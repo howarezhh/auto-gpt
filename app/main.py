@@ -56,6 +56,7 @@ def _migrate_request_log_columns(db) -> None:
         "has_image": "ALTER TABLE request_logs ADD COLUMN has_image BOOLEAN NOT NULL DEFAULT 0",
         "request_id": "ALTER TABLE request_logs ADD COLUMN request_id TEXT",
         "conversation_key": "ALTER TABLE request_logs ADD COLUMN conversation_key TEXT",
+        "first_token_latency_ms": "ALTER TABLE request_logs ADD COLUMN first_token_latency_ms INTEGER",
         "prompt_tokens": "ALTER TABLE request_logs ADD COLUMN prompt_tokens INTEGER",
         "completion_tokens": "ALTER TABLE request_logs ADD COLUMN completion_tokens INTEGER",
         "total_tokens": "ALTER TABLE request_logs ADD COLUMN total_tokens INTEGER",
@@ -87,6 +88,8 @@ def _migrate_request_log_columns(db) -> None:
     provider_model_additions = {
         "circuit_state": "ALTER TABLE provider_models ADD COLUMN circuit_state TEXT NOT NULL DEFAULT 'closed'",
         "circuit_opened_at": "ALTER TABLE provider_models ADD COLUMN circuit_opened_at DATETIME",
+        "input_price_per_1k": "ALTER TABLE provider_models ADD COLUMN input_price_per_1k FLOAT",
+        "output_price_per_1k": "ALTER TABLE provider_models ADD COLUMN output_price_per_1k FLOAT",
     }
     changed_provider_models = False
     for column, ddl in provider_model_additions.items():

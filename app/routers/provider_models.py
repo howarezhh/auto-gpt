@@ -15,8 +15,9 @@ router = APIRouter(prefix="/api/provider-models", tags=["provider-models"])
 @router.get("", response_model=list[ProviderModelConfigOut])
 def list_provider_models(db: Session = Depends(get_db)) -> list[ProviderModelConfigOut]:
     providers = ProviderService.list_providers(db)
+    metrics = ProviderService._build_quality_metrics(db, providers)
     return [
-        ProviderModelConfigOut.model_validate(provider_model)
+        ProviderModelConfigOut(**ProviderService.provider_model_to_dict(provider_model, metrics=metrics["provider_models"].get(provider_model.id)))
         for provider in providers
         for provider_model in provider.provider_models
     ]

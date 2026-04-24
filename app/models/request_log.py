@@ -29,6 +29,7 @@ class RequestLog(Base):
     success: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    first_token_latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)

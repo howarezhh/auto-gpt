@@ -21,7 +21,7 @@ router = APIRouter(prefix="/api/providers", tags=["providers"])
 
 @router.get("", response_model=list[ProviderOut])
 def list_providers(db: Session = Depends(get_db)) -> list[ProviderOut]:
-    return [ProviderOut(**ProviderService.provider_to_dict(item)) for item in ProviderService.list_providers(db)]
+    return [ProviderOut(**item) for item in ProviderService.list_provider_dicts(db)]
 
 
 @router.post("", response_model=ProviderOut, status_code=status.HTTP_201_CREATED)
@@ -31,7 +31,7 @@ def create_provider(payload: ProviderCreate, db: Session = Depends(get_db)) -> P
     if settings.default_provider_id is None:
         settings.default_provider_id = provider.id
         db.commit()
-    return ProviderOut(**ProviderService.provider_to_dict(provider))
+    return ProviderOut(**ProviderService.provider_to_dict(provider, metrics=ProviderService._build_quality_metrics(db, [provider])))
 
 
 @router.put("/{provider_id}", response_model=ProviderOut)
@@ -39,7 +39,8 @@ def update_provider(provider_id: int, payload: ProviderUpdate, db: Session = Dep
     provider = ProviderService.get_provider(db, provider_id)
     if not provider:
         raise HTTPException(status_code=404, detail="Provider not found")
-    return ProviderOut(**ProviderService.provider_to_dict(ProviderService.update_provider(db, provider, payload)))
+    provider = ProviderService.update_provider(db, provider, payload)
+    return ProviderOut(**ProviderService.provider_to_dict(provider, metrics=ProviderService._build_quality_metrics(db, [provider])))
 
 
 @router.put("/{provider_id}/models/{provider_model_id}", response_model=ProviderModelConfigOut)
@@ -56,7 +57,8 @@ def update_provider_model(
         provider_model = ProviderService.update_provider_model(db, provider, provider_model_id, payload)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return ProviderModelConfigOut.model_validate(provider_model)
+    metrics = ProviderService._build_quality_metrics(db, [provider])
+    return ProviderModelConfigOut(**ProviderService.provider_model_to_dict(provider_model, metrics=metrics["provider_models"].get(provider_model.id)))
 
 
 @router.delete("/{provider_id}")

@@ -113,6 +113,8 @@ def _create_provider(client: TestClient, *, name: str, priority: int, weight: in
                 "supports_stream": True,
                 "supports_vision": "vision" in model_name,
                 "enabled": True,
+                "input_price_per_1k": 0.0005 if model_name == "reg-model" else 0.0008,
+                "output_price_per_1k": 0.0015 if model_name == "reg-model" else 0.002,
             }
             for model_name in models
         ],
@@ -351,6 +353,22 @@ def main() -> None:
             _assert(stream_response.status_code == 200, f"stream request failed: {stream_response.text}")
             _assert("data:" in stream_response.text, "stream response should return SSE payload")
 
+            providers_response = client.get("/api/providers")
+            _assert(providers_response.status_code == 200, f"provider list failed: {providers_response.text}")
+            providers_payload = providers_response.json()
+            provider_a_after_calls = next((item for item in providers_payload if item["id"] == provider_a["id"]), None)
+            _assert(provider_a_after_calls is not None, "provider_a missing from provider list")
+            reg_model_metrics = next((item for item in provider_a_after_calls["model_configs"] if item["model_name"] == "reg-model"), None)
+            _assert(reg_model_metrics is not None, "provider reg-model missing after requests")
+            _assert(reg_model_metrics["input_price_per_1k"] == 0.0005, f"input price not persisted: {reg_model_metrics}")
+            _assert(reg_model_metrics["output_price_per_1k"] == 0.0015, f"output price not persisted: {reg_model_metrics}")
+            _assert(reg_model_metrics["recent_request_count"] >= 2, f"recent request count missing: {reg_model_metrics}")
+            _assert(reg_model_metrics["success_rate"] is not None, f"success rate missing: {reg_model_metrics}")
+            _assert(reg_model_metrics["stability_score"] is not None, f"stability score missing: {reg_model_metrics}")
+            _assert(reg_model_metrics["avg_first_token_latency_ms"] is not None, f"first token metric missing: {reg_model_metrics}")
+            _assert(provider_a_after_calls["best_input_price_per_1k"] == 0.0005, f"provider best input price mismatch: {provider_a_after_calls}")
+            _assert(provider_a_after_calls["success_rate"] is not None, f"provider success rate missing: {provider_a_after_calls}")
+
             internal_playground = client.post(
                 "/api/playground/responses",
                 headers={"X-Aotu-Provider-Id": str(provider_b["id"])},
@@ -385,6 +403,17 @@ def main() -> None:
             )
 
             with SessionLocal() as db:
+                stream_logs = list(
+                    db.query(RequestLog)
+                    .filter(RequestLog.is_stream.is_(True), RequestLog.success.is_(True))
+                    .all()
+                )
+                _assert(stream_logs, "expected successful stream logs")
+                _assert(
+                    any(log.first_token_latency_ms is not None for log in stream_logs),
+                    "stream log should persist first_token_latency_ms",
+                )
+
                 manual_order = RouterService.order_candidates(
                     db,
                     model_name="reg-model",

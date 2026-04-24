@@ -372,6 +372,7 @@ class ProxyService:
                                     success=True,
                                     status_code=200,
                                     latency_ms=latency_ms,
+                                    first_token_latency_ms=first_chunk_latency_ms,
                                     prompt_tokens=usage_info["prompt_tokens"],
                                     completion_tokens=usage_info["completion_tokens"],
                                     total_tokens=usage_info["total_tokens"],

@@ -19,6 +19,7 @@ class RequestLogOut(BaseModel):
     success: bool
     status_code: int | None
     latency_ms: int | None
+    first_token_latency_ms: int | None
     prompt_tokens: int | None
     completion_tokens: int | None
     total_tokens: int | None

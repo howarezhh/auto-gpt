@@ -1,13 +1,30 @@
+from collections import defaultdict
+from datetime import datetime, timedelta
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
+from app.models.request_log import RequestLog
 from app.schemas.provider import ProviderCreate, ProviderModelConfigInput, ProviderModelConfigUpdate, ProviderUpdate
+from app.services.log_service import LogService
 from app.utils.json_utils import dumps_json, loads_json
 
 
 class ProviderService:
+    QUALITY_WINDOW_MINUTES = 24 * 60
+    TRACE_TERMINAL_SUCCESS_RESULTS = {"success"}
+    TRACE_TERMINAL_FAILURE_RESULTS = {
+        "http_error",
+        "upstream_auth_error",
+        "model_not_found",
+        "rate_limited",
+        "request_rejected",
+        "exception",
+        "client_cancelled",
+    }
+
     @staticmethod
     def _infer_model_capabilities(model_name: str) -> dict[str, bool]:
         normalized = (model_name or "").strip().lower()
@@ -41,6 +58,12 @@ class ProviderService:
                 .order_by(Provider.priority.asc(), Provider.id.asc())
             )
         )
+
+    @staticmethod
+    def list_provider_dicts(db: Session) -> list[dict]:
+        providers = ProviderService.list_providers(db)
+        metrics = ProviderService._build_quality_metrics(db, providers)
+        return [ProviderService.provider_to_dict(provider, metrics=metrics) for provider in providers]
 
     @staticmethod
     def get_provider(db: Session, provider_id: int) -> Provider | None:
@@ -120,7 +143,17 @@ class ProviderService:
         return provider_model
 
     @staticmethod
-    def provider_to_dict(provider: Provider) -> dict:
+    def provider_to_dict(provider: Provider, *, metrics: dict | None = None) -> dict:
+        metrics = metrics or {"providers": {}, "provider_models": {}}
+        provider_metric = metrics["providers"].get(provider.id, {})
+        best_input_price = min(
+            (item.input_price_per_1k for item in provider.provider_models if item.input_price_per_1k is not None),
+            default=None,
+        )
+        best_output_price = min(
+            (item.output_price_per_1k for item in provider.provider_models if item.output_price_per_1k is not None),
+            default=None,
+        )
         return {
             "id": provider.id,
             "name": provider.name,
@@ -134,25 +167,7 @@ class ProviderService:
             "max_retries": provider.max_retries,
             "models": [item.model_name for item in provider.provider_models],
             "model_configs": [
-                {
-                    "id": item.id,
-                    "model_name": item.model_name,
-                    "enabled": item.enabled,
-                    "priority": item.priority,
-                    "weight": item.weight,
-                    "health_status": item.health_status,
-                    "circuit_state": item.circuit_state,
-                    "circuit_opened_at": item.circuit_opened_at,
-                    "last_check_at": item.last_check_at,
-                    "last_latency_ms": item.last_latency_ms,
-                    "failure_count": item.failure_count,
-                    "success_count": item.success_count,
-                    "last_error": item.last_error,
-                    "supports_stream": item.supports_stream,
-                    "supports_vision": item.supports_vision,
-                    "created_at": item.created_at,
-                    "updated_at": item.updated_at,
-                }
+                ProviderService.provider_model_to_dict(item, metrics=metrics["provider_models"].get(item.id))
                 for item in provider.provider_models
             ],
             "health_status": provider.health_status,
@@ -161,9 +176,44 @@ class ProviderService:
             "failure_count": provider.failure_count,
             "success_count": provider.success_count,
             "circuit_state": provider.circuit_state,
+            "recent_request_count": provider_metric.get("recent_request_count", 0),
+            "success_rate": provider_metric.get("success_rate"),
+            "avg_first_token_latency_ms": provider_metric.get("avg_first_token_latency_ms"),
+            "stability_score": provider_metric.get("stability_score"),
+            "best_input_price_per_1k": best_input_price,
+            "best_output_price_per_1k": best_output_price,
             "remark": provider.remark,
             "created_at": provider.created_at,
             "updated_at": provider.updated_at,
+        }
+
+    @staticmethod
+    def provider_model_to_dict(provider_model: ProviderModel, *, metrics: dict | None = None) -> dict:
+        metrics = metrics or {}
+        return {
+            "id": provider_model.id,
+            "model_name": provider_model.model_name,
+            "enabled": provider_model.enabled,
+            "priority": provider_model.priority,
+            "weight": provider_model.weight,
+            "health_status": provider_model.health_status,
+            "circuit_state": provider_model.circuit_state,
+            "circuit_opened_at": provider_model.circuit_opened_at,
+            "last_check_at": provider_model.last_check_at,
+            "last_latency_ms": provider_model.last_latency_ms,
+            "failure_count": provider_model.failure_count,
+            "success_count": provider_model.success_count,
+            "last_error": provider_model.last_error,
+            "supports_stream": provider_model.supports_stream,
+            "supports_vision": provider_model.supports_vision,
+            "input_price_per_1k": provider_model.input_price_per_1k,
+            "output_price_per_1k": provider_model.output_price_per_1k,
+            "recent_request_count": metrics.get("recent_request_count", 0),
+            "success_rate": metrics.get("success_rate"),
+            "avg_first_token_latency_ms": metrics.get("avg_first_token_latency_ms"),
+            "stability_score": metrics.get("stability_score"),
+            "created_at": provider_model.created_at,
+            "updated_at": provider_model.updated_at,
         }
 
     @staticmethod
@@ -250,6 +300,8 @@ class ProviderService:
                 weight=item.weight,
                 supports_stream=item.supports_stream,
                 supports_vision=item.supports_vision,
+                input_price_per_1k=item.input_price_per_1k,
+                output_price_per_1k=item.output_price_per_1k,
             )
             for item in provider.provider_models
         ]
@@ -270,6 +322,8 @@ class ProviderService:
             provider_model.weight = config.weight
             provider_model.supports_stream = config.supports_stream
             provider_model.supports_vision = config.supports_vision
+            provider_model.input_price_per_1k = config.input_price_per_1k
+            provider_model.output_price_per_1k = config.output_price_per_1k
             if provider_model.health_status not in {"healthy", "degraded", "unhealthy"}:
                 provider_model.health_status = "unknown"
             if not provider_model.circuit_state:
@@ -284,3 +338,164 @@ class ProviderService:
     @staticmethod
     def _sync_models_json(provider: Provider) -> None:
         provider.models_json = dumps_json([item.model_name for item in provider.provider_models if item.enabled])
+
+    @staticmethod
+    def _build_quality_metrics(db: Session, providers: list[Provider]) -> dict[str, dict]:
+        provider_ids = {item.id for item in providers}
+        provider_model_map = {
+            item.id: item
+            for provider in providers
+            for item in provider.provider_models
+        }
+        if not provider_ids:
+            return {"providers": {}, "provider_models": {}}
+
+        since = datetime.utcnow() - timedelta(minutes=ProviderService.QUALITY_WINDOW_MINUTES)
+        logs = list(
+            db.scalars(
+                select(RequestLog).where(
+                    RequestLog.created_at >= since,
+                    LogService._route_traffic_expr(),
+                )
+            )
+        )
+
+        provider_stats: dict[int, dict] = defaultdict(ProviderService._empty_quality_accumulator)
+        model_stats: dict[int, dict] = defaultdict(ProviderService._empty_quality_accumulator)
+
+        for log in logs:
+            trace = loads_json(log.trace_json, [])
+            if isinstance(trace, list):
+                for item in trace:
+                    if not isinstance(item, dict):
+                        continue
+                    provider_id = item.get("provider_id")
+                    provider_model_id = item.get("provider_model_id")
+                    result = item.get("result")
+                    if not isinstance(provider_id, int) or provider_id not in provider_ids:
+                        continue
+                    if result in ProviderService.TRACE_TERMINAL_SUCCESS_RESULTS:
+                        ProviderService._register_attempt(provider_stats[provider_id], success=True)
+                        if isinstance(provider_model_id, int) and provider_model_id in provider_model_map:
+                            ProviderService._register_attempt(model_stats[provider_model_id], success=True)
+                    elif result in ProviderService.TRACE_TERMINAL_FAILURE_RESULTS:
+                        ProviderService._register_attempt(provider_stats[provider_id], success=False)
+                        if isinstance(provider_model_id, int) and provider_model_id in provider_model_map:
+                            ProviderService._register_attempt(model_stats[provider_model_id], success=False)
+
+            if (
+                log.success
+                and isinstance(log.provider_id, int)
+                and log.provider_id in provider_ids
+                and isinstance(log.resolved_provider_model_id, int)
+                and log.resolved_provider_model_id in provider_model_map
+                and log.first_token_latency_ms is not None
+            ):
+                ProviderService._register_first_token(provider_stats[log.provider_id], log.first_token_latency_ms)
+                ProviderService._register_first_token(model_stats[log.resolved_provider_model_id], log.first_token_latency_ms)
+
+        provider_metrics = {
+            provider.id: ProviderService._finalize_quality_snapshot(
+                provider_stats.get(provider.id, ProviderService._empty_quality_accumulator()),
+                health_status=provider.health_status,
+                circuit_state=provider.circuit_state,
+            )
+            for provider in providers
+        }
+        provider_model_metrics = {
+            provider_model.id: ProviderService._finalize_quality_snapshot(
+                model_stats.get(provider_model.id, ProviderService._empty_quality_accumulator()),
+                health_status=provider_model.health_status,
+                circuit_state=provider_model.circuit_state,
+            )
+            for provider_model in provider_model_map.values()
+        }
+        return {"providers": provider_metrics, "provider_models": provider_model_metrics}
+
+    @staticmethod
+    def _empty_quality_accumulator() -> dict[str, int | float]:
+        return {
+            "recent_request_count": 0,
+            "success_count": 0,
+            "first_token_sum": 0.0,
+            "first_token_count": 0,
+        }
+
+    @staticmethod
+    def _register_attempt(target: dict[str, int | float], *, success: bool) -> None:
+        target["recent_request_count"] += 1
+        if success:
+            target["success_count"] += 1
+
+    @staticmethod
+    def _register_first_token(target: dict[str, int | float], first_token_latency_ms: int) -> None:
+        target["first_token_sum"] += float(first_token_latency_ms)
+        target["first_token_count"] += 1
+
+    @staticmethod
+    def _finalize_quality_snapshot(
+        stats: dict[str, int | float],
+        *,
+        health_status: str,
+        circuit_state: str,
+    ) -> dict[str, int | float | None]:
+        request_count = int(stats.get("recent_request_count", 0) or 0)
+        success_count = int(stats.get("success_count", 0) or 0)
+        first_token_count = int(stats.get("first_token_count", 0) or 0)
+        avg_first_token_latency_ms = (
+            round(float(stats["first_token_sum"]) / first_token_count, 2)
+            if first_token_count
+            else None
+        )
+        success_rate = round((success_count / request_count) * 100, 2) if request_count else None
+        stability_score = ProviderService._calculate_stability_score(
+            request_count=request_count,
+            success_rate=success_rate,
+            avg_first_token_latency_ms=avg_first_token_latency_ms,
+            health_status=health_status,
+            circuit_state=circuit_state,
+        )
+        return {
+            "recent_request_count": request_count,
+            "success_rate": success_rate,
+            "avg_first_token_latency_ms": avg_first_token_latency_ms,
+            "stability_score": stability_score,
+        }
+
+    @staticmethod
+    def _calculate_stability_score(
+        *,
+        request_count: int,
+        success_rate: float | None,
+        avg_first_token_latency_ms: float | None,
+        health_status: str,
+        circuit_state: str,
+    ) -> float:
+        if request_count <= 0:
+            base = {
+                "healthy": 85.0,
+                "degraded": 65.0,
+                "unhealthy": 30.0,
+                "unknown": 50.0,
+            }.get(health_status, 50.0)
+            if circuit_state == "half_open":
+                base -= 8.0
+            elif circuit_state == "open":
+                base -= 20.0
+        else:
+            base = success_rate if success_rate is not None else 50.0
+            if avg_first_token_latency_ms is not None:
+                base -= min(35.0, avg_first_token_latency_ms / 100.0)
+            if health_status == "degraded":
+                base -= 10.0
+            elif health_status == "unhealthy":
+                base -= 25.0
+            elif health_status == "unknown":
+                base -= 5.0
+            if circuit_state == "half_open":
+                base -= 8.0
+            elif circuit_state == "open":
+                base -= 20.0
+            if request_count < 5:
+                base -= 5.0
+        return round(max(0.0, min(100.0, base)), 2)

@@ -43,6 +43,14 @@
         <span>支持 Vision</span>
         <strong data-provider-stat="vision_model_count">0</strong>
     </article>
+    <article class="metric-card">
+        <span>已配置单价</span>
+        <strong data-provider-stat="priced_model_count">0</strong>
+    </article>
+    <article class="metric-card">
+        <span>平均稳定性</span>
+        <strong data-provider-stat="avg_stability_score">0</strong>
+    </article>
 </section>
 
 <section class="provider-command-grid">
@@ -65,6 +73,8 @@
                         <th>模型</th>
                         <th>状态</th>
                         <th>熔断</th>
+                        <th>成本</th>
+                        <th>质量</th>
                         <th>优先级</th>
                         <th>权重</th>
                         <th>操作</th>
@@ -86,6 +96,7 @@
             <div class="dashboard-signal-list" id="provider-capability-list">
                 <div><span>Stream 模型</span><strong>0</strong></div>
                 <div><span>Vision 模型</span><strong>0</strong></div>
+                <div><span>已配置单价</span><strong>0</strong></div>
                 <div><span>健康模型</span><strong>0</strong></div>
                 <div><span>异常模型</span><strong>0</strong></div>
             </div>
@@ -123,6 +134,8 @@
                     <th>模型</th>
                     <th>健康</th>
                     <th>能力</th>
+                    <th>价格</th>
+                    <th>质量</th>
                     <th>优先级</th>
                     <th>权重</th>
                     <th>启用</th>
@@ -178,7 +191,7 @@
                 <span>模型配置</span>
                 <div class="settings-note provider-model-note">
                     <strong>填写方式</strong>
-                    <span>每行一个模型，格式：模型名|优先级|权重|stream(y/n)|vision(y/n)|enabled(y/n)。例如：gpt-4o-mini|100|100|y|n|y。</span>
+                    <span>每行一个模型，格式：模型名|优先级|权重|stream(y/n)|vision(y/n)|enabled(y/n)|输入单价/1K|输出单价/1K。例如：gpt-4o-mini|100|100|y|n|y|0.0005|0.0015。</span>
                 </div>
                 <div class="provider-model-preset-bar">
                     <span class="provider-model-preset-label">预设模型</span>
@@ -197,7 +210,7 @@
                     <input class="field-input" id="provider-custom-model-name" placeholder="输入自定义模型名，例如 gpt-4.1-mini" type="text">
                     <button class="btn btn-ghost interactive-btn" id="provider-add-custom-model" type="button">添加自定义模型</button>
                 </div>
-                <textarea class="field-input" id="provider-models" rows="5" placeholder="每行一个模型，格式：模型名|优先级|权重|stream(y/n)|vision(y/n)|enabled(y/n)&#10;例如：gpt-4o-mini|100|100|y|n|y"></textarea>
+                <textarea class="field-input" id="provider-models" rows="5" placeholder="每行一个模型，格式：模型名|优先级|权重|stream(y/n)|vision(y/n)|enabled(y/n)|输入单价/1K|输出单价/1K&#10;例如：gpt-4o-mini|100|100|y|n|y|0.0005|0.0015"></textarea>
             </label>
             <label class="form-span-2">
                 <span>备注</span>

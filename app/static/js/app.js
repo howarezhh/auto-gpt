@@ -134,7 +134,7 @@
             .map((line) => line.trim())
             .filter(Boolean)
             .map((line) => {
-                const [modelName, priority, weight, supportsStream, supportsVision, enabled] = line.split("|").map((item) => item?.trim() ?? "");
+                const [modelName, priority, weight, supportsStream, supportsVision, enabled, inputPrice, outputPrice] = line.split("|").map((item) => item?.trim() ?? "");
                 return {
                     model_name: modelName,
                     priority: priority ? Number(priority) : 100,
@@ -142,14 +142,21 @@
                     supports_stream: !supportsStream || /^(y|yes|true|1)$/i.test(supportsStream),
                     supports_vision: /^(y|yes|true|1)$/i.test(supportsVision),
                     enabled: !enabled || /^(y|yes|true|1)$/i.test(enabled),
+                    input_price_per_1k: inputPrice === "" ? null : Number(inputPrice),
+                    output_price_per_1k: outputPrice === "" ? null : Number(outputPrice),
                 };
             })
-            .filter((item) => item.model_name);
+            .filter((item) => item.model_name)
+            .map((item) => ({
+                ...item,
+                input_price_per_1k: Number.isFinite(item.input_price_per_1k) ? item.input_price_per_1k : null,
+                output_price_per_1k: Number.isFinite(item.output_price_per_1k) ? item.output_price_per_1k : null,
+            }));
     }
 
     function formatModelConfigs(modelConfigs = []) {
         return modelConfigs.map((item) => (
-            `${item.model_name}|${item.priority}|${item.weight}|${item.supports_stream ? "y" : "n"}|${item.supports_vision ? "y" : "n"}|${item.enabled ? "y" : "n"}`
+            `${item.model_name}|${item.priority}|${item.weight}|${item.supports_stream ? "y" : "n"}|${item.supports_vision ? "y" : "n"}|${item.enabled ? "y" : "n"}|${item.input_price_per_1k ?? ""}|${item.output_price_per_1k ?? ""}`
         )).join("\n");
     }
 
@@ -157,7 +164,7 @@
         const normalized = String(modelName || "").trim();
         if (!normalized) return "";
         const supportsVision = /gpt-4o|gpt-4\.1|gpt-5/i.test(normalized);
-        return `${normalized}|100|100|y|${supportsVision ? "y" : "n"}|y`;
+        return `${normalized}|100|100|y|${supportsVision ? "y" : "n"}|y||`;
     }
 
     function appendModelConfigLine(textarea, modelName) {
@@ -224,8 +231,13 @@
         const unhealthyProviderCount = providers.filter((provider) => provider.health_status === "unhealthy").length;
         const streamModelCount = modelConfigs.filter((model) => model.supports_stream).length;
         const visionModelCount = modelConfigs.filter((model) => model.supports_vision).length;
+        const pricedModelCount = modelConfigs.filter((model) => model.input_price_per_1k != null || model.output_price_per_1k != null).length;
         const healthyModelCount = modelConfigs.filter((model) => model.health_status === "healthy").length;
         const unhealthyModelCount = modelConfigs.filter((model) => model.health_status === "unhealthy").length;
+        const stabilityModels = modelConfigs.filter((model) => Number.isFinite(Number(model.stability_score)));
+        const avgStabilityScore = stabilityModels.length
+            ? Number((stabilityModels.reduce((sum, model) => sum + Number(model.stability_score || 0), 0) / stabilityModels.length).toFixed(2))
+            : 0;
         return {
             providerCount,
             enabledProviderCount,
@@ -235,8 +247,10 @@
             unhealthyProviderCount,
             streamModelCount,
             visionModelCount,
+            pricedModelCount,
             healthyModelCount,
             unhealthyModelCount,
+            avgStabilityScore,
         };
     }
 
@@ -277,6 +291,41 @@
 
     function formatSwitchText(value, enabledLabel = "开启", disabledLabel = "关闭") {
         return value ? enabledLabel : disabledLabel;
+    }
+
+    function formatPrice(value) {
+        if (value == null || Number.isNaN(Number(value))) return "-";
+        return `${Number(value).toFixed(4)}/1K`;
+    }
+
+    function formatPercent(value) {
+        if (value == null || Number.isNaN(Number(value))) return "-";
+        return `${Number(value).toFixed(2)}%`;
+    }
+
+    function formatLatencyMs(value) {
+        if (value == null || Number.isNaN(Number(value))) return "-";
+        return `${Math.round(Number(value))} ms`;
+    }
+
+    function formatScore(value) {
+        if (value == null || Number.isNaN(Number(value))) return "-";
+        return `${Number(value).toFixed(2)} 分`;
+    }
+
+    function renderProviderCost(provider) {
+        return `
+            <div>输入 ${escapeHtml(formatPrice(provider.best_input_price_per_1k))}</div>
+            <div class="table-muted">输出 ${escapeHtml(formatPrice(provider.best_output_price_per_1k))}</div>
+        `;
+    }
+
+    function renderQualitySummary(entity) {
+        return `
+            <div>成功率 ${escapeHtml(formatPercent(entity.success_rate))}</div>
+            <div class="table-muted">首 Token ${escapeHtml(formatLatencyMs(entity.avg_first_token_latency_ms))}</div>
+            <div class="table-muted">稳定性 ${escapeHtml(formatScore(entity.stability_score))} · 样本 ${escapeHtml(String(entity.recent_request_count ?? 0))}</div>
+        `;
     }
 
     function formatHealthOverview(healthyCount, degradedCount, unhealthyCount) {
@@ -1266,6 +1315,8 @@
             document.querySelector('[data-provider-stat="model_count"]').textContent = summary.modelCount;
             document.querySelector('[data-provider-stat="stream_model_count"]').textContent = summary.streamModelCount;
             document.querySelector('[data-provider-stat="vision_model_count"]').textContent = summary.visionModelCount;
+            document.querySelector('[data-provider-stat="priced_model_count"]').textContent = summary.pricedModelCount;
+            document.querySelector('[data-provider-stat="avg_stability_score"]').textContent = formatScore(summary.avgStabilityScore);
 
             const healthyRatio = summary.providerCount ? Math.round((summary.healthyProviderCount / summary.providerCount) * 100) : 0;
             document.getElementById("providers-summary-card").innerHTML = `
@@ -1282,6 +1333,7 @@
             document.getElementById("provider-capability-list").innerHTML = `
                 <div><span>Stream 模型</span><strong>${summary.streamModelCount}</strong></div>
                 <div><span>Vision 模型</span><strong>${summary.visionModelCount}</strong></div>
+                <div><span>已配置单价</span><strong>${summary.pricedModelCount}</strong></div>
                 <div><span>健康模型</span><strong>${summary.healthyModelCount}</strong></div>
                 <div><span>异常模型</span><strong>${summary.unhealthyModelCount}</strong></div>
             `;
@@ -1304,6 +1356,8 @@
                     <td>${renderProviderModelHealth(provider.model_configs, provider.id)}</td>
                     <td>${statusBadge(provider.health_status)}</td>
                     <td>${statusBadge(provider.circuit_state)}</td>
+                    <td>${renderProviderCost(provider)}</td>
+                    <td>${renderQualitySummary(provider)}</td>
                     <td>${provider.priority}</td>
                     <td>${provider.weight}</td>
                     <td>
@@ -1316,7 +1370,7 @@
                         </div>
                     </td>
                 </tr>
-            `).join("") || '<tr><td colspan="8"><div class="empty-state">没有匹配的中转站</div></td></tr>';
+            `).join("") || '<tr><td colspan="10"><div class="empty-state">没有匹配的中转站</div></td></tr>';
             enhanceInteractiveButtons(tableBody);
         }
 
@@ -1337,6 +1391,11 @@
                     </td>
                     <td>${statusBadge(model.health_status)}</td>
                     <td>${model.supports_stream ? "流式" : "非流式"} / ${model.supports_vision ? "图像" : "文本"}</td>
+                    <td>
+                        <input class="field-input" type="number" step="0.0001" value="${model.input_price_per_1k ?? ""}" placeholder="输入 /1K" data-model-field="input_price_per_1k" data-provider-id="${provider.id}" data-model-id="${model.id}">
+                        <input class="field-input mt-2" type="number" step="0.0001" value="${model.output_price_per_1k ?? ""}" placeholder="输出 /1K" data-model-field="output_price_per_1k" data-provider-id="${provider.id}" data-model-id="${model.id}">
+                    </td>
+                    <td>${renderQualitySummary(model)}</td>
                     <td><input class="field-input" type="number" value="${model.priority}" data-model-field="priority" data-provider-id="${provider.id}" data-model-id="${model.id}"></td>
                     <td><input class="field-input" type="number" value="${model.weight}" data-model-field="weight" data-provider-id="${provider.id}" data-model-id="${model.id}"></td>
                     <td>
@@ -1353,7 +1412,7 @@
                         </div>
                     </td>
                 </tr>
-            `).join("") || '<tr><td colspan="8"><div class="empty-state">没有匹配的模型</div></td></tr>';
+            `).join("") || '<tr><td colspan="10"><div class="empty-state">没有匹配的模型</div></td></tr>';
             enhanceInteractiveButtons(modelTableBody);
         }
 
@@ -1454,10 +1513,14 @@
                 const priorityInput = modelTableBody.querySelector(`input[data-model-field="priority"][data-provider-id="${providerId}"][data-model-id="${modelId}"]`);
                 const weightInput = modelTableBody.querySelector(`input[data-model-field="weight"][data-provider-id="${providerId}"][data-model-id="${modelId}"]`);
                 const enabledInput = modelTableBody.querySelector(`input[data-model-field="enabled"][data-provider-id="${providerId}"][data-model-id="${modelId}"]`);
+                const inputPriceInput = modelTableBody.querySelector(`input[data-model-field="input_price_per_1k"][data-provider-id="${providerId}"][data-model-id="${modelId}"]`);
+                const outputPriceInput = modelTableBody.querySelector(`input[data-model-field="output_price_per_1k"][data-provider-id="${providerId}"][data-model-id="${modelId}"]`);
                 const payload = {
                     priority: Number(priorityInput.value),
                     weight: Number(weightInput.value),
                     enabled: action === "toggle-model" ? !modelConfig.enabled : enabledInput.checked,
+                    input_price_per_1k: inputPriceInput.value === "" ? null : Number(inputPriceInput.value),
+                    output_price_per_1k: outputPriceInput.value === "" ? null : Number(outputPriceInput.value),
                 };
                 try {
                     setButtonLoading(button, true);

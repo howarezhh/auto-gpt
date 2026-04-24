@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -25,6 +25,8 @@ class ProviderModel(Base):
     circuit_opened_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     supports_stream: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     supports_vision: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    input_price_per_1k: Mapped[float | None] = mapped_column(Float, nullable=True)
+    output_price_per_1k: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow

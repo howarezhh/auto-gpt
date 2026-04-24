@@ -10,6 +10,8 @@ class ProviderModelConfigBase(BaseModel):
     weight: int = 100
     supports_stream: bool = True
     supports_vision: bool = False
+    input_price_per_1k: float | None = Field(default=None, ge=0)
+    output_price_per_1k: float | None = Field(default=None, ge=0)
 
     @field_validator("model_name")
     @classmethod
@@ -31,6 +33,10 @@ class ProviderModelConfigOut(ProviderModelConfigBase):
     failure_count: int
     success_count: int
     last_error: str | None
+    recent_request_count: int = 0
+    success_rate: float | None = None
+    avg_first_token_latency_ms: float | None = None
+    stability_score: float | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -43,6 +49,8 @@ class ProviderModelConfigUpdate(BaseModel):
     weight: int | None = None
     supports_stream: bool | None = None
     supports_vision: bool | None = None
+    input_price_per_1k: float | None = Field(default=None, ge=0)
+    output_price_per_1k: float | None = Field(default=None, ge=0)
 
 
 class ProviderBatchConnectivityTestRequest(BaseModel):
@@ -140,6 +148,12 @@ class ProviderOut(BaseModel):
     failure_count: int
     success_count: int
     circuit_state: str
+    recent_request_count: int = 0
+    success_rate: float | None = None
+    avg_first_token_latency_ms: float | None = None
+    stability_score: float | None = None
+    best_input_price_per_1k: float | None = None
+    best_output_price_per_1k: float | None = None
     remark: str | None
     created_at: datetime
     updated_at: datetime
