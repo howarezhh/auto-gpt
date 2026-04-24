@@ -1,0 +1,248 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero-panel hero-panel-compact cockpit-hero docs-cockpit-hero docs-help-hero">
+    <div class="cockpit-hero-copy">
+        <div class="eyebrow">Help Center</div>
+        <h2>帮助中心</h2>
+        <p>这里不是纯接口页，而是面向使用者的帮助中心。你可以先看首次使用路径，也可以按“配置渠道”“开通调用”“排查问题”三类场景快速找到答案。</p>
+        <div class="hero-actions">
+            <a class="btn btn-accent interactive-btn" href="#starter-guide">我是第一次使用</a>
+            <a class="btn btn-ghost interactive-btn" href="#scenario-guide">按场景查看</a>
+        </div>
+    </div>
+    <div class="cockpit-hero-aside docs-hero-aside docs-help-aside">
+        <div class="cockpit-aside-label">帮助中心</div>
+        <div class="cockpit-aside-value">3 类</div>
+        <div class="cockpit-aside-copy">首次上手、常见场景、问题排查</div>
+        <div class="cockpit-health-bar"><span style="width: 100%"></span></div>
+        <div class="cockpit-aside-meta">
+            <span>后台使用</span>
+            <span>外部接入</span>
+        </div>
+    </div>
+</section>
+
+<section class="docs-help-grid" id="starter-guide">
+    <div class="panel-card section-shell docs-help-main">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">Get Started</div>
+                <h3>第一次使用，建议这样开始</h3>
+            </div>
+        </div>
+        <div class="docs-help-list">
+            <article class="docs-help-card">
+                <div class="docs-help-index">01</div>
+                <div>
+                    <h4>先把可用线路配出来</h4>
+                    <p>进入 <code>/providers</code> 添加中转站，补齐模型、价格、成功率、首 Token 时延和稳定性。这里决定系统到底有哪些线路可选。</p>
+                </div>
+            </article>
+            <article class="docs-help-card">
+                <div class="docs-help-index">02</div>
+                <div>
+                    <h4>再决定系统怎么选线路</h4>
+                    <p>进入 <code>/settings</code> 设置路由模式。你可以选择固定优先、自动回退、按权重分流或按会话粘滞。</p>
+                </div>
+            </article>
+            <article class="docs-help-card">
+                <div class="docs-help-index">03</div>
+                <div>
+                    <h4>给外部系统开通权限</h4>
+                    <p>进入 <code>/api-keys</code> 创建平台 API Key，绑定可访问的 provider，并设置 Token 额度、金额额度和余额。</p>
+                </div>
+            </article>
+            <article class="docs-help-card">
+                <div class="docs-help-index">04</div>
+                <div>
+                    <h4>先验证，再给业务系统上线</h4>
+                    <p>先在 <code>/playground</code> 验证链路，再让业务系统用平台 Key 接入。上线后主要看 <code>/logs</code> 和 <code>/conversations</code>。</p>
+                </div>
+            </article>
+        </div>
+    </div>
+
+    <div class="docs-help-side">
+        <div class="panel-card">
+            <div class="panel-head">
+                <div>
+                    <div class="panel-kicker">Suitable For</div>
+                    <h3>你可能是哪类用户</h3>
+                </div>
+            </div>
+            <div class="docs-audience-list">
+                <div><span>管理员</span><strong>关心 provider、路由、系统规则</strong></div>
+                <div><span>运营人员</span><strong>关心密钥、额度、余额和异常处理</strong></div>
+                <div><span>接入开发</span><strong>关心地址、参数、标准调用方式</strong></div>
+                <div><span>排障人员</span><strong>关心日志、回放和失败原因定位</strong></div>
+            </div>
+        </div>
+
+        <div class="panel-card">
+            <div class="panel-head">
+                <div>
+                    <div class="panel-kicker">Quick Entry</div>
+                    <h3>常用入口</h3>
+                </div>
+            </div>
+            <div class="action-stack">
+                <a class="quick-link" href="/providers" data-shell-link>配置中转站</a>
+                <a class="quick-link" href="/settings" data-shell-link>调整路由</a>
+                <a class="quick-link" href="/api-keys" data-shell-link>管理 API Key</a>
+                <a class="quick-link" href="/playground" data-shell-link>做内部测试</a>
+                <a class="quick-link" href="/logs" data-shell-link>排查请求日志</a>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="panel-card section-shell docs-hub-panel" id="scenario-guide">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">Scenario Guide</div>
+            <h3>按场景查看</h3>
+        </div>
+    </div>
+    <div class="docs-scenario-grid">
+        <article class="docs-scenario-card">
+            <h4>我要新增一个 provider</h4>
+            <p>到 <code>/providers</code> 新建渠道，录入模型和价格，然后先单独测试，再决定是否加入系统路由。</p>
+        </article>
+        <article class="docs-scenario-card">
+            <h4>我要给业务系统开通调用</h4>
+            <p>到 <code>/api-keys</code> 创建平台 Key，绑定授权 provider，设置额度和余额，再把平台 Key 交给业务系统。</p>
+        </article>
+        <article class="docs-scenario-card">
+            <h4>我要控制成本和稳定性</h4>
+            <p>回到 <code>/providers</code> 与 <code>/settings</code>，结合单价、成功率、首 Token 时间和稳定性评分来调整优先级和路由模式。</p>
+        </article>
+        <article class="docs-scenario-card">
+            <h4>我要知道外部怎么接入</h4>
+            <p>业务系统只需要 <code>BASE_URL</code>、平台 API Key 和标准请求参数；正式调用统一走 <code>/v1/*</code>。</p>
+        </article>
+        <article class="docs-scenario-card">
+            <h4>我要排查一次失败请求</h4>
+            <p>先查 <code>/logs</code> 看状态码和命中 provider，再看会话回放，最后回 API Key 详情确认是否额度或余额限制。</p>
+        </article>
+        <article class="docs-scenario-card">
+            <h4>我要看这个模块是干什么的</h4>
+            <p>下面的模块说明区会告诉你每个页面负责什么，避免把后台管理页和外部正式入口混用。</p>
+        </article>
+    </div>
+</section>
+
+<section class="docs-info-grid">
+    <div class="panel-card section-shell">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">Module Overview</div>
+                <h3>模块说明</h3>
+            </div>
+        </div>
+        <div class="docs-module-grid">
+            <article class="docs-module-card">
+                <h4>概览</h4>
+                <p>看系统状态、请求规模、健康概况和 API Key 整体使用情况。</p>
+            </article>
+            <article class="docs-module-card">
+                <h4>中转站管理</h4>
+                <p>维护 provider、模型、价格与质量指标，是系统资源池的入口。</p>
+            </article>
+            <article class="docs-module-card">
+                <h4>路由设置</h4>
+                <p>决定请求如何落到不同线路，是稳定性和成本策略的中控区。</p>
+            </article>
+            <article class="docs-module-card">
+                <h4>调用测试</h4>
+                <p>用于后台内部验证线路，不是给外部业务系统直接调用的正式入口。</p>
+            </article>
+            <article class="docs-module-card">
+                <h4>API 密钥管理</h4>
+                <p>负责授权、额度、余额、账单与单密钥路由策略。</p>
+            </article>
+            <article class="docs-module-card">
+                <h4>日志中心 / 会话回放</h4>
+                <p>前者看请求明细，后者看完整链路，排查问题时需要结合使用。</p>
+            </article>
+        </div>
+    </div>
+
+    <div class="panel-card section-shell">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">Access Basics</div>
+                <h3>接入基础信息</h3>
+            </div>
+        </div>
+        <div class="detail-list docs-detail-list">
+            <div><span>本地地址</span><strong><code>http://127.0.0.1:8000</code> 常见，但实际以启动端口为准</strong></div>
+            <div><span>生产地址</span><strong><code>https://你的域名</code>，文档中统一写作 <code>BASE_URL</code></strong></div>
+            <div><span>后台页面</span><strong>给管理员和运维使用，不替代外部正式入口</strong></div>
+            <div><span>外部入口</span><strong>统一走 <code>BASE_URL/v1/*</code></strong></div>
+            <div><span>鉴权方式</span><strong><code>Authorization: Bearer YOUR_PLATFORM_API_KEY</code></strong></div>
+            <div><span>标准路径</span><strong><code>/v1/models</code>、<code>/v1/chat/completions</code>、<code>/v1/responses</code>、<code>/v1/embeddings</code></strong></div>
+        </div>
+    </div>
+</section>
+
+<section class="dashboard-command-grid docs-command-grid-secondary">
+    <div class="panel-card section-shell docs-main-panel">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">FAQ</div>
+                <h3>高频问题</h3>
+            </div>
+        </div>
+        <div class="docs-faq-list">
+            <article class="docs-faq-card">
+                <h4>为什么外部系统不能直接指定 provider？</h4>
+                <p>因为对外入口强调统一代理和稳定路由。外部只关心模型和结果，具体命中哪条线路由平台负责。</p>
+            </article>
+            <article class="docs-faq-card">
+                <h4>为什么我已经有上游 Key，还要再建平台 Key？</h4>
+                <p>平台 Key 负责统一授权、额度、余额、账单和日志留痕，外部系统不应该直接持有上游渠道 Key。</p>
+            </article>
+            <article class="docs-faq-card">
+                <h4>为什么会被 429 拦截？</h4>
+                <p>通常是 Token 额度耗尽、金额额度耗尽或余额不足，需要回 API Key 详情页确认哪一项触发限制。</p>
+            </article>
+            <article class="docs-faq-card">
+                <h4>新接入时优先用哪个接口？</h4>
+                <p>优先使用标准 <code>/v1/responses</code> 或兼容的 <code>/v1/chat/completions</code>，不要走后台调试接口。</p>
+            </article>
+        </div>
+    </div>
+
+    <div class="dashboard-command-side docs-side-panel">
+        <div class="panel-card">
+            <div class="panel-head">
+                <div>
+                    <div class="panel-kicker">Billing</div>
+                    <h3>账务说明</h3>
+                </div>
+            </div>
+            <div class="dashboard-signal-list">
+                <div><span>Token 额度</span><strong>按总 Token 用量累计，到上限后停止调用</strong></div>
+                <div><span>金额额度</span><strong>按总成本累计，到上限后同样停止调用</strong></div>
+                <div><span>余额</span><strong>每次成功请求都会扣费，余额不足时直接拒绝</strong></div>
+                <div><span>账单依据</span><strong>统一基于请求日志和模型单价自动计算</strong></div>
+            </div>
+        </div>
+
+        <div class="panel-card">
+            <div class="panel-head">
+                <div>
+                    <div class="panel-kicker">Troubleshooting</div>
+                    <h3>排查入口</h3>
+                </div>
+            </div>
+            <div class="dashboard-signal-list">
+                <div><span>401 / 403</span><strong>先查 API Key 是否错误、禁用或过期</strong></div>
+                <div><span>429</span><strong>先查额度与余额</strong></div>
+                <div><span>模型不可用</span><strong>先查 provider 配置、授权范围和路由策略</strong></div>
+                <div><span>请求变慢</span><strong>先查 provider 降级、延迟和自动回退情况</strong></div>
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock %}

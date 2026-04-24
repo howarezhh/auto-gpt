@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import hashlib
 import secrets
+from decimal import Decimal
 
 from fastapi import Depends, Header, status
 from sqlalchemy import select
@@ -24,6 +25,7 @@ class ApiClientAuthError(Exception):
         api_client_key_name: str | None = None,
         api_client_key_prefix: str | None = None,
         remaining_tokens: int | None = None,
+        remaining_balance: float | None = None,
         policy_snapshot_json: str | None = None,
     ):
         self.status_code = status_code
@@ -33,6 +35,7 @@ class ApiClientAuthError(Exception):
         self.api_client_key_name = api_client_key_name
         self.api_client_key_prefix = api_client_key_prefix
         self.remaining_tokens = remaining_tokens
+        self.remaining_balance = remaining_balance
         self.policy_snapshot_json = policy_snapshot_json
         super().__init__(message)
 
@@ -42,6 +45,7 @@ class ApiClientAuthContext:
     api_client_key: ApiClientKey
     route_context: RoutePolicyContext
     remaining_tokens: int | None
+    remaining_balance: float | None
     policy_snapshot_json: str
 
 
@@ -103,6 +107,9 @@ class ApiKeyService:
         remaining_tokens = None
         if api_client_key.token_limit_total is not None:
             remaining_tokens = max(0, api_client_key.token_limit_total - api_client_key.total_tokens_used)
+        remaining_balance = None
+        if api_client_key.balance_amount is not None:
+            remaining_balance = float(api_client_key.balance_amount)
         allowed_provider_ids = [binding.provider_id for binding in api_client_key.provider_bindings]
         default_provider_id = api_client_key.default_provider_id
         if default_provider_id not in allowed_provider_ids:
@@ -124,6 +131,7 @@ class ApiKeyService:
                 api_client_key_name=api_client_key.name,
                 api_client_key_prefix=api_client_key.key_prefix,
                 remaining_tokens=remaining_tokens,
+                remaining_balance=remaining_balance,
                 policy_snapshot_json=policy_snapshot_json,
             )
         if api_client_key.expires_at is not None and api_client_key.expires_at <= datetime.utcnow():
@@ -135,6 +143,7 @@ class ApiKeyService:
                 api_client_key_name=api_client_key.name,
                 api_client_key_prefix=api_client_key.key_prefix,
                 remaining_tokens=remaining_tokens,
+                remaining_balance=remaining_balance,
                 policy_snapshot_json=policy_snapshot_json,
             )
         if (
@@ -149,6 +158,31 @@ class ApiKeyService:
                 api_client_key_name=api_client_key.name,
                 api_client_key_prefix=api_client_key.key_prefix,
                 remaining_tokens=remaining_tokens,
+                remaining_balance=remaining_balance,
+                policy_snapshot_json=policy_snapshot_json,
+            )
+        if api_client_key.cost_limit_total is not None and Decimal(str(api_client_key.total_cost_used or 0)) >= Decimal(str(api_client_key.cost_limit_total)):
+            raise ApiClientAuthError(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                code="insufficient_quota",
+                message="Api key billing quota exhausted",
+                api_client_key_id=api_client_key.id,
+                api_client_key_name=api_client_key.name,
+                api_client_key_prefix=api_client_key.key_prefix,
+                remaining_tokens=remaining_tokens,
+                remaining_balance=remaining_balance,
+                policy_snapshot_json=policy_snapshot_json,
+            )
+        if api_client_key.balance_amount is not None and Decimal(str(api_client_key.balance_amount)) <= Decimal("0"):
+            raise ApiClientAuthError(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                code="insufficient_balance",
+                message="Api key balance exhausted",
+                api_client_key_id=api_client_key.id,
+                api_client_key_name=api_client_key.name,
+                api_client_key_prefix=api_client_key.key_prefix,
+                remaining_tokens=remaining_tokens,
+                remaining_balance=remaining_balance,
                 policy_snapshot_json=policy_snapshot_json,
             )
         if not allowed_provider_ids:
@@ -160,6 +194,7 @@ class ApiKeyService:
                 api_client_key_name=api_client_key.name,
                 api_client_key_prefix=api_client_key.key_prefix,
                 remaining_tokens=remaining_tokens,
+                remaining_balance=remaining_balance,
                 policy_snapshot_json=policy_snapshot_json,
             )
 
@@ -176,6 +211,7 @@ class ApiKeyService:
             api_client_key=api_client_key,
             route_context=route_context,
             remaining_tokens=remaining_tokens,
+            remaining_balance=remaining_balance,
             policy_snapshot_json=policy_snapshot_json,
         )
 

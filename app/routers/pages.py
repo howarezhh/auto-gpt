@@ -70,6 +70,18 @@ def playground_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse("playground.html", {"request": request, "page_name": "playground"})
 
 
+@router.get("/docs", response_class=HTMLResponse)
+def docs_page(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(
+        "docs.html",
+        {
+            "request": request,
+            "page_name": "docs",
+            "title": "使用文档",
+        },
+    )
+
+
 @router.get("/api-keys", response_class=HTMLResponse)
 def api_keys_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(

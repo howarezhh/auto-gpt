@@ -4,6 +4,8 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.schemas.api_key import (
     ApiKeyAnalyticsOut,
+    ApiKeyBalanceAdjustmentIn,
+    ApiKeyBillingSummaryOut,
     ApiKeyCreate,
     ApiKeyCreateResponse,
     ApiKeyDetailOut,
@@ -140,3 +142,27 @@ def api_key_analytics(
         recent_error_limit=recent_error_limit,
         model_limit=model_limit,
     )
+
+
+@router.get("/{api_key_id}/billing", response_model=ApiKeyBillingSummaryOut)
+def api_key_billing(
+    api_key_id: int,
+    limit: int = Query(default=50, ge=1, le=200),
+    db: Session = Depends(get_db),
+) -> ApiKeyBillingSummaryOut:
+    api_key = ApiKeyAdminService.get_api_key(db, api_key_id)
+    if api_key is None:
+        raise HTTPException(status_code=404, detail="API key not found")
+    return ApiKeyAdminService.get_billing_summary(db, api_key_id=api_key_id, limit=limit)
+
+
+@router.post("/{api_key_id}/billing/adjust", response_model=ApiKeyBillingSummaryOut)
+def adjust_api_key_balance(
+    api_key_id: int,
+    payload: ApiKeyBalanceAdjustmentIn,
+    db: Session = Depends(get_db),
+) -> ApiKeyBillingSummaryOut:
+    api_key = ApiKeyAdminService.get_api_key(db, api_key_id)
+    if api_key is None:
+        raise HTTPException(status_code=404, detail="API key not found")
+    return ApiKeyAdminService.adjust_balance(db, api_key=api_key, payload=payload)

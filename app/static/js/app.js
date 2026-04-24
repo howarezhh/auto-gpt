@@ -39,6 +39,7 @@
         key_disabled: "密钥已禁用",
         key_expired: "密钥已过期",
         insufficient_quota: "额度不足",
+        insufficient_balance: "余额不足",
         no_authorized_provider: "未授权渠道",
     };
 
@@ -47,6 +48,8 @@
         disabled: "已禁用",
         expired: "已过期",
         quota_exhausted: "额度耗尽",
+        cost_quota_exhausted: "金额额度耗尽",
+        balance_exhausted: "余额耗尽",
         unbound: "未绑定渠道",
     };
 
@@ -291,6 +294,11 @@
 
     function formatSwitchText(value, enabledLabel = "开启", disabledLabel = "关闭") {
         return value ? enabledLabel : disabledLabel;
+    }
+
+    function formatMoney(value) {
+        if (value == null || Number.isNaN(Number(value))) return "不限";
+        return Number(value).toFixed(6);
     }
 
     function formatPrice(value) {
@@ -1954,6 +1962,16 @@
         };
     }
 
+    function buildApiKeyCostSummary(apiKey) {
+        const usedCost = Number(apiKey.total_cost_used || 0);
+        const balance = apiKey.balance_amount == null ? null : Number(apiKey.balance_amount || 0);
+        const costLimit = apiKey.cost_limit_total == null ? null : Number(apiKey.cost_limit_total || 0);
+        return {
+            summary: `累计消费 ${formatMoney(usedCost)}`,
+            detail: `余额 ${balance == null ? "不限" : formatMoney(balance)} · 金额额度 ${costLimit == null ? "不限" : formatMoney(costLimit)}`,
+        };
+    }
+
     function renderApiKeyProviderSelector(container, providers = [], selectedIds = []) {
         if (!container) return;
         if (!providers.length) {
@@ -1993,6 +2011,8 @@
         const enabledInput = document.getElementById("api-key-enabled");
         const expiresAtInput = document.getElementById("api-key-expires-at");
         const tokenLimitInput = document.getElementById("api-key-token-limit-total");
+        const costLimitInput = document.getElementById("api-key-cost-limit-total");
+        const balanceAmountInput = document.getElementById("api-key-balance-amount");
         const nameInput = document.getElementById("api-key-name");
         const remarkInput = document.getElementById("api-key-remark");
         const idInput = document.getElementById("api-key-id");
@@ -2002,6 +2022,10 @@
         function renderSummary(summary) {
             document.querySelectorAll("[data-api-key-summary]").forEach((node) => {
                 const key = node.dataset.apiKeySummary;
+                if (["total_cost_used", "total_balance_amount", "total_recharge_amount"].includes(key)) {
+                    node.textContent = formatMoney(summary?.[key] ?? 0);
+                    return;
+                }
                 node.textContent = formatNumber(summary?.[key] ?? 0);
             });
             const total = Number(summary?.total_keys || 0);
@@ -2038,6 +2062,7 @@
             const filteredItems = getFilteredApiKeys();
             tableBody.innerHTML = filteredItems.map((item) => {
                 const quota = buildApiKeyQuotaSummary(item);
+                const cost = buildApiKeyCostSummary(item);
                 return `
                     <tr>
                         <td>
@@ -2065,6 +2090,10 @@
                             <div class="table-muted">剩余 ${item.remaining_tokens == null ? "无限额" : formatNumber(item.remaining_tokens)}</div>
                         </td>
                         <td>
+                            <strong>${escapeHtml(cost.summary)}</strong>
+                            <div class="table-muted">${escapeHtml(cost.detail)}</div>
+                        </td>
+                        <td>
                             <strong>${formatDate(item.last_used_at)}</strong>
                             <div class="table-muted">过期 ${formatDate(item.expires_at)}</div>
                         </td>
@@ -2078,7 +2107,7 @@
                         </td>
                     </tr>
                 `;
-            }).join("") || '<tr><td colspan="8"><div class="empty-state">暂无匹配的 API 密钥</div></td></tr>';
+            }).join("") || '<tr><td colspan="9"><div class="empty-state">暂无匹配的 API 密钥</div></td></tr>';
             enhanceInteractiveButtons(tableBody);
         }
 
@@ -2118,6 +2147,10 @@
             manualFallbackInput.checked = apiKey?.manual_allow_fallback ?? true;
             expiresAtInput.value = toDatetimeLocalInputValue(apiKey?.expires_at);
             tokenLimitInput.value = apiKey?.token_limit_total ?? "";
+            costLimitInput.value = apiKey?.cost_limit_total ?? "";
+            balanceAmountInput.value = isEditing ? "" : (apiKey?.balance_amount ?? "");
+            balanceAmountInput.disabled = isEditing;
+            balanceAmountInput.placeholder = isEditing ? "已创建密钥请到详情页做余额调整" : "留空表示不限制";
             populateDefaultProviderOptions(apiKey?.default_provider_id || null);
             renderApiKeyProviderSelector(providerSelector, state.providers, apiKey?.allowed_provider_ids || []);
             refreshRoutePreview();
@@ -2132,6 +2165,8 @@
             rawValue.textContent = "";
             form.reset();
             idInput.value = "";
+            balanceAmountInput.disabled = false;
+            balanceAmountInput.placeholder = "留空表示不限制";
             renderApiKeyProviderSelector(providerSelector, state.providers, []);
             populateDefaultProviderOptions();
             refreshRoutePreview();
@@ -2168,11 +2203,15 @@
                 enabled: enabledInput.checked,
                 expires_at: expiresAtInput.value ? new Date(expiresAtInput.value).toISOString() : null,
                 token_limit_total: tokenLimitInput.value === "" ? null : Number(tokenLimitInput.value),
+                cost_limit_total: costLimitInput.value === "" ? null : Number(costLimitInput.value),
                 route_mode: routeModeInput.value,
                 default_provider_id: defaultProviderId,
                 manual_allow_fallback: manualFallbackInput.checked,
                 allowed_provider_ids: allowedProviderIds,
             };
+            if (!idInput.value) {
+                payload.balance_amount = balanceAmountInput.value === "" ? null : Number(balanceAmountInput.value);
+            }
             if (!payload.name) {
                 showToast("请填写 API 密钥名称", "error");
                 return;
@@ -2264,25 +2303,60 @@
         const logModalContent = document.getElementById("api-key-log-modal-content");
         const logModalClose = document.getElementById("api-key-log-modal-close");
         const openFullLogsLink = document.getElementById("api-key-detail-open-full-logs");
+        const billingTableBody = document.getElementById("api-key-detail-billing-records");
+        const balanceAdjustForm = document.getElementById("api-key-balance-adjust-form");
+        const balanceAdjustAmountInput = document.getElementById("api-key-balance-adjust-amount");
+        const balanceAdjustRemarkInput = document.getElementById("api-key-balance-adjust-remark");
+        const balanceAdjustSubmit = document.getElementById("api-key-balance-adjust-submit");
 
-        function renderDetail(detail, stats, analytics, logs) {
+        function renderBilling(billing) {
+            document.getElementById("api-key-detail-billing-summary").innerHTML = `
+                <div><span>当前余额</span><strong>${billing.balance_amount == null ? "不限" : formatMoney(billing.balance_amount)}</strong></div>
+                <div><span>累计消费</span><strong>${formatMoney(billing.total_cost_used)}</strong></div>
+                <div><span>累计充值</span><strong>${formatMoney(billing.total_recharge_amount)}</strong></div>
+                <div><span>金额额度</span><strong>${billing.cost_limit_total == null ? "不限" : formatMoney(billing.cost_limit_total)}</strong></div>
+                <div><span>剩余额度</span><strong>${billing.remaining_cost_quota == null ? "不限" : formatMoney(billing.remaining_cost_quota)}</strong></div>
+                <div><span>24h 消费</span><strong>${formatMoney(billing.recent_billed_cost)}</strong></div>
+                <div><span>账单笔数</span><strong>${formatNumber(billing.total_billing_records)}</strong></div>
+            `;
+            billingTableBody.innerHTML = billing.items.length
+                ? billing.items.map((item) => `
+                    <tr>
+                        <td>${formatDate(item.created_at)}</td>
+                        <td>${escapeHtml(item.record_type === "request_charge" ? "请求扣费" : (item.record_type === "top_up" ? "充值" : "手工调整"))}</td>
+                        <td>${escapeHtml(formatMoney(item.amount))}</td>
+                        <td>${escapeHtml(item.balance_after == null ? "不限" : formatMoney(item.balance_after))}</td>
+                        <td>
+                            <strong>${escapeHtml(item.model_name || "-")}</strong>
+                            <div class="table-muted">${escapeHtml(item.provider_name || "-")}</div>
+                        </td>
+                        <td>${formatNumber(item.total_tokens ?? 0)}</td>
+                        <td>${escapeHtml(item.remark || "-")}</td>
+                    </tr>
+                `).join("")
+                : '<tr><td colspan="7"><div class="empty-state">暂无账单流水</div></td></tr>';
+        }
+
+        function renderDetail(detail, stats, analytics, logs, billing) {
             document.getElementById("api-key-detail-title").textContent = detail.name;
             document.getElementById("api-key-detail-subtitle").textContent = `${renderApiKeyStatusText(detail.status)} · ${detail.key_masked} · 最近使用 ${formatDate(detail.last_used_at)}`;
             const quota = buildApiKeyQuotaSummary(detail);
             document.getElementById("api-key-detail-signal").innerHTML = `
                 <div class="cockpit-aside-label">额度脉冲</div>
-                <div class="cockpit-aside-value">${detail.remaining_tokens == null ? "∞" : formatNumber(detail.remaining_tokens)}</div>
-                <div class="cockpit-aside-copy">剩余额度与最近调用强度</div>
+                <div class="cockpit-aside-value">${detail.balance_amount == null ? (detail.remaining_tokens == null ? "∞" : formatNumber(detail.remaining_tokens)) : formatMoney(detail.balance_amount)}</div>
+                <div class="cockpit-aside-copy">余额、额度与最近调用强度</div>
                 <div class="cockpit-health-bar"><span style="width:${quota.percent}%"></span></div>
                 <div class="cockpit-aside-meta">
                     <span>状态 ${escapeHtml(renderApiKeyStatusText(detail.status))}</span>
-                    <span>请求 ${formatNumber(stats.total_requests)}</span>
+                    <span>消费 ${formatMoney(detail.total_cost_used)}</span>
                 </div>
             `;
             document.getElementById("api-key-detail-total-requests").textContent = formatNumber(stats.total_requests);
             document.getElementById("api-key-detail-prompt-tokens").textContent = formatNumber(detail.prompt_tokens_used);
             document.getElementById("api-key-detail-completion-tokens").textContent = formatNumber(detail.completion_tokens_used);
             document.getElementById("api-key-detail-total-tokens").textContent = formatNumber(detail.total_tokens_used);
+            document.getElementById("api-key-detail-total-cost-used").textContent = formatMoney(detail.total_cost_used);
+            document.getElementById("api-key-detail-balance-amount").textContent = detail.balance_amount == null ? "不限" : formatMoney(detail.balance_amount);
             document.getElementById("api-key-detail-recent-requests").textContent = formatNumber(stats.recent_requests);
             document.getElementById("api-key-detail-recent-failures").textContent = formatNumber(stats.recent_failed_requests);
             document.getElementById("api-key-detail-meta").innerHTML = `
@@ -2300,7 +2374,10 @@
                 <div><span>总额度</span><strong>${detail.token_limit_total == null ? "无限额" : formatNumber(detail.token_limit_total)}</strong></div>
                 <div><span>已使用</span><strong>${formatNumber(detail.total_tokens_used)}</strong></div>
                 <div><span>剩余额度</span><strong>${detail.remaining_tokens == null ? "无限额" : formatNumber(detail.remaining_tokens)}</strong></div>
-                <div><span>24h 开销</span><strong>${formatNumber(detail.recent_usage.recent_total_tokens)} Token</strong></div>
+                <div><span>24h Token</span><strong>${formatNumber(detail.recent_usage.recent_total_tokens)} Token</strong></div>
+                <div><span>金额额度</span><strong>${detail.cost_limit_total == null ? "不限" : formatMoney(detail.cost_limit_total)}</strong></div>
+                <div><span>当前余额</span><strong>${detail.balance_amount == null ? "不限" : formatMoney(detail.balance_amount)}</strong></div>
+                <div><span>24h 消费</span><strong>${formatMoney(stats.recent_total_cost)}</strong></div>
             `;
             document.getElementById("api-key-detail-bindings").innerHTML = detail.allowed_providers.length
                 ? detail.allowed_providers.map((provider) => `
@@ -2330,6 +2407,7 @@
                             <span>请求 ${formatNumber(item.total_requests)}</span>
                             <span>失败 ${formatNumber(item.failed_requests)}</span>
                             <span>Token ${formatNumber(item.total_tokens)}</span>
+                            <span>消费 ${formatMoney(item.total_cost)}</span>
                         </div>
                     </article>
                 `).join("")
@@ -2359,7 +2437,7 @@
                     <td>${escapeHtml(log.requested_model || log.model_name || "-")}</td>
                     <td>${escapeHtml(log.provider_name || "-")}</td>
                     <td>${escapeHtml(log.api_client_auth_result ? formatApiClientAuthResultLabel(log.api_client_auth_result) : (log.success ? formatApiClientAuthResultLabel("authenticated") : "-"))}</td>
-                    <td>${formatNumber(log.total_tokens ?? 0)}</td>
+                    <td>${formatNumber(log.total_tokens ?? 0)}<div class="table-muted">${escapeHtml(log.total_cost == null ? "-" : formatMoney(log.total_cost))}</div></td>
                     <td>${log.status_code ?? "-"}</td>
                     <td>${log.latency_ms ?? "-"}</td>
                     <td>${log.success ? statusBadge("healthy") : statusBadge("unhealthy")}</td>
@@ -2368,16 +2446,18 @@
             `).join("") || '<tr><td colspan="10"><div class="empty-state">暂无请求日志</div></td></tr>';
             enhanceInteractiveButtons(logsTableBody);
             openFullLogsLink.href = `/logs?api_client_key_id=${encodeURIComponent(String(apiKeyId))}`;
+            renderBilling(billing);
         }
 
         async function loadDetail({ silent = false } = {}) {
-            const [detail, stats, analytics, logs] = await Promise.all([
+            const [detail, stats, analytics, logs, billing] = await Promise.all([
                 api.get(`/api/api-keys/${apiKeyId}`),
                 api.get(`/api/api-keys/${apiKeyId}/stats`),
                 api.get(`/api/api-keys/${apiKeyId}/analytics`),
                 api.get(`/api/api-keys/${apiKeyId}/logs?page=1&page_size=20`),
+                api.get(`/api/api-keys/${apiKeyId}/billing?limit=20`),
             ]);
-            renderDetail(detail, stats, analytics, logs);
+            renderDetail(detail, stats, analytics, logs, billing);
             if (!silent) showToast("密钥详情已刷新");
         }
 
@@ -2412,6 +2492,28 @@
                 2,
             );
             logModal.classList.remove("hidden");
+        });
+
+        balanceAdjustForm.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            if (!balanceAdjustAmountInput.value.trim()) {
+                showToast("请填写调整金额", "error");
+                return;
+            }
+            try {
+                setButtonLoading(balanceAdjustSubmit, true);
+                await api.post(`/api/api-keys/${apiKeyId}/billing/adjust`, {
+                    amount: Number(balanceAdjustAmountInput.value),
+                    remark: balanceAdjustRemarkInput.value.trim() || null,
+                });
+                balanceAdjustForm.reset();
+                showToast("余额调整已提交");
+                await loadDetail({ silent: true });
+            } catch (error) {
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(balanceAdjustSubmit, false);
+            }
         });
 
         await loadDetail({ silent: true });

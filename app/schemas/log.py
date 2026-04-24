@@ -20,6 +20,11 @@ class RequestLogOut(BaseModel):
     status_code: int | None
     latency_ms: int | None
     first_token_latency_ms: int | None
+    prompt_cost: float | None
+    completion_cost: float | None
+    total_cost: float | None
+    billing_status: str | None
+    api_client_balance_after: float | None
     prompt_tokens: int | None
     completion_tokens: int | None
     total_tokens: int | None

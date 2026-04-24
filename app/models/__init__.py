@@ -1,3 +1,4 @@
+from app.models.api_client_billing_record import ApiClientBillingRecord
 from app.models.app_setting import AppSetting
 from app.models.api_client_key import ApiClientKey
 from app.models.api_client_key_provider_binding import ApiClientKeyProviderBinding
@@ -7,6 +8,7 @@ from app.models.request_log import RequestLog
 
 __all__ = [
     "AppSetting",
+    "ApiClientBillingRecord",
     "ApiClientKey",
     "ApiClientKeyProviderBinding",
     "Provider",

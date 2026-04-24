@@ -18,6 +18,7 @@ from app.database import SessionLocal
 from app.models.api_client_key import ApiClientKey
 from app.models.request_log import RequestLog
 from app.scheduler import scheduler
+from app.services.billing_service import BillingService
 from app.utils.json_utils import safeJsonParse
 
 
@@ -170,6 +171,7 @@ class TokenUsageService:
                 original_completion_tokens=original_completion_tokens,
                 original_total_tokens=original_total_tokens,
             )
+            BillingService.sync_request_billing(db, log)
             db.commit()
 
     @staticmethod

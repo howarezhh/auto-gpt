@@ -20,6 +20,8 @@ class ApiKeyBase(BaseModel):
     enabled: bool = True
     expires_at: datetime | None = None
     token_limit_total: int | None = Field(default=None, ge=0)
+    cost_limit_total: float | None = Field(default=None, ge=0)
+    balance_amount: float | None = Field(default=None, ge=0)
     route_mode: RouteMode = "failover"
     default_provider_id: int | None = None
     manual_allow_fallback: bool = True
@@ -61,6 +63,8 @@ class ApiKeyUpdate(BaseModel):
     enabled: bool | None = None
     expires_at: datetime | None = None
     token_limit_total: int | None = Field(default=None, ge=0)
+    cost_limit_total: float | None = Field(default=None, ge=0)
+    balance_amount: float | None = Field(default=None, ge=0)
     route_mode: RouteMode | None = None
     default_provider_id: int | None = None
     manual_allow_fallback: bool | None = None
@@ -110,6 +114,11 @@ class ApiKeyOut(BaseModel):
     completion_tokens_used: int
     total_tokens_used: int
     remaining_tokens: int | None
+    cost_limit_total: float | None
+    total_cost_used: float
+    balance_amount: float | None
+    total_recharge_amount: float
+    remaining_cost_quota: float | None
     route_mode: RouteMode
     default_provider_id: int | None
     manual_allow_fallback: bool
@@ -127,6 +136,7 @@ class ApiKeyRecentUsageOut(BaseModel):
     recent_prompt_tokens: int
     recent_completion_tokens: int
     recent_total_tokens: int
+    recent_total_cost: float = 0
 
 
 class ApiKeyDetailOut(ApiKeyOut):
@@ -149,6 +159,7 @@ class ApiKeyStatsOut(BaseModel):
     recent_prompt_tokens: int
     recent_completion_tokens: int
     recent_total_tokens: int
+    recent_total_cost: float = 0
 
 
 class ApiKeySummaryOut(BaseModel):
@@ -162,6 +173,9 @@ class ApiKeySummaryOut(BaseModel):
     total_prompt_tokens: int
     total_completion_tokens: int
     total_tokens: int
+    total_cost_used: float = 0
+    total_balance_amount: float = 0
+    total_recharge_amount: float = 0
 
 
 class ApiKeyModelDistributionItemOut(BaseModel):
@@ -169,6 +183,7 @@ class ApiKeyModelDistributionItemOut(BaseModel):
     total_requests: int
     failed_requests: int
     total_tokens: int
+    total_cost: float = 0
     last_requested_at: datetime | None
 
 
@@ -187,3 +202,47 @@ class ApiKeyAnalyticsOut(BaseModel):
     api_client_key_id: int
     model_distribution: list[ApiKeyModelDistributionItemOut]
     recent_errors: list[ApiKeyRecentErrorOut]
+
+
+class ApiKeyBillingRecordOut(BaseModel):
+    id: int
+    api_client_key_id: int
+    request_log_id: int | None
+    record_type: str
+    amount: float
+    balance_after: float | None
+    provider_id: int | None
+    provider_name: str | None
+    model_name: str | None
+    prompt_tokens: int | None
+    completion_tokens: int | None
+    total_tokens: int | None
+    unit_input_price_per_1k: float | None
+    unit_output_price_per_1k: float | None
+    remark: str | None
+    created_at: datetime
+
+
+class ApiKeyBillingSummaryOut(BaseModel):
+    api_client_key_id: int
+    balance_amount: float | None
+    total_cost_used: float
+    total_recharge_amount: float
+    cost_limit_total: float | None
+    remaining_cost_quota: float | None
+    recent_billed_cost: float = 0
+    total_billing_records: int = 0
+    items: list[ApiKeyBillingRecordOut] = Field(default_factory=list)
+
+
+class ApiKeyBalanceAdjustmentIn(BaseModel):
+    amount: float
+    remark: str | None = None
+
+    @field_validator("remark")
+    @classmethod
+    def normalize_adjustment_remark(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None

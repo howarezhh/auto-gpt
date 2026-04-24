@@ -1,14 +1,18 @@
 from datetime import datetime, timedelta
+from decimal import Decimal
 
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session, selectinload
 
+from app.models.api_client_billing_record import ApiClientBillingRecord
 from app.models.api_client_key import ApiClientKey
 from app.models.api_client_key_provider_binding import ApiClientKeyProviderBinding
 from app.models.provider import Provider
 from app.models.request_log import RequestLog
 from app.schemas.api_key import (
     ApiKeyAnalyticsOut,
+    ApiKeyBalanceAdjustmentIn,
+    ApiKeyBillingSummaryOut,
     ApiKeyCreate,
     ApiKeyDetailOut,
     ApiKeyModelDistributionItemOut,
@@ -19,6 +23,7 @@ from app.schemas.api_key import (
     ApiKeyUpdate,
 )
 from app.services.api_key_service import ApiKeyService
+from app.services.billing_service import BillingService
 
 
 class ApiKeyAdminService:
@@ -49,8 +54,11 @@ class ApiKeyAdminService:
                 func.sum(RequestLog.prompt_tokens).label("total_prompt_tokens"),
                 func.sum(RequestLog.completion_tokens).label("total_completion_tokens"),
                 func.sum(RequestLog.total_tokens).label("total_tokens"),
+                func.sum(RequestLog.total_cost).label("total_cost_used"),
             ).where(RequestLog.api_client_key_id.is_not(None))
         ).one()
+        total_balance_amount = sum(float(item.balance_amount or 0) for item in api_keys)
+        total_recharge_amount = sum(float(item.total_recharge_amount or 0) for item in api_keys)
 
         return ApiKeySummaryOut(
             total_keys=len(api_keys),
@@ -63,6 +71,9 @@ class ApiKeyAdminService:
             total_prompt_tokens=int(aggregate_row.total_prompt_tokens or 0),
             total_completion_tokens=int(aggregate_row.total_completion_tokens or 0),
             total_tokens=int(aggregate_row.total_tokens or 0),
+            total_cost_used=float(aggregate_row.total_cost_used or 0),
+            total_balance_amount=total_balance_amount,
+            total_recharge_amount=total_recharge_amount,
         )
 
     @staticmethod
@@ -104,12 +115,27 @@ class ApiKeyAdminService:
             enabled=payload.enabled,
             expires_at=payload.expires_at,
             token_limit_total=payload.token_limit_total,
+            cost_limit_total=BillingService.to_decimal(payload.cost_limit_total) if payload.cost_limit_total is not None else None,
+            balance_amount=BillingService.to_decimal(payload.balance_amount) if payload.balance_amount is not None else None,
+            total_cost_used=BillingService.to_decimal(0),
+            total_recharge_amount=BillingService.to_decimal(payload.balance_amount) if payload.balance_amount is not None else BillingService.to_decimal(0),
             route_mode=payload.route_mode,
             default_provider_id=payload.default_provider_id,
             manual_allow_fallback=payload.manual_allow_fallback,
         )
         db.add(api_key)
         db.flush()
+        if payload.balance_amount is not None and payload.balance_amount > 0:
+            db.add(
+                ApiClientBillingRecord(
+                    api_client_key_id=api_key.id,
+                    request_log_id=None,
+                    record_type="top_up",
+                    amount=BillingService.to_decimal(payload.balance_amount),
+                    balance_after=BillingService.to_decimal(payload.balance_amount),
+                    remark="创建 API Key 初始余额",
+                )
+            )
         ApiKeyAdminService._replace_provider_bindings(db, api_key, payload.allowed_provider_ids)
         db.commit()
         db.refresh(api_key)
@@ -132,6 +158,8 @@ class ApiKeyAdminService:
         for field, value in data.items():
             if field == "allowed_provider_ids":
                 continue
+            if field in {"cost_limit_total", "balance_amount"} and value is not None:
+                value = BillingService.to_decimal(value)
             setattr(api_key, field, value)
         if "allowed_provider_ids" in data:
             ApiKeyAdminService._replace_provider_bindings(db, api_key, allowed_provider_ids)
@@ -203,6 +231,7 @@ class ApiKeyAdminService:
             recent_prompt_tokens=recent_usage.recent_prompt_tokens,
             recent_completion_tokens=recent_usage.recent_completion_tokens,
             recent_total_tokens=recent_usage.recent_total_tokens,
+            recent_total_cost=recent_usage.recent_total_cost,
         )
 
     @staticmethod
@@ -220,6 +249,7 @@ class ApiKeyAdminService:
                 func.count(RequestLog.id).label("total_requests"),
                 func.sum(case((RequestLog.success.is_(False), 1), else_=0)).label("failed_requests"),
                 func.sum(RequestLog.total_tokens).label("total_tokens"),
+                func.sum(RequestLog.total_cost).label("total_cost"),
                 func.max(RequestLog.created_at).label("last_requested_at"),
             )
             .where(RequestLog.api_client_key_id == api_key_id)
@@ -246,6 +276,7 @@ class ApiKeyAdminService:
                     total_requests=int(row.total_requests or 0),
                     failed_requests=int(row.failed_requests or 0),
                     total_tokens=int(row.total_tokens or 0),
+                    total_cost=float(row.total_cost or 0),
                     last_requested_at=row.last_requested_at,
                 )
                 for row in model_distribution_rows
@@ -280,6 +311,12 @@ class ApiKeyAdminService:
         remaining_tokens = None
         if api_key.token_limit_total is not None:
             remaining_tokens = max(0, api_key.token_limit_total - api_key.total_tokens_used)
+        remaining_cost_quota = None
+        if api_key.cost_limit_total is not None:
+            remaining_cost_quota = max(
+                Decimal("0"),
+                BillingService.to_decimal(api_key.cost_limit_total) - BillingService.to_decimal(api_key.total_cost_used),
+            )
         status = "active"
         if not api_key.enabled:
             status = "disabled"
@@ -287,6 +324,10 @@ class ApiKeyAdminService:
             status = "expired"
         elif api_key.token_limit_total is not None and api_key.total_tokens_used >= api_key.token_limit_total:
             status = "quota_exhausted"
+        elif api_key.cost_limit_total is not None and BillingService.to_decimal(api_key.total_cost_used) >= BillingService.to_decimal(api_key.cost_limit_total):
+            status = "cost_quota_exhausted"
+        elif api_key.balance_amount is not None and BillingService.to_decimal(api_key.balance_amount) <= Decimal("0"):
+            status = "balance_exhausted"
         elif not allowed_providers:
             status = "unbound"
         return {
@@ -303,6 +344,11 @@ class ApiKeyAdminService:
             "completion_tokens_used": api_key.completion_tokens_used,
             "total_tokens_used": api_key.total_tokens_used,
             "remaining_tokens": remaining_tokens,
+            "cost_limit_total": BillingService.to_float(api_key.cost_limit_total),
+            "total_cost_used": BillingService.to_float(api_key.total_cost_used) or 0,
+            "balance_amount": BillingService.to_float(api_key.balance_amount),
+            "total_recharge_amount": BillingService.to_float(api_key.total_recharge_amount) or 0,
+            "remaining_cost_quota": BillingService.to_float(remaining_cost_quota),
             "route_mode": api_key.route_mode,
             "default_provider_id": api_key.default_provider_id,
             "manual_allow_fallback": api_key.manual_allow_fallback,
@@ -345,6 +391,7 @@ class ApiKeyAdminService:
             func.sum(RequestLog.prompt_tokens).label("recent_prompt_tokens"),
             func.sum(RequestLog.completion_tokens).label("recent_completion_tokens"),
             func.sum(RequestLog.total_tokens).label("recent_total_tokens"),
+            func.sum(RequestLog.total_cost).label("recent_total_cost"),
         ).where(
             RequestLog.api_client_key_id == api_key_id,
             RequestLog.created_at >= since,
@@ -357,7 +404,32 @@ class ApiKeyAdminService:
             recent_prompt_tokens=int(recent_row.recent_prompt_tokens or 0),
             recent_completion_tokens=int(recent_row.recent_completion_tokens or 0),
             recent_total_tokens=int(recent_row.recent_total_tokens or 0),
+            recent_total_cost=float(recent_row.recent_total_cost or 0),
         )
+
+    @staticmethod
+    def get_billing_summary(
+        db: Session,
+        *,
+        api_key_id: int,
+        limit: int = 50,
+    ) -> ApiKeyBillingSummaryOut:
+        return BillingService.list_billing_records(db, api_key_id=api_key_id, limit=limit)
+
+    @staticmethod
+    def adjust_balance(
+        db: Session,
+        *,
+        api_key: ApiClientKey,
+        payload: ApiKeyBalanceAdjustmentIn,
+    ) -> ApiKeyBillingSummaryOut:
+        BillingService.create_balance_adjustment(
+            db,
+            api_key=api_key,
+            amount=payload.amount,
+            remark=payload.remark,
+        )
+        return BillingService.list_billing_records(db, api_key_id=api_key.id, limit=50)
 
     @staticmethod
     def _replace_provider_bindings(db: Session, api_key: ApiClientKey, allowed_provider_ids: list[int]) -> None:

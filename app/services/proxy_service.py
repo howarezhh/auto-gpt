@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
 from app.services.api_key_service import ApiClientAuthContext, ApiKeyService
+from app.services.billing_service import BillingService
 from app.services.log_service import LogService
 from app.services.provider_service import ProviderService
 from app.services.router_service import RoutePolicyContext, RouterService
@@ -118,7 +119,7 @@ class ProxyService:
                     )
                     ProxyService._mark_success(db, provider, provider_model, latency_ms)
                     trace.append(ProxyService._build_trace_item(provider, provider_model, "success", latency_ms, status_code=200))
-                    LogService.create_log(
+                    created_log = LogService.create_log(
                         db,
                         log_type=log_type,
                         provider_id=provider.id,
@@ -157,6 +158,8 @@ class ProxyService:
                         completion_tokens=usage_info["completion_tokens"],
                         total_tokens=usage_info["total_tokens"],
                     )
+                    BillingService.sync_request_billing(db, created_log)
+                    db.commit()
                     return response, provider, trace, latency_ms
                 except httpx.HTTPStatusError as exc:
                     latency_ms = int((time.perf_counter() - started) * 1000)
@@ -356,7 +359,7 @@ class ProxyService:
                                         status_code=200,
                                     ),
                                 ]
-                                LogService.create_log(
+                                created_log = LogService.create_log(
                                     db,
                                     log_type=log_type,
                                     provider_id=provider.id,
@@ -394,6 +397,8 @@ class ProxyService:
                                     completion_tokens=usage_info["completion_tokens"],
                                     total_tokens=usage_info["total_tokens"],
                                 )
+                                BillingService.sync_request_billing(db, created_log)
+                                db.commit()
                             else:
                                 ProxyService._mark_failure(
                                     db,

@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, Numeric, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -30,6 +30,11 @@ class RequestLog(Base):
     status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     first_token_latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    prompt_cost: Mapped[float | None] = mapped_column(Numeric(18, 6), nullable=True)
+    completion_cost: Mapped[float | None] = mapped_column(Numeric(18, 6), nullable=True)
+    total_cost: Mapped[float | None] = mapped_column(Numeric(18, 6), nullable=True)
+    billing_status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    api_client_balance_after: Mapped[float | None] = mapped_column(Numeric(18, 6), nullable=True)
     prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)

@@ -135,6 +135,8 @@ def _create_api_key(
     route_mode: str = "failover",
     manual_allow_fallback: bool = True,
     token_limit_total: int | None = 1000,
+    cost_limit_total: float | None = None,
+    balance_amount: float | None = None,
     expires_at: str | None = None,
 ) -> dict:
     payload = {
@@ -143,6 +145,8 @@ def _create_api_key(
         "enabled": enabled,
         "expires_at": expires_at,
         "token_limit_total": token_limit_total,
+        "cost_limit_total": cost_limit_total,
+        "balance_amount": balance_amount,
         "route_mode": route_mode,
         "default_provider_id": default_provider_id,
         "manual_allow_fallback": manual_allow_fallback,
@@ -202,6 +206,8 @@ def main() -> None:
                 route_mode="failover",
                 manual_allow_fallback=True,
                 token_limit_total=1000,
+                cost_limit_total=1,
+                balance_amount=1,
             )
             disabled_key = _create_api_key(
                 client,
@@ -237,6 +243,14 @@ def main() -> None:
                 allowed_provider_ids=[provider_a["id"], provider_b["id"]],
                 default_provider_id=provider_a["id"],
                 token_limit_total=1000,
+            )
+            balance_key = _create_api_key(
+                client,
+                name="stage7-balance",
+                allowed_provider_ids=[provider_a["id"]],
+                default_provider_id=provider_a["id"],
+                token_limit_total=1000,
+                balance_amount=0.00004,
             )
             invalid_manual_key_response = client.post(
                 "/api/api-keys",
@@ -352,6 +366,18 @@ def main() -> None:
             )
             _assert(stream_response.status_code == 200, f"stream request failed: {stream_response.text}")
             _assert("data:" in stream_response.text, "stream response should return SSE payload")
+
+            balance_spend_response = client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": f"Bearer {balance_key['raw_api_key']}"},
+                json={"model": "reg-model", "messages": [{"role": "user", "content": "bill me"}]},
+            )
+            _assert(balance_spend_response.status_code == 200, f"balance spend request failed: {balance_spend_response.text}")
+            balance_exhausted_response = client.get(
+                "/v1/models",
+                headers={"Authorization": f"Bearer {balance_key['raw_api_key']}"},
+            )
+            _assert(balance_exhausted_response.status_code == 429, f"balance exhausted key should be 429: {balance_exhausted_response.text}")
 
             providers_response = client.get("/api/providers")
             _assert(providers_response.status_code == 200, f"provider list failed: {providers_response.text}")
@@ -559,6 +585,7 @@ def main() -> None:
             detail_response = client.get(f"/api/api-keys/{active_key['id']}")
             stats_response = client.get(f"/api/api-keys/{active_key['id']}/stats")
             analytics_response = client.get(f"/api/api-keys/{active_key['id']}/analytics")
+            billing_response = client.get(f"/api/api-keys/{active_key['id']}/billing?limit=20")
             logs_response = client.get(f"/api/api-keys/{active_key['id']}/logs?page=1&page_size=50")
             summary_response = client.get("/api/api-keys/summary")
             vision_logs_response = client.get(f"/api/api-keys/{vision_key['id']}/logs?page=1&page_size=20")
@@ -570,6 +597,7 @@ def main() -> None:
             _assert(detail_response.status_code == 200, f"detail response failed: {detail_response.text}")
             _assert(stats_response.status_code == 200, f"stats response failed: {stats_response.text}")
             _assert(analytics_response.status_code == 200, f"analytics response failed: {analytics_response.text}")
+            _assert(billing_response.status_code == 200, f"billing response failed: {billing_response.text}")
             _assert(logs_response.status_code == 200, f"logs response failed: {logs_response.text}")
             _assert(summary_response.status_code == 200, f"summary response failed: {summary_response.text}")
             _assert(vision_logs_response.status_code == 200, f"vision logs response failed: {vision_logs_response.text}")
@@ -579,6 +607,7 @@ def main() -> None:
             detail = detail_response.json()
             stats = stats_response.json()
             analytics = analytics_response.json()
+            billing = billing_response.json()
             logs = logs_response.json()
             summary = summary_response.json()
             vision_logs = vision_logs_response.json()
@@ -587,9 +616,15 @@ def main() -> None:
 
             _assert(detail["total_tokens_used"] == 70, f"detail total tokens mismatch: {detail}")
             _assert(detail["remaining_tokens"] == 930, f"detail remaining tokens mismatch: {detail}")
+            _assert(detail["total_cost_used"] > 0, f"detail total cost should be positive: {detail}")
+            _assert(detail["balance_amount"] < 1, f"detail balance should be deducted: {detail}")
             _assert(stats["total_requests"] == 2, f"stats total requests mismatch: {stats}")
             _assert(stats["success_requests"] == 2, f"stats success requests mismatch: {stats}")
             _assert(stats["recent_total_tokens"] == 70, f"recent tokens mismatch: {stats}")
+            _assert(stats["recent_total_cost"] > 0, f"recent total cost mismatch: {stats}")
+            _assert(billing["total_billing_records"] >= 2, f"billing records should include init top-up and request charges: {billing}")
+            _assert(any(item["record_type"] == "request_charge" for item in billing["items"]), f"billing items missing request charge: {billing}")
+            _assert(billing["recent_billed_cost"] > 0, f"billing recent cost mismatch: {billing}")
 
             success_logs = [item for item in logs["items"] if item["success"]]
             _assert(len(success_logs) == 2, f"expected 2 success logs, got {len(success_logs)}")
@@ -604,8 +639,19 @@ def main() -> None:
             _assert(any(item["value"] == active_key["key_prefix"] for item in filter_options["api_client_key_queries"]), "api key query filter option missing")
             _assert(any(item.get("has_image") for item in vision_logs["items"]), "vision request log should record has_image=true")
             _assert(analytics["model_distribution"][0]["total_tokens"] == 70, "analytics token aggregation mismatch")
-            _assert(summary["total_keys"] == 6, f"summary key count mismatch: {summary}")
+            _assert(analytics["model_distribution"][0]["total_cost"] > 0, "analytics cost aggregation mismatch")
+            _assert(summary["total_keys"] == 7, f"summary key count mismatch: {summary}")
             _assert(summary["total_tokens"] >= 120, f"summary total tokens should include image request usage: {summary}")
+            _assert(summary["total_cost_used"] > 0, f"summary total cost mismatch: {summary}")
+            _assert(summary["total_balance_amount"] >= 0, f"summary total balance mismatch: {summary}")
+
+            balance_adjust_response = client.post(
+                f"/api/api-keys/{active_key['id']}/billing/adjust",
+                json={"amount": 2, "remark": "stage7 recharge"},
+            )
+            _assert(balance_adjust_response.status_code == 200, f"balance adjust failed: {balance_adjust_response.text}")
+            adjusted_billing = balance_adjust_response.json()
+            _assert(any(item["record_type"] == "top_up" for item in adjusted_billing["items"]), f"billing top-up record missing: {adjusted_billing}")
 
     print("stage7 regression passed")
 

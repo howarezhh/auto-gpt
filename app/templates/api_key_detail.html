@@ -27,6 +27,8 @@
     <article class="metric-card"><span>累计输入 Token</span><strong id="api-key-detail-prompt-tokens">0</strong></article>
     <article class="metric-card"><span>累计输出 Token</span><strong id="api-key-detail-completion-tokens">0</strong></article>
     <article class="metric-card"><span>累计总 Token</span><strong id="api-key-detail-total-tokens">0</strong></article>
+    <article class="metric-card"><span>累计消费</span><strong id="api-key-detail-total-cost-used">0</strong></article>
+    <article class="metric-card"><span>当前余额</span><strong id="api-key-detail-balance-amount">0</strong></article>
     <article class="metric-card"><span>24h 请求量</span><strong id="api-key-detail-recent-requests">0</strong></article>
     <article class="metric-card metric-card-alert"><span>24h 失败数</span><strong id="api-key-detail-recent-failures">0</strong></article>
 </section>
@@ -109,6 +111,65 @@
                 <div class="empty-state">暂无错误记录</div>
             </div>
         </div>
+    </div>
+</section>
+
+<section class="panel-card section-shell">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">Billing Ledger</div>
+            <h3>账单流水与余额调整</h3>
+        </div>
+    </div>
+    <div class="api-key-detail-info-grid">
+        <div class="panel-card api-key-inline-card">
+            <div class="panel-head">
+                <div>
+                    <div class="panel-kicker">Billing Summary</div>
+                    <h3>账单概览</h3>
+                </div>
+            </div>
+            <div class="detail-list" id="api-key-detail-billing-summary"></div>
+        </div>
+        <div class="panel-card api-key-inline-card">
+            <div class="panel-head">
+                <div>
+                    <div class="panel-kicker">Balance Ops</div>
+                    <h3>余额调整</h3>
+                </div>
+            </div>
+            <form class="form-grid" id="api-key-balance-adjust-form">
+                <label>
+                    <span>调整金额</span>
+                    <input class="field-input" id="api-key-balance-adjust-amount" type="number" step="0.000001" placeholder="正数充值，负数扣减" required>
+                </label>
+                <label class="form-span-2">
+                    <span>备注</span>
+                    <input class="field-input" id="api-key-balance-adjust-remark" maxlength="200" placeholder="例如：人工充值、售后补偿、手工扣减">
+                </label>
+                <div class="form-actions form-span-2">
+                    <button class="btn btn-accent interactive-btn" id="api-key-balance-adjust-submit" type="submit">提交调整</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    <div class="table-shell">
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>时间</th>
+                    <th>类型</th>
+                    <th>金额</th>
+                    <th>余额</th>
+                    <th>模型 / 渠道</th>
+                    <th>Token</th>
+                    <th>备注</th>
+                </tr>
+            </thead>
+            <tbody id="api-key-detail-billing-records">
+                <tr><td colspan="7"><div class="empty-state">正在加载账单流水...</div></td></tr>
+            </tbody>
+        </table>
     </div>
 </section>
 

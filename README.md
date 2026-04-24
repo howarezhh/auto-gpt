@@ -33,3 +33,26 @@ python start_project.py --host 0.0.0.0 --port 9000
 python start_project.py --prepare-only
 python start_project.py --no-reload
 ```
+
+## 阿里云 Ubuntu 一键部署
+
+适用于已将项目放到 Linux 服务器后的部署场景，例如 `/opt/auto-gpt`。
+
+```bash
+cd /opt/auto-gpt
+chmod +x start_aliyun.sh
+sudo ./start_aliyun.sh
+```
+
+脚本会自动完成以下操作：
+
+- 安装 `python3`、`python3-venv`、`python3-pip`、`nginx`
+- 在项目根目录创建或复用 `.venv`
+- 使用清华源安装 Python 依赖
+- 创建或更新 `.env`
+- 自动生成 `LOCAL_PROXY_API_KEY`（若当前为空）
+- 写入 `systemd` 服务 `aotu-gpt.service`
+- 写入 `nginx` 站点配置并启用
+- 设置后端与 `nginx` 开机自启并立即启动
+
+部署完成后，仍需在阿里云安全组放行 `80/TCP` 到 `0.0.0.0/0`。

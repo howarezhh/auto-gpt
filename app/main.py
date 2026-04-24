@@ -57,6 +57,11 @@ def _migrate_request_log_columns(db) -> None:
         "request_id": "ALTER TABLE request_logs ADD COLUMN request_id TEXT",
         "conversation_key": "ALTER TABLE request_logs ADD COLUMN conversation_key TEXT",
         "first_token_latency_ms": "ALTER TABLE request_logs ADD COLUMN first_token_latency_ms INTEGER",
+        "prompt_cost": "ALTER TABLE request_logs ADD COLUMN prompt_cost NUMERIC",
+        "completion_cost": "ALTER TABLE request_logs ADD COLUMN completion_cost NUMERIC",
+        "total_cost": "ALTER TABLE request_logs ADD COLUMN total_cost NUMERIC",
+        "billing_status": "ALTER TABLE request_logs ADD COLUMN billing_status TEXT",
+        "api_client_balance_after": "ALTER TABLE request_logs ADD COLUMN api_client_balance_after NUMERIC",
         "prompt_tokens": "ALTER TABLE request_logs ADD COLUMN prompt_tokens INTEGER",
         "completion_tokens": "ALTER TABLE request_logs ADD COLUMN completion_tokens INTEGER",
         "total_tokens": "ALTER TABLE request_logs ADD COLUMN total_tokens INTEGER",
@@ -98,6 +103,25 @@ def _migrate_request_log_columns(db) -> None:
         db.execute(text(ddl))
         changed_provider_models = True
     if changed_provider_models:
+        db.commit()
+
+    existing_api_key_columns = {
+        row[1]
+        for row in db.execute(text("PRAGMA table_info(api_client_keys)")).fetchall()
+    }
+    api_key_additions = {
+        "cost_limit_total": "ALTER TABLE api_client_keys ADD COLUMN cost_limit_total NUMERIC",
+        "total_cost_used": "ALTER TABLE api_client_keys ADD COLUMN total_cost_used NUMERIC NOT NULL DEFAULT 0",
+        "balance_amount": "ALTER TABLE api_client_keys ADD COLUMN balance_amount NUMERIC",
+        "total_recharge_amount": "ALTER TABLE api_client_keys ADD COLUMN total_recharge_amount NUMERIC NOT NULL DEFAULT 0",
+    }
+    changed_api_keys = False
+    for column, ddl in api_key_additions.items():
+        if column in existing_api_key_columns:
+            continue
+        db.execute(text(ddl))
+        changed_api_keys = True
+    if changed_api_keys:
         db.commit()
 
     existing_settings_columns = {
@@ -153,7 +177,13 @@ async def lifespan(_: FastAPI):
         scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="aotu-gpt", lifespan=lifespan)
+app = FastAPI(
+    title="aotu-gpt",
+    lifespan=lifespan,
+    docs_url="/api-docs",
+    redoc_url="/api-redoc",
+    openapi_url="/openapi.json",
+)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 

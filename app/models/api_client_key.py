@@ -1,6 +1,8 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Text
+from decimal import Decimal
+
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -20,6 +22,10 @@ class ApiClientKey(Base):
     prompt_tokens_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     completion_tokens_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     total_tokens_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cost_limit_total: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    total_cost_used: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False, default=Decimal("0"))
+    balance_amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    total_recharge_amount: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False, default=Decimal("0"))
     route_mode: Mapped[str] = mapped_column(Text, nullable=False, default="failover")
     default_provider_id: Mapped[int | None] = mapped_column(ForeignKey("providers.id"), nullable=True)
     manual_allow_fallback: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
