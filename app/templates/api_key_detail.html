@@ -1,0 +1,157 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero-panel hero-panel-compact cockpit-hero api-key-detail-hero" data-api-key-id="{{ api_key_id }}">
+    <div class="cockpit-hero-copy">
+        <div class="eyebrow">API Key Detail</div>
+        <h2 id="api-key-detail-title">API 密钥详情</h2>
+        <p id="api-key-detail-subtitle">正在加载密钥状态、额度、授权策略和调用留痕...</p>
+        <div class="hero-actions">
+            <a class="btn btn-ghost interactive-btn" href="/api-keys" data-shell-link>返回列表</a>
+            <button class="btn btn-accent interactive-btn" id="api-key-detail-refresh-btn" type="button">刷新详情</button>
+        </div>
+    </div>
+    <div class="cockpit-hero-aside api-key-detail-aside" id="api-key-detail-signal">
+        <div class="cockpit-aside-label">额度脉冲</div>
+        <div class="cockpit-aside-value">-</div>
+        <div class="cockpit-aside-copy">剩余额度与最近调用强度</div>
+        <div class="cockpit-health-bar"><span style="width:0%"></span></div>
+        <div class="cockpit-aside-meta">
+            <span>状态 -</span>
+            <span>请求 -</span>
+        </div>
+    </div>
+</section>
+
+<section class="stats-grid api-key-detail-stats">
+    <article class="metric-card"><span>累计请求量</span><strong id="api-key-detail-total-requests">0</strong></article>
+    <article class="metric-card"><span>累计输入 Token</span><strong id="api-key-detail-prompt-tokens">0</strong></article>
+    <article class="metric-card"><span>累计输出 Token</span><strong id="api-key-detail-completion-tokens">0</strong></article>
+    <article class="metric-card"><span>累计总 Token</span><strong id="api-key-detail-total-tokens">0</strong></article>
+    <article class="metric-card"><span>24h 请求量</span><strong id="api-key-detail-recent-requests">0</strong></article>
+    <article class="metric-card metric-card-alert"><span>24h 失败数</span><strong id="api-key-detail-recent-failures">0</strong></article>
+</section>
+
+<section class="dashboard-command-grid api-key-detail-grid">
+    <div class="panel-card section-shell api-key-detail-main">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">Core State</div>
+                <h3>基础信息与额度进度</h3>
+            </div>
+        </div>
+        <div class="api-key-detail-info-grid">
+            <div class="panel-card api-key-inline-card">
+                <div class="panel-head">
+                    <div>
+                        <div class="panel-kicker">Identity</div>
+                        <h3>基础信息</h3>
+                    </div>
+                </div>
+                <div class="detail-list" id="api-key-detail-meta"></div>
+            </div>
+            <div class="panel-card api-key-inline-card">
+                <div class="panel-head">
+                    <div>
+                        <div class="panel-kicker">Quota</div>
+                        <h3>额度进度</h3>
+                    </div>
+                </div>
+                <div class="api-key-quota-shell">
+                    <div class="api-key-quota-bar"><span id="api-key-detail-quota-bar"></span></div>
+                    <div class="api-key-quota-meta" id="api-key-detail-quota-meta"></div>
+                </div>
+            </div>
+        </div>
+        <div class="api-key-detail-info-grid">
+            <div class="panel-card api-key-inline-card">
+                <div class="panel-head">
+                    <div>
+                        <div class="panel-kicker">Bindings</div>
+                        <h3>授权中转站</h3>
+                    </div>
+                </div>
+                <div class="api-key-chip-grid" id="api-key-detail-bindings"></div>
+            </div>
+            <div class="panel-card api-key-inline-card">
+                <div class="panel-head">
+                    <div>
+                        <div class="panel-kicker">Routing</div>
+                        <h3>专属路由策略</h3>
+                    </div>
+                </div>
+                <div class="route-mode-cards" id="api-key-detail-route-cards"></div>
+                <div class="route-live-summary api-key-detail-route-summary" id="api-key-detail-route-summary"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="dashboard-command-side api-key-detail-side">
+        <div class="panel-card">
+            <div class="panel-head">
+                <div>
+                    <div class="panel-kicker">Model Mix</div>
+                    <h3>模型调用分布</h3>
+                </div>
+            </div>
+            <div class="api-key-model-distribution" id="api-key-detail-model-distribution">
+                <div class="empty-state">暂无模型调用记录</div>
+            </div>
+        </div>
+
+        <div class="panel-card">
+            <div class="panel-head">
+                <div>
+                    <div class="panel-kicker">Recent Errors</div>
+                    <h3>最近错误</h3>
+                </div>
+            </div>
+            <div class="api-key-error-list" id="api-key-detail-errors">
+                <div class="empty-state">暂无错误记录</div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="panel-card section-shell">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">Trace Log</div>
+            <h3>历史请求日志</h3>
+        </div>
+        <div class="hero-actions">
+            <a class="btn btn-ghost btn-sm interactive-btn" id="api-key-detail-open-full-logs" href="/logs" data-shell-link>打开日志中心</a>
+        </div>
+    </div>
+    <div class="table-shell">
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>时间</th>
+                    <th>类型</th>
+                    <th>模型</th>
+                    <th>中转站</th>
+                    <th>鉴权</th>
+                    <th>Token</th>
+                    <th>状态码</th>
+                    <th>耗时</th>
+                    <th>结果</th>
+                    <th>详情</th>
+                </tr>
+            </thead>
+            <tbody id="api-key-detail-logs">
+                <tr><td colspan="10"><div class="empty-state">正在加载请求日志...</div></td></tr>
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<div class="modal-shell hidden" id="api-key-log-modal">
+    <div class="modal-card modal-lg">
+        <div class="modal-head">
+            <h3>API Key 请求详情</h3>
+            <button class="icon-btn interactive-btn" id="api-key-log-modal-close" type="button">×</button>
+        </div>
+        <pre class="code-block" id="api-key-log-modal-content">暂无详情</pre>
+    </div>
+</div>
+{% endblock %}

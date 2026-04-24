@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ title or "aotu-gpt" }}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="{{ url_for('static', path='css/app.css') }}?v=20260424-4" rel="stylesheet">
+</head>
+<body data-page="{{ page_name or '' }}">
+    <div class="app-shell">
+        <aside class="sidebar">
+            <div class="brand-block">
+                <div class="brand-row">
+                    <span class="brand-logo">
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M12 2.25a1 1 0 0 1 .89.55l2.03 4.11 4.54.66a1 1 0 0 1 .55 1.7l-3.28 3.2.77 4.52a1 1 0 0 1-1.45 1.06L12 15.93l-4.05 2.13a1 1 0 0 1-1.45-1.06l.77-4.52-3.28-3.2a1 1 0 0 1 .55-1.7l4.54-.66 2.03-4.11a1 1 0 0 1 .89-.55Z" />
+                        </svg>
+                    </span>
+                    <div class="brand-text">
+                        <strong>aotu-gpt</strong>
+                    </div>
+                </div>
+            </div>
+            <nav class="nav-cluster">
+                <a class="nav-link {% if request.url.path == '/' %}active{% endif %}" href="/" data-shell-link>
+                    <span class="nav-icon">◫</span>
+                    <div class="nav-copy">
+                        <span>概览</span>
+                    </div>
+                </a>
+                <a class="nav-link {% if request.url.path == '/providers' %}active{% endif %}" href="/providers" data-shell-link>
+                    <span class="nav-icon">◎</span>
+                    <div class="nav-copy">
+                        <span>中转站管理</span>
+                    </div>
+                </a>
+                <a class="nav-link {% if request.url.path == '/settings' %}active{% endif %}" href="/settings" data-shell-link>
+                    <span class="nav-icon">⚙</span>
+                    <div class="nav-copy">
+                        <span>路由设置</span>
+                    </div>
+                </a>
+                <a class="nav-link {% if request.url.path == '/playground' %}active{% endif %}" href="/playground" data-shell-link>
+                    <span class="nav-icon">↗</span>
+                    <div class="nav-copy">
+                        <span>调用测试</span>
+                    </div>
+                </a>
+                <a class="nav-link {% if request.url.path.startswith('/api-keys') %}active{% endif %}" href="/api-keys" data-shell-link>
+                    <span class="nav-icon">⌘</span>
+                    <div class="nav-copy">
+                        <span>API 密钥管理</span>
+                    </div>
+                </a>
+                <a class="nav-link {% if request.url.path == '/logs' %}active{% endif %}" href="/logs" data-shell-link>
+                    <span class="nav-icon">≣</span>
+                    <div class="nav-copy">
+                        <span>日志中心</span>
+                    </div>
+                </a>
+                <a class="nav-link {% if request.url.path == '/conversations' %}active{% endif %}" href="/conversations" data-shell-link>
+                    <span class="nav-icon">◌</span>
+                    <div class="nav-copy">
+                        <span>会话回放</span>
+                    </div>
+                </a>
+            </nav>
+        </aside>
+        <div class="workspace">
+            <header class="topbar">
+                <div class="topbar-title">
+                    <span class="topbar-mark"></span>
+                    <strong id="topbar-title">{{ title or "控制台" }}</strong>
+                </div>
+                <div class="topbar-actions">
+                    <a class="topbar-btn" href="/api-keys" data-shell-link>API 密钥</a>
+                    <a class="topbar-btn" href="/logs" data-shell-link>请求日志</a>
+                    <a class="topbar-btn" href="/conversations" data-shell-link>会话回放</a>
+                    <a class="topbar-btn" href="/settings" data-shell-link>路由设置</a>
+                    <span class="topbar-user">A</span>
+                </div>
+            </header>
+            <main class="content" id="app-content">
+                {% block content %}{% endblock %}
+            </main>
+        </div>
+    </div>
+    <div class="toast-stack" id="toast-stack"></div>
+    <script src="{{ url_for('static', path='js/app.js') }}?v=20260424-12"></script>
+</body>
+</html>

@@ -1,0 +1,217 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero-panel hero-panel-compact cockpit-hero provider-cockpit-hero">
+    <div class="cockpit-hero-copy">
+        <div class="eyebrow">Providers</div>
+        <h2>中转站管理</h2>
+        <p>管理上游中转地址、模型、优先级与健康状态，作为统一代理的上游资源池。</p>
+        <div class="hero-actions">
+            <button class="btn btn-accent interactive-btn" id="add-provider-btn" type="button">新增中转站</button>
+            <button class="btn btn-ghost interactive-btn" id="providers-check-all-btn" type="button">检查全部</button>
+        </div>
+    </div>
+    <div class="cockpit-hero-aside provider-hero-aside" id="providers-summary-card">
+        <div class="cockpit-aside-label">渠道脉冲</div>
+        <div class="cockpit-aside-value">0</div>
+        <div class="cockpit-aside-copy">当前已启用中转站</div>
+        <div class="cockpit-health-bar"><span style="width:0%"></span></div>
+        <div class="cockpit-aside-meta">
+            <span>模型 0</span>
+            <span>支持流式 0</span>
+        </div>
+    </div>
+</section>
+
+<section class="provider-telemetry-grid" id="provider-telemetry-grid">
+    <article class="metric-card">
+        <span>中转站总数</span>
+        <strong data-provider-stat="provider_count">0</strong>
+    </article>
+    <article class="metric-card">
+        <span>已启用中转站</span>
+        <strong data-provider-stat="enabled_provider_count">0</strong>
+    </article>
+    <article class="metric-card">
+        <span>模型总数</span>
+        <strong data-provider-stat="model_count">0</strong>
+    </article>
+    <article class="metric-card">
+        <span>支持 Stream</span>
+        <strong data-provider-stat="stream_model_count">0</strong>
+    </article>
+    <article class="metric-card">
+        <span>支持 Vision</span>
+        <strong data-provider-stat="vision_model_count">0</strong>
+    </article>
+</section>
+
+<section class="provider-command-grid">
+    <div class="panel-card section-shell provider-registry-panel">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">Registry</div>
+                <h3>中转列表</h3>
+            </div>
+        </div>
+        <div class="table-toolbar provider-toolbar">
+            <input class="field-input search-input" id="provider-search" type="search" placeholder="搜索名称、URL、模型">
+        </div>
+        <div class="table-shell">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>名称</th>
+                        <th>Base URL</th>
+                        <th>模型</th>
+                        <th>状态</th>
+                        <th>熔断</th>
+                        <th>优先级</th>
+                        <th>权重</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody id="provider-table-body"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="provider-command-side">
+        <div class="panel-card">
+            <div class="panel-head">
+                <div>
+                    <div class="panel-kicker">Capability Mix</div>
+                    <h3>模型能力总览</h3>
+                </div>
+            </div>
+            <div class="dashboard-signal-list" id="provider-capability-list">
+                <div><span>Stream 模型</span><strong>0</strong></div>
+                <div><span>Vision 模型</span><strong>0</strong></div>
+                <div><span>健康模型</span><strong>0</strong></div>
+                <div><span>异常模型</span><strong>0</strong></div>
+            </div>
+        </div>
+
+        <div class="panel-card">
+            <div class="panel-head">
+                <div>
+                    <div class="panel-kicker">Registry Notes</div>
+                    <h3>录入与调度提醒</h3>
+                </div>
+            </div>
+            <div class="dashboard-signal-list">
+                <div><span>模型配置</span><strong>优先使用预设，避免拼写漂移</strong></div>
+                <div><span>权重策略</span><strong>同模型多副本时再拉开差异</strong></div>
+                <div><span>Vision 能力</span><strong>只给确实支持图片的模型开启</strong></div>
+                <div><span>测试建议</span><strong>新增线路后先做单模型测试再启用</strong></div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="panel-card section-shell provider-model-panel">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">Model Matrix</div>
+            <h3>模型管理</h3>
+        </div>
+    </div>
+    <div class="table-shell">
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>中转站</th>
+                    <th>模型</th>
+                    <th>健康</th>
+                    <th>能力</th>
+                    <th>优先级</th>
+                    <th>权重</th>
+                    <th>启用</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody id="provider-model-table-body"></tbody>
+        </table>
+    </div>
+</section>
+
+<div class="modal-shell hidden" id="provider-modal">
+    <div class="modal-card modal-lg">
+        <div class="modal-head">
+            <h3 id="provider-modal-title">新增中转站</h3>
+            <button class="icon-btn interactive-btn" id="provider-modal-close" type="button">×</button>
+        </div>
+        <form id="provider-form" class="form-grid">
+            <input id="provider-id" type="hidden">
+            <label>
+                <span>名称</span>
+                <input class="field-input" id="provider-name" required>
+            </label>
+            <label>
+                <span>Base URL</span>
+                <input class="field-input" id="provider-base-url" placeholder="https://example.com/v1" required>
+            </label>
+            <label>
+                <span>API Key</span>
+                <input class="field-input" id="provider-api-key" placeholder="新增时必填；编辑时留空表示不修改">
+            </label>
+            <label>
+                <span>类型</span>
+                <input class="field-input" id="provider-type" value="openai_compatible">
+            </label>
+            <label>
+                <span>优先级</span>
+                <input class="field-input" id="provider-priority" type="number" value="100">
+            </label>
+            <label>
+                <span>权重</span>
+                <input class="field-input" id="provider-weight" type="number" value="100">
+            </label>
+            <label>
+                <span>超时毫秒</span>
+                <input class="field-input" id="provider-timeout-ms" type="number" value="30000">
+            </label>
+            <label>
+                <span>最大重试次数</span>
+                <input class="field-input" id="provider-max-retries" type="number" value="1">
+            </label>
+            <label class="form-span-2">
+                <span>模型配置</span>
+                <div class="settings-note provider-model-note">
+                    <strong>填写方式</strong>
+                    <span>每行一个模型，格式：模型名|优先级|权重|stream(y/n)|vision(y/n)|enabled(y/n)。例如：gpt-4o-mini|100|100|y|n|y。</span>
+                </div>
+                <div class="provider-model-preset-bar">
+                    <span class="provider-model-preset-label">预设模型</span>
+                    <div class="provider-model-preset-list">
+                        <button class="table-action-btn" type="button" data-model-preset="gpt-5.4">gpt-5.4</button>
+                        <button class="table-action-btn" type="button" data-model-preset="gpt-5">gpt-5</button>
+                        <button class="table-action-btn" type="button" data-model-preset="gpt-5-mini">gpt-5-mini</button>
+                        <button class="table-action-btn" type="button" data-model-preset="gpt-4.1">gpt-4.1</button>
+                        <button class="table-action-btn" type="button" data-model-preset="gpt-4o">gpt-4o</button>
+                        <button class="table-action-btn" type="button" data-model-preset="gpt-4o-mini">gpt-4o-mini</button>
+                        <button class="table-action-btn" type="button" data-model-preset="o3">o3</button>
+                        <button class="table-action-btn" type="button" data-model-preset="o4-mini">o4-mini</button>
+                    </div>
+                </div>
+                <div class="provider-model-custom-row">
+                    <input class="field-input" id="provider-custom-model-name" placeholder="输入自定义模型名，例如 gpt-4.1-mini" type="text">
+                    <button class="btn btn-ghost interactive-btn" id="provider-add-custom-model" type="button">添加自定义模型</button>
+                </div>
+                <textarea class="field-input" id="provider-models" rows="5" placeholder="每行一个模型，格式：模型名|优先级|权重|stream(y/n)|vision(y/n)|enabled(y/n)&#10;例如：gpt-4o-mini|100|100|y|n|y"></textarea>
+            </label>
+            <label class="form-span-2">
+                <span>备注</span>
+                <textarea class="field-input" id="provider-remark" rows="3"></textarea>
+            </label>
+            <label class="toggle-row form-span-2">
+                <input id="provider-enabled" type="checkbox" checked>
+                <span>启用该中转站</span>
+            </label>
+            <div class="form-actions form-span-2">
+                <button class="btn btn-ghost interactive-btn" id="provider-form-cancel" type="button">取消</button>
+                <button class="btn btn-accent interactive-btn" id="provider-submit-btn" type="submit">保存</button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}

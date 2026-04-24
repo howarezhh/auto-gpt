@@ -1,0 +1,396 @@
+from datetime import datetime, timedelta
+
+from sqlalchemy import case, func, select
+from sqlalchemy.orm import Session, selectinload
+
+from app.models.api_client_key import ApiClientKey
+from app.models.api_client_key_provider_binding import ApiClientKeyProviderBinding
+from app.models.provider import Provider
+from app.models.request_log import RequestLog
+from app.schemas.api_key import (
+    ApiKeyAnalyticsOut,
+    ApiKeyCreate,
+    ApiKeyDetailOut,
+    ApiKeyModelDistributionItemOut,
+    ApiKeyRecentErrorOut,
+    ApiKeyRecentUsageOut,
+    ApiKeyStatsOut,
+    ApiKeySummaryOut,
+    ApiKeyUpdate,
+)
+from app.services.api_key_service import ApiKeyService
+
+
+class ApiKeyAdminService:
+    @staticmethod
+    def get_summary(db: Session) -> ApiKeySummaryOut:
+        api_keys = ApiKeyAdminService.list_api_keys(db)
+        now = datetime.utcnow()
+        enabled_keys = 0
+        disabled_keys = 0
+        expired_keys = 0
+        quota_exhausted_keys = 0
+        unbound_keys = 0
+        for api_key in api_keys:
+            if api_key.enabled:
+                enabled_keys += 1
+            else:
+                disabled_keys += 1
+            if api_key.expires_at is not None and api_key.expires_at <= now:
+                expired_keys += 1
+            if api_key.token_limit_total is not None and api_key.total_tokens_used >= api_key.token_limit_total:
+                quota_exhausted_keys += 1
+            if not api_key.provider_bindings:
+                unbound_keys += 1
+
+        aggregate_row = db.execute(
+            select(
+                func.count(RequestLog.id).label("total_requests"),
+                func.sum(RequestLog.prompt_tokens).label("total_prompt_tokens"),
+                func.sum(RequestLog.completion_tokens).label("total_completion_tokens"),
+                func.sum(RequestLog.total_tokens).label("total_tokens"),
+            ).where(RequestLog.api_client_key_id.is_not(None))
+        ).one()
+
+        return ApiKeySummaryOut(
+            total_keys=len(api_keys),
+            enabled_keys=enabled_keys,
+            disabled_keys=disabled_keys,
+            expired_keys=expired_keys,
+            quota_exhausted_keys=quota_exhausted_keys,
+            unbound_keys=unbound_keys,
+            total_requests=int(aggregate_row.total_requests or 0),
+            total_prompt_tokens=int(aggregate_row.total_prompt_tokens or 0),
+            total_completion_tokens=int(aggregate_row.total_completion_tokens or 0),
+            total_tokens=int(aggregate_row.total_tokens or 0),
+        )
+
+    @staticmethod
+    def list_api_keys(db: Session) -> list[ApiClientKey]:
+        return list(
+            db.scalars(
+                select(ApiClientKey)
+                .options(
+                    selectinload(ApiClientKey.provider_bindings).selectinload(ApiClientKeyProviderBinding.provider)
+                )
+                .order_by(ApiClientKey.id.desc())
+            )
+        )
+
+    @staticmethod
+    def get_api_key(db: Session, api_key_id: int) -> ApiClientKey | None:
+        return db.scalar(
+            select(ApiClientKey)
+            .options(
+                selectinload(ApiClientKey.provider_bindings).selectinload(ApiClientKeyProviderBinding.provider)
+            )
+            .where(ApiClientKey.id == api_key_id)
+        )
+
+    @staticmethod
+    def create_api_key(db: Session, payload: ApiKeyCreate) -> tuple[ApiClientKey, str]:
+        ApiKeyAdminService._validate_provider_configuration(
+            db,
+            route_mode=payload.route_mode,
+            allowed_provider_ids=payload.allowed_provider_ids,
+            default_provider_id=payload.default_provider_id,
+        )
+        raw_api_key = ApiKeyService.generate_api_key()
+        api_key = ApiClientKey(
+            name=payload.name,
+            remark=payload.remark,
+            key_prefix=ApiKeyService.extract_key_prefix(raw_api_key),
+            key_hash=ApiKeyService.hash_api_key(raw_api_key),
+            enabled=payload.enabled,
+            expires_at=payload.expires_at,
+            token_limit_total=payload.token_limit_total,
+            route_mode=payload.route_mode,
+            default_provider_id=payload.default_provider_id,
+            manual_allow_fallback=payload.manual_allow_fallback,
+        )
+        db.add(api_key)
+        db.flush()
+        ApiKeyAdminService._replace_provider_bindings(db, api_key, payload.allowed_provider_ids)
+        db.commit()
+        db.refresh(api_key)
+        return ApiKeyAdminService.get_api_key(db, api_key.id), raw_api_key
+
+    @staticmethod
+    def update_api_key(db: Session, api_key: ApiClientKey, payload: ApiKeyUpdate) -> ApiClientKey:
+        data = payload.model_dump(exclude_unset=True)
+        allowed_provider_ids = data.get("allowed_provider_ids")
+        route_mode = data.get("route_mode", api_key.route_mode)
+        default_provider_id = data.get("default_provider_id", api_key.default_provider_id)
+        if allowed_provider_ids is None:
+            allowed_provider_ids = [binding.provider_id for binding in api_key.provider_bindings]
+        ApiKeyAdminService._validate_provider_configuration(
+            db,
+            route_mode=route_mode,
+            allowed_provider_ids=allowed_provider_ids,
+            default_provider_id=default_provider_id,
+        )
+        for field, value in data.items():
+            if field == "allowed_provider_ids":
+                continue
+            setattr(api_key, field, value)
+        if "allowed_provider_ids" in data:
+            ApiKeyAdminService._replace_provider_bindings(db, api_key, allowed_provider_ids)
+        db.commit()
+        db.refresh(api_key)
+        return ApiKeyAdminService.get_api_key(db, api_key.id)
+
+    @staticmethod
+    def set_enabled(db: Session, api_key: ApiClientKey, enabled: bool) -> ApiClientKey:
+        api_key.enabled = enabled
+        db.commit()
+        db.refresh(api_key)
+        return ApiKeyAdminService.get_api_key(db, api_key.id)
+
+    @staticmethod
+    def delete_api_key(db: Session, api_key: ApiClientKey) -> None:
+        db.delete(api_key)
+        db.commit()
+
+    @staticmethod
+    def get_logs(
+        db: Session,
+        *,
+        api_key_id: int,
+        page: int,
+        page_size: int,
+        log_type: str | None,
+        success: bool | None,
+    ) -> tuple[int, list[RequestLog]]:
+        stmt = select(RequestLog).where(RequestLog.api_client_key_id == api_key_id)
+        count_stmt = select(func.count()).select_from(RequestLog).where(RequestLog.api_client_key_id == api_key_id)
+        if log_type:
+            stmt = stmt.where(RequestLog.log_type == log_type)
+            count_stmt = count_stmt.where(RequestLog.log_type == log_type)
+        if success is not None:
+            stmt = stmt.where(RequestLog.success == success)
+            count_stmt = count_stmt.where(RequestLog.success == success)
+        total = db.scalar(count_stmt) or 0
+        items = list(
+            db.scalars(
+                stmt.order_by(RequestLog.created_at.desc(), RequestLog.id.desc())
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            )
+        )
+        return total, items
+
+    @staticmethod
+    def get_stats(db: Session, *, api_key_id: int, window_hours: int = 24) -> ApiKeyStatsOut:
+        aggregate_stmt = select(
+            func.count(RequestLog.id).label("total_requests"),
+            func.sum(case((RequestLog.success.is_(True), 1), else_=0)).label("success_requests"),
+            func.sum(case((RequestLog.success.is_(False), 1), else_=0)).label("failed_requests"),
+            func.avg(RequestLog.latency_ms).label("avg_latency_ms"),
+        ).where(RequestLog.api_client_key_id == api_key_id)
+        aggregate_row = db.execute(aggregate_stmt).one()
+
+        recent_usage = ApiKeyAdminService.get_recent_usage(db, api_key_id=api_key_id, window_hours=window_hours)
+
+        return ApiKeyStatsOut(
+            api_client_key_id=api_key_id,
+            total_requests=int(aggregate_row.total_requests or 0),
+            success_requests=int(aggregate_row.success_requests or 0),
+            failed_requests=int(aggregate_row.failed_requests or 0),
+            avg_latency_ms=round(float(aggregate_row.avg_latency_ms), 2) if aggregate_row.avg_latency_ms is not None else None,
+            recent_window_hours=recent_usage.recent_window_hours,
+            recent_requests=recent_usage.recent_requests,
+            recent_failed_requests=recent_usage.recent_failed_requests,
+            recent_prompt_tokens=recent_usage.recent_prompt_tokens,
+            recent_completion_tokens=recent_usage.recent_completion_tokens,
+            recent_total_tokens=recent_usage.recent_total_tokens,
+        )
+
+    @staticmethod
+    def get_analytics(
+        db: Session,
+        *,
+        api_key_id: int,
+        recent_error_limit: int = 8,
+        model_limit: int = 12,
+    ) -> ApiKeyAnalyticsOut:
+        model_name_expr = func.coalesce(RequestLog.requested_model, RequestLog.model_name, "unknown")
+        model_distribution_rows = db.execute(
+            select(
+                model_name_expr.label("model_name"),
+                func.count(RequestLog.id).label("total_requests"),
+                func.sum(case((RequestLog.success.is_(False), 1), else_=0)).label("failed_requests"),
+                func.sum(RequestLog.total_tokens).label("total_tokens"),
+                func.max(RequestLog.created_at).label("last_requested_at"),
+            )
+            .where(RequestLog.api_client_key_id == api_key_id)
+            .group_by(model_name_expr)
+            .order_by(func.count(RequestLog.id).desc(), model_name_expr.asc())
+            .limit(max(1, model_limit))
+        ).all()
+
+        recent_error_rows = db.execute(
+            select(RequestLog)
+            .where(
+                RequestLog.api_client_key_id == api_key_id,
+                RequestLog.success.is_(False),
+            )
+            .order_by(RequestLog.created_at.desc(), RequestLog.id.desc())
+            .limit(max(1, recent_error_limit))
+        ).scalars().all()
+
+        return ApiKeyAnalyticsOut(
+            api_client_key_id=api_key_id,
+            model_distribution=[
+                ApiKeyModelDistributionItemOut(
+                    model_name=str(row.model_name or "unknown"),
+                    total_requests=int(row.total_requests or 0),
+                    failed_requests=int(row.failed_requests or 0),
+                    total_tokens=int(row.total_tokens or 0),
+                    last_requested_at=row.last_requested_at,
+                )
+                for row in model_distribution_rows
+            ],
+            recent_errors=[
+                ApiKeyRecentErrorOut(
+                    id=item.id,
+                    created_at=item.created_at,
+                    request_path=item.request_path,
+                    model_name=item.requested_model or item.model_name,
+                    provider_name=item.provider_name,
+                    status_code=item.status_code,
+                    api_client_auth_result=item.api_client_auth_result,
+                    message=item.message,
+                )
+                for item in recent_error_rows
+            ],
+        )
+
+    @staticmethod
+    def serialize_api_key(api_key: ApiClientKey) -> dict:
+        allowed_providers = [
+            {
+                "id": binding.provider.id,
+                "name": binding.provider.name,
+                "enabled": binding.provider.enabled,
+                "health_status": binding.provider.health_status,
+            }
+            for binding in api_key.provider_bindings
+            if binding.provider is not None
+        ]
+        remaining_tokens = None
+        if api_key.token_limit_total is not None:
+            remaining_tokens = max(0, api_key.token_limit_total - api_key.total_tokens_used)
+        status = "active"
+        if not api_key.enabled:
+            status = "disabled"
+        elif api_key.expires_at is not None and api_key.expires_at <= datetime.utcnow():
+            status = "expired"
+        elif api_key.token_limit_total is not None and api_key.total_tokens_used >= api_key.token_limit_total:
+            status = "quota_exhausted"
+        elif not allowed_providers:
+            status = "unbound"
+        return {
+            "id": api_key.id,
+            "name": api_key.name,
+            "remark": api_key.remark,
+            "enabled": api_key.enabled,
+            "status": status,
+            "key_prefix": api_key.key_prefix,
+            "key_masked": ApiKeyService.mask_key_prefix(api_key.key_prefix),
+            "expires_at": api_key.expires_at,
+            "token_limit_total": api_key.token_limit_total,
+            "prompt_tokens_used": api_key.prompt_tokens_used,
+            "completion_tokens_used": api_key.completion_tokens_used,
+            "total_tokens_used": api_key.total_tokens_used,
+            "remaining_tokens": remaining_tokens,
+            "route_mode": api_key.route_mode,
+            "default_provider_id": api_key.default_provider_id,
+            "manual_allow_fallback": api_key.manual_allow_fallback,
+            "allowed_provider_ids": [binding.provider_id for binding in api_key.provider_bindings],
+            "allowed_providers": allowed_providers,
+            "last_used_at": api_key.last_used_at,
+            "created_at": api_key.created_at,
+            "updated_at": api_key.updated_at,
+        }
+
+    @staticmethod
+    def serialize_api_key_detail(
+        db: Session,
+        api_key: ApiClientKey,
+        *,
+        window_hours: int = 24,
+    ) -> ApiKeyDetailOut:
+        recent_usage = ApiKeyAdminService.get_recent_usage(
+            db,
+            api_key_id=api_key.id,
+            window_hours=window_hours,
+        )
+        return ApiKeyDetailOut(
+            **ApiKeyAdminService.serialize_api_key(api_key),
+            recent_usage=recent_usage,
+        )
+
+    @staticmethod
+    def get_recent_usage(
+        db: Session,
+        *,
+        api_key_id: int,
+        window_hours: int = 24,
+    ) -> ApiKeyRecentUsageOut:
+        normalized_window_hours = max(1, window_hours)
+        since = datetime.utcnow() - timedelta(hours=normalized_window_hours)
+        recent_stmt = select(
+            func.count(RequestLog.id).label("recent_requests"),
+            func.sum(case((RequestLog.success.is_(False), 1), else_=0)).label("recent_failed_requests"),
+            func.sum(RequestLog.prompt_tokens).label("recent_prompt_tokens"),
+            func.sum(RequestLog.completion_tokens).label("recent_completion_tokens"),
+            func.sum(RequestLog.total_tokens).label("recent_total_tokens"),
+        ).where(
+            RequestLog.api_client_key_id == api_key_id,
+            RequestLog.created_at >= since,
+        )
+        recent_row = db.execute(recent_stmt).one()
+        return ApiKeyRecentUsageOut(
+            recent_window_hours=normalized_window_hours,
+            recent_requests=int(recent_row.recent_requests or 0),
+            recent_failed_requests=int(recent_row.recent_failed_requests or 0),
+            recent_prompt_tokens=int(recent_row.recent_prompt_tokens or 0),
+            recent_completion_tokens=int(recent_row.recent_completion_tokens or 0),
+            recent_total_tokens=int(recent_row.recent_total_tokens or 0),
+        )
+
+    @staticmethod
+    def _replace_provider_bindings(db: Session, api_key: ApiClientKey, allowed_provider_ids: list[int]) -> None:
+        existing_by_provider_id = {binding.provider_id: binding for binding in api_key.provider_bindings}
+        keep_ids = set(allowed_provider_ids)
+        for provider_id in allowed_provider_ids:
+            if provider_id in existing_by_provider_id:
+                continue
+            db.add(ApiClientKeyProviderBinding(api_client_key=api_key, provider_id=provider_id))
+        for binding in list(api_key.provider_bindings):
+            if binding.provider_id not in keep_ids:
+                db.delete(binding)
+        db.flush()
+
+    @staticmethod
+    def _validate_provider_configuration(
+        db: Session,
+        *,
+        route_mode: str,
+        allowed_provider_ids: list[int],
+        default_provider_id: int | None,
+    ) -> None:
+        if route_mode == "manual" and default_provider_id is None:
+            raise ValueError("manual route_mode requires default_provider_id")
+        if not allowed_provider_ids:
+            if default_provider_id is not None:
+                raise ValueError("default_provider_id must be one of allowed_provider_ids")
+            return
+        existing_ids = set(
+            db.scalars(select(Provider.id).where(Provider.id.in_(allowed_provider_ids))).all()
+        )
+        missing_ids = [provider_id for provider_id in allowed_provider_ids if provider_id not in existing_ids]
+        if missing_ids:
+            raise ValueError(f"Provider not found: {', '.join(str(item) for item in missing_ids)}")
+        if default_provider_id is not None and default_provider_id not in existing_ids:
+            raise ValueError("default_provider_id must be one of allowed_provider_ids")

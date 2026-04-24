@@ -1,0 +1,197 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero-panel hero-panel-compact cockpit-hero api-key-hero">
+    <div class="cockpit-hero-copy">
+        <div class="eyebrow">API Access</div>
+        <h2>API 密钥管理</h2>
+        <p>集中维护外部调用密钥、授权中转范围、额度约束与调用状态，直接完成日常授权和风控操作。</p>
+        <div class="hero-actions">
+            <button class="btn btn-accent interactive-btn" id="add-api-key-btn" type="button">新增 API 密钥</button>
+            <a class="btn btn-ghost interactive-btn" href="/logs" data-shell-link>查看全局日志</a>
+        </div>
+    </div>
+    <div class="cockpit-hero-aside api-key-hero-aside" id="api-key-summary-signal">
+        <div class="cockpit-aside-label">密钥总览</div>
+        <div class="cockpit-aside-value">0</div>
+        <div class="cockpit-aside-copy">当前可运维的 API 密钥总数</div>
+        <div class="cockpit-health-bar"><span style="width:0%"></span></div>
+        <div class="cockpit-aside-meta">
+            <span>启用 0</span>
+            <span>禁用 0</span>
+        </div>
+    </div>
+</section>
+
+<section class="stats-grid api-key-stats-grid" id="api-key-summary-grid">
+    <article class="metric-card"><span>总密钥数</span><strong data-api-key-summary="total_keys">0</strong></article>
+    <article class="metric-card"><span>启用中</span><strong data-api-key-summary="enabled_keys">0</strong></article>
+    <article class="metric-card"><span>禁用中</span><strong data-api-key-summary="disabled_keys">0</strong></article>
+    <article class="metric-card"><span>已过期</span><strong data-api-key-summary="expired_keys">0</strong></article>
+    <article class="metric-card metric-card-alert"><span>额度耗尽</span><strong data-api-key-summary="quota_exhausted_keys">0</strong></article>
+    <article class="metric-card"><span>总请求量</span><strong data-api-key-summary="total_requests">0</strong></article>
+    <article class="metric-card"><span>输入 Token</span><strong data-api-key-summary="total_prompt_tokens">0</strong></article>
+    <article class="metric-card"><span>输出 Token</span><strong data-api-key-summary="total_completion_tokens">0</strong></article>
+    <article class="metric-card"><span>总 Token</span><strong data-api-key-summary="total_tokens">0</strong></article>
+</section>
+
+<section class="dashboard-command-grid api-key-command-grid">
+    <div class="panel-card section-shell api-key-main-panel">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">Registry</div>
+                <h3>密钥列表</h3>
+            </div>
+            <div class="table-toolbar">
+                <input class="field-input search-input" id="api-key-search" type="search" placeholder="搜索名称、备注、前缀、状态">
+            </div>
+        </div>
+        <div class="table-shell">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>名称</th>
+                        <th>前缀</th>
+                        <th>状态</th>
+                        <th>路由策略</th>
+                        <th>授权渠道</th>
+                        <th>额度</th>
+                        <th>最近使用</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody id="api-key-table-body">
+                    <tr><td colspan="8"><div class="empty-state">正在加载 API 密钥...</div></td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="dashboard-command-side api-key-side-panel">
+        <div class="panel-card">
+            <div class="panel-head">
+                <div>
+                    <div class="panel-kicker">Ops Notes</div>
+                    <h3>运维提醒</h3>
+                </div>
+            </div>
+            <div class="dashboard-signal-list">
+                <div><span>创建规范</span><strong>原始 Key 只返回一次，需立即保存到业务系统</strong></div>
+                <div><span>授权范围</span><strong>授权渠道为空时，对外调用会被直接拦截</strong></div>
+                <div><span>手动优先模式</span><strong>若关闭失败后回退，默认渠道失败后不会切换</strong></div>
+                <div><span>额度口径</span><strong>总额度、剩余额度与日志统计统一按 request_logs 追溯</strong></div>
+            </div>
+        </div>
+
+        <div class="panel-card">
+            <div class="panel-head">
+                <div>
+                    <div class="panel-kicker">Quick Drill</div>
+                    <h3>快捷入口</h3>
+                </div>
+            </div>
+            <div class="action-stack">
+                <a class="quick-link" href="/playground" data-shell-link>打开内部 playground</a>
+                <a class="quick-link" href="/settings" data-shell-link>查看全局路由设置</a>
+                <a class="quick-link" href="/logs" data-shell-link>核对平台请求日志</a>
+            </div>
+        </div>
+    </div>
+</section>
+
+<div class="modal-shell hidden" id="api-key-modal">
+    <div class="modal-card modal-lg">
+        <div class="modal-head">
+            <h3 id="api-key-modal-title">新增 API 密钥</h3>
+            <button class="icon-btn interactive-btn" id="api-key-modal-close" type="button">×</button>
+        </div>
+        <form id="api-key-form" class="form-grid">
+            <input id="api-key-id" type="hidden">
+            <label>
+                <span>名称</span>
+                <input class="field-input" id="api-key-name" maxlength="100" required>
+            </label>
+            <label>
+                <span>备注</span>
+                <input class="field-input" id="api-key-remark" maxlength="200" placeholder="例如：CRM 生产环境">
+            </label>
+            <label>
+                <span>路由模式</span>
+                <select class="field-input" id="api-key-route-mode">
+                    <option value="manual">手动优先</option>
+                    <option value="failover">故障切换</option>
+                    <option value="weighted">权重分流</option>
+                    <option value="sticky">会话粘滞</option>
+                </select>
+            </label>
+            <label>
+                <span>默认中转站</span>
+                <select class="field-input" id="api-key-default-provider-id">
+                    <option value="">未设置</option>
+                </select>
+            </label>
+            <label>
+                <span>过期时间</span>
+                <input class="field-input" id="api-key-expires-at" type="datetime-local">
+            </label>
+            <label>
+                <span>Token 上限</span>
+                <input class="field-input" id="api-key-token-limit-total" type="number" min="0" placeholder="留空表示不限制">
+            </label>
+            <div class="form-dual-check form-span-2">
+                <label class="toggle-row">
+                    <input id="api-key-enabled" type="checkbox" checked>
+                    <span>启用该密钥</span>
+                </label>
+                <label class="toggle-row">
+                    <input id="api-key-manual-allow-fallback" type="checkbox" checked>
+                    <span>手动优先模式允许失败后回退</span>
+                </label>
+            </div>
+            <div class="form-span-2 route-guide-grid">
+                <section class="route-guide-panel">
+                    <div class="route-guide-head">
+                        <div>
+                            <div class="panel-kicker">Per-Key Policy</div>
+                            <h4>单密钥专属路由策略</h4>
+                        </div>
+                    </div>
+                    <div class="route-mode-cards" id="api-key-route-mode-cards"></div>
+                </section>
+                <section class="route-guide-panel route-guide-panel-accent">
+                    <div class="route-guide-head">
+                        <div>
+                            <div class="panel-kicker">Live Preview</div>
+                            <h4>当前策略执行预览</h4>
+                        </div>
+                    </div>
+                    <div class="route-live-summary" id="api-key-route-live-summary"></div>
+                </section>
+            </div>
+            <label class="form-span-2">
+                <span>授权中转站</span>
+                <div class="settings-note">
+                    <strong>授权规则</strong>
+                    <span>只允许命中这里勾选的中转站；即使模型可用，只要渠道未授权，也会被路由链路拦截。</span>
+                </div>
+                <div class="api-key-provider-selector" id="api-key-provider-selector">
+                    <div class="playground-provider-list-empty">正在加载中转站...</div>
+                </div>
+            </label>
+            <div class="form-actions form-span-2">
+                <button class="btn btn-ghost interactive-btn" id="api-key-form-cancel" type="button">取消</button>
+                <button class="btn btn-accent interactive-btn" id="api-key-submit-btn" type="submit">保存</button>
+            </div>
+        </form>
+        <div class="api-key-raw-panel hidden" id="api-key-raw-panel">
+            <div class="settings-note">
+                <strong>原始 API Key</strong>
+                <span>该明文只会返回一次。请立即保存到你的外部业务系统。</span>
+            </div>
+            <div class="api-key-raw-box">
+                <code id="api-key-raw-value"></code>
+                <button class="btn btn-ghost btn-sm interactive-btn" id="api-key-copy-raw-btn" type="button">复制明文</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

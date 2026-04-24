@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="page-heading">
+    <div>
+        <div class="eyebrow">Routing</div>
+        <h2>路由设置</h2>
+        <p>统一配置默认路由模式、重试策略、熔断阈值与自动健康检查参数。</p>
+    </div>
+</section>
+
+<section class="panel-card section-shell">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">Route Policy</div>
+            <h3>全局路由策略</h3>
+        </div>
+    </div>
+    <form class="form-grid" id="settings-form">
+        <label>
+            <span>路由模式</span>
+            <select class="field-input" id="setting-route-mode">
+                <option value="manual">手动优先 | 固定默认中转优先</option>
+                <option value="failover">故障切换 | 默认中转失败自动切换</option>
+                <option value="weighted">权重分流 | 按权重首选自动分流</option>
+                <option value="sticky">会话粘滞 | 同会话优先命中同一中转</option>
+            </select>
+        </label>
+        <label>
+            <span>默认中转站</span>
+            <select class="field-input" id="setting-default-provider-id"></select>
+        </label>
+        <div class="form-span-2 route-guide-grid">
+            <section class="route-guide-panel">
+                <div class="route-guide-head">
+                    <div>
+                        <div class="panel-kicker">Mode Guide</div>
+                        <h4>四种路由模式说明</h4>
+                    </div>
+                    <span class="route-guide-badge">按当前实现说明</span>
+                </div>
+                <div class="route-mode-cards" id="route-mode-cards"></div>
+            </section>
+            <section class="route-guide-panel route-guide-panel-accent">
+                <div class="route-guide-head">
+                    <div>
+                        <div class="panel-kicker">Live Logic</div>
+                        <h4>当前实际命中逻辑说明</h4>
+                    </div>
+                </div>
+                <div class="route-live-summary" id="route-live-summary"></div>
+            </section>
+        </div>
+        <label>
+            <span>全局超时毫秒</span>
+            <input class="field-input" id="setting-global-timeout-ms" type="number">
+        </label>
+        <label>
+            <span>全局最大重试次数</span>
+            <input class="field-input" id="setting-global-max-retries" type="number">
+        </label>
+        <label>
+            <span>熔断阈值</span>
+            <input class="field-input" id="setting-circuit-breaker-threshold" type="number">
+        </label>
+        <label>
+            <span>健康检查间隔秒</span>
+            <input class="field-input" id="setting-health-check-interval-sec" type="number">
+        </label>
+        <label>
+            <span>恢复探测间隔秒</span>
+            <input class="field-input" id="setting-recovery-probe-interval-sec" type="number">
+        </label>
+        <div class="form-span-2 settings-note">
+            <strong>采集策略</strong>
+            <span>下面这些选项控制 token 统计、请求/响应正文保存、流式最终回复留存，以及日志正文大小上限。</span>
+        </div>
+        <label>
+            <span>日志正文最大字节数</span>
+            <input class="field-input" id="setting-max-logged-body-bytes" type="number">
+        </label>
+        <div class="form-dual-check form-span-2">
+            <label class="toggle-row">
+                <input id="setting-manual-allow-fallback" type="checkbox">
+                <span>手动优先模式允许失败后回退</span>
+            </label>
+            <label class="toggle-row">
+                <input id="setting-auto-health-check" type="checkbox">
+                <span>启用自动健康检查</span>
+            </label>
+            <label class="toggle-row">
+                <input id="setting-enable-token-logging" type="checkbox">
+                <span>记录 token 使用量</span>
+            </label>
+            <label class="toggle-row">
+                <input id="setting-enable-payload-logging" type="checkbox">
+                <span>记录请求与响应正文</span>
+            </label>
+            <label class="toggle-row">
+                <input id="setting-enable-stream-response-persist" type="checkbox">
+                <span>记录流式最终回复文本</span>
+            </label>
+            <label class="toggle-row">
+                <input id="setting-mask-sensitive-fields" type="checkbox">
+                <span>日志中脱敏敏感字段</span>
+            </label>
+        </div>
+        <div class="form-actions form-span-2">
+            <button class="btn btn-accent interactive-btn" id="settings-submit-btn" type="submit">保存设置</button>
+        </div>
+    </form>
+</section>
+{% endblock %}

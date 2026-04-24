@@ -1,0 +1,30 @@
+from datetime import datetime
+
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Text
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.database import Base
+
+
+class AppSetting(Base):
+    __tablename__ = "app_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    route_mode: Mapped[str] = mapped_column(Text, nullable=False, default="failover")
+    default_provider_id: Mapped[int | None] = mapped_column(ForeignKey("providers.id"), nullable=True)
+    manual_allow_fallback: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    global_timeout_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=30000)
+    global_max_retries: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
+    circuit_breaker_threshold: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    auto_health_check: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    health_check_interval_sec: Mapped[int] = mapped_column(Integer, nullable=False, default=60)
+    recovery_probe_interval_sec: Mapped[int] = mapped_column(Integer, nullable=False, default=30)
+    enable_token_logging: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    enable_payload_logging: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    enable_stream_response_persist: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    mask_sensitive_fields: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    max_logged_body_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=16384)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+    )

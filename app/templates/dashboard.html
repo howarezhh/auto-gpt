@@ -1,0 +1,185 @@
+{% extends "base.html" %}
+{% set route_mode_labels = {"manual": "手动优先", "failover": "故障切换", "weighted": "权重分流", "sticky": "会话粘滞"} %}
+{% set health_labels = {"healthy": "健康", "degraded": "降级", "unhealthy": "异常", "unknown": "未知"} %}
+{% set circuit_labels = {"closed": "闭合", "open": "已熔断", "half_open": "半开探测", "unknown": "未知"} %}
+{% block content %}
+<section class="hero-panel hero-panel-compact cockpit-hero">
+    <div class="cockpit-hero-copy">
+        <div class="eyebrow">Overview</div>
+        <h2>概览</h2>
+        <p>统一查看中转状态、路由配置、健康巡检与最近代理使用概况。</p>
+        <div class="hero-actions">
+            <a class="btn btn-accent interactive-btn" href="/providers">管理中转站</a>
+            <button class="btn btn-ghost interactive-btn" id="check-all-btn" type="button">检查全部中转</button>
+        </div>
+    </div>
+    <div class="cockpit-hero-aside" id="dashboard-signal-card">
+        <div class="cockpit-aside-label">系统信号</div>
+        <div class="cockpit-aside-value">{{ stats.recent_requests or 0 }}</div>
+        <div class="cockpit-aside-copy">过去 24 小时代理请求量</div>
+        <div class="cockpit-health-bar">
+            <span style="width: {{ ((stats.healthy_count / stats.provider_count) * 100) if stats.provider_count else 0 }}%"></span>
+        </div>
+        <div class="cockpit-aside-meta">
+            <span>路由 {{ route_mode_labels.get(settings.route_mode, settings.route_mode) }}</span>
+            <span>{{ stats.healthy_count or 0 }}/{{ stats.provider_count or 0 }} 健康</span>
+        </div>
+    </div>
+</section>
+
+<section class="stats-grid" id="dashboard-stats">
+    <article class="metric-card">
+        <span>总中转站数</span>
+        <strong data-stat="provider_count">{{ stats.provider_count }}</strong>
+    </article>
+    <article class="metric-card">
+        <span>健康中转站</span>
+        <strong data-stat="healthy_count">{{ stats.healthy_count }}</strong>
+    </article>
+    <article class="metric-card">
+        <span>降级中转站</span>
+        <strong data-stat="degraded_count">{{ stats.degraded_count or 0 }}</strong>
+    </article>
+    <article class="metric-card">
+        <span>异常中转站</span>
+        <strong data-stat="unhealthy_count">{{ stats.unhealthy_count or 0 }}</strong>
+    </article>
+    <article class="metric-card">
+        <span>模型总数</span>
+        <strong data-stat="model_count">{{ stats.model_count or 0 }}</strong>
+    </article>
+    <article class="metric-card">
+        <span>24h 请求量</span>
+        <strong data-stat="recent_requests">{{ stats.recent_requests or 0 }}</strong>
+    </article>
+    <article class="metric-card">
+        <span>24h Token 用量</span>
+        <strong data-stat="recent_tokens">{{ stats.recent_tokens or 0 }}</strong>
+    </article>
+    <article class="metric-card">
+        <span>会话数</span>
+        <strong data-stat="conversation_count">{{ stats.conversation_count or 0 }}</strong>
+    </article>
+    <article class="metric-card">
+        <span>API 密钥总数</span>
+        <strong data-stat="api_key_total">{{ stats.api_key_total or 0 }}</strong>
+    </article>
+    <article class="metric-card">
+        <span>API 密钥启用中</span>
+        <strong data-stat="api_key_enabled">{{ stats.api_key_enabled or 0 }}</strong>
+    </article>
+    <article class="metric-card">
+        <span>API 密钥禁用中</span>
+        <strong data-stat="api_key_disabled">{{ stats.api_key_disabled or 0 }}</strong>
+    </article>
+    <article class="metric-card">
+        <span>API Key 总请求量</span>
+        <strong data-stat="api_key_total_requests">{{ stats.api_key_total_requests or 0 }}</strong>
+    </article>
+    <article class="metric-card">
+        <span>API Key 输入 Token</span>
+        <strong data-stat="api_key_total_prompt_tokens">{{ stats.api_key_total_prompt_tokens or 0 }}</strong>
+    </article>
+    <article class="metric-card">
+        <span>API Key 输出 Token</span>
+        <strong data-stat="api_key_total_completion_tokens">{{ stats.api_key_total_completion_tokens or 0 }}</strong>
+    </article>
+    <article class="metric-card">
+        <span>API Key 总 Token</span>
+        <strong data-stat="api_key_total_tokens">{{ stats.api_key_total_tokens or 0 }}</strong>
+    </article>
+    <article class="metric-card metric-card-alert">
+        <span>24h 失败率</span>
+        <strong data-stat="recent_failure_rate">{{ stats.recent_failure_rate or 0 }}%</strong>
+    </article>
+    <article class="metric-card metric-card-alert">
+        <span>累计失败数</span>
+        <strong data-stat="total_failures">{{ stats.total_failures }}</strong>
+    </article>
+</section>
+
+<section class="dashboard-command-grid">
+    <div class="panel-card dashboard-command-main">
+        <div class="panel-head">
+            <div>
+                <div class="panel-kicker">Provider Radar</div>
+                <h3>中转状态矩阵</h3>
+            </div>
+            <a class="btn btn-ghost btn-sm interactive-btn" href="/providers">查看全部</a>
+        </div>
+        <div class="dashboard-radar-meta" id="dashboard-health-distribution">
+            <div><span>健康</span><strong>{{ stats.healthy_count }}</strong></div>
+            <div><span>降级</span><strong>{{ stats.degraded_count or 0 }}</strong></div>
+            <div><span>异常</span><strong>{{ stats.unhealthy_count or 0 }}</strong></div>
+            <div><span>模型数</span><strong>{{ stats.model_count or 0 }}</strong></div>
+        </div>
+        <div class="provider-grid" id="dashboard-provider-grid">
+            {% for provider in providers %}
+            <article class="provider-card">
+                <div class="provider-card-top">
+                    <h4>{{ provider.name }}</h4>
+                    <span class="status-badge status-{{ provider.health_status }}">{{ health_labels.get(provider.health_status, provider.health_status) }}</span>
+                </div>
+                <div class="provider-meta">优先级 {{ provider.priority }} / 权重 {{ provider.weight }}</div>
+                <div class="provider-models">{{ provider.models_json }}</div>
+                <div class="provider-foot">
+                    <span>延迟 {{ provider.last_latency_ms or '-' }} ms</span>
+                    <span>{{ circuit_labels.get(provider.circuit_state, provider.circuit_state) }}</span>
+                </div>
+            </article>
+            {% endfor %}
+        </div>
+    </div>
+
+    <div class="dashboard-command-side">
+        <div class="panel-card">
+            <div class="panel-head">
+                <div>
+                    <div class="panel-kicker">Routing</div>
+                    <h3>当前路由配置</h3>
+                </div>
+            </div>
+            <div class="detail-list" id="dashboard-route-meta">
+                <div><span>模式</span><strong>{{ route_mode_labels.get(settings.route_mode, settings.route_mode) }}</strong></div>
+                <div><span>默认中转</span><strong>{{ settings.default_provider_id or '-' }}</strong></div>
+                <div><span>自动巡检</span><strong>{{ '开启' if settings.auto_health_check else '关闭' }}</strong></div>
+                <div><span>检查间隔</span><strong>{{ settings.health_check_interval_sec }} 秒</strong></div>
+                <div><span>模型健康</span><strong>健康 {{ stats.healthy_model_count or 0 }} / 降级 {{ stats.degraded_model_count or 0 }} / 异常 {{ stats.unhealthy_model_count or 0 }}</strong></div>
+                <div><span>Token 记录</span><strong>{{ '开启' if settings.enable_token_logging else '关闭' }}</strong></div>
+                <div><span>正文记录</span><strong>{{ '开启' if settings.enable_payload_logging else '关闭' }}</strong></div>
+            </div>
+        </div>
+
+        <div class="panel-card">
+            <div class="panel-head">
+                <div>
+                    <div class="panel-kicker">Capture Profile</div>
+                    <h3>采集与留痕</h3>
+                </div>
+            </div>
+            <div class="dashboard-signal-list" id="dashboard-logging-profile">
+                <div><span>Token 统计</span><strong>{{ '开启' if settings.enable_token_logging else '关闭' }}</strong></div>
+                <div><span>正文保存</span><strong>{{ '开启' if settings.enable_payload_logging else '关闭' }}</strong></div>
+                <div><span>流式留存</span><strong>{{ '开启' if settings.enable_stream_response_persist else '关闭' }}</strong></div>
+                <div><span>日志大小上限</span><strong>{{ settings.max_logged_body_bytes }} B</strong></div>
+            </div>
+        </div>
+
+        <div class="panel-card">
+            <div class="panel-head">
+                <div>
+                    <div class="panel-kicker">Quick Actions</div>
+                    <h3>快捷入口</h3>
+                </div>
+            </div>
+            <div class="action-stack">
+                <a class="quick-link" href="/settings">调整路由策略</a>
+                <a class="quick-link" href="/playground">发起代理测试</a>
+                <a class="quick-link" href="/api-keys">进入 API 密钥管理</a>
+                <a class="quick-link" href="/logs">查看日志中心</a>
+                <a class="quick-link" href="/conversations">打开会话回放</a>
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock %}
