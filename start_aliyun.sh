@@ -7,6 +7,7 @@ PYTHON_BIN="$VENV_DIR/bin/python"
 ENV_FILE="$PROJECT_ROOT/.env"
 ENV_EXAMPLE="$PROJECT_ROOT/.env.example"
 REQUIREMENTS_FILE="$PROJECT_ROOT/requirements.txt"
+REQUIREMENTS_HASH_FILE="$VENV_DIR/.requirements.sha256"
 SERVICE_NAME="aotu-gpt"
 NGINX_SITE_NAME="aotu-gpt"
 PIP_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple"
@@ -37,10 +38,33 @@ ensure_venv() {
   fi
 }
 
+current_requirements_hash() {
+  sha256sum "$REQUIREMENTS_FILE" | awk '{print $1}'
+}
+
 install_python_dependencies() {
+  local current_hash=""
+  local installed_hash=""
+
+  if [[ ! -f "$REQUIREMENTS_FILE" ]]; then
+    log "requirements.txt not found, skipping Python dependency installation."
+    return
+  fi
+
+  current_hash="$(current_requirements_hash)"
+  if [[ -f "$REQUIREMENTS_HASH_FILE" ]]; then
+    installed_hash="$(cat "$REQUIREMENTS_HASH_FILE")"
+  fi
+
+  if [[ -n "$installed_hash" && "$installed_hash" == "$current_hash" ]]; then
+    log "Python dependencies already installed for current requirements.txt, skipping."
+    return
+  fi
+
   log "Installing Python dependencies..."
   "$PYTHON_BIN" -m pip install --upgrade pip -i "$PIP_INDEX_URL"
   "$PYTHON_BIN" -m pip install -r "$REQUIREMENTS_FILE" -i "$PIP_INDEX_URL"
+  printf '%s' "$current_hash" > "$REQUIREMENTS_HASH_FILE"
 }
 
 generate_local_proxy_api_key() {
