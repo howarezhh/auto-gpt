@@ -52,15 +52,19 @@ sudo ./start_aliyun.sh
 
 脚本会自动完成以下操作：
 
-- 安装 `python3`、`python3-venv`、`python3-pip`、`nginx`
+- 检查并安装缺失的系统依赖：`python3`、`python3-venv`、`python3-pip`、`nginx`、`curl`、`ca-certificates`
 - 在项目根目录创建或复用 `.venv`
 - 使用清华源安装 Python 依赖
+- 自动创建 `data/` 目录
 - 创建或更新 `.env`
 - 自动生成生产环境所需的 `SESSION_SECRET_KEY` 与 `API_KEY_ENCRYPTION_SECRET`（若为空、仍为默认占位值或长度不足）
+- 当 `EXTERNAL_BASE_URL` 为空时，尝试根据阿里云元数据自动写入公网地址
 - 自动生成 `LOCAL_PROXY_API_KEY`（若当前为空）
 - 写入 `systemd` 服务 `aotu-gpt.service`
 - 写入 `nginx` 站点配置并启用
+- 若服务器启用了 `ufw`，自动放行 `80/TCP`
 - 设置后端与 `nginx` 开机自启并立即启动
+- 执行本机和公网健康检查；已完成的依赖安装、虚拟环境创建、Python 依赖安装会自动跳过
 
 部署完成后，仍需在阿里云安全组放行 `80/TCP` 到 `0.0.0.0/0`。
 
@@ -68,4 +72,13 @@ sudo ./start_aliyun.sh
 
 ```bash
 EXTERNAL_BASE_URL=http://114.55.144.46
+```
+
+部署完成后可手动复查：
+
+```bash
+sudo systemctl status aotu-gpt
+sudo systemctl status nginx
+curl http://127.0.0.1:8000/login
+curl http://114.55.144.46/login
 ```

@@ -13,6 +13,8 @@ NGINX_SITE_NAME="aotu-gpt"
 PIP_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple"
 APP_HOST="127.0.0.1"
 APP_PORT="8000"
+METADATA_BASE_URL="http://100.100.100.200/latest/meta-data"
+SYSTEM_PACKAGES=(python3 python3-venv python3-pip nginx curl ca-certificates)
 
 log() {
   printf '[aotu-gpt] %s\n' "$1"
@@ -26,16 +28,37 @@ require_root() {
 }
 
 install_system_packages() {
-  log "Installing system packages..."
+  local missing_packages=()
+  local package=""
+
+  for package in "${SYSTEM_PACKAGES[@]}"; do
+    if dpkg -s "$package" >/dev/null 2>&1; then
+      continue
+    fi
+    missing_packages+=("$package")
+  done
+
+  if [[ ${#missing_packages[@]} -eq 0 ]]; then
+    log "Required system packages already installed, skipping."
+    return
+  fi
+
+  log "Installing missing system packages: ${missing_packages[*]}"
   apt-get update
-  apt-get install -y python3 python3-venv python3-pip nginx
+  apt-get install -y "${missing_packages[@]}"
 }
 
 ensure_venv() {
   if [[ ! -x "$PYTHON_BIN" ]]; then
     log "Creating project virtual environment..."
     python3 -m venv "$VENV_DIR"
+  else
+    log "Project virtual environment already exists, skipping."
   fi
+}
+
+ensure_data_dir() {
+  mkdir -p "$PROJECT_ROOT/data"
 }
 
 current_requirements_hash() {
@@ -98,6 +121,62 @@ get_env_value() {
   fi
 }
 
+get_public_ip() {
+  local ip=""
+
+  if command -v curl >/dev/null 2>&1; then
+    ip="$(curl -fsS --max-time 2 "${METADATA_BASE_URL}/eipv4" 2>/dev/null || true)"
+    if [[ -n "$ip" ]]; then
+      printf '%s' "$ip"
+      return
+    fi
+
+    ip="$(curl -fsS --max-time 2 "${METADATA_BASE_URL}/public-ipv4" 2>/dev/null || true)"
+    if [[ -n "$ip" ]]; then
+      printf '%s' "$ip"
+      return
+    fi
+  fi
+}
+
+ensure_external_base_url() {
+  local current_value=""
+  local public_ip=""
+
+  current_value="$(get_env_value "EXTERNAL_BASE_URL")"
+  if [[ -n "$current_value" ]]; then
+    return
+  fi
+
+  public_ip="$(get_public_ip)"
+  if [[ -z "$public_ip" ]]; then
+    log "EXTERNAL_BASE_URL is empty and public IP auto-detection failed, keeping it unchanged."
+    return
+  fi
+
+  set_env_value "EXTERNAL_BASE_URL" "http://${public_ip}"
+  log "Detected public IP and wrote EXTERNAL_BASE_URL=http://${public_ip} into .env"
+}
+
+extract_server_name_from_url() {
+  local url="$1"
+  local without_scheme=""
+  local host_port=""
+  local host_only=""
+
+  without_scheme="${url#http://}"
+  without_scheme="${without_scheme#https://}"
+  host_port="${without_scheme%%/*}"
+  host_only="${host_port%%:*}"
+
+  if [[ -n "$host_only" ]]; then
+    printf '%s' "$host_only"
+    return
+  fi
+
+  printf '_'
+}
+
 ensure_strong_secret() {
   local key="$1"
   local placeholder="$2"
@@ -129,6 +208,7 @@ ensure_env_file() {
   set_env_value "PIP_INDEX_URL" "$PIP_INDEX_URL"
   ensure_strong_secret "SESSION_SECRET_KEY" "change-this-session-secret"
   ensure_strong_secret "API_KEY_ENCRYPTION_SECRET" "change-this-api-key-encryption-secret"
+  ensure_external_base_url
 
   local current_key=""
   current_key="$(get_env_value "LOCAL_PROXY_API_KEY")"
@@ -166,22 +246,33 @@ EOF
 
 write_nginx_site() {
   local site_file="/etc/nginx/sites-available/${NGINX_SITE_NAME}"
+  local external_base_url=""
+  local server_name="_"
+
+  external_base_url="$(get_env_value "EXTERNAL_BASE_URL")"
+  if [[ -n "$external_base_url" ]]; then
+    server_name="$(extract_server_name_from_url "$external_base_url")"
+  fi
+
   log "Writing nginx site: ${site_file}"
   cat > "$site_file" <<EOF
 server {
     listen 80;
     listen [::]:80;
-    server_name _;
+    server_name ${server_name};
 
     client_max_body_size 20m;
 
     location / {
         proxy_pass http://${APP_HOST}:${APP_PORT};
         proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_buffering off;
         proxy_read_timeout 600s;
         proxy_send_timeout 600s;
     }
@@ -194,23 +285,71 @@ EOF
 
 reload_and_start_services() {
   log "Reloading systemd and starting services..."
+  nginx -t
   systemctl daemon-reload
   systemctl enable "$SERVICE_NAME"
   systemctl restart "$SERVICE_NAME"
-  nginx -t
   systemctl enable nginx
   systemctl restart nginx
 }
 
+run_health_checks() {
+  local local_url="http://${APP_HOST}:${APP_PORT}/login"
+  local external_base_url=""
+  local external_url=""
+
+  if curl -fsS --max-time 10 "$local_url" >/dev/null; then
+    log "Local health check passed: ${local_url}"
+  else
+    log "Local health check failed: ${local_url}"
+    systemctl --no-pager --full status "$SERVICE_NAME" || true
+    exit 1
+  fi
+
+  external_base_url="$(get_env_value "EXTERNAL_BASE_URL")"
+  if [[ -z "$external_base_url" ]]; then
+    return
+  fi
+
+  external_url="${external_base_url%/}/login"
+  if curl -fsS --max-time 10 "$external_url" >/dev/null; then
+    log "External health check passed: ${external_url}"
+  else
+    log "External health check failed: ${external_url}"
+    log "This usually means the ECS security group, firewall, or public network mapping is still blocking port 80."
+  fi
+}
+
+ensure_firewall_port() {
+  if ! command -v ufw >/dev/null 2>&1; then
+    return
+  fi
+
+  if ! ufw status | grep -q "Status: active"; then
+    return
+  fi
+
+  if ufw status | grep -qE '(^| )80/tcp( |$)|Nginx HTTP'; then
+    log "UFW already allows HTTP traffic, skipping."
+    return
+  fi
+
+  log "Allowing TCP port 80 through UFW..."
+  ufw allow 80/tcp
+}
+
 print_summary() {
   local proxy_key
+  local external_base_url=""
   proxy_key="$(get_env_value "LOCAL_PROXY_API_KEY")"
+  external_base_url="$(get_env_value "EXTERNAL_BASE_URL")"
   cat <<EOF
 
 Deployment completed.
 
 Project root: ${PROJECT_ROOT}
 Local app URL: http://${APP_HOST}:${APP_PORT}/
+Public app URL: ${external_base_url:-Not set}
 systemd service: ${SERVICE_NAME}
 nginx site: ${NGINX_SITE_NAME}
 LOCAL_PROXY_API_KEY: ${proxy_key}
@@ -226,12 +365,15 @@ EOF
 main() {
   require_root
   install_system_packages
+  ensure_data_dir
   ensure_venv
   install_python_dependencies
   ensure_env_file
   write_systemd_service
   write_nginx_site
   reload_and_start_services
+  ensure_firewall_port
+  run_health_checks
   print_summary
 }
 
