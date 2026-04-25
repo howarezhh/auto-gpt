@@ -111,3 +111,21 @@ class MetricItem(BaseModel):
 class MetricListResponse(BaseModel):
     window_minutes: int
     items: list[MetricItem]
+
+
+class MetricTimeSeriesItem(BaseModel):
+    bucket_start: datetime
+    total_requests: int
+    success_requests: int
+    failed_requests: int
+    stream_requests: int = 0
+    image_requests: int = 0
+    avg_latency_ms: float | None = None
+    avg_ttfb_ms: float | None = None
+    total_tokens: int = 0
+
+
+class MetricTimeSeriesResponse(BaseModel):
+    window_minutes: int
+    bucket_minutes: int
+    items: list[MetricTimeSeriesItem]

@@ -1,3 +1,5 @@
+import csv
+import io
 from datetime import datetime, timedelta
 
 from sqlalchemy import case, delete, func, not_, or_, select
@@ -713,3 +715,162 @@ class LogService:
                 "avg_latency_ms": float(row.avg_latency_ms) if row.avg_latency_ms is not None else None,
             }
         return summary
+
+    @staticmethod
+    def export_logs_csv(
+        db: Session,
+        *,
+        log_type: str | None,
+        log_types: list[str] | None,
+        provider_id: int | None,
+        model_name: str | None,
+        conversation_key: str | None,
+        api_client_key_id: int | None,
+        api_client_key_query: str | None,
+        user_account_id: int | None,
+        success: bool | None,
+        exclude_health_checks: bool,
+        api_client_key_ids: list[int] | None = None,
+        limit: int = 5000,
+    ) -> str:
+        stmt = select(RequestLog)
+        stmt = LogService._apply_log_filters(
+            stmt,
+            log_type=log_type,
+            log_types=log_types,
+            provider_id=provider_id,
+            model_name=model_name,
+            conversation_key=conversation_key,
+            api_client_key_id=api_client_key_id,
+            api_client_key_query=api_client_key_query,
+            user_account_id=user_account_id,
+            success=success,
+            exclude_health_checks=exclude_health_checks,
+            api_client_key_ids=api_client_key_ids,
+        )
+        rows = list(
+            db.scalars(
+                stmt.order_by(RequestLog.created_at.desc(), RequestLog.id.desc()).limit(max(1, min(limit, 10000)))
+            )
+        )
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow([
+            "created_at",
+            "log_type",
+            "request_id",
+            "session_id",
+            "conversation_key",
+            "requested_model",
+            "provider_name",
+            "http_method",
+            "success",
+            "status_code",
+            "is_stream",
+            "has_image",
+            "latency_ms",
+            "ttfb_ms",
+            "duration_ms",
+            "tps",
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+            "total_cost",
+            "reasoning_level",
+            "api_client_key_name",
+            "user_account_name",
+            "message",
+        ])
+        for item in rows:
+            writer.writerow([
+                item.created_at.isoformat() if item.created_at else "",
+                item.log_type,
+                item.request_id or "",
+                item.session_id or "",
+                item.conversation_key or "",
+                item.requested_model or item.model_name or "",
+                item.provider_name or "",
+                item.http_method or "",
+                "true" if item.success else "false",
+                item.status_code if item.status_code is not None else "",
+                "true" if item.is_stream else "false",
+                "true" if item.has_image else "false",
+                item.latency_ms if item.latency_ms is not None else "",
+                item.ttfb_ms if item.ttfb_ms is not None else "",
+                item.duration_ms if item.duration_ms is not None else "",
+                item.tps if item.tps is not None else "",
+                item.prompt_tokens if item.prompt_tokens is not None else "",
+                item.completion_tokens if item.completion_tokens is not None else "",
+                item.total_tokens if item.total_tokens is not None else "",
+                item.cache_read_tokens if item.cache_read_tokens is not None else "",
+                item.cache_write_tokens if item.cache_write_tokens is not None else "",
+                item.total_cost if item.total_cost is not None else "",
+                item.reasoning_level or "",
+                item.api_client_key_name or "",
+                item.user_account_name or "",
+                item.message or "",
+            ])
+        return buffer.getvalue()
+
+    @staticmethod
+    def metric_timeseries(
+        db: Session,
+        *,
+        window_minutes: int,
+        bucket_minutes: int,
+    ) -> list[dict]:
+        bucket_minutes = max(1, min(bucket_minutes, window_minutes))
+        since = datetime.utcnow() - timedelta(minutes=window_minutes)
+        logs = list(
+            db.scalars(
+                select(RequestLog)
+                .where(
+                    RequestLog.created_at >= since,
+                    LogService._route_traffic_expr(),
+                )
+                .order_by(RequestLog.created_at.asc(), RequestLog.id.asc())
+            )
+        )
+        buckets: dict[datetime, dict] = {}
+        for item in logs:
+            if item.created_at is None:
+                continue
+            minute_floor = item.created_at.replace(second=0, microsecond=0)
+            bucket_minute = minute_floor.minute - (minute_floor.minute % bucket_minutes)
+            bucket_start = minute_floor.replace(minute=bucket_minute)
+            current = buckets.setdefault(
+                bucket_start,
+                {
+                    "bucket_start": bucket_start,
+                    "total_requests": 0,
+                    "success_requests": 0,
+                    "failed_requests": 0,
+                    "stream_requests": 0,
+                    "image_requests": 0,
+                    "latency_values": [],
+                    "ttfb_values": [],
+                    "total_tokens": 0,
+                },
+            )
+            current["total_requests"] += 1
+            current["success_requests"] += 1 if item.success else 0
+            current["failed_requests"] += 0 if item.success else 1
+            current["stream_requests"] += 1 if item.is_stream else 0
+            current["image_requests"] += 1 if item.has_image else 0
+            current["total_tokens"] += int(item.total_tokens or 0)
+            if item.latency_ms is not None:
+                current["latency_values"].append(float(item.latency_ms))
+            if item.ttfb_ms is not None:
+                current["ttfb_values"].append(float(item.ttfb_ms))
+
+        results = []
+        for bucket_start in sorted(buckets.keys()):
+            current = buckets[bucket_start]
+            latency_values = current.pop("latency_values")
+            ttfb_values = current.pop("ttfb_values")
+            current["avg_latency_ms"] = round(sum(latency_values) / len(latency_values), 2) if latency_values else None
+            current["avg_ttfb_ms"] = round(sum(ttfb_values) / len(ttfb_values), 2) if ttfb_values else None
+            results.append(current)
+        return results

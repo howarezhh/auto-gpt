@@ -1,4 +1,7 @@
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -66,6 +69,42 @@ def list_logs(
 @router.delete("")
 def clear_logs(db: Session = Depends(get_db)) -> dict:
     return {"deleted": LogService.clear_logs(db)}
+
+
+@router.get("/export")
+def export_logs(
+    log_type: str | None = None,
+    provider_id: int | None = None,
+    model_name: str | None = None,
+    conversation_key: str | None = None,
+    api_client_key_id: int | None = None,
+    api_client_key_query: str | None = None,
+    user_account_id: int | None = None,
+    success: bool | None = None,
+    exclude_health_checks: bool = Query(default=True),
+    limit: int = Query(default=5000, ge=1, le=10000),
+    db: Session = Depends(get_db),
+) -> Response:
+    csv_text = LogService.export_logs_csv(
+        db,
+        log_type=log_type,
+        log_types=None,
+        provider_id=provider_id,
+        model_name=model_name,
+        conversation_key=conversation_key,
+        api_client_key_id=api_client_key_id,
+        api_client_key_query=api_client_key_query,
+        user_account_id=user_account_id,
+        success=success,
+        exclude_health_checks=exclude_health_checks,
+        limit=limit,
+    )
+    filename = f"logs-export-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.csv"
+    return Response(
+        content=csv_text,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/metrics", response_model=MetricListResponse)
