@@ -1328,11 +1328,12 @@
     }
 
     async function refreshDashboard() {
-        const [stats, providers, settings, metrics] = await Promise.all([
+        const [stats, providers, settings, metrics, timeSeries] = await Promise.all([
             api.get("/api/dashboard"),
             api.get("/api/providers"),
             api.get("/api/settings"),
             api.get("/api/metrics/summary?window_minutes=60"),
+            api.get("/api/metrics/timeseries?window_minutes=180&bucket_minutes=15"),
         ]);
         document.querySelector('[data-stat="provider_count"]').textContent = stats.provider_count;
         document.querySelector('[data-stat="healthy_count"]').textContent = stats.healthy_count;
@@ -1421,6 +1422,22 @@
                 <td>${formatNumber(item.unique_users || 0)}</td>
             </tr>
         `).join("") : '<tr><td colspan="10" class="text-muted">最近 60 分钟暂无可展示流量</td></tr>';
+
+        const timeSeriesBody = document.getElementById("dashboard-timeseries-table-body");
+        const timeSeriesItems = Array.isArray(timeSeries.items) ? timeSeries.items : [];
+        timeSeriesBody.innerHTML = timeSeriesItems.length ? timeSeriesItems.slice(-12).reverse().map((item) => `
+            <tr>
+                <td>${formatDate(item.bucket_start)}</td>
+                <td>${formatNumber(item.total_requests)}</td>
+                <td>${formatNumber(item.success_requests)}</td>
+                <td>${formatNumber(item.failed_requests)}</td>
+                <td>${formatNumber(item.stream_requests || 0)}</td>
+                <td>${formatNumber(item.image_requests || 0)}</td>
+                <td>${item.avg_latency_ms ?? "-"} ms</td>
+                <td>${item.avg_ttfb_ms ?? "-"} ms</td>
+                <td>${formatNumber(item.total_tokens || 0)}</td>
+            </tr>
+        `).join("") : '<tr><td colspan="9" class="text-muted">最近 3 小时暂无时间序列数据</td></tr>';
     }
 
     async function initProviders() {
@@ -3158,6 +3175,7 @@
     async function initLogs() {
         const tableBody = document.getElementById("logs-table-body");
         const refreshBtn = document.getElementById("logs-refresh-btn");
+        const exportBtn = document.getElementById("logs-export-btn");
         const lastRefreshLabel = document.getElementById("logs-last-refresh");
         const clearBtn = document.getElementById("logs-clear-btn");
         const providerSelect = document.getElementById("logs-provider-id");
@@ -3224,6 +3242,28 @@
             if (state.page >= totalPages) return;
             state.page += 1;
             await loadLogs();
+        });
+        exportBtn.addEventListener("click", () => {
+            const params = new URLSearchParams();
+            const logType = document.getElementById("logs-log-type").value;
+            const providerId = providerSelect.value;
+            const modelName = modelSelect.value;
+            const userAccountId = userAccountSelect.value;
+            const apiClientKeyId = apiClientKeyIdSelect.value;
+            const apiClientKeyQuery = apiClientKeyQuerySelect.value;
+            const success = document.getElementById("logs-success").value;
+            const conversationKey = document.getElementById("logs-conversation-key").value.trim();
+            if (logType) params.set("log_type", logType);
+            if (providerId) params.set("provider_id", providerId);
+            if (modelName) params.set("model_name", modelName);
+            if (userAccountId) params.set("user_account_id", userAccountId);
+            if (apiClientKeyId) params.set("api_client_key_id", apiClientKeyId);
+            if (apiClientKeyQuery) params.set("api_client_key_query", apiClientKeyQuery);
+            if (success) params.set("success", success);
+            if (conversationKey) params.set("conversation_key", conversationKey);
+            params.set("exclude_health_checks", excludeHealthChecksInput.checked ? "true" : "false");
+            params.set("limit", "5000");
+            window.location.href = `/api/logs/export?${params.toString()}`;
         });
 
         refreshBtn.addEventListener("click", async (event) => {

@@ -212,4 +212,33 @@
         </table>
     </div>
 </section>
+
+<section class="panel-card section-shell">
+    <div class="panel-head">
+        <div>
+            <div class="panel-kicker">Time Series</div>
+            <h3>最近 3 小时流量时间序列</h3>
+        </div>
+    </div>
+    <div class="table-responsive">
+        <table class="table align-middle">
+            <thead>
+                <tr>
+                    <th>时间桶</th>
+                    <th>请求</th>
+                    <th>成功</th>
+                    <th>失败</th>
+                    <th>流式</th>
+                    <th>图片</th>
+                    <th>平均延迟</th>
+                    <th>平均首包</th>
+                    <th>Token</th>
+                </tr>
+            </thead>
+            <tbody id="dashboard-timeseries-table-body">
+                <tr><td colspan="9" class="text-muted">正在加载时间序列...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</section>
 {% endblock %}
