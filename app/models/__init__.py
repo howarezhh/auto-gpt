@@ -5,6 +5,7 @@ from app.models.api_client_key_provider_binding import ApiClientKeyProviderBindi
 from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
 from app.models.request_log import RequestLog
+from app.models.user_account import UserAccount
 
 __all__ = [
     "AppSetting",
@@ -14,4 +15,5 @@ __all__ = [
     "Provider",
     "ProviderModel",
     "RequestLog",
+    "UserAccount",
 ]

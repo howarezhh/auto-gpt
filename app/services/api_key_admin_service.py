@@ -9,6 +9,7 @@ from app.models.api_client_key import ApiClientKey
 from app.models.api_client_key_provider_binding import ApiClientKeyProviderBinding
 from app.models.provider import Provider
 from app.models.request_log import RequestLog
+from app.models.user_account import UserAccount
 from app.schemas.api_key import (
     ApiKeyAnalyticsOut,
     ApiKeyBalanceAdjustmentIn,
@@ -82,7 +83,8 @@ class ApiKeyAdminService:
             db.scalars(
                 select(ApiClientKey)
                 .options(
-                    selectinload(ApiClientKey.provider_bindings).selectinload(ApiClientKeyProviderBinding.provider)
+                    selectinload(ApiClientKey.provider_bindings).selectinload(ApiClientKeyProviderBinding.provider),
+                    selectinload(ApiClientKey.owner_user),
                 )
                 .order_by(ApiClientKey.id.desc())
             )
@@ -93,7 +95,8 @@ class ApiKeyAdminService:
         return db.scalar(
             select(ApiClientKey)
             .options(
-                selectinload(ApiClientKey.provider_bindings).selectinload(ApiClientKeyProviderBinding.provider)
+                selectinload(ApiClientKey.provider_bindings).selectinload(ApiClientKeyProviderBinding.provider),
+                selectinload(ApiClientKey.owner_user),
             )
             .where(ApiClientKey.id == api_key_id)
         )
@@ -106,6 +109,7 @@ class ApiKeyAdminService:
             allowed_provider_ids=payload.allowed_provider_ids,
             default_provider_id=payload.default_provider_id,
         )
+        ApiKeyAdminService._validate_owner_user(db, payload.owner_user_id)
         raw_api_key = ApiKeyService.generate_api_key()
         api_key = ApiClientKey(
             name=payload.name,
@@ -121,6 +125,7 @@ class ApiKeyAdminService:
             total_recharge_amount=BillingService.to_decimal(payload.balance_amount) if payload.balance_amount is not None else BillingService.to_decimal(0),
             route_mode=payload.route_mode,
             default_provider_id=payload.default_provider_id,
+            owner_user_id=payload.owner_user_id,
             manual_allow_fallback=payload.manual_allow_fallback,
         )
         db.add(api_key)
@@ -147,6 +152,7 @@ class ApiKeyAdminService:
         allowed_provider_ids = data.get("allowed_provider_ids")
         route_mode = data.get("route_mode", api_key.route_mode)
         default_provider_id = data.get("default_provider_id", api_key.default_provider_id)
+        owner_user_id = data.get("owner_user_id", api_key.owner_user_id)
         if allowed_provider_ids is None:
             allowed_provider_ids = [binding.provider_id for binding in api_key.provider_bindings]
         ApiKeyAdminService._validate_provider_configuration(
@@ -155,6 +161,7 @@ class ApiKeyAdminService:
             allowed_provider_ids=allowed_provider_ids,
             default_provider_id=default_provider_id,
         )
+        ApiKeyAdminService._validate_owner_user(db, owner_user_id)
         for field, value in data.items():
             if field == "allowed_provider_ids":
                 continue
@@ -351,6 +358,8 @@ class ApiKeyAdminService:
             "remaining_cost_quota": BillingService.to_float(remaining_cost_quota),
             "route_mode": api_key.route_mode,
             "default_provider_id": api_key.default_provider_id,
+            "owner_user_id": api_key.owner_user_id,
+            "owner_user_name": api_key.owner_user.username if api_key.owner_user else None,
             "manual_allow_fallback": api_key.manual_allow_fallback,
             "allowed_provider_ids": [binding.provider_id for binding in api_key.provider_bindings],
             "allowed_providers": allowed_providers,
@@ -466,3 +475,11 @@ class ApiKeyAdminService:
             raise ValueError(f"Provider not found: {', '.join(str(item) for item in missing_ids)}")
         if default_provider_id is not None and default_provider_id not in existing_ids:
             raise ValueError("default_provider_id must be one of allowed_provider_ids")
+
+    @staticmethod
+    def _validate_owner_user(db: Session, owner_user_id: int | None) -> None:
+        if owner_user_id is None:
+            return
+        existing = db.scalar(select(UserAccount.id).where(UserAccount.id == owner_user_id, UserAccount.enabled.is_(True)))
+        if existing is None:
+            raise ValueError("owner_user_id does not exist")

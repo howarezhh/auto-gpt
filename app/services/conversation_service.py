@@ -18,8 +18,13 @@ class ConversationService:
         page: int,
         page_size: int,
         query: str | None = None,
+        api_client_key_ids: list[int] | None = None,
     ) -> tuple[int, list[ConversationSummaryItem]]:
         filters = [RequestLog.conversation_key.is_not(None)]
+        if api_client_key_ids is not None:
+            if not api_client_key_ids:
+                return 0, []
+            filters.append(RequestLog.api_client_key_id.in_(api_client_key_ids))
         if query:
             like_value = f"%{query.strip()}%"
             filters.append(
@@ -82,11 +87,21 @@ class ConversationService:
         return total, items
 
     @staticmethod
-    def get_replay(db: Session, conversation_key: str) -> ConversationReplay | None:
+    def get_replay(
+        db: Session,
+        conversation_key: str,
+        *,
+        api_client_key_ids: list[int] | None = None,
+    ) -> ConversationReplay | None:
+        filters = [RequestLog.conversation_key == conversation_key]
+        if api_client_key_ids is not None:
+            if not api_client_key_ids:
+                return None
+            filters.append(RequestLog.api_client_key_id.in_(api_client_key_ids))
         logs = list(
             db.scalars(
                 select(RequestLog)
-                .where(RequestLog.conversation_key == conversation_key)
+                .where(*filters)
                 .order_by(RequestLog.created_at.asc(), RequestLog.id.asc())
             )
         )

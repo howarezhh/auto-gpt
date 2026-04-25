@@ -1,13 +1,16 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.sessions import SessionMiddleware
 from sqlalchemy import text
 
+from app.config import get_settings
 from app.database import Base, SessionLocal, engine
 from app.models import AppSetting
+from app.routers.auth import router as auth_router
 from app.routers.api_keys import router as api_keys_router
 from app.routers.playground_api import router as playground_api_router
 from app.routers.dashboard import router as dashboard_router
@@ -19,11 +22,14 @@ from app.routers.provider_models import router as provider_models_router
 from app.routers.providers import router as providers_router
 from app.routers.proxy import router as proxy_router
 from app.routers.settings import router as settings_router
+from app.routers.user_accounts import router as user_accounts_router
+from app.routers.user_portal import router as user_portal_router
 from app.scheduler import scheduler
 from app.services.api_key_service import ApiClientAuthError
 from app.services.log_service import LogService
 from app.services.provider_service import ProviderService
 from app.services.setting_service import SettingService
+from app.services.user_auth_service import require_admin_api_user
 from app.tasks import configure_scheduler
 from app.utils.json_utils import dumps_json, safeJsonParse
 
@@ -114,6 +120,7 @@ def _migrate_request_log_columns(db) -> None:
         "total_cost_used": "ALTER TABLE api_client_keys ADD COLUMN total_cost_used NUMERIC NOT NULL DEFAULT 0",
         "balance_amount": "ALTER TABLE api_client_keys ADD COLUMN balance_amount NUMERIC",
         "total_recharge_amount": "ALTER TABLE api_client_keys ADD COLUMN total_recharge_amount NUMERIC NOT NULL DEFAULT 0",
+        "owner_user_id": "ALTER TABLE api_client_keys ADD COLUMN owner_user_id INTEGER",
     }
     changed_api_keys = False
     for column, ddl in api_key_additions.items():
@@ -134,6 +141,7 @@ def _migrate_request_log_columns(db) -> None:
         "enable_stream_response_persist": "ALTER TABLE app_settings ADD COLUMN enable_stream_response_persist BOOLEAN NOT NULL DEFAULT 1",
         "mask_sensitive_fields": "ALTER TABLE app_settings ADD COLUMN mask_sensitive_fields BOOLEAN NOT NULL DEFAULT 1",
         "max_logged_body_bytes": "ALTER TABLE app_settings ADD COLUMN max_logged_body_bytes INTEGER NOT NULL DEFAULT 16384",
+        "allow_public_user_registration": "ALTER TABLE app_settings ADD COLUMN allow_public_user_registration BOOLEAN NOT NULL DEFAULT 0",
     }
     changed_settings = False
     for column, ddl in app_setting_additions.items():
@@ -165,6 +173,14 @@ def _migrate_request_log_columns(db) -> None:
     if changed_indexes:
         db.commit()
 
+    existing_user_columns = {
+        row[1]
+        for row in db.execute(text("PRAGMA table_info(user_accounts)")).fetchall()
+    }
+    if existing_user_columns and "last_login_at" not in existing_user_columns:
+        db.execute(text("ALTER TABLE user_accounts ADD COLUMN last_login_at DATETIME"))
+        db.commit()
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -184,6 +200,7 @@ app = FastAPI(
     redoc_url="/api-redoc",
     openapi_url="/openapi.json",
 )
+app.add_middleware(SessionMiddleware, secret_key=get_settings().session_secret_key, same_site="lax")
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 
@@ -273,14 +290,17 @@ class ProxySafeHelpers:
             return any(ProxySafeHelpers.value_has_image(item) for item in value.values())
         return False
 
+app.include_router(auth_router)
+app.include_router(user_portal_router)
+app.include_router(user_accounts_router)
 app.include_router(pages_router)
-app.include_router(dashboard_router)
-app.include_router(conversations_router)
-app.include_router(api_keys_router)
-app.include_router(providers_router)
-app.include_router(provider_models_router)
-app.include_router(settings_router)
-app.include_router(logs_router)
-app.include_router(metrics_router)
-app.include_router(playground_api_router)
+app.include_router(dashboard_router, dependencies=[Depends(require_admin_api_user)])
+app.include_router(conversations_router, dependencies=[Depends(require_admin_api_user)])
+app.include_router(api_keys_router, dependencies=[Depends(require_admin_api_user)])
+app.include_router(providers_router, dependencies=[Depends(require_admin_api_user)])
+app.include_router(provider_models_router, dependencies=[Depends(require_admin_api_user)])
+app.include_router(settings_router, dependencies=[Depends(require_admin_api_user)])
+app.include_router(logs_router, dependencies=[Depends(require_admin_api_user)])
+app.include_router(metrics_router, dependencies=[Depends(require_admin_api_user)])
+app.include_router(playground_api_router, dependencies=[Depends(require_admin_api_user)])
 app.include_router(proxy_router)

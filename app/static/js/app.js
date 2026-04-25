@@ -1594,6 +1594,7 @@
         document.getElementById("setting-enable-payload-logging").checked = settings.enable_payload_logging;
         document.getElementById("setting-enable-stream-response-persist").checked = settings.enable_stream_response_persist;
         document.getElementById("setting-mask-sensitive-fields").checked = settings.mask_sensitive_fields;
+        document.getElementById("setting-allow-public-user-registration").checked = settings.allow_public_user_registration;
 
         const refreshRouteGuide = () => {
             renderRoutePolicyGuide({
@@ -1626,6 +1627,7 @@
                 enable_stream_response_persist: document.getElementById("setting-enable-stream-response-persist").checked,
                 mask_sensitive_fields: document.getElementById("setting-mask-sensitive-fields").checked,
                 max_logged_body_bytes: Number(document.getElementById("setting-max-logged-body-bytes").value),
+                allow_public_user_registration: document.getElementById("setting-allow-public-user-registration").checked,
             };
             try {
                 setButtonLoading(submitBtn, true);
@@ -2009,6 +2011,7 @@
         const routeModeInput = document.getElementById("api-key-route-mode");
         const manualFallbackInput = document.getElementById("api-key-manual-allow-fallback");
         const enabledInput = document.getElementById("api-key-enabled");
+        const ownerUserSelect = document.getElementById("api-key-owner-user-id");
         const expiresAtInput = document.getElementById("api-key-expires-at");
         const tokenLimitInput = document.getElementById("api-key-token-limit-total");
         const costLimitInput = document.getElementById("api-key-cost-limit-total");
@@ -2017,7 +2020,7 @@
         const remarkInput = document.getElementById("api-key-remark");
         const idInput = document.getElementById("api-key-id");
         const form = document.getElementById("api-key-form");
-        const state = { summary: null, apiKeys: [], providers: [] };
+        const state = { summary: null, apiKeys: [], providers: [], users: [] };
 
         function renderSummary(summary) {
             document.querySelectorAll("[data-api-key-summary]").forEach((node) => {
@@ -2051,6 +2054,7 @@
                 return [
                     item.name,
                     item.remark,
+                    item.owner_user_name,
                     item.key_prefix,
                     item.status,
                     item.key_masked,
@@ -2068,6 +2072,10 @@
                         <td>
                             <strong>${escapeHtml(item.name)}</strong>
                             <div class="table-muted">${escapeHtml(item.remark || "-")}</div>
+                        </td>
+                        <td>
+                            <strong>${escapeHtml(item.owner_user_name || "未分配")}</strong>
+                            <div class="table-muted">${item.owner_user_id ? `用户 ID ${escapeHtml(String(item.owner_user_id))}` : "管理员侧未绑定用户"}</div>
                         </td>
                         <td>
                             <strong>${escapeHtml(item.key_masked)}</strong>
@@ -2107,7 +2115,7 @@
                         </td>
                     </tr>
                 `;
-            }).join("") || '<tr><td colspan="9"><div class="empty-state">暂无匹配的 API 密钥</div></td></tr>';
+            }).join("") || '<tr><td colspan="10"><div class="empty-state">暂无匹配的 API 密钥</div></td></tr>';
             enhanceInteractiveButtons(tableBody);
         }
 
@@ -2115,6 +2123,14 @@
             defaultProviderSelect.innerHTML = '<option value="">未设置</option>' + state.providers.map((provider) => `
                 <option value="${provider.id}" ${Number(selectedProviderId) === provider.id ? "selected" : ""}>
                     ${escapeHtml(provider.name)} ${provider.enabled ? "" : "(已禁用)"}
+                </option>
+            `).join("");
+        }
+
+        function populateOwnerUserOptions(selectedUserId = null) {
+            ownerUserSelect.innerHTML = '<option value="">未分配</option>' + state.users.map((user) => `
+                <option value="${user.id}" ${Number(selectedUserId) === user.id ? "selected" : ""}>
+                    ${escapeHtml(user.username)} · ${escapeHtml(user.email)}
                 </option>
             `).join("");
         }
@@ -2145,6 +2161,7 @@
             routeModeInput.value = apiKey?.route_mode || "failover";
             enabledInput.checked = apiKey?.enabled ?? true;
             manualFallbackInput.checked = apiKey?.manual_allow_fallback ?? true;
+            populateOwnerUserOptions(apiKey?.owner_user_id || null);
             expiresAtInput.value = toDatetimeLocalInputValue(apiKey?.expires_at);
             tokenLimitInput.value = apiKey?.token_limit_total ?? "";
             costLimitInput.value = apiKey?.cost_limit_total ?? "";
@@ -2169,21 +2186,25 @@
             balanceAmountInput.placeholder = "留空表示不限制";
             renderApiKeyProviderSelector(providerSelector, state.providers, []);
             populateDefaultProviderOptions();
+            populateOwnerUserOptions();
             refreshRoutePreview();
         }
 
         async function loadData({ silent = false } = {}) {
-            const [summary, apiKeys, providers] = await Promise.all([
+            const [summary, apiKeys, providers, users] = await Promise.all([
                 api.get("/api/api-keys/summary"),
                 api.get("/api/api-keys"),
                 api.get("/api/providers"),
+                api.get("/api/users/options"),
             ]);
             state.summary = summary;
             state.apiKeys = apiKeys;
             state.providers = providers;
+            state.users = users;
             renderSummary(summary);
             renderTable();
             populateDefaultProviderOptions(defaultProviderSelect.value ? Number(defaultProviderSelect.value) : null);
+            populateOwnerUserOptions(ownerUserSelect.value ? Number(ownerUserSelect.value) : null);
             renderApiKeyProviderSelector(providerSelector, state.providers, getSelectedProviderIds());
             refreshRoutePreview();
             if (!silent) showToast("API 密钥数据已刷新");
@@ -2206,6 +2227,7 @@
                 cost_limit_total: costLimitInput.value === "" ? null : Number(costLimitInput.value),
                 route_mode: routeModeInput.value,
                 default_provider_id: defaultProviderId,
+                owner_user_id: ownerUserSelect.value === "" ? null : Number(ownerUserSelect.value),
                 manual_allow_fallback: manualFallbackInput.checked,
                 allowed_provider_ids: allowedProviderIds,
             };
@@ -2964,6 +2986,10 @@
         const target = new URL(url, window.location.origin);
         const targetPath = `${target.pathname}${target.search}`;
         const response = await fetch(targetPath, { headers: { "X-Requested-With": "shell-nav" } });
+        if (response.redirected && new URL(response.url, window.location.origin).pathname !== target.pathname) {
+            window.location.href = response.url;
+            return;
+        }
         if (!response.ok) {
             throw new Error(`页面加载失败: ${response.status}`);
         }

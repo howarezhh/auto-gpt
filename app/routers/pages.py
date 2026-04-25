@@ -4,7 +4,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from app.database import get_db
@@ -13,14 +13,27 @@ from app.models.request_log import RequestLog
 from app.services.api_key_admin_service import ApiKeyAdminService
 from app.services.provider_service import ProviderService
 from app.services.setting_service import SettingService
+from app.services.user_auth_service import USER_ROLE_ADMIN, UserAuthService
 
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
 
 
+def require_admin_html(request: Request, db: Session):
+    user = UserAuthService.get_current_user(request, db)
+    if user is None:
+        return RedirectResponse("/login", status_code=303)
+    if user.role != USER_ROLE_ADMIN:
+        return RedirectResponse("/user", status_code=303)
+    return user
+
+
 @router.get("/", response_class=HTMLResponse)
 def dashboard_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
+    current_user = require_admin_html(request, db)
+    if isinstance(current_user, RedirectResponse):
+        return current_user
     providers = ProviderService.list_providers(db)
     api_key_summary = ApiKeyAdminService.get_summary(db)
     recent_since = datetime.utcnow() - timedelta(hours=24)
@@ -52,50 +65,72 @@ def dashboard_page(request: Request, db: Session = Depends(get_db)) -> HTMLRespo
         "api_key_total_completion_tokens": api_key_summary.total_completion_tokens,
         "api_key_total_tokens": api_key_summary.total_tokens,
     }
-    return templates.TemplateResponse("dashboard.html", {"request": request, "providers": providers, "settings": SettingService.get_or_create(db), "stats": stats, "page_name": "dashboard"})
+    return templates.TemplateResponse("dashboard.html", {"request": request, "providers": providers, "settings": SettingService.get_or_create(db), "stats": stats, "page_name": "dashboard", "portal_type": "admin", "current_user": current_user})
 
 
 @router.get("/providers", response_class=HTMLResponse)
 def providers_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
-    return templates.TemplateResponse("providers.html", {"request": request, "providers": ProviderService.list_providers(db), "page_name": "providers"})
+    current_user = require_admin_html(request, db)
+    if isinstance(current_user, RedirectResponse):
+        return current_user
+    return templates.TemplateResponse("providers.html", {"request": request, "providers": ProviderService.list_providers(db), "page_name": "providers", "portal_type": "admin", "current_user": current_user})
 
 
 @router.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
-    return templates.TemplateResponse("settings.html", {"request": request, "settings": SettingService.get_or_create(db), "page_name": "settings"})
+    current_user = require_admin_html(request, db)
+    if isinstance(current_user, RedirectResponse):
+        return current_user
+    return templates.TemplateResponse("settings.html", {"request": request, "settings": SettingService.get_or_create(db), "page_name": "settings", "portal_type": "admin", "current_user": current_user})
 
 
 @router.get("/playground", response_class=HTMLResponse)
-def playground_page(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse("playground.html", {"request": request, "page_name": "playground"})
+def playground_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
+    current_user = require_admin_html(request, db)
+    if isinstance(current_user, RedirectResponse):
+        return current_user
+    return templates.TemplateResponse("playground.html", {"request": request, "page_name": "playground", "portal_type": "admin", "current_user": current_user})
 
 
 @router.get("/docs", response_class=HTMLResponse)
-def docs_page(request: Request) -> HTMLResponse:
+def docs_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
+    current_user = require_admin_html(request, db)
+    if isinstance(current_user, RedirectResponse):
+        return current_user
     return templates.TemplateResponse(
         "docs.html",
         {
             "request": request,
             "page_name": "docs",
             "title": "使用文档",
+            "portal_type": "admin",
+            "current_user": current_user,
         },
     )
 
 
 @router.get("/api-keys", response_class=HTMLResponse)
-def api_keys_page(request: Request) -> HTMLResponse:
+def api_keys_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
+    current_user = require_admin_html(request, db)
+    if isinstance(current_user, RedirectResponse):
+        return current_user
     return templates.TemplateResponse(
         "api_keys.html",
         {
             "request": request,
             "page_name": "api-keys",
             "title": "API 密钥管理",
+            "portal_type": "admin",
+            "current_user": current_user,
         },
     )
 
 
 @router.get("/api-keys/{api_key_id}", response_class=HTMLResponse)
-def api_key_detail_page(request: Request, api_key_id: int) -> HTMLResponse:
+def api_key_detail_page(request: Request, api_key_id: int, db: Session = Depends(get_db)) -> HTMLResponse:
+    current_user = require_admin_html(request, db)
+    if isinstance(current_user, RedirectResponse):
+        return current_user
     return templates.TemplateResponse(
         "api_key_detail.html",
         {
@@ -103,16 +138,24 @@ def api_key_detail_page(request: Request, api_key_id: int) -> HTMLResponse:
             "page_name": "api-key-detail",
             "title": "API 密钥详情",
             "api_key_id": api_key_id,
+            "portal_type": "admin",
+            "current_user": current_user,
         },
     )
 
 
 @router.get("/logs", response_class=HTMLResponse)
 def logs_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
+    current_user = require_admin_html(request, db)
+    if isinstance(current_user, RedirectResponse):
+        return current_user
     logs = db.scalars(select(RequestLog).order_by(RequestLog.created_at.desc()).limit(100)).all()
-    return templates.TemplateResponse("logs.html", {"request": request, "logs": logs, "page_name": "logs"})
+    return templates.TemplateResponse("logs.html", {"request": request, "logs": logs, "page_name": "logs", "portal_type": "admin", "current_user": current_user})
 
 
 @router.get("/conversations", response_class=HTMLResponse)
-def conversations_page(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse("conversations.html", {"request": request, "page_name": "conversations"})
+def conversations_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
+    current_user = require_admin_html(request, db)
+    if isinstance(current_user, RedirectResponse):
+        return current_user
+    return templates.TemplateResponse("conversations.html", {"request": request, "page_name": "conversations", "portal_type": "admin", "current_user": current_user})

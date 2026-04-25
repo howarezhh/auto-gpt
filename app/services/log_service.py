@@ -121,6 +121,7 @@ class LogService:
         api_client_key_query: str | None,
         success: bool | None,
         exclude_health_checks: bool = False,
+        api_client_key_ids: list[int] | None = None,
     ) -> tuple[int, list[RequestLog], dict[str, int]]:
         stmt = select(RequestLog)
         count_stmt = select(func.count()).select_from(RequestLog)
@@ -143,6 +144,7 @@ class LogService:
             api_client_key_query=api_client_key_query,
             success=success,
             exclude_health_checks=exclude_health_checks,
+            api_client_key_ids=api_client_key_ids,
         )
         count_stmt = LogService._apply_log_filters(
             count_stmt,
@@ -154,6 +156,7 @@ class LogService:
             api_client_key_query=api_client_key_query,
             success=success,
             exclude_health_checks=exclude_health_checks,
+            api_client_key_ids=api_client_key_ids,
         )
         summary_stmt = LogService._apply_log_filters(
             summary_stmt,
@@ -165,6 +168,7 @@ class LogService:
             api_client_key_query=api_client_key_query,
             success=success,
             exclude_health_checks=exclude_health_checks,
+            api_client_key_ids=api_client_key_ids,
         )
         total = db.scalar(count_stmt) or 0
         summary_row = db.execute(summary_stmt).one()
@@ -196,6 +200,7 @@ class LogService:
         api_client_key_query: str | None,
         success: bool | None,
         exclude_health_checks: bool,
+        api_client_key_ids: list[int] | None = None,
     ):
         if exclude_health_checks:
             stmt = stmt.where(LogService._non_health_check_expr())
@@ -209,6 +214,11 @@ class LogService:
             stmt = stmt.where(RequestLog.conversation_key == conversation_key)
         if api_client_key_id:
             stmt = stmt.where(RequestLog.api_client_key_id == api_client_key_id)
+        elif api_client_key_ids is not None:
+            if not api_client_key_ids:
+                stmt = stmt.where(RequestLog.api_client_key_id == -1)
+            else:
+                stmt = stmt.where(RequestLog.api_client_key_id.in_(api_client_key_ids))
         if api_client_key_query:
             keyword = f"%{api_client_key_query.strip()}%"
             stmt = stmt.where(

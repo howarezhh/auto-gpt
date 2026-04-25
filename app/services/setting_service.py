@@ -22,6 +22,7 @@ DEFAULT_SETTING = {
     "enable_stream_response_persist": True,
     "mask_sensitive_fields": True,
     "max_logged_body_bytes": 16384,
+    "allow_public_user_registration": False,
 }
 
 

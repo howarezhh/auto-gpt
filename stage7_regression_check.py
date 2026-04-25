@@ -94,6 +94,20 @@ def _assert(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
+def _bootstrap_admin(client: TestClient) -> None:
+    response = client.post(
+        "/setup-admin",
+        data={
+            "username": "stage7-admin",
+            "email": "stage7-admin@example.com",
+            "password": "Stage7Admin#123",
+            "password_confirm": "Stage7Admin#123",
+        },
+        follow_redirects=False,
+    )
+    _assert(response.status_code == 303, f"bootstrap admin failed: {response.text}")
+
+
 def _create_provider(client: TestClient, *, name: str, priority: int, weight: int, models: list[str]) -> dict:
     payload = {
         "name": name,
@@ -162,6 +176,7 @@ def main() -> None:
         ProxyService, "_stream_request", side_effect=_fake_stream_request
     ):
         with TestClient(app) as client:
+            _bootstrap_admin(client)
             provider_a = _create_provider(
                 client,
                 name="stage7-provider-a",

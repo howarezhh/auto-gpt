@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero-panel hero-panel-compact cockpit-hero">
+    <div class="cockpit-hero-copy">
+        <div class="eyebrow">User Portal</div>
+        <h2>用户中心</h2>
+        <p>查看当前账号、名下 API Key、调用统计，并进入个人资料、日志、账单与会话回放。</p>
+    </div>
+    <div class="cockpit-hero-aside">
+        <div class="cockpit-aside-label">当前账号</div>
+        <div class="cockpit-aside-value">{{ current_user.username }}</div>
+        <div class="cockpit-aside-copy">{{ current_user.email }}</div>
+        <div class="cockpit-health-bar"><span style="width: 100%"></span></div>
+        <div class="cockpit-aside-meta">
+            <span>普通用户端</span>
+            <span>已登录</span>
+        </div>
+    </div>
+</section>
+
+<section class="stats-grid">
+    <article class="metric-card"><span>我的 API Key</span><strong>{{ owned_api_keys|length }}</strong></article>
+    <article class="metric-card"><span>总请求量</span><strong>{{ totals.total_requests }}</strong></article>
+    <article class="metric-card"><span>总 Token</span><strong>{{ totals.total_tokens }}</strong></article>
+    <article class="metric-card"><span>可用余额</span><strong>{{ '%.6f'|format(totals.available_balance) }}</strong></article>
+</section>
+
+<section class="dashboard-command-grid">
+    <div class="panel-card section-shell">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">My Keys</div>
+                <h3>我的 API Key</h3>
+            </div>
+        </div>
+        <div class="table-shell">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>名称</th>
+                        <th>前缀</th>
+                        <th>状态</th>
+                        <th>累计 Token</th>
+                        <th>余额</th>
+                        <th>最近使用</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% if owned_api_keys %}
+                        {% for item in owned_api_keys %}
+                        <tr>
+                            <td>{{ item.name }}</td>
+                            <td>{{ item.key_masked }}</td>
+                            <td>{{ item.status }}</td>
+                            <td>{{ item.total_tokens_used }}</td>
+                            <td>{{ item.balance_amount if item.balance_amount is not none else '不限' }}</td>
+                            <td>{{ item.last_used_at or '-' }}</td>
+                        </tr>
+                        {% endfor %}
+                    {% else %}
+                        <tr><td colspan="6"><div class="empty-state">当前账号还没有绑定 API Key，请联系管理员分配。</div></td></tr>
+                    {% endif %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="dashboard-command-side">
+        <div class="panel-card">
+            <div class="panel-head">
+                <div>
+                    <div class="panel-kicker">Quick Access</div>
+                    <h3>常用入口</h3>
+                </div>
+            </div>
+            <div class="dashboard-signal-list">
+                <div><span>个人资料</span><strong><a href="/user/profile" data-shell-link>修改资料 / 修改密码</a></strong></div>
+                <div><span>我的日志</span><strong><a href="/user/logs" data-shell-link>查看调用明细与状态</a></strong></div>
+                <div><span>我的账单</span><strong><a href="/user/billing" data-shell-link>查看余额、充值与扣费记录</a></strong></div>
+                <div><span>我的会话</span><strong><a href="/user/conversations" data-shell-link>查看会话回放</a></strong></div>
+            </div>
+        </div>
+        <div class="panel-card">
+            <div class="panel-head">
+                <div>
+                    <div class="panel-kicker">Access</div>
+                    <h3>接入提醒</h3>
+                </div>
+            </div>
+            <div class="dashboard-signal-list">
+                <div><span>正式入口</span><strong>统一走 <code>/v1/*</code></strong></div>
+                <div><span>鉴权方式</span><strong><code>Authorization: Bearer ...</code></strong></div>
+                <div><span>会话数</span><strong>{{ totals.conversation_count }}</strong></div>
+                <div><span>累计费用</span><strong>{{ '%.6f'|format(totals.total_cost) }}</strong></div>
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock %}

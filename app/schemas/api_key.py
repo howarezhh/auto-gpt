@@ -24,6 +24,7 @@ class ApiKeyBase(BaseModel):
     balance_amount: float | None = Field(default=None, ge=0)
     route_mode: RouteMode = "failover"
     default_provider_id: int | None = None
+    owner_user_id: int | None = None
     manual_allow_fallback: bool = True
     allowed_provider_ids: list[int] = Field(default_factory=list)
 
@@ -67,6 +68,7 @@ class ApiKeyUpdate(BaseModel):
     balance_amount: float | None = Field(default=None, ge=0)
     route_mode: RouteMode | None = None
     default_provider_id: int | None = None
+    owner_user_id: int | None = None
     manual_allow_fallback: bool | None = None
     allowed_provider_ids: list[int] | None = None
 
@@ -121,6 +123,8 @@ class ApiKeyOut(BaseModel):
     remaining_cost_quota: float | None
     route_mode: RouteMode
     default_provider_id: int | None
+    owner_user_id: int | None
+    owner_user_name: str | None
     manual_allow_fallback: bool
     allowed_provider_ids: list[int]
     allowed_providers: list[ApiKeyProviderOut]

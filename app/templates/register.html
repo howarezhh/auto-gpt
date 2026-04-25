@@ -1,0 +1,37 @@
+{% extends "auth_base.html" %}
+{% block content %}
+<section class="auth-card">
+    <div class="auth-brand">aotu-gpt</div>
+    <h1>用户注册</h1>
+    <p>默认关闭公开注册。若管理员已开放，你可以直接注册普通用户账号。</p>
+    {% if error_message %}
+    <div class="auth-alert">{{ error_message }}</div>
+    {% endif %}
+    {% if public_registration_enabled %}
+    <form class="auth-form" method="post" action="/register">
+        <label>
+            <span>用户名</span>
+            <input class="field-input" name="username" required>
+        </label>
+        <label>
+            <span>邮箱</span>
+            <input class="field-input" name="email" type="email" required>
+        </label>
+        <label>
+            <span>密码</span>
+            <input class="field-input" name="password" type="password" required>
+        </label>
+        <label>
+            <span>确认密码</span>
+            <input class="field-input" name="password_confirm" type="password" required>
+        </label>
+        <button class="btn btn-accent" type="submit">注册并进入用户端</button>
+    </form>
+    {% else %}
+    <div class="auth-alert">当前未开放公开注册，请联系管理员在后台创建账号，或等待管理员开放注册。</div>
+    {% endif %}
+    <div class="auth-links">
+        <a href="/login">返回登录</a>
+    </div>
+</section>
+{% endblock %}

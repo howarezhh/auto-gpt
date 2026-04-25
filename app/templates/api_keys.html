@@ -53,6 +53,7 @@
                 <thead>
                     <tr>
                         <th>名称</th>
+                        <th>归属用户</th>
                         <th>前缀</th>
                         <th>状态</th>
                         <th>路由策略</th>
@@ -64,7 +65,7 @@
                     </tr>
                 </thead>
                 <tbody id="api-key-table-body">
-                    <tr><td colspan="9"><div class="empty-state">正在加载 API 密钥...</div></td></tr>
+                    <tr><td colspan="10"><div class="empty-state">正在加载 API 密钥...</div></td></tr>
                 </tbody>
             </table>
         </div>
@@ -131,6 +132,12 @@
                 <span>默认中转站</span>
                 <select class="field-input" id="api-key-default-provider-id">
                     <option value="">未设置</option>
+                </select>
+            </label>
+            <label>
+                <span>归属用户</span>
+                <select class="field-input" id="api-key-owner-user-id">
+                    <option value="">未分配</option>
                 </select>
             </label>
             <label>

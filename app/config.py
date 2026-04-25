@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     local_proxy_api_key: str = ""
     request_timeout_ms: int = 30000
     pip_index_url: str = "https://pypi.tuna.tsinghua.edu.cn/simple"
+    session_secret_key: str = "change-this-session-secret"
 
     model_config = SettingsConfigDict(
         env_file=".env",

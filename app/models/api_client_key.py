@@ -28,6 +28,7 @@ class ApiClientKey(Base):
     total_recharge_amount: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False, default=Decimal("0"))
     route_mode: Mapped[str] = mapped_column(Text, nullable=False, default="failover")
     default_provider_id: Mapped[int | None] = mapped_column(ForeignKey("providers.id"), nullable=True)
+    owner_user_id: Mapped[int | None] = mapped_column(ForeignKey("user_accounts.id"), nullable=True, index=True)
     manual_allow_fallback: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
@@ -43,3 +44,4 @@ class ApiClientKey(Base):
         back_populates="api_client_key",
         cascade="all, delete-orphan",
     )
+    owner_user = relationship("UserAccount", back_populates="owned_api_keys")

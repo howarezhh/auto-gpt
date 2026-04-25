@@ -24,6 +24,7 @@ class AppSetting(Base):
     enable_stream_response_persist: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     mask_sensitive_fields: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     max_logged_body_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=16384)
+    allow_public_user_registration: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow

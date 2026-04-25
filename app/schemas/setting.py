@@ -22,6 +22,7 @@ class SettingUpdate(BaseModel):
     enable_stream_response_persist: bool = True
     mask_sensitive_fields: bool = True
     max_logged_body_bytes: int = 16384
+    allow_public_user_registration: bool = False
 
 
 class SettingOut(SettingUpdate):

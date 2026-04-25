@@ -1,0 +1,30 @@
+{% extends "auth_base.html" %}
+{% block content %}
+<section class="auth-card">
+    <div class="auth-brand">aotu-gpt</div>
+    <h1>初始化管理员</h1>
+    <p>系统当前还没有管理员账号。请先创建首个管理员，再进入管理后台端。</p>
+    {% if error_message %}
+    <div class="auth-alert">{{ error_message }}</div>
+    {% endif %}
+    <form class="auth-form" method="post" action="/setup-admin">
+        <label>
+            <span>管理员用户名</span>
+            <input class="field-input" name="username" required>
+        </label>
+        <label>
+            <span>管理员邮箱</span>
+            <input class="field-input" name="email" type="email" required>
+        </label>
+        <label>
+            <span>密码</span>
+            <input class="field-input" name="password" type="password" required>
+        </label>
+        <label>
+            <span>确认密码</span>
+            <input class="field-input" name="password_confirm" type="password" required>
+        </label>
+        <button class="btn btn-accent" type="submit">创建管理员并进入后台</button>
+    </form>
+</section>
+{% endblock %}

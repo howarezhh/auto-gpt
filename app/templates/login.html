@@ -1,0 +1,25 @@
+{% extends "auth_base.html" %}
+{% block content %}
+<section class="auth-card">
+    <div class="auth-brand">aotu-gpt</div>
+    <h1>账号登录</h1>
+    <p>登录后会按角色自动进入管理后台端或用户端。</p>
+    {% if error_message %}
+    <div class="auth-alert">{{ error_message }}</div>
+    {% endif %}
+    <form class="auth-form" method="post" action="/login">
+        <label>
+            <span>用户名或邮箱</span>
+            <input class="field-input" name="identifier" required>
+        </label>
+        <label>
+            <span>密码</span>
+            <input class="field-input" name="password" type="password" required>
+        </label>
+        <button class="btn btn-accent" type="submit">登录</button>
+    </form>
+    <div class="auth-links">
+        <a href="/register">去注册</a>
+    </div>
+</section>
+{% endblock %}

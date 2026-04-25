@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero-panel hero-panel-compact cockpit-hero">
+    <div class="cockpit-hero-copy">
+        <div class="eyebrow">Users</div>
+        <h2>用户管理</h2>
+        <p>管理管理员账号与普通用户账号。公开注册默认关闭，可在路由设置页开启或关闭。</p>
+    </div>
+    <div class="cockpit-hero-aside">
+        <div class="cockpit-aside-label">用户概览</div>
+        <div class="cockpit-aside-value">{{ users|length }}</div>
+        <div class="cockpit-aside-copy">当前系统中的账号总数</div>
+        <div class="cockpit-health-bar"><span style="width: 100%"></span></div>
+        <div class="cockpit-aside-meta">
+            <span>管理员 {{ admin_count }}</span>
+            <span>启用中 {{ enabled_count }}</span>
+        </div>
+    </div>
+</section>
+
+{% if error_message %}
+<section class="panel-card"><div class="auth-alert">{{ error_message }}</div></section>
+{% endif %}
+{% if request.query_params.get('created') or request.query_params.get('updated') %}
+<section class="panel-card"><div class="auth-success">操作已完成。</div></section>
+{% endif %}
+{% if request.query_params.get('error') %}
+<section class="panel-card"><div class="auth-alert">操作失败：{{ request.query_params.get('error') }}</div></section>
+{% endif %}
+
+<section class="dashboard-command-grid">
+    <div class="panel-card section-shell">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">Create User</div>
+                <h3>新增账号</h3>
+            </div>
+        </div>
+        <form class="form-grid" method="post" action="/users/create">
+            <label>
+                <span>用户名</span>
+                <input class="field-input" name="username" required>
+            </label>
+            <label>
+                <span>邮箱</span>
+                <input class="field-input" name="email" type="email" required>
+            </label>
+            <label>
+                <span>初始密码</span>
+                <input class="field-input" name="password" type="password" required>
+            </label>
+            <label>
+                <span>角色</span>
+                <select class="field-input" name="role">
+                    <option value="user">普通用户</option>
+                    <option value="admin">管理员</option>
+                </select>
+            </label>
+            <label class="toggle-row">
+                <input name="enabled" type="checkbox" checked>
+                <span>创建后立即启用</span>
+            </label>
+            <div class="form-actions form-span-2">
+                <button class="btn btn-accent" type="submit">创建账号</button>
+            </div>
+        </form>
+    </div>
+
+    <div class="dashboard-command-side">
+        <div class="panel-card">
+            <div class="panel-head">
+                <div>
+                    <div class="panel-kicker">Registration</div>
+                    <h3>注册方式</h3>
+                </div>
+            </div>
+            <div class="dashboard-signal-list">
+                <div><span>管理员创建</span><strong>始终可用</strong></div>
+                <div><span>公开注册</span><strong>{{ '已开启' if allow_public_user_registration else '默认关闭' }}</strong></div>
+                <div><span>当前建议</span><strong>生产环境优先使用管理员后台创建</strong></div>
+                <div><span>切换位置</span><strong>在“路由设置”页统一切换公开注册开关</strong></div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="panel-card section-shell">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">Account Registry</div>
+            <h3>账号列表</h3>
+        </div>
+    </div>
+    <div class="table-shell">
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>用户名</th>
+                    <th>邮箱</th>
+                    <th>角色</th>
+                    <th>状态</th>
+                    <th>关联 API Key</th>
+                    <th>最近登录</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for user in users %}
+                <tr>
+                    <td>{{ user.id }}</td>
+                    <td>{{ user.username }}</td>
+                    <td>{{ user.email }}</td>
+                    <td>{{ '管理员' if user.role == 'admin' else '普通用户' }}</td>
+                    <td>{{ '启用中' if user.enabled else '已禁用' }}</td>
+                    <td>{{ key_counts.get(user.id, 0) }}</td>
+                    <td>{{ user.last_login_at or '-' }}</td>
+                    <td>
+                        <div class="table-actions">
+                            <form method="post" action="/users/{{ user.id }}/toggle">
+                                <button class="table-action-btn" type="submit">{{ '禁用' if user.enabled else '启用' }}</button>
+                            </form>
+                            <form method="post" action="/users/{{ user.id }}/role">
+                                <input name="role" type="hidden" value="{{ 'user' if user.role == 'admin' else 'admin' }}">
+                                <button class="table-action-btn" type="submit">{{ '降为用户' if user.role == 'admin' else '升为管理员' }}</button>
+                            </form>
+                            <form method="post" action="/users/{{ user.id }}/password">
+                                <input class="field-input" name="password" type="password" placeholder="新密码" style="min-height:34px;width:140px;" required>
+                                <button class="table-action-btn" type="submit">重置密码</button>
+                            </form>
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}
