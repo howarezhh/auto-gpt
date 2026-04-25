@@ -68,6 +68,7 @@ class LogService:
         token_response_payload: dict | None = None,
         token_response_text: str | None = None,
         schedule_token_fill: bool = True,
+        auto_commit: bool = True,
     ) -> RequestLog:
         provider_model = None
         if resolved_provider_model_id is not None and (
@@ -149,7 +150,9 @@ class LogService:
         )
         LogService.refresh_derived_fields(log, response_payload=token_response_payload, trace=trace)
         db.add(log)
-        db.commit()
+        db.flush()
+        if auto_commit:
+            db.commit()
         db.refresh(log)
         if (
             schedule_token_fill
@@ -635,8 +638,14 @@ class LogService:
                 RequestLog.provider_name,
                 RequestLog.requested_model,
                 func.count(RequestLog.id).label("total_requests"),
+                func.sum(case((RequestLog.success.is_(True), 1), else_=0)).label("success_requests"),
                 func.sum(case((RequestLog.success.is_(False), 1), else_=0)).label("failed_requests"),
                 func.avg(RequestLog.latency_ms).label("avg_latency_ms"),
+                func.avg(RequestLog.ttfb_ms).label("avg_ttfb_ms"),
+                func.avg(RequestLog.duration_ms).label("avg_duration_ms"),
+                func.sum(case((RequestLog.is_stream.is_(True), 1), else_=0)).label("stream_requests"),
+                func.sum(case((RequestLog.has_image.is_(True), 1), else_=0)).label("image_requests"),
+                func.count(func.distinct(RequestLog.user_account_id)).label("unique_users"),
                 func.sum(RequestLog.prompt_tokens).label("prompt_tokens"),
                 func.sum(RequestLog.completion_tokens).label("completion_tokens"),
                 func.sum(RequestLog.total_tokens).label("total_tokens"),
@@ -648,6 +657,7 @@ class LogService:
         results = []
         for row in db.execute(stmt):
             total_requests = int(row.total_requests or 0)
+            success_requests = int(row.success_requests or 0)
             failed_requests = int(row.failed_requests or 0)
             results.append(
                 {
@@ -655,9 +665,15 @@ class LogService:
                     "provider_name": row.provider_name,
                     "requested_model": row.requested_model,
                     "total_requests": total_requests,
+                    "success_requests": success_requests,
                     "failed_requests": failed_requests,
                     "failure_rate": round((failed_requests / total_requests) * 100, 2) if total_requests else 0.0,
                     "avg_latency_ms": round(float(row.avg_latency_ms), 2) if row.avg_latency_ms is not None else None,
+                    "avg_ttfb_ms": round(float(row.avg_ttfb_ms), 2) if row.avg_ttfb_ms is not None else None,
+                    "avg_duration_ms": round(float(row.avg_duration_ms), 2) if row.avg_duration_ms is not None else None,
+                    "stream_requests": int(row.stream_requests or 0),
+                    "image_requests": int(row.image_requests or 0),
+                    "unique_users": int(row.unique_users or 0),
                     "prompt_tokens": int(row.prompt_tokens or 0),
                     "completion_tokens": int(row.completion_tokens or 0),
                     "total_tokens": int(row.total_tokens or 0),

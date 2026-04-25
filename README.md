@@ -56,9 +56,16 @@ sudo ./start_aliyun.sh
 - 在项目根目录创建或复用 `.venv`
 - 使用清华源安装 Python 依赖
 - 创建或更新 `.env`
+- 自动生成生产环境所需的 `SESSION_SECRET_KEY` 与 `API_KEY_ENCRYPTION_SECRET`（若为空、仍为默认占位值或长度不足）
 - 自动生成 `LOCAL_PROXY_API_KEY`（若当前为空）
 - 写入 `systemd` 服务 `aotu-gpt.service`
 - 写入 `nginx` 站点配置并启用
 - 设置后端与 `nginx` 开机自启并立即启动
 
 部署完成后，仍需在阿里云安全组放行 `80/TCP` 到 `0.0.0.0/0`。
+
+若需要让“使用文档”页面固定展示公网地址，部署完成后再把 `.env` 中的 `EXTERNAL_BASE_URL` 改成你的公网地址，例如：
+
+```bash
+EXTERNAL_BASE_URL=http://114.55.144.46
+```

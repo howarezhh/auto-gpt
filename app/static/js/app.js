@@ -1328,10 +1328,11 @@
     }
 
     async function refreshDashboard() {
-        const [stats, providers, settings] = await Promise.all([
+        const [stats, providers, settings, metrics] = await Promise.all([
             api.get("/api/dashboard"),
             api.get("/api/providers"),
             api.get("/api/settings"),
+            api.get("/api/metrics/summary?window_minutes=60"),
         ]);
         document.querySelector('[data-stat="provider_count"]').textContent = stats.provider_count;
         document.querySelector('[data-stat="healthy_count"]').textContent = stats.healthy_count;
@@ -1403,6 +1404,23 @@
             <div><span>流式留存</span><strong>${formatSwitchText(settings.enable_stream_response_persist)}</strong></div>
             <div><span>日志大小上限</span><strong>${settings.max_logged_body_bytes} B</strong></div>
         `;
+
+        const metricsBody = document.getElementById("dashboard-metrics-table-body");
+        const metricItems = Array.isArray(metrics.items) ? metrics.items : [];
+        metricsBody.innerHTML = metricItems.length ? metricItems.slice(0, 12).map((item) => `
+            <tr>
+                <td>${escapeHtml(item.provider_name || "-")}</td>
+                <td>${escapeHtml(item.requested_model || "-")}</td>
+                <td>${formatNumber(item.total_requests)}</td>
+                <td>${formatNumber(item.success_requests)}</td>
+                <td>${item.failure_rate}%</td>
+                <td>${item.avg_latency_ms ?? "-"} ms</td>
+                <td>${item.avg_ttfb_ms ?? "-"} ms</td>
+                <td>${formatNumber(item.stream_requests || 0)}</td>
+                <td>${formatNumber(item.image_requests || 0)}</td>
+                <td>${formatNumber(item.unique_users || 0)}</td>
+            </tr>
+        `).join("") : '<tr><td colspan="10" class="text-muted">最近 60 分钟暂无可展示流量</td></tr>';
     }
 
     async function initProviders() {
@@ -2146,8 +2164,12 @@
             if (mode === "upload") {
                 const file = imageFileInput.files?.[0];
                 imageNote.textContent = file
-                    ? `将以 data URL 形式发送本地图片：${file.name}`
-                    : "将把本地图片转换为 data URL 后发往内部接口，适合直接测试视觉模型。";
+                    ? (isLocalBrowserHost()
+                        ? `当前为本地访问，将以 data URL 形式发送本地图片：${file.name}`
+                        : `将先上传到当前服务，再把可访问图片地址发送给模型：${file.name}`)
+                    : (isLocalBrowserHost()
+                        ? "将把本地图片转换为 data URL 后发往内部接口，适合直接测试视觉模型。"
+                        : "将先把本地图片上传到当前服务，再把生成的图片地址发给模型。");
                 return;
             }
             imageNote.textContent = "当前仅发送文本。若切换为图片链接或本地上传，playground 会自动按所选内部接口拼装视觉请求。";
@@ -2200,6 +2222,27 @@
             });
         }
 
+        function isLocalBrowserHost() {
+            const hostname = window.location.hostname || "";
+            return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+        }
+
+        async function uploadPlaygroundImage(file) {
+            const formData = new FormData();
+            formData.append("file", file);
+            const response = await fetch("/api/playground/assets/upload", {
+                method: "POST",
+                body: formData,
+                credentials: "same-origin",
+            });
+            if (!response.ok) {
+                const text = await response.text();
+                const data = safeJsonParse(text) ?? text;
+                throw new Error(typeof data === "string" ? data : JSON.stringify(data, null, 2));
+            }
+            return await response.json();
+        }
+
         async function resolvePlaygroundImageInput() {
             const mode = imageModeSelect.value || "none";
             if (mode === "none") {
@@ -2217,9 +2260,20 @@
             if (!file) {
                 throw new Error("请先选择一张本地图片");
             }
+            if (isLocalBrowserHost()) {
+                return {
+                    url: await readImageFileAsDataUrl(file),
+                    detail,
+                    source: "data-url",
+                };
+            }
+            const uploaded = await uploadPlaygroundImage(file);
             return {
-                url: await readImageFileAsDataUrl(file),
+                url: uploaded.asset_url,
                 detail,
+                source: "uploaded-asset",
+                assetId: uploaded.id,
+                assetUrl: uploaded.asset_url,
             };
         }
 
@@ -2406,6 +2460,59 @@
         });
 
         await loadPlaygroundModels();
+    }
+
+    async function initUserModels() {
+        const form = document.getElementById("user-asset-upload-form");
+        const fileInput = document.getElementById("user-asset-file");
+        const submitBtn = document.getElementById("user-asset-upload-btn");
+        const meta = document.getElementById("user-asset-upload-meta");
+        const result = document.getElementById("user-asset-upload-result");
+        if (!form || !fileInput || !submitBtn || !meta || !result) {
+            return;
+        }
+
+        form.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            const file = fileInput.files?.[0];
+            if (!file) {
+                showToast("请先选择一张图片", "error");
+                return;
+            }
+            const formData = new FormData();
+            formData.append("file", file);
+            try {
+                setButtonLoading(submitBtn, true);
+                meta.textContent = "图片上传中...";
+                const response = await fetch("/api/user/assets/upload", {
+                    method: "POST",
+                    body: formData,
+                    credentials: "same-origin",
+                });
+                if (!response.ok) {
+                    const text = await response.text();
+                    const data = safeJsonParse(text) ?? text;
+                    throw new Error(typeof data === "string" ? data : JSON.stringify(data, null, 2));
+                }
+                const data = await response.json();
+                meta.textContent = "图片上传完成，可直接复制地址用于多模态请求。";
+                result.innerHTML = `
+                    <div><span>文件名</span><strong>${escapeHtml(data.filename || "-")}</strong></div>
+                    <div><span>大小</span><strong>${formatNumber(data.file_size_bytes || 0)} B</strong></div>
+                    <div><span>图片地址</span><strong><button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="${escapeHtml(data.asset_url)}">复制地址</button></strong></div>
+                    <div><span>访问路径</span><strong>${escapeHtml(data.public_path || "-")}</strong></div>
+                    <div><span>调用示例</span><strong><button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="${escapeHtml(JSON.stringify({ type: "image_url", image_url: { url: data.asset_url, detail: "auto" } }))}">复制消息片段</button></strong></div>
+                `;
+                enhanceInteractiveButtons(result);
+                showToast("图片上传成功");
+            } catch (error) {
+                meta.textContent = "图片上传失败";
+                result.innerHTML = `<div><span>错误</span><strong>${escapeHtml(error.message)}</strong></div>`;
+                showToast("图片上传失败", "error");
+            } finally {
+                setButtonLoading(submitBtn, false);
+            }
+        });
     }
 
     function renderApiKeyStatusText(status) {
@@ -3542,6 +3649,7 @@
             if (page === "models") await initModels();
             if (page === "settings") await initSettings();
             if (page === "playground") await initPlayground();
+            if (page === "user-models") await initUserModels();
             if (page === "api-keys") await initApiKeys();
             if (page === "api-key-detail") await initApiKeyDetail();
             if (page === "logs") await initLogs();

@@ -318,6 +318,7 @@ class ApiKeyService:
         prompt_tokens: int | None,
         completion_tokens: int | None,
         total_tokens: int | None,
+        auto_commit: bool = True,
     ) -> None:
         if api_client_key is None:
             return
@@ -338,7 +339,8 @@ class ApiKeyService:
             changed = True
         if changed:
             target.last_used_at = datetime.utcnow()
-            db.commit()
+            if auto_commit:
+                db.commit()
 
 
 def require_api_client_auth(

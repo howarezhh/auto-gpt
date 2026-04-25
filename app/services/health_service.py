@@ -10,6 +10,7 @@ from app.models.provider_model import ProviderModel
 from app.services.log_service import LogService
 from app.services.provider_service import ProviderService
 from app.services.setting_service import SettingService
+from app.services.upstream_client import UpstreamClientService
 
 
 VISION_TEST_IMAGE_URL = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
@@ -130,41 +131,44 @@ class HealthService:
     ) -> dict:
         started = time.perf_counter()
         try:
-            async with httpx.AsyncClient(timeout=provider.timeout_ms / 1000) as client:
-                basic_response = await client.post(
+            client = UpstreamClientService.get_client()
+            basic_response = await client.post(
+                f"{provider.base_url}/chat/completions",
+                headers=HealthService._auth_headers(provider),
+                json=HealthService._build_model_probe_payload(provider_model, vision_probe=False, stream=False),
+                timeout=provider.timeout_ms / 1000,
+            )
+            basic_response.raise_for_status()
+
+            health_status = "healthy"
+            message = "model probe success"
+
+            if vision_probe and provider_model.supports_vision:
+                vision_response = await client.post(
                     f"{provider.base_url}/chat/completions",
                     headers=HealthService._auth_headers(provider),
-                    json=HealthService._build_model_probe_payload(provider_model, vision_probe=False, stream=False),
+                    json=HealthService._build_model_probe_payload(provider_model, vision_probe=True, stream=False),
+                    timeout=provider.timeout_ms / 1000,
                 )
-                basic_response.raise_for_status()
+                vision_response.raise_for_status()
 
-                health_status = "healthy"
-                message = "model probe success"
-
-                if vision_probe and provider_model.supports_vision:
-                    vision_response = await client.post(
-                        f"{provider.base_url}/chat/completions",
-                        headers=HealthService._auth_headers(provider),
-                        json=HealthService._build_model_probe_payload(provider_model, vision_probe=True, stream=False),
-                    )
-                    vision_response.raise_for_status()
-
-                if stream_probe and provider_model.supports_stream:
-                    async with client.stream(
-                        "POST",
-                        f"{provider.base_url}/chat/completions",
-                        headers=HealthService._auth_headers(provider),
-                        json=HealthService._build_model_probe_payload(provider_model, vision_probe=False, stream=True),
-                    ) as stream_response:
-                        stream_response.raise_for_status()
-                        first_chunk = None
-                        async for chunk in stream_response.aiter_bytes():
-                            if chunk:
-                                first_chunk = chunk
-                                break
-                        if not first_chunk:
-                            health_status = "degraded"
-                            message = "stream probe opened but no chunk received"
+            if stream_probe and provider_model.supports_stream:
+                async with client.stream(
+                    "POST",
+                    f"{provider.base_url}/chat/completions",
+                    headers=HealthService._auth_headers(provider),
+                    json=HealthService._build_model_probe_payload(provider_model, vision_probe=False, stream=True),
+                    timeout=provider.timeout_ms / 1000,
+                ) as stream_response:
+                    stream_response.raise_for_status()
+                    first_chunk = None
+                    async for chunk in stream_response.aiter_bytes():
+                        if chunk:
+                            first_chunk = chunk
+                            break
+                    if not first_chunk:
+                        health_status = "degraded"
+                        message = "stream probe opened but no chunk received"
 
             latency_ms = int((time.perf_counter() - started) * 1000)
             HealthService._apply_model_health(
@@ -325,8 +329,11 @@ class HealthService:
     async def check_provider_connectivity(db: Session, provider: Provider, *, log_result: bool) -> dict:
         started = time.perf_counter()
         try:
-            async with httpx.AsyncClient(timeout=provider.timeout_ms / 1000) as client:
-                response = await client.get(f"{provider.base_url}/models", headers=HealthService._auth_headers(provider))
+            response = await UpstreamClientService.get_client().get(
+                f"{provider.base_url}/models",
+                headers=HealthService._auth_headers(provider),
+                timeout=provider.timeout_ms / 1000,
+            )
             latency_ms = int((time.perf_counter() - started) * 1000)
             provider.last_check_at = datetime.utcnow()
             provider.last_latency_ms = latency_ms

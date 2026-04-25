@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.schemas.model_catalog import ModelCatalogCreate, ModelCatalogDetailOut, ModelCatalogOut
 from app.schemas.model_catalog import ModelCatalogUpdate, UserModelOut
+from app.services.asset_service import AssetService
 from app.services.model_catalog_service import ModelCatalogService
 from app.services.user_auth_service import require_admin_api_user, require_session_api_user
 
@@ -50,3 +51,21 @@ def update_model(model_name: str, payload: ModelCatalogUpdate, db: Session = Dep
 @router.get("/api/user/models", response_model=list[UserModelOut])
 def list_user_models(current_user=Depends(require_session_api_user), db: Session = Depends(get_db)) -> list[UserModelOut]:
     return [UserModelOut(**item) for item in ModelCatalogService.list_user_models(db, user=current_user)]
+
+
+@router.post("/api/user/assets/upload")
+def upload_user_asset(
+    request: Request,
+    _current_user=Depends(require_session_api_user),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+) -> dict:
+    asset = AssetService.create_uploaded_image(db, upload_file=file)
+    return {
+        "id": asset.id,
+        "filename": asset.filename,
+        "content_type": asset.content_type,
+        "file_size_bytes": asset.file_size_bytes,
+        "public_path": asset.public_path,
+        "asset_url": str(request.base_url).rstrip("/") + asset.public_path,
+    }

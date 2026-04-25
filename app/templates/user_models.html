@@ -75,6 +75,27 @@
         <div class="panel-card">
             <div class="panel-head">
                 <div>
+                    <div class="panel-kicker">Multimodal</div>
+                    <h3>图片上传工具</h3>
+                </div>
+            </div>
+            <form id="user-asset-upload-form" class="form-grid">
+                <label class="form-span-2">
+                    <span>选择图片</span>
+                    <input class="field-input" id="user-asset-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif">
+                </label>
+                <div class="form-actions form-span-2">
+                    <button class="btn btn-accent interactive-btn" id="user-asset-upload-btn" type="submit">上传并生成图片地址</button>
+                </div>
+            </form>
+            <div class="result-meta" id="user-asset-upload-meta">可上传图片并生成当前服务可访问的地址，便于拼装多模态请求。</div>
+            <div class="dashboard-signal-list" id="user-asset-upload-result">
+                <div><span>状态</span><strong>等待上传</strong></div>
+            </div>
+        </div>
+        <div class="panel-card">
+            <div class="panel-head">
+                <div>
                     <div class="panel-kicker">How To Use</div>
                     <h3>使用提醒</h3>
                 </div>

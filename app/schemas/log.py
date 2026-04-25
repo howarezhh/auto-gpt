@@ -94,9 +94,15 @@ class MetricItem(BaseModel):
     provider_name: str | None
     requested_model: str | None
     total_requests: int
+    success_requests: int
     failed_requests: int
     failure_rate: float
     avg_latency_ms: float | None
+    avg_ttfb_ms: float | None = None
+    avg_duration_ms: float | None = None
+    stream_requests: int = 0
+    image_requests: int = 0
+    unique_users: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0

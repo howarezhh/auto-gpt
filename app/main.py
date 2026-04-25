@@ -31,6 +31,7 @@ from app.services.log_service import LogService
 from app.services.model_catalog_service import ModelCatalogService
 from app.services.provider_service import ProviderService
 from app.services.setting_service import SettingService
+from app.services.upstream_client import UpstreamClientService
 from app.services.user_auth_service import require_admin_api_user
 from app.tasks import configure_scheduler
 from app.utils.json_utils import dumps_json, safeJsonParse
@@ -228,12 +229,14 @@ def _migrate_request_log_columns(db) -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_database()
+    UpstreamClientService.get_client()
     if not scheduler.running:
         configure_scheduler()
         scheduler.start()
     yield
     if scheduler.running:
         scheduler.shutdown(wait=False)
+    await UpstreamClientService.aclose()
 
 
 app = FastAPI(
@@ -245,6 +248,7 @@ app = FastAPI(
 )
 app.add_middleware(SessionMiddleware, secret_key=settings.session_secret_key, same_site="lax")
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
+app.mount("/uploaded-assets", StaticFiles(directory=settings.uploads_dir), name="uploaded-assets")
 
 
 @app.exception_handler(ApiClientAuthError)

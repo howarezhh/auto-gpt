@@ -182,4 +182,34 @@
         </div>
     </div>
 </section>
+
+<section class="panel-card section-shell">
+    <div class="panel-head">
+        <div>
+            <div class="panel-kicker">Traffic Metrics</div>
+            <h3>最近 60 分钟模型流量统计</h3>
+        </div>
+    </div>
+    <div class="table-responsive">
+        <table class="table align-middle">
+            <thead>
+                <tr>
+                    <th>中转站</th>
+                    <th>模型</th>
+                    <th>请求</th>
+                    <th>成功</th>
+                    <th>失败率</th>
+                    <th>平均延迟</th>
+                    <th>平均首包</th>
+                    <th>流式</th>
+                    <th>图片</th>
+                    <th>用户数</th>
+                </tr>
+            </thead>
+            <tbody id="dashboard-metrics-table-body">
+                <tr><td colspan="10" class="text-muted">正在加载统计数据...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</section>
 {% endblock %}

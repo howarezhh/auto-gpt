@@ -17,6 +17,7 @@ from app.services.log_service import LogService
 from app.services.provider_service import ProviderService
 from app.services.router_service import RoutePolicyContext, RouterService
 from app.services.setting_service import SettingService
+from app.services.upstream_client import UpstreamClientService
 from app.utils.json_utils import dumps_json, safeJsonParse
 
 
@@ -160,6 +161,7 @@ class ProxyService:
                         token_response_payload=response,
                         token_response_text=response_text,
                         schedule_token_fill=setting.enable_token_logging,
+                        auto_commit=False,
                     )
                     ApiKeyService.apply_token_usage(
                         db,
@@ -167,6 +169,7 @@ class ProxyService:
                         prompt_tokens=usage_info["prompt_tokens"],
                         completion_tokens=usage_info["completion_tokens"],
                         total_tokens=usage_info["total_tokens"],
+                        auto_commit=False,
                     )
                     BillingService.sync_request_billing(db, created_log)
                     db.commit()
@@ -417,6 +420,7 @@ class ProxyService:
                                     token_request_payload=payload,
                                     token_response_text=ProxyService._finalize_text_capture(token_response_parts),
                                     schedule_token_fill=setting.enable_token_logging,
+                                    auto_commit=False,
                                 )
                                 ApiKeyService.apply_token_usage(
                                     db,
@@ -424,6 +428,7 @@ class ProxyService:
                                     prompt_tokens=usage_info["prompt_tokens"],
                                     completion_tokens=usage_info["completion_tokens"],
                                     total_tokens=usage_info["total_tokens"],
+                                    auto_commit=False,
                                 )
                                 BillingService.sync_request_billing(db, created_log)
                                 db.commit()
@@ -484,7 +489,9 @@ class ProxyService:
                                     token_request_payload=payload,
                                     token_response_text=ProxyService._finalize_text_capture(token_response_parts),
                                     schedule_token_fill=setting.enable_token_logging,
+                                    auto_commit=False,
                                 )
+                                db.commit()
 
                     return stream_generator(), provider, trace, latency_ms
                 except httpx.HTTPStatusError as exc:
@@ -553,8 +560,12 @@ class ProxyService:
     @staticmethod
     async def _forward_json(provider: Provider, endpoint_path: str, payload: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
         headers = {"Authorization": f"Bearer {provider.api_key}"}
-        async with httpx.AsyncClient(timeout=provider.timeout_ms / 1000) as client:
-            response = await client.post(f"{provider.base_url}{endpoint_path}", headers=headers, json=payload)
+        response = await UpstreamClientService.get_client().post(
+            f"{provider.base_url}{endpoint_path}",
+            headers=headers,
+            json=payload,
+            timeout=provider.timeout_ms / 1000,
+        )
         response.raise_for_status()
         return response.json(), ProxyService._extract_upstream_request_id(response)
 
@@ -562,9 +573,14 @@ class ProxyService:
     @asynccontextmanager
     async def _stream_request(provider: Provider, endpoint_path: str, payload: dict[str, Any]) -> AsyncIterator[httpx.Response]:
         headers = {"Authorization": f"Bearer {provider.api_key}"}
-        async with httpx.AsyncClient(timeout=provider.timeout_ms / 1000) as client:
-            async with client.stream("POST", f"{provider.base_url}{endpoint_path}", headers=headers, json=payload) as response:
-                yield response
+        async with UpstreamClientService.get_client().stream(
+            "POST",
+            f"{provider.base_url}{endpoint_path}",
+            headers=headers,
+            json=payload,
+            timeout=provider.timeout_ms / 1000,
+        ) as response:
+            yield response
 
     @staticmethod
     def _mark_failure(
@@ -588,7 +604,6 @@ class ProxyService:
             provider_model.health_status = "degraded"
             provider_model.circuit_state = "closed"
         ProviderService.refresh_provider_state(provider)
-        db.commit()
 
     @staticmethod
     def _mark_success(db: Session, provider: Provider, provider_model: ProviderModel, latency_ms: int) -> None:
@@ -603,7 +618,6 @@ class ProxyService:
         provider_model.circuit_state = "closed"
         provider_model.circuit_opened_at = None
         ProviderService.refresh_provider_state(provider)
-        db.commit()
 
     @staticmethod
     async def _extract_response_error(response: httpx.Response) -> str:

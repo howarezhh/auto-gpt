@@ -1,12 +1,30 @@
-from fastapi import APIRouter, Depends, Header, Response
+from fastapi import APIRouter, Depends, File, Header, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.services.asset_service import AssetService
 from app.services.proxy_service import ProxyService
 
 
 router = APIRouter(prefix="/api/playground", tags=["playground"])
+
+
+@router.post("/assets/upload")
+def upload_playground_asset(
+    request: Request,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+) -> dict:
+    asset = AssetService.create_uploaded_image(db, upload_file=file)
+    return {
+        "id": asset.id,
+        "filename": asset.filename,
+        "content_type": asset.content_type,
+        "file_size_bytes": asset.file_size_bytes,
+        "public_path": asset.public_path,
+        "asset_url": str(request.base_url).rstrip("/") + asset.public_path,
+    }
 
 
 @router.post("/chat-completions", response_model=None)

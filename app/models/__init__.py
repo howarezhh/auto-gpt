@@ -6,6 +6,7 @@ from app.models.model_catalog import ModelCatalog
 from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
 from app.models.request_log import RequestLog
+from app.models.uploaded_asset import UploadedAsset
 from app.models.user_account import UserAccount
 
 __all__ = [
@@ -17,5 +18,6 @@ __all__ = [
     "Provider",
     "ProviderModel",
     "RequestLog",
+    "UploadedAsset",
     "UserAccount",
 ]

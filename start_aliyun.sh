@@ -74,6 +74,13 @@ print(secrets.token_urlsafe(32))
 PY
 }
 
+generate_runtime_secret() {
+  python3 - <<'PY'
+import secrets
+print(secrets.token_urlsafe(48))
+PY
+}
+
 set_env_value() {
   local key="$1"
   local value="$2"
@@ -82,6 +89,29 @@ set_env_value() {
   else
     printf '%s=%s\n' "$key" "$value" >> "$ENV_FILE"
   fi
+}
+
+get_env_value() {
+  local key="$1"
+  if grep -q "^${key}=" "$ENV_FILE"; then
+    grep "^${key}=" "$ENV_FILE" | head -n1 | cut -d'=' -f2-
+  fi
+}
+
+ensure_strong_secret() {
+  local key="$1"
+  local placeholder="$2"
+  local current_value=""
+
+  current_value="$(get_env_value "$key")"
+  if [[ -n "$current_value" && "$current_value" != "$placeholder" && ${#current_value} -ge 32 ]]; then
+    return
+  fi
+
+  local generated_secret=""
+  generated_secret="$(generate_runtime_secret)"
+  set_env_value "$key" "$generated_secret"
+  log "Generated ${key} and wrote it into .env"
 }
 
 ensure_env_file() {
@@ -97,11 +127,11 @@ ensure_env_file() {
   set_env_value "APP_HOST" "$APP_HOST"
   set_env_value "APP_PORT" "$APP_PORT"
   set_env_value "PIP_INDEX_URL" "$PIP_INDEX_URL"
+  ensure_strong_secret "SESSION_SECRET_KEY" "change-this-session-secret"
+  ensure_strong_secret "API_KEY_ENCRYPTION_SECRET" "change-this-api-key-encryption-secret"
 
   local current_key=""
-  if grep -q "^LOCAL_PROXY_API_KEY=" "$ENV_FILE"; then
-    current_key="$(grep "^LOCAL_PROXY_API_KEY=" "$ENV_FILE" | head -n1 | cut -d'=' -f2-)"
-  fi
+  current_key="$(get_env_value "LOCAL_PROXY_API_KEY")"
 
   if [[ -z "$current_key" ]]; then
     local generated_key
@@ -174,7 +204,7 @@ reload_and_start_services() {
 
 print_summary() {
   local proxy_key
-  proxy_key="$(grep "^LOCAL_PROXY_API_KEY=" "$ENV_FILE" | head -n1 | cut -d'=' -f2-)"
+  proxy_key="$(get_env_value "LOCAL_PROXY_API_KEY")"
   cat <<EOF
 
 Deployment completed.

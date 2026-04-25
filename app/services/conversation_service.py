@@ -52,24 +52,44 @@ class ConversationService:
             .subquery()
         )
 
+        latest_model_subquery = (
+            select(RequestLog.requested_model)
+            .where(RequestLog.conversation_key == grouped.c.conversation_key)
+            .order_by(RequestLog.created_at.desc(), RequestLog.id.desc())
+            .limit(1)
+            .scalar_subquery()
+        )
+        latest_provider_subquery = (
+            select(RequestLog.provider_name)
+            .where(RequestLog.conversation_key == grouped.c.conversation_key)
+            .order_by(RequestLog.created_at.desc(), RequestLog.id.desc())
+            .limit(1)
+            .scalar_subquery()
+        )
+        latest_preview_subquery = (
+            select(func.coalesce(RequestLog.response_text, RequestLog.message))
+            .where(RequestLog.conversation_key == grouped.c.conversation_key)
+            .order_by(RequestLog.created_at.desc(), RequestLog.id.desc())
+            .limit(1)
+            .scalar_subquery()
+        )
+
         total = db.scalar(select(func.count()).select_from(grouped)) or 0
         rows = db.execute(
-            select(grouped).order_by(grouped.c.updated_at.desc()).offset((page - 1) * page_size).limit(page_size)
+            select(
+                grouped,
+                latest_model_subquery.label("latest_model"),
+                latest_provider_subquery.label("latest_provider_name"),
+                latest_preview_subquery.label("preview_text"),
+            )
+            .order_by(grouped.c.updated_at.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
         ).all()
 
         items: list[ConversationSummaryItem] = []
         for row in rows:
-            latest_log = db.scalar(
-                select(RequestLog)
-                .where(RequestLog.conversation_key == row.conversation_key)
-                .order_by(RequestLog.created_at.desc(), RequestLog.id.desc())
-                .limit(1)
-            )
-            preview_text = None
-            if latest_log is not None:
-                preview_text = latest_log.response_text or latest_log.message
-                if preview_text:
-                    preview_text = preview_text[:180]
+            preview_text = row.preview_text[:180] if row.preview_text else None
             items.append(
                 ConversationSummaryItem(
                     conversation_key=row.conversation_key,
@@ -79,8 +99,8 @@ class ConversationService:
                     total_tokens=int(row.total_tokens or 0),
                     started_at=row.started_at,
                     updated_at=row.updated_at,
-                    latest_model=latest_log.requested_model if latest_log else None,
-                    latest_provider_name=latest_log.provider_name if latest_log else None,
+                    latest_model=row.latest_model,
+                    latest_provider_name=row.latest_provider_name,
                     preview_text=preview_text,
                 )
             )
