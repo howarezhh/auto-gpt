@@ -8,6 +8,9 @@
     <div class="auth-alert">{{ error_message }}</div>
     {% endif %}
     <form class="auth-form" method="post" action="/setup-admin">
+        {% if next_path %}
+        <input name="next_path" type="hidden" value="{{ next_path }}">
+        {% endif %}
         <label>
             <span>管理员用户名</span>
             <input class="field-input" name="username" required>

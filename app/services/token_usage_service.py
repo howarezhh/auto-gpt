@@ -19,6 +19,7 @@ from app.models.api_client_key import ApiClientKey
 from app.models.request_log import RequestLog
 from app.scheduler import scheduler
 from app.services.billing_service import BillingService
+from app.services.log_service import LogService
 from app.utils.json_utils import safeJsonParse
 
 
@@ -163,6 +164,9 @@ class TokenUsageService:
             log.total_tokens = total_tokens
             changed = True
 
+        if LogService.refresh_derived_fields(log, response_payload=response_data):
+            changed = True
+
         if changed:
             TokenUsageService._sync_api_client_key_usage_delta(
                 db,
@@ -206,10 +210,18 @@ class TokenUsageService:
     @staticmethod
     def _extract_usage_from_response(response_data: dict[str, Any] | None) -> dict[str, int | None]:
         if not isinstance(response_data, dict):
-            return {"prompt_tokens": None, "completion_tokens": None, "total_tokens": None}
+            return {
+                "prompt_tokens": None,
+                "completion_tokens": None,
+                "total_tokens": None,
+            }
         usage = response_data.get("usage")
         if not isinstance(usage, dict):
-            return {"prompt_tokens": None, "completion_tokens": None, "total_tokens": None}
+            return {
+                "prompt_tokens": None,
+                "completion_tokens": None,
+                "total_tokens": None,
+            }
         prompt_tokens = usage.get("prompt_tokens", usage.get("input_tokens"))
         completion_tokens = usage.get("completion_tokens", usage.get("output_tokens"))
         total_tokens = usage.get("total_tokens")
@@ -221,6 +233,7 @@ class TokenUsageService:
 
     @staticmethod
     def _count_request_tokens(payload: dict[str, Any], *, model_name: str | None, request_path: str | None) -> int | None:
+        # Embeddings has been retired externally. Keep legacy accounting only for historical logs.
         if request_path == "/v1/embeddings":
             return TokenUsageService._count_embedding_input_tokens(payload.get("input"), model_name)
         if request_path in {"/v1/chat/completions", "/chat/completions"}:

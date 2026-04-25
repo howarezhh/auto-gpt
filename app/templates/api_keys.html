@@ -54,7 +54,7 @@
                     <tr>
                         <th>名称</th>
                         <th>归属用户</th>
-                        <th>前缀</th>
+                        <th>密钥</th>
                         <th>状态</th>
                         <th>路由策略</th>
                         <th>授权渠道</th>
@@ -80,7 +80,8 @@
                 </div>
             </div>
             <div class="dashboard-signal-list">
-                <div><span>创建规范</span><strong>原始 Key 只返回一次，需立即保存到业务系统</strong></div>
+                <div><span>密钥展示</span><strong>新密钥与可回显密钥都支持一键复制</strong></div>
+                <div><span>历史兼容</span><strong>旧密钥若没有明文存档，需编辑后重置一次才能长期回显</strong></div>
                 <div><span>授权范围</span><strong>授权渠道为空时，对外调用会被直接拦截</strong></div>
                 <div><span>手动优先模式</span><strong>若关闭失败后回退，默认渠道失败后不会切换</strong></div>
                 <div><span>额度口径</span><strong>总额度、剩余额度与日志统计统一按 request_logs 追溯</strong></div>
@@ -114,6 +115,21 @@
             <label>
                 <span>名称</span>
                 <input class="field-input" id="api-key-name" maxlength="100" required>
+            </label>
+            <label>
+                <span>密钥生成方式</span>
+                <select class="field-input" id="api-key-generation-mode">
+                    <option value="auto">自动生成</option>
+                    <option value="custom">自定义密钥</option>
+                </select>
+            </label>
+            <label class="form-span-2">
+                <span>密钥明文</span>
+                <input class="field-input" id="api-key-raw-api-key" maxlength="128" placeholder="自动生成时可留空；自定义时必须以 sk-aotu- 开头，长度 24-128 位">
+                <div class="settings-note api-key-inline-note">
+                    <strong>密钥规则</strong>
+                    <span>支持自动生成或自定义录入。自定义密钥必须以 <code>sk-aotu-</code> 开头，仅允许字母、数字、连字符和下划线，长度 24-128 位。</span>
+                </div>
             </label>
             <label>
                 <span>备注</span>

@@ -110,12 +110,14 @@ class ApiKeyAdminService:
             default_provider_id=payload.default_provider_id,
         )
         ApiKeyAdminService._validate_owner_user(db, payload.owner_user_id)
-        raw_api_key = ApiKeyService.generate_api_key()
+        raw_api_key = ApiKeyService.build_raw_api_key(payload.raw_api_key)
+        ApiKeyAdminService._validate_raw_api_key_uniqueness(db, raw_api_key)
         api_key = ApiClientKey(
             name=payload.name,
             remark=payload.remark,
             key_prefix=ApiKeyService.extract_key_prefix(raw_api_key),
             key_hash=ApiKeyService.hash_api_key(raw_api_key),
+            raw_key_encrypted=ApiKeyService.encrypt_raw_api_key(raw_api_key),
             enabled=payload.enabled,
             expires_at=payload.expires_at,
             token_limit_total=payload.token_limit_total,
@@ -162,8 +164,15 @@ class ApiKeyAdminService:
             default_provider_id=default_provider_id,
         )
         ApiKeyAdminService._validate_owner_user(db, owner_user_id)
+        raw_api_key = data.get("raw_api_key")
+        if raw_api_key is not None:
+            normalized_raw_api_key = ApiKeyService.build_raw_api_key(raw_api_key)
+            ApiKeyAdminService._validate_raw_api_key_uniqueness(db, normalized_raw_api_key, exclude_api_key_id=api_key.id)
+            api_key.key_prefix = ApiKeyService.extract_key_prefix(normalized_raw_api_key)
+            api_key.key_hash = ApiKeyService.hash_api_key(normalized_raw_api_key)
+            api_key.raw_key_encrypted = ApiKeyService.encrypt_raw_api_key(normalized_raw_api_key)
         for field, value in data.items():
-            if field == "allowed_provider_ids":
+            if field in {"allowed_provider_ids", "raw_api_key"}:
                 continue
             if field in {"cost_limit_total", "balance_amount"} and value is not None:
                 value = BillingService.to_decimal(value)
@@ -305,6 +314,7 @@ class ApiKeyAdminService:
 
     @staticmethod
     def serialize_api_key(api_key: ApiClientKey) -> dict:
+        raw_api_key = ApiKeyService.decrypt_raw_api_key(api_key.raw_key_encrypted)
         allowed_providers = [
             {
                 "id": binding.provider.id,
@@ -345,6 +355,8 @@ class ApiKeyAdminService:
             "status": status,
             "key_prefix": api_key.key_prefix,
             "key_masked": ApiKeyService.mask_key_prefix(api_key.key_prefix),
+            "raw_api_key": raw_api_key,
+            "has_stored_raw_key": raw_api_key is not None,
             "expires_at": api_key.expires_at,
             "token_limit_total": api_key.token_limit_total,
             "prompt_tokens_used": api_key.prompt_tokens_used,
@@ -483,3 +495,18 @@ class ApiKeyAdminService:
         existing = db.scalar(select(UserAccount.id).where(UserAccount.id == owner_user_id, UserAccount.enabled.is_(True)))
         if existing is None:
             raise ValueError("owner_user_id does not exist")
+
+    @staticmethod
+    def _validate_raw_api_key_uniqueness(
+        db: Session,
+        raw_api_key: str,
+        *,
+        exclude_api_key_id: int | None = None,
+    ) -> None:
+        key_hash = ApiKeyService.hash_api_key(raw_api_key)
+        stmt = select(ApiClientKey.id).where(ApiClientKey.key_hash == key_hash)
+        if exclude_api_key_id is not None:
+            stmt = stmt.where(ApiClientKey.id != exclude_api_key_id)
+        existing = db.scalar(stmt)
+        if existing is not None:
+            raise ValueError("API 密钥已存在，请使用其他值")

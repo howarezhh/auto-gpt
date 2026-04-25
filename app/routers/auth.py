@@ -1,4 +1,5 @@
 from datetime import datetime
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -14,10 +15,6 @@ router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
 
 
-def _redirect_for_user_role(role: str) -> str:
-    return "/" if role == USER_ROLE_ADMIN else "/user"
-
-
 def _current_user(request: Request, db: Session):
     return UserAuthService.get_current_user(request, db)
 
@@ -26,12 +23,15 @@ def _current_user(request: Request, db: Session):
 def setup_admin_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
     if UserAuthService.has_any_admin(db):
         return RedirectResponse("/login", status_code=303)
+    next_path = UserAuthService.normalize_next_path(request.query_params.get("next"))
     return templates.TemplateResponse(
         "setup_admin.html",
         {
             "request": request,
             "title": "初始化管理员",
+            "page_name": "setup-admin",
             "error_message": None,
+            "next_path": next_path,
         },
     )
 
@@ -43,6 +43,7 @@ def setup_admin_submit(
     email: str = Form(...),
     password: str = Form(...),
     password_confirm: str = Form(...),
+    next_path: str | None = Form(default=None),
     db: Session = Depends(get_db),
 ):
     if UserAuthService.has_any_admin(db):
@@ -53,7 +54,9 @@ def setup_admin_submit(
             {
                 "request": request,
                 "title": "初始化管理员",
+                "page_name": "setup-admin",
                 "error_message": "两次输入的密码不一致",
+                "next_path": UserAuthService.normalize_next_path(next_path),
             },
             status_code=400,
         )
@@ -72,27 +75,36 @@ def setup_admin_submit(
             {
                 "request": request,
                 "title": "初始化管理员",
+                "page_name": "setup-admin",
                 "error_message": str(exc),
+                "next_path": UserAuthService.normalize_next_path(next_path),
             },
             status_code=400,
         )
     UserAuthService.login_user(request, admin)
-    return RedirectResponse("/", status_code=303)
+    return RedirectResponse(UserAuthService.resolve_post_login_path(admin.role, next_path), status_code=303)
 
 
 @router.get("/login", response_class=HTMLResponse)
 def login_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
     if not UserAuthService.has_any_admin(db):
-        return RedirectResponse("/setup-admin", status_code=303)
+        next_path = UserAuthService.normalize_next_path(request.query_params.get("next"))
+        target = "/setup-admin"
+        if next_path:
+            target = f"{target}?next={quote(next_path, safe='')}"
+        return RedirectResponse(target, status_code=303)
     user = _current_user(request, db)
+    next_path = UserAuthService.normalize_next_path(request.query_params.get("next"))
     if user is not None:
-        return RedirectResponse(_redirect_for_user_role(user.role), status_code=303)
+        return RedirectResponse(UserAuthService.resolve_post_login_path(user.role, next_path), status_code=303)
     return templates.TemplateResponse(
         "login.html",
         {
             "request": request,
             "title": "登录",
+            "page_name": "login",
             "error_message": None,
+            "next_path": next_path,
         },
     )
 
@@ -102,10 +114,15 @@ def login_submit(
     request: Request,
     identifier: str = Form(...),
     password: str = Form(...),
+    next_path: str | None = Form(default=None),
     db: Session = Depends(get_db),
 ):
     if not UserAuthService.has_any_admin(db):
-        return RedirectResponse("/setup-admin", status_code=303)
+        target = "/setup-admin"
+        normalized_next = UserAuthService.normalize_next_path(next_path)
+        if normalized_next:
+            target = f"{target}?next={quote(normalized_next, safe='')}"
+        return RedirectResponse(target, status_code=303)
     user = UserAuthService.authenticate(db, identifier, password)
     if user is None:
         return templates.TemplateResponse(
@@ -113,12 +130,14 @@ def login_submit(
             {
                 "request": request,
                 "title": "登录",
+                "page_name": "login",
                 "error_message": "账号或密码错误，或该账号已被禁用",
+                "next_path": UserAuthService.normalize_next_path(next_path),
             },
             status_code=400,
         )
     UserAuthService.login_user(request, user)
-    return RedirectResponse(_redirect_for_user_role(user.role), status_code=303)
+    return RedirectResponse(UserAuthService.resolve_post_login_path(user.role, next_path), status_code=303)
 
 
 @router.get("/register", response_class=HTMLResponse)
@@ -126,16 +145,19 @@ def register_page(request: Request, db: Session = Depends(get_db)) -> HTMLRespon
     if not UserAuthService.has_any_admin(db):
         return RedirectResponse("/setup-admin", status_code=303)
     user = _current_user(request, db)
+    next_path = UserAuthService.normalize_next_path(request.query_params.get("next"))
     if user is not None:
-        return RedirectResponse(_redirect_for_user_role(user.role), status_code=303)
+        return RedirectResponse(UserAuthService.resolve_post_login_path(user.role, next_path), status_code=303)
     settings = SettingService.get_or_create(db)
     return templates.TemplateResponse(
         "register.html",
         {
             "request": request,
             "title": "注册",
+            "page_name": "register",
             "public_registration_enabled": settings.allow_public_user_registration,
             "error_message": None,
+            "next_path": next_path,
         },
     )
 
@@ -147,6 +169,7 @@ def register_submit(
     email: str = Form(...),
     password: str = Form(...),
     password_confirm: str = Form(...),
+    next_path: str | None = Form(default=None),
     db: Session = Depends(get_db),
 ):
     settings = SettingService.get_or_create(db)
@@ -156,8 +179,10 @@ def register_submit(
             {
                 "request": request,
                 "title": "注册",
+                "page_name": "register",
                 "public_registration_enabled": False,
                 "error_message": "当前未开放公开注册，请联系管理员在后台创建账号或开放注册。",
+                "next_path": UserAuthService.normalize_next_path(next_path),
             },
             status_code=403,
         )
@@ -167,8 +192,10 @@ def register_submit(
             {
                 "request": request,
                 "title": "注册",
+                "page_name": "register",
                 "public_registration_enabled": True,
                 "error_message": "两次输入的密码不一致",
+                "next_path": UserAuthService.normalize_next_path(next_path),
             },
             status_code=400,
         )
@@ -187,8 +214,10 @@ def register_submit(
             {
                 "request": request,
                 "title": "注册",
+                "page_name": "register",
                 "public_registration_enabled": True,
                 "error_message": str(exc),
+                "next_path": UserAuthService.normalize_next_path(next_path),
             },
             status_code=400,
         )
@@ -196,7 +225,7 @@ def register_submit(
     db.commit()
     db.refresh(user)
     UserAuthService.login_user(request, user)
-    return RedirectResponse("/user", status_code=303)
+    return RedirectResponse(UserAuthService.resolve_post_login_path(user.role, next_path), status_code=303)
 
 
 @router.get("/logout")

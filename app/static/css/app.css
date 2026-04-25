@@ -868,6 +868,11 @@ body::before {
 }
 
 .detail-list strong {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    flex-wrap: wrap;
     font-size: 15px;
 }
 
@@ -2120,6 +2125,80 @@ textarea.field-input {
     border-color: #ffd9db;
 }
 
+.provider-test-result-shell {
+    display: grid;
+    gap: 16px;
+}
+
+.provider-test-result-card {
+    padding: 16px 18px;
+    border-radius: 18px;
+    border: 1px solid rgba(128, 149, 182, 0.18);
+    background: rgba(248, 250, 252, 0.82);
+}
+
+.provider-test-summary-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 12px;
+    margin-top: 12px;
+}
+
+.provider-test-summary-item {
+    padding: 12px 14px;
+    border-radius: 14px;
+    background: var(--surface);
+    border: 1px solid rgba(128, 149, 182, 0.16);
+    display: grid;
+    gap: 6px;
+}
+
+.provider-test-summary-item span {
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.provider-test-summary-item strong {
+    font-size: 14px;
+    color: var(--text);
+}
+
+.provider-test-message {
+    margin-top: 12px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--text);
+    line-height: 1.7;
+}
+
+.provider-test-model-list {
+    display: grid;
+    gap: 12px;
+    margin-top: 12px;
+}
+
+.provider-test-model-item {
+    padding: 14px 16px;
+    border-radius: 16px;
+    background: var(--surface);
+    border: 1px solid rgba(128, 149, 182, 0.16);
+}
+
+.provider-test-model-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+}
+
+.provider-test-model-message {
+    margin-top: 8px;
+    color: var(--text);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
 .empty-state {
     padding: 28px 12px;
     text-align: center;
@@ -2430,8 +2509,10 @@ textarea.field-input {
     overflow: auto;
     padding: 18px;
     border-radius: 20px;
-    background: #0f172a;
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    background: #000000;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow: none;
+    color: #ffffff;
 }
 
 .doc-code-block.compact {
@@ -2443,10 +2524,11 @@ textarea.field-input {
     margin: 0;
     white-space: pre-wrap;
     word-break: break-word;
+    color: #ffffff;
 }
 
 .doc-code-block code {
-    color: #e5eefc;
+    color: #ffffff;
     font-family: "IBM Plex Mono", "Consolas", monospace;
     font-size: 13px;
     line-height: 1.8;
@@ -2486,6 +2568,16 @@ textarea.field-input {
     gap: 18px;
     align-items: start;
     margin-bottom: 18px;
+}
+
+.docs-client-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 18px;
+}
+
+.api-key-inline-note {
+    margin-top: 8px;
 }
 
 .docs-help-side {

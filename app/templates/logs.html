@@ -37,7 +37,6 @@
                 <option value="">全部</option>
                 <option value="chat">对话请求</option>
                 <option value="responses">响应请求</option>
-                <option value="embeddings">向量请求</option>
                 <option value="health_check_provider">渠道健康检查</option>
                 <option value="health_check_model">模型健康检查</option>
                 <option value="proxy_generic">通用代理日志</option>
@@ -53,6 +52,12 @@
         <label>
             <span>模型名</span>
             <select class="field-input" id="logs-model-name">
+                <option value="">全部</option>
+            </select>
+        </label>
+        <label>
+            <span>所属用户</span>
+            <select class="field-input" id="logs-user-account-id">
                 <option value="">全部</option>
             </select>
         </label>
@@ -91,15 +96,23 @@
                 <tr>
                     <th>时间</th>
                     <th>类型</th>
-                    <th>中转站</th>
+                    <th>Key</th>
+                    <th>Session</th>
                     <th>模型</th>
-                    <th>密钥</th>
-                    <th>Token</th>
-                    <th>会话键</th>
+                    <th>渠道</th>
+                    <th>思维等级</th>
+                    <th>方法</th>
                     <th>成功</th>
-                    <th>状态码</th>
-                    <th>耗时</th>
-                    <th>消息</th>
+                    <th>尝试</th>
+                    <th>TTFB</th>
+                    <th>TPS</th>
+                    <th>用时</th>
+                    <th>输入</th>
+                    <th>输出</th>
+                    <th>缓存读</th>
+                    <th>缓存写</th>
+                    <th>成本</th>
+                    <th>倍率</th>
                     <th>详情</th>
                 </tr>
             </thead>

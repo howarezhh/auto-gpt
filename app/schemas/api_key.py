@@ -16,6 +16,7 @@ class ApiKeyProviderOut(BaseModel):
 
 class ApiKeyBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
+    raw_api_key: str | None = Field(default=None, min_length=24, max_length=128)
     remark: str | None = None
     enabled: bool = True
     expires_at: datetime | None = None
@@ -41,6 +42,14 @@ class ApiKeyBase(BaseModel):
         normalized = value.strip()
         return normalized or None
 
+    @field_validator("raw_api_key")
+    @classmethod
+    def normalize_raw_api_key(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
     @field_validator("allowed_provider_ids")
     @classmethod
     def normalize_allowed_provider_ids(cls, value: list[int]) -> list[int]:
@@ -60,6 +69,7 @@ class ApiKeyCreate(ApiKeyBase):
 
 class ApiKeyUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=100)
+    raw_api_key: str | None = Field(default=None, min_length=24, max_length=128)
     remark: str | None = None
     enabled: bool | None = None
     expires_at: datetime | None = None
@@ -82,6 +92,14 @@ class ApiKeyUpdate(BaseModel):
     @field_validator("remark")
     @classmethod
     def normalize_remark(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+    @field_validator("raw_api_key")
+    @classmethod
+    def normalize_raw_api_key(cls, value: str | None) -> str | None:
         if value is None:
             return None
         normalized = value.strip()
@@ -110,6 +128,8 @@ class ApiKeyOut(BaseModel):
     status: str
     key_prefix: str
     key_masked: str
+    raw_api_key: str | None
+    has_stored_raw_key: bool
     expires_at: datetime | None
     token_limit_total: int | None
     prompt_tokens_used: int

@@ -16,6 +16,7 @@ class ApiClientKey(Base):
     remark: Mapped[str | None] = mapped_column(Text, nullable=True)
     key_prefix: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     key_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True, index=True)
+    raw_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     token_limit_total: Mapped[int | None] = mapped_column(Integer, nullable=True)

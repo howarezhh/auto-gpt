@@ -22,7 +22,10 @@
     <article class="metric-card"><span>我的 API Key</span><strong>{{ owned_api_keys|length }}</strong></article>
     <article class="metric-card"><span>总请求量</span><strong>{{ totals.total_requests }}</strong></article>
     <article class="metric-card"><span>总 Token</span><strong>{{ totals.total_tokens }}</strong></article>
-    <article class="metric-card"><span>可用余额</span><strong>{{ '%.6f'|format(totals.available_balance) }}</strong></article>
+    <article class="metric-card"><span>账户总余额</span><strong>{{ '%.6f'|format(totals.balance_amount) if totals.balance_amount is not none else '不限' }}</strong></article>
+    <article class="metric-card"><span>冻结金额</span><strong>{{ '%.6f'|format(totals.frozen_amount or 0) }}</strong></article>
+    <article class="metric-card"><span>可用余额</span><strong>{{ '%.6f'|format(totals.available_balance) if totals.available_balance is not none else '不限' }}</strong></article>
+    <article class="metric-card"><span>累计费用</span><strong>{{ '%.6f'|format(totals.total_cost) }}</strong></article>
 </section>
 
 <section class="dashboard-command-grid">
@@ -51,7 +54,17 @@
                         <tr>
                             <td>{{ item.name }}</td>
                             <td>{{ item.key_masked }}</td>
-                            <td>{{ item.status }}</td>
+                            <td>
+                                {% if item.status == 'active' %}正常可用
+                                {% elif item.status == 'disabled' %}已禁用
+                                {% elif item.status == 'expired' %}已过期
+                                {% elif item.status == 'quota_exhausted' %}额度耗尽
+                                {% elif item.status == 'cost_quota_exhausted' %}金额额度耗尽
+                                {% elif item.status == 'balance_exhausted' %}余额耗尽
+                                {% elif item.status == 'unbound' %}未绑定渠道
+                                {% else %}{{ item.status }}
+                                {% endif %}
+                            </td>
                             <td>{{ item.total_tokens_used }}</td>
                             <td>{{ item.balance_amount if item.balance_amount is not none else '不限' }}</td>
                             <td>{{ item.last_used_at or '-' }}</td>
@@ -75,6 +88,7 @@
             </div>
             <div class="dashboard-signal-list">
                 <div><span>个人资料</span><strong><a href="/user/profile" data-shell-link>修改资料 / 修改密码</a></strong></div>
+                <div><span>可用模型</span><strong><a href="/user/models" data-shell-link>查看价格、速度与可用渠道</a></strong></div>
                 <div><span>我的日志</span><strong><a href="/user/logs" data-shell-link>查看调用明细与状态</a></strong></div>
                 <div><span>我的账单</span><strong><a href="/user/billing" data-shell-link>查看余额、充值与扣费记录</a></strong></div>
                 <div><span>我的会话</span><strong><a href="/user/conversations" data-shell-link>查看会话回放</a></strong></div>
@@ -91,7 +105,9 @@
                 <div><span>正式入口</span><strong>统一走 <code>/v1/*</code></strong></div>
                 <div><span>鉴权方式</span><strong><code>Authorization: Bearer ...</code></strong></div>
                 <div><span>会话数</span><strong>{{ totals.conversation_count }}</strong></div>
-                <div><span>累计费用</span><strong>{{ '%.6f'|format(totals.total_cost) }}</strong></div>
+                <div><span>今日请求 / 本月请求</span><strong>{{ account_summary.day_requests }} / {{ account_summary.month_requests }}</strong></div>
+                <div><span>今日 Token / 本月 Token</span><strong>{{ account_summary.day_tokens }} / {{ account_summary.month_tokens }}</strong></div>
+                <div><span>今日费用 / 本月费用</span><strong>{{ '%.6f'|format(account_summary.day_cost_used or 0) }} / {{ '%.6f'|format(account_summary.month_cost_used or 0) }}</strong></div>
             </div>
         </div>
     </div>

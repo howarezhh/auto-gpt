@@ -73,6 +73,8 @@ class ProviderService:
 
     @staticmethod
     def create_provider(db: Session, payload: ProviderCreate) -> Provider:
+        from app.services.model_catalog_service import ModelCatalogService
+
         provider = Provider(
             name=payload.name,
             base_url=payload.base_url.rstrip("/"),
@@ -89,12 +91,15 @@ class ProviderService:
         db.flush()
         ProviderService._replace_provider_models(db, provider, ProviderService._resolve_model_configs(payload))
         ProviderService.refresh_provider_state(provider)
+        ModelCatalogService.sync_model_catalogs(db)
         db.commit()
         db.refresh(provider)
         return provider
 
     @staticmethod
     def update_provider(db: Session, provider: Provider, payload: ProviderUpdate) -> Provider:
+        from app.services.model_catalog_service import ModelCatalogService
+
         data = payload.model_dump(exclude_unset=True)
         for field, value in data.items():
             if field in {"models", "model_configs"}:
@@ -114,14 +119,18 @@ class ProviderService:
                 provider_model.last_error = None
 
         ProviderService.refresh_provider_state(provider)
+        ModelCatalogService.sync_model_catalogs(db)
         db.commit()
         db.refresh(provider)
         return provider
 
     @staticmethod
     def delete_provider(db: Session, provider: Provider) -> None:
+        from app.services.model_catalog_service import ModelCatalogService
+
         db.delete(provider)
         db.commit()
+        ModelCatalogService.sync_model_catalogs(db)
 
     @staticmethod
     def update_provider_model(
@@ -130,6 +139,8 @@ class ProviderService:
         provider_model_id: int,
         payload: ProviderModelConfigUpdate,
     ) -> ProviderModel:
+        from app.services.model_catalog_service import ModelCatalogService
+
         provider_model = next((item for item in provider.provider_models if item.id == provider_model_id), None)
         if provider_model is None:
             raise ValueError("Provider model not found")
@@ -138,6 +149,7 @@ class ProviderService:
             setattr(provider_model, field, value)
 
         ProviderService.refresh_provider_state(provider)
+        ModelCatalogService.sync_model_catalogs(db)
         db.commit()
         db.refresh(provider_model)
         return provider_model
@@ -324,6 +336,8 @@ class ProviderService:
             provider_model.supports_vision = config.supports_vision
             provider_model.input_price_per_1k = config.input_price_per_1k
             provider_model.output_price_per_1k = config.output_price_per_1k
+            if not provider_model.price_multiplier:
+                provider_model.price_multiplier = 1.0
             if provider_model.health_status not in {"healthy", "degraded", "unhealthy"}:
                 provider_model.health_status = "unknown"
             if not provider_model.circuit_state:

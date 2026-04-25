@@ -12,22 +12,34 @@ class RequestLogOut(BaseModel):
     requested_model: str | None
     request_id: str | None
     conversation_key: str | None
+    session_id: str | None
     resolved_provider_model_id: int | None
     request_path: str | None
+    http_method: str | None
     is_stream: bool
     has_image: bool
     success: bool
     status_code: int | None
     latency_ms: int | None
     first_token_latency_ms: int | None
+    ttfb_ms: int | None
+    duration_ms: int | None
+    tps: float | None
+    reasoning_level: str | None
+    attempt_count: int | None
     prompt_cost: float | None
     completion_cost: float | None
     total_cost: float | None
     billing_status: str | None
+    billing_multiplier: float | None
+    channel_price_input_per_1k: float | None
+    channel_price_output_per_1k: float | None
     api_client_balance_after: float | None
     prompt_tokens: int | None
     completion_tokens: int | None
     total_tokens: int | None
+    cache_read_tokens: int | None
+    cache_write_tokens: int | None
     finish_reason: str | None
     upstream_request_id: str | None
     request_body_json: str | None
@@ -37,6 +49,8 @@ class RequestLogOut(BaseModel):
     api_client_key_id: int | None
     api_client_key_name: str | None
     api_client_key_prefix: str | None
+    user_account_id: int | None
+    user_account_name: str | None
     api_client_auth_result: str | None
     api_client_remaining_tokens: int | None
     api_client_policy_snapshot_json: str | None
@@ -66,6 +80,7 @@ class LogFilterOptionsResponse(BaseModel):
     model_names: list[LogFilterOptionOut]
     api_client_key_ids: list[LogFilterOptionOut]
     api_client_key_queries: list[LogFilterOptionOut]
+    users: list[LogFilterOptionOut]
 
 
 class LogListResponse(BaseModel):

@@ -191,7 +191,7 @@
                 <span>模型配置</span>
                 <div class="settings-note provider-model-note">
                     <strong>填写方式</strong>
-                    <span>每行一个模型，格式：模型名|优先级|权重|stream(y/n)|vision(y/n)|enabled(y/n)|输入单价/1K|输出单价/1K。例如：gpt-4o-mini|100|100|y|n|y|0.0005|0.0015。</span>
+                    <span>每行一个模型，格式：模型名|优先级|权重|stream(y/n)|vision(y/n)|enabled(y/n)|输入单价/1M|输出单价/1M。系统会自动按每百万 token 换算展示并按每千 token 存储。例如：gpt-4o-mini|100|100|y|n|y|0.5|1.5。</span>
                 </div>
                 <div class="provider-model-preset-bar">
                     <span class="provider-model-preset-label">预设模型</span>
@@ -210,7 +210,7 @@
                     <input class="field-input" id="provider-custom-model-name" placeholder="输入自定义模型名，例如 gpt-4.1-mini" type="text">
                     <button class="btn btn-ghost interactive-btn" id="provider-add-custom-model" type="button">添加自定义模型</button>
                 </div>
-                <textarea class="field-input" id="provider-models" rows="5" placeholder="每行一个模型，格式：模型名|优先级|权重|stream(y/n)|vision(y/n)|enabled(y/n)|输入单价/1K|输出单价/1K&#10;例如：gpt-4o-mini|100|100|y|n|y|0.0005|0.0015"></textarea>
+                <textarea class="field-input" id="provider-models" rows="5" placeholder="每行一个模型，格式：模型名|优先级|权重|stream(y/n)|vision(y/n)|enabled(y/n)|输入单价/1M|输出单价/1M&#10;例如：gpt-4o-mini|100|100|y|n|y|0.5|1.5"></textarea>
             </label>
             <label class="form-span-2">
                 <span>备注</span>
@@ -225,6 +225,16 @@
                 <button class="btn btn-accent interactive-btn" id="provider-submit-btn" type="submit">保存</button>
             </div>
         </form>
+    </div>
+</div>
+
+<div class="modal-shell hidden" id="provider-test-result-modal">
+    <div class="modal-card modal-lg">
+        <div class="modal-head">
+            <h3 id="provider-test-result-modal-title">测试结果</h3>
+            <button class="icon-btn interactive-btn" id="provider-test-result-modal-close" type="button">×</button>
+        </div>
+        <div id="provider-test-result-modal-content"></div>
     </div>
 </div>
 {% endblock %}

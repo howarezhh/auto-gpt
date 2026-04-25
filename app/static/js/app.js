@@ -1,5 +1,11 @@
 (function () {
     let page = document.body.dataset.page;
+    const authContext = {
+        isAuthenticated: document.body.dataset.authenticated === "true",
+        userRole: document.body.dataset.userRole || "",
+    };
+    const PUBLIC_ROUTE_PREFIXES = ["/login", "/register", "/setup-admin"];
+    const ADMIN_ROUTE_PREFIXES = ["/providers", "/settings", "/playground", "/docs", "/api-keys", "/logs", "/conversations", "/users"];
 
     const ROUTE_MODE_LABELS = {
         manual: "手动优先",
@@ -12,7 +18,7 @@
         health_check: "健康检查",
         chat: "对话请求",
         responses: "响应请求",
-        embeddings: "向量请求",
+        embeddings: "历史向量请求（已下线）",
         health_check_provider: "渠道健康检查",
         health_check_model: "模型健康检查",
         proxy_generic: "通用代理日志",
@@ -69,9 +75,57 @@
         };
     }
 
+    function matchRoute(pathname, prefix) {
+        return pathname === prefix || pathname.startsWith(`${prefix}/`);
+    }
+
+    function getRouteRole(pathname) {
+        if (PUBLIC_ROUTE_PREFIXES.some((prefix) => matchRoute(pathname, prefix))) {
+            return "public";
+        }
+        if (matchRoute(pathname, "/user")) {
+            return "user";
+        }
+        if (pathname === "/" || ADMIN_ROUTE_PREFIXES.some((prefix) => matchRoute(pathname, prefix))) {
+            return "admin";
+        }
+        return "public";
+    }
+
+    function getRoleHomePath(role = authContext.userRole) {
+        return role === "user" ? "/user" : "/";
+    }
+
+    function buildLoginPath(targetPath = `${window.location.pathname}${window.location.search}`) {
+        return `/login?next=${encodeURIComponent(targetPath)}`;
+    }
+
+    function resolveRouteRedirect(targetUrl) {
+        const target = new URL(targetUrl, window.location.origin);
+        const routeRole = getRouteRole(target.pathname);
+        if (routeRole === "public") {
+            return null;
+        }
+        if (!authContext.isAuthenticated) {
+            return buildLoginPath(`${target.pathname}${target.search}`);
+        }
+        if (routeRole !== authContext.userRole) {
+            return getRoleHomePath();
+        }
+        return null;
+    }
+
     async function parseResponse(response) {
         const text = await response.text();
         const data = text ? safeJsonParse(text) ?? text : null;
+        if (response.status === 401) {
+            window.location.href = buildLoginPath();
+            throw new Error("登录状态已失效，请重新登录");
+        }
+        if (response.status === 403 && authContext.isAuthenticated) {
+            window.location.href = getRoleHomePath();
+            throw new Error("当前账号无权访问该内容");
+        }
         if (!response.ok) {
             const detail = typeof data === "object" && data ? data.detail ?? data : data;
             throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail, null, 2));
@@ -112,6 +166,63 @@
         return `${fallbackName} 测试${statusText}${providerText}${healthText}，状态码 ${statusCode}，耗时 ${latencyMs} ms${modelText}${message}`;
     }
 
+    function renderProviderTestModalBody(result, options = {}) {
+        const scope = options.scope || "provider";
+        const titleName = options.name || result?.provider_name || result?.model_name || "测试对象";
+        const modelResults = Array.isArray(result?.model_results) ? result.model_results : [];
+        const summaryRows = [
+            ["测试对象", titleName],
+            ["测试范围", scope === "model" ? "单模型测试" : "中转站测试"],
+            ["结果", result?.success ? "成功" : "失败"],
+            ["健康状态", formatHealthStatusLabel(result?.health_status || "unknown")],
+            ["状态码", result?.status_code ?? "-"],
+            ["耗时", `${result?.latency_ms ?? "-"} ms`],
+        ];
+        if (scope === "provider") {
+            summaryRows.push(["连通性", result?.provider_success ? "成功" : "失败"]);
+            summaryRows.push(["模型通过", `${result?.models_success ?? 0}/${result?.models_total ?? 0}`]);
+        }
+        const summaryHtml = summaryRows.map(([label, value]) => `
+            <div class="provider-test-summary-item">
+                <span>${escapeHtml(String(label))}</span>
+                <strong>${escapeHtml(String(value))}</strong>
+            </div>
+        `).join("");
+        const messageHtml = escapeHtml(result?.message || "无补充说明");
+        const modelHtml = scope === "provider"
+            ? (modelResults.length
+                ? modelResults.map((item) => `
+                    <article class="provider-test-model-item">
+                        <div class="provider-test-model-top">
+                            <strong>${escapeHtml(item.model_name || "-")}</strong>
+                            <div>${statusBadge(item.health_status || "unknown")}</div>
+                        </div>
+                        <div class="table-muted">状态码 ${item.status_code ?? "-"} · 耗时 ${item.latency_ms ?? "-"} ms</div>
+                        <div class="provider-test-model-message">${escapeHtml(item.message || "-")}</div>
+                    </article>
+                `).join("")
+                : '<div class="empty-state">当前中转站没有可展示的模型测试结果</div>')
+            : "";
+        return `
+            <div class="provider-test-result-shell">
+                <section class="provider-test-result-card">
+                    <div class="panel-kicker">Test Summary</div>
+                    <div class="provider-test-summary-grid">${summaryHtml}</div>
+                </section>
+                <section class="provider-test-result-card">
+                    <div class="panel-kicker">Result Message</div>
+                    <div class="provider-test-message">${messageHtml}</div>
+                </section>
+                ${scope === "provider" ? `
+                <section class="provider-test-result-card">
+                    <div class="panel-kicker">Model Results</div>
+                    <div class="provider-test-model-list">${modelHtml}</div>
+                </section>
+                ` : ""}
+            </div>
+        `;
+    }
+
     function setBatchPlaceholder(message) {
         const empty = document.getElementById("playground-batch-output-empty");
         const output = document.getElementById("playground-batch-output");
@@ -131,6 +242,18 @@
         output.innerHTML = html;
     }
 
+    const PRICE_PER_1M_MULTIPLIER = 1000;
+
+    function toPricePer1M(value) {
+        if (value == null || Number.isNaN(Number(value))) return null;
+        return Number(value) * PRICE_PER_1M_MULTIPLIER;
+    }
+
+    function toPricePer1K(value) {
+        if (value == null || Number.isNaN(Number(value))) return null;
+        return Number(value) / PRICE_PER_1M_MULTIPLIER;
+    }
+
     function parseModelConfigs(input) {
         return input
             .split(/\r?\n/)
@@ -145,8 +268,8 @@
                     supports_stream: !supportsStream || /^(y|yes|true|1)$/i.test(supportsStream),
                     supports_vision: /^(y|yes|true|1)$/i.test(supportsVision),
                     enabled: !enabled || /^(y|yes|true|1)$/i.test(enabled),
-                    input_price_per_1k: inputPrice === "" ? null : Number(inputPrice),
-                    output_price_per_1k: outputPrice === "" ? null : Number(outputPrice),
+                    input_price_per_1k: inputPrice === "" ? null : toPricePer1K(inputPrice),
+                    output_price_per_1k: outputPrice === "" ? null : toPricePer1K(outputPrice),
                 };
             })
             .filter((item) => item.model_name)
@@ -159,7 +282,7 @@
 
     function formatModelConfigs(modelConfigs = []) {
         return modelConfigs.map((item) => (
-            `${item.model_name}|${item.priority}|${item.weight}|${item.supports_stream ? "y" : "n"}|${item.supports_vision ? "y" : "n"}|${item.enabled ? "y" : "n"}|${item.input_price_per_1k ?? ""}|${item.output_price_per_1k ?? ""}`
+            `${item.model_name}|${item.priority}|${item.weight}|${item.supports_stream ? "y" : "n"}|${item.supports_vision ? "y" : "n"}|${item.enabled ? "y" : "n"}|${toPricePer1M(item.input_price_per_1k) ?? ""}|${toPricePer1M(item.output_price_per_1k) ?? ""}`
         )).join("\n");
     }
 
@@ -303,7 +426,7 @@
 
     function formatPrice(value) {
         if (value == null || Number.isNaN(Number(value))) return "-";
-        return `${Number(value).toFixed(4)}/1K`;
+        return `${toPricePer1M(value).toFixed(4)}/1M`;
     }
 
     function formatPercent(value) {
@@ -771,31 +894,88 @@
         };
     }
 
+    function extractTextValue(value) {
+        if (typeof value === "string") {
+            return value;
+        }
+        if (Array.isArray(value)) {
+            return value.map((item) => extractTextValue(item)).filter(Boolean).join("");
+        }
+        if (!value || typeof value !== "object") {
+            return "";
+        }
+        if (typeof value.text === "string") {
+            return value.text;
+        }
+        if (value.text && typeof value.text === "object") {
+            if (typeof value.text.value === "string") {
+                return value.text.value;
+            }
+            return extractTextValue(value.text);
+        }
+        if (typeof value.value === "string") {
+            return value.value;
+        }
+        if (typeof value.content === "string") {
+            return value.content;
+        }
+        if (Array.isArray(value.content)) {
+            return value.content.map((item) => extractTextValue(item)).filter(Boolean).join("");
+        }
+        return "";
+    }
+
+    function collectTextFragments(value, parts = []) {
+        if (value == null) return parts;
+        if (typeof value === "string") {
+            if (value.trim()) parts.push(value);
+            return parts;
+        }
+        if (Array.isArray(value)) {
+            value.forEach((item) => collectTextFragments(item, parts));
+            return parts;
+        }
+        if (typeof value !== "object") {
+            return parts;
+        }
+        const directText = extractTextValue(value);
+        if (directText && directText.trim()) {
+            parts.push(directText);
+            return parts;
+        }
+        Object.values(value).forEach((item) => collectTextFragments(item, parts));
+        return parts;
+    }
+
     function extractAssistantText(data) {
         if (!data || typeof data !== "object") return "";
         if (Array.isArray(data.choices) && data.choices.length) {
             const choice = data.choices[0];
-            if (choice?.message?.content && typeof choice.message.content === "string") {
-                return choice.message.content;
+            const messageContent = extractTextValue(choice?.message?.content);
+            if (messageContent.trim()) {
+                return messageContent.trim();
             }
-            if (choice?.delta?.content && typeof choice.delta.content === "string") {
-                return choice.delta.content;
+            const deltaContent = extractTextValue(choice?.delta?.content);
+            if (deltaContent.trim()) {
+                return deltaContent.trim();
             }
         }
         if (typeof data.output_text === "string") {
             return data.output_text;
         }
+        if (typeof data.delta === "string" && data.type === "response.output_text.delta") {
+            return data.delta;
+        }
         if (Array.isArray(data.output)) {
-            const parts = [];
-            for (const item of data.output) {
-                if (!item || typeof item !== "object" || !Array.isArray(item.content)) continue;
-                for (const block of item.content) {
-                    if (block?.text && typeof block.text === "string") {
-                        parts.push(block.text);
-                    }
-                }
-            }
+            const parts = collectTextFragments(data.output, []);
             return parts.join("\n").trim();
+        }
+        if (Array.isArray(data.content)) {
+            const parts = collectTextFragments(data.content, []);
+            return parts.join("\n").trim();
+        }
+        if (data.response && typeof data.response === "object") {
+            return extractAssistantText(data.response);
         }
         return "";
     }
@@ -816,6 +996,7 @@
         let usage = null;
         let finishReason = null;
         const replyParts = [];
+        let latestResponse = null;
         for (const line of text.split(/\r?\n/)) {
             const trimmed = line.trim();
             if (!trimmed.startsWith("data:")) continue;
@@ -824,22 +1005,35 @@
             const parsed = safeJsonParse(payload);
             if (!parsed || typeof parsed !== "object") continue;
             events.push(parsed);
+            if (parsed.response && typeof parsed.response === "object") {
+                latestResponse = parsed.response;
+            }
+            if (parsed.type === "response.output_text.delta" && typeof parsed.delta === "string") {
+                replyParts.push(parsed.delta);
+            }
             const deltaText = extractAssistantText(parsed);
             if (deltaText) replyParts.push(deltaText);
             if (!finishReason) {
-                finishReason = parsed.choices?.[0]?.finish_reason || parsed.output?.[0]?.finish_reason || null;
+                finishReason = parsed.choices?.[0]?.finish_reason
+                    || parsed.output?.[0]?.finish_reason
+                    || parsed.response?.output?.[0]?.finish_reason
+                    || parsed.response?.status
+                    || null;
             }
             if (!usage && parsed.usage) {
                 usage = parsed.usage;
             } else if (parsed.usage) {
                 usage = parsed.usage;
             }
+            if (parsed.response?.usage) {
+                usage = parsed.response.usage;
+            }
         }
         const first = events[0] || {};
         return {
-            id: first.id || null,
-            model: first.model || null,
-            created: first.created || null,
+            id: latestResponse?.id || first.id || null,
+            model: latestResponse?.model || first.model || null,
+            created: latestResponse?.created_at || latestResponse?.created || first.created || null,
             usage,
             finishReason,
             reply: replyParts.join(""),
@@ -1215,6 +1409,9 @@
         const tableBody = document.getElementById("provider-table-body");
         const modelTableBody = document.getElementById("provider-model-table-body");
         const modal = document.getElementById("provider-modal");
+        const testResultModal = document.getElementById("provider-test-result-modal");
+        const testResultModalTitle = document.getElementById("provider-test-result-modal-title");
+        const testResultModalContent = document.getElementById("provider-test-result-modal-content");
         const searchInput = document.getElementById("provider-search");
         const checkAllBtn = document.getElementById("providers-check-all-btn");
         const submitBtn = document.getElementById("provider-submit-btn");
@@ -1227,6 +1424,7 @@
         document.getElementById("add-provider-btn").addEventListener("click", () => openProviderModal());
         document.getElementById("provider-modal-close").addEventListener("click", closeProviderModal);
         document.getElementById("provider-form-cancel").addEventListener("click", closeProviderModal);
+        document.getElementById("provider-test-result-modal-close")?.addEventListener("click", closeTestResultModal);
         document.querySelectorAll("[data-model-preset]").forEach((button) => {
             button.addEventListener("click", () => {
                 const modelName = button.dataset.modelPreset;
@@ -1262,6 +1460,9 @@
 
         modal.addEventListener("click", (event) => {
             if (event.target === modal) closeProviderModal();
+        });
+        testResultModal?.addEventListener("click", (event) => {
+            if (event.target === testResultModal) closeTestResultModal();
         });
 
         document.getElementById("provider-form").addEventListener("submit", async (event) => {
@@ -1400,8 +1601,8 @@
                     <td>${statusBadge(model.health_status)}</td>
                     <td>${model.supports_stream ? "流式" : "非流式"} / ${model.supports_vision ? "图像" : "文本"}</td>
                     <td>
-                        <input class="field-input" type="number" step="0.0001" value="${model.input_price_per_1k ?? ""}" placeholder="输入 /1K" data-model-field="input_price_per_1k" data-provider-id="${provider.id}" data-model-id="${model.id}">
-                        <input class="field-input mt-2" type="number" step="0.0001" value="${model.output_price_per_1k ?? ""}" placeholder="输出 /1K" data-model-field="output_price_per_1k" data-provider-id="${provider.id}" data-model-id="${model.id}">
+                        <input class="field-input" type="number" step="0.0001" value="${toPricePer1M(model.input_price_per_1k) ?? ""}" placeholder="输入 /1M" data-model-field="input_price_per_1k" data-provider-id="${provider.id}" data-model-id="${model.id}">
+                        <input class="field-input mt-2" type="number" step="0.0001" value="${toPricePer1M(model.output_price_per_1k) ?? ""}" placeholder="输出 /1M" data-model-field="output_price_per_1k" data-provider-id="${provider.id}" data-model-id="${model.id}">
                     </td>
                     <td>${renderQualitySummary(model)}</td>
                     <td><input class="field-input" type="number" value="${model.priority}" data-model-field="priority" data-provider-id="${provider.id}" data-model-id="${model.id}"></td>
@@ -1442,6 +1643,10 @@
                         formatTestResultLabel(result, `模型 ${modelConfig.model_name}`),
                         result.success ? "success" : "error",
                     );
+                    openTestResultModal(
+                        `模型测试结果 · ${modelConfig.model_name}`,
+                        renderProviderTestModalBody(result, { scope: "model", name: `${owner.name} / ${modelConfig.model_name}` }),
+                    );
                     await loadProviders();
                 } catch (error) {
                     showToast(error.message, "error");
@@ -1460,6 +1665,10 @@
                     showToast(
                         formatTestResultLabel(result, provider.name),
                         result.success ? "success" : "error",
+                    );
+                    openTestResultModal(
+                        `中转站测试结果 · ${provider.name}`,
+                        renderProviderTestModalBody(result, { scope: "provider", name: provider.name }),
                     );
                     await loadProviders();
                 }
@@ -1508,6 +1717,10 @@
                         formatTestResultLabel(result, `模型 ${modelConfig.model_name}`),
                         result.success ? "success" : "error",
                     );
+                    openTestResultModal(
+                        `模型测试结果 · ${modelConfig.model_name}`,
+                        renderProviderTestModalBody(result, { scope: "model", name: `${owner.name} / ${modelConfig.model_name}` }),
+                    );
                     await loadProviders();
                 } catch (error) {
                     showToast(error.message, "error");
@@ -1527,8 +1740,8 @@
                     priority: Number(priorityInput.value),
                     weight: Number(weightInput.value),
                     enabled: action === "toggle-model" ? !modelConfig.enabled : enabledInput.checked,
-                    input_price_per_1k: inputPriceInput.value === "" ? null : Number(inputPriceInput.value),
-                    output_price_per_1k: outputPriceInput.value === "" ? null : Number(outputPriceInput.value),
+                    input_price_per_1k: inputPriceInput.value === "" ? null : toPricePer1K(inputPriceInput.value),
+                    output_price_per_1k: outputPriceInput.value === "" ? null : toPricePer1K(outputPriceInput.value),
                 };
                 try {
                     setButtonLoading(button, true);
@@ -1565,7 +1778,264 @@
             modal.classList.add("hidden");
         }
 
+        function openTestResultModal(title, html) {
+            if (!testResultModal || !testResultModalTitle || !testResultModalContent) return;
+            testResultModalTitle.textContent = title;
+            testResultModalContent.innerHTML = html;
+            testResultModal.classList.remove("hidden");
+        }
+
+        function closeTestResultModal() {
+            if (!testResultModal || !testResultModalContent) return;
+            testResultModal.classList.add("hidden");
+            testResultModalContent.innerHTML = "";
+        }
+
         await loadProviders();
+    }
+
+    async function initModels() {
+        const tableBody = document.getElementById("models-table-body");
+        const searchInput = document.getElementById("models-search");
+        const refreshBtn = document.getElementById("models-refresh-btn");
+        const addBtn = document.getElementById("add-model-btn");
+        const modal = document.getElementById("model-modal");
+        const modalTitle = document.getElementById("model-modal-title");
+        const closeBtn = document.getElementById("model-modal-close");
+        const cancelBtn = document.getElementById("model-form-cancel");
+        const form = document.getElementById("model-form");
+        const submitBtn = document.getElementById("model-submit-btn");
+        const nameInput = document.getElementById("model-name");
+        const displayNameInput = document.getElementById("model-display-name");
+        const enabledInput = document.getElementById("model-enabled");
+        const inputPriceInput = document.getElementById("model-input-price");
+        const outputPriceInput = document.getElementById("model-output-price");
+        const speedLabelInput = document.getElementById("model-speed-label");
+        const remarkInput = document.getElementById("model-remark");
+        const bindingBody = document.getElementById("model-binding-body");
+        if (!tableBody || !searchInput || !refreshBtn || !addBtn || !modal || !form || !bindingBody) return;
+
+        const state = { models: [], providers: [], editingModelName: null };
+
+        function updateSummary() {
+            const summary = {
+                total: state.models.length,
+                enabled: state.models.filter((item) => item.enabled).length,
+                boundProviders: state.models.reduce((sum, item) => sum + (item.provider_count || 0), 0),
+                enabledProviders: state.models.reduce((sum, item) => sum + (item.enabled_provider_count || 0), 0),
+            };
+            document.querySelectorAll("[data-model-summary]").forEach((node) => {
+                node.textContent = summary[node.dataset.modelSummary] ?? "0";
+            });
+        }
+
+        function renderTable() {
+            const query = searchInput.value.trim().toLowerCase();
+            const filtered = state.models.filter((item) => {
+                if (!query) return true;
+                const haystack = [
+                    item.model_name,
+                    item.display_name || "",
+                    item.speed_label || "",
+                    (item.available_provider_names || []).join(" "),
+                    item.remark || "",
+                ].join(" ").toLowerCase();
+                return haystack.includes(query);
+            });
+            tableBody.innerHTML = filtered.map((item) => `
+                <tr>
+                    <td>
+                        <strong>${escapeHtml(item.display_name || item.model_name)}</strong>
+                        <div class="table-muted">${escapeHtml(item.model_name)}</div>
+                    </td>
+                    <td>${item.enabled ? '<span class="status-badge status-healthy">已启用</span>' : '<span class="status-badge status-unknown">已停用</span>'}</td>
+                    <td>
+                        <div>输入 ${escapeHtml(formatPrice(item.input_price_per_1k ?? item.lowest_input_price_per_1k))}</div>
+                        <div class="table-muted">输出 ${escapeHtml(formatPrice(item.output_price_per_1k ?? item.lowest_output_price_per_1k))}</div>
+                    </td>
+                    <td>${escapeHtml(item.speed_label || "-")}</td>
+                    <td>
+                        <strong>${escapeHtml(String(item.enabled_provider_count || 0))} / ${escapeHtml(String(item.provider_count || 0))}</strong>
+                        <div class="table-muted">${escapeHtml((item.available_provider_names || []).join("、") || "未绑定")}</div>
+                    </td>
+                    <td>${item.avg_price_multiplier == null ? "-" : `${Number(item.avg_price_multiplier).toFixed(2)}x`}</td>
+                    <td>
+                        <div class="table-actions">
+                            <button class="table-action-btn" data-action="edit" data-model-name="${escapeHtml(item.model_name)}">编辑</button>
+                        </div>
+                    </td>
+                </tr>
+            `).join("") || '<tr><td colspan="7"><div class="empty-state">暂无模型配置</div></td></tr>';
+            enhanceInteractiveButtons(tableBody);
+        }
+
+        function buildBindingRows(bindings = []) {
+            const rows = bindings.length ? bindings : state.providers.map((provider) => ({
+                provider_id: provider.id,
+                provider_name: provider.name,
+                provider_enabled: provider.enabled,
+                provider_health_status: provider.health_status,
+                bound: false,
+                enabled: true,
+                priority: 100,
+                weight: 100,
+                price_multiplier: 1,
+            }));
+            bindingBody.innerHTML = rows.map((item) => `
+                <tr data-provider-id="${item.provider_id}">
+                    <td><input type="checkbox" data-binding-field="bound" ${item.bound ? "checked" : ""}></td>
+                    <td>
+                        <strong>${escapeHtml(item.provider_name)}</strong>
+                        <div class="table-muted">${escapeHtml(formatHealthStatusLabel(item.provider_health_status))}</div>
+                    </td>
+                    <td>${item.provider_enabled ? "已启用" : "已停用"}</td>
+                    <td><input type="checkbox" data-binding-field="enabled" ${item.enabled ? "checked" : ""}></td>
+                    <td><input class="field-input" type="number" min="0.0001" step="0.0001" data-binding-field="price_multiplier" value="${item.price_multiplier ?? 1}"></td>
+                    <td><input class="field-input" type="number" data-binding-field="priority" value="${item.priority ?? 100}"></td>
+                    <td><input class="field-input" type="number" data-binding-field="weight" value="${item.weight ?? 100}"></td>
+                    <td data-binding-preview>-</td>
+                </tr>
+            `).join("");
+            refreshBindingRows();
+        }
+
+        function refreshBindingRows() {
+            const baseInput = inputPriceInput.value === "" ? null : Number(inputPriceInput.value);
+            const baseOutput = outputPriceInput.value === "" ? null : Number(outputPriceInput.value);
+            bindingBody.querySelectorAll("tr").forEach((row) => {
+                const boundField = row.querySelector('input[data-binding-field="bound"]');
+                const enabledField = row.querySelector('input[data-binding-field="enabled"]');
+                const multiplierField = row.querySelector('input[data-binding-field="price_multiplier"]');
+                const priorityField = row.querySelector('input[data-binding-field="priority"]');
+                const weightField = row.querySelector('input[data-binding-field="weight"]');
+                const preview = row.querySelector("[data-binding-preview]");
+                const bound = boundField.checked;
+                [enabledField, multiplierField, priorityField, weightField].forEach((field) => {
+                    field.disabled = !bound;
+                });
+                if (!bound) {
+                    preview.textContent = "-";
+                    return;
+                }
+                const multiplier = Number(multiplierField.value || 1);
+                const inputPreview = baseInput == null || Number.isNaN(baseInput) ? "-" : `${(baseInput * multiplier).toFixed(4)}/1M`;
+                const outputPreview = baseOutput == null || Number.isNaN(baseOutput) ? "-" : `${(baseOutput * multiplier).toFixed(4)}/1M`;
+                preview.innerHTML = `<div>输入 ${escapeHtml(inputPreview)}</div><div class="table-muted">输出 ${escapeHtml(outputPreview)}</div>`;
+            });
+        }
+
+        function openModal(detail = null) {
+            const isEditing = Boolean(detail);
+            state.editingModelName = detail?.model_name || null;
+            modalTitle.textContent = isEditing ? `编辑模型 ${detail.model_name}` : "新增模型";
+            nameInput.value = detail?.model_name || "";
+            nameInput.disabled = isEditing;
+            displayNameInput.value = detail?.display_name || "";
+            enabledInput.checked = detail?.enabled ?? true;
+            inputPriceInput.value = detail?.input_price_per_1k == null ? "" : toPricePer1M(detail.input_price_per_1k);
+            outputPriceInput.value = detail?.output_price_per_1k == null ? "" : toPricePer1M(detail.output_price_per_1k);
+            speedLabelInput.value = detail?.speed_label || "";
+            remarkInput.value = detail?.remark || "";
+            buildBindingRows(detail?.provider_bindings || []);
+            modal.classList.remove("hidden");
+        }
+
+        function closeModal() {
+            modal.classList.add("hidden");
+            form.reset();
+            bindingBody.innerHTML = "";
+            state.editingModelName = null;
+            nameInput.disabled = false;
+        }
+
+        function collectBindings() {
+            return Array.from(bindingBody.querySelectorAll("tr")).map((row) => ({
+                provider_id: Number(row.dataset.providerId),
+                bound: row.querySelector('input[data-binding-field="bound"]').checked,
+                enabled: row.querySelector('input[data-binding-field="enabled"]').checked,
+                price_multiplier: Number(row.querySelector('input[data-binding-field="price_multiplier"]').value || 1),
+                priority: Number(row.querySelector('input[data-binding-field="priority"]').value || 100),
+                weight: Number(row.querySelector('input[data-binding-field="weight"]').value || 100),
+            }));
+        }
+
+        async function loadData({ silent = false } = {}) {
+            const [models, providers] = await Promise.all([api.get("/api/models"), api.get("/api/providers")]);
+            state.models = models;
+            state.providers = providers;
+            updateSummary();
+            renderTable();
+            if (!silent) showToast("模型配置已刷新");
+        }
+
+        tableBody.addEventListener("click", async (event) => {
+            const button = event.target.closest("[data-action='edit']");
+            if (!button) return;
+            try {
+                const detail = await api.get(`/api/models/${encodeURIComponent(button.dataset.modelName)}`);
+                openModal(detail);
+            } catch (error) {
+                showToast(error.message, "error");
+            }
+        });
+
+        bindingBody.addEventListener("input", refreshBindingRows);
+        bindingBody.addEventListener("change", refreshBindingRows);
+        inputPriceInput.addEventListener("input", refreshBindingRows);
+        outputPriceInput.addEventListener("input", refreshBindingRows);
+
+        form.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            const payload = {
+                display_name: displayNameInput.value.trim() || null,
+                enabled: enabledInput.checked,
+                input_price_per_1k: inputPriceInput.value === "" ? null : toPricePer1K(Number(inputPriceInput.value)),
+                output_price_per_1k: outputPriceInput.value === "" ? null : toPricePer1K(Number(outputPriceInput.value)),
+                speed_label: speedLabelInput.value.trim() || null,
+                remark: remarkInput.value.trim() || null,
+                provider_bindings: collectBindings(),
+            };
+            if (!state.editingModelName) {
+                payload.model_name = nameInput.value.trim();
+                if (!payload.model_name) {
+                    showToast("请填写模型名", "error");
+                    return;
+                }
+            }
+            try {
+                setButtonLoading(submitBtn, true);
+                if (state.editingModelName) {
+                    await api.put(`/api/models/${encodeURIComponent(state.editingModelName)}`, payload);
+                    showToast("模型配置已更新");
+                } else {
+                    await api.post("/api/models", payload);
+                    showToast("模型已创建");
+                }
+                closeModal();
+                await loadData({ silent: true });
+            } catch (error) {
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(submitBtn, false);
+            }
+        });
+
+        addBtn.addEventListener("click", () => openModal());
+        refreshBtn.addEventListener("click", async () => {
+            try {
+                await loadData();
+            } catch (error) {
+                showToast(error.message, "error");
+            }
+        });
+        searchInput.addEventListener("input", renderTable);
+        closeBtn.addEventListener("click", closeModal);
+        cancelBtn.addEventListener("click", closeModal);
+        modal.addEventListener("click", (event) => {
+            if (event.target === modal) closeModal();
+        });
+
+        await loadData({ silent: true });
     }
 
     async function initSettings() {
@@ -1752,12 +2222,6 @@
                 detail,
             };
         }
-
-        output.addEventListener("click", async (event) => {
-            const button = event.target.closest("[data-copy-text]");
-            if (!button) return;
-            await copyText(button.dataset.copyText);
-        });
 
         function renderPlaygroundProviders(providers) {
             providerSelect.innerHTML = '<option value="">自动路由（按当前规则）</option>' + providers
@@ -2017,6 +2481,8 @@
         const costLimitInput = document.getElementById("api-key-cost-limit-total");
         const balanceAmountInput = document.getElementById("api-key-balance-amount");
         const nameInput = document.getElementById("api-key-name");
+        const generationModeInput = document.getElementById("api-key-generation-mode");
+        const rawApiKeyInput = document.getElementById("api-key-raw-api-key");
         const remarkInput = document.getElementById("api-key-remark");
         const idInput = document.getElementById("api-key-id");
         const form = document.getElementById("api-key-form");
@@ -2058,6 +2524,7 @@
                     item.key_prefix,
                     item.status,
                     item.key_masked,
+                    item.raw_api_key,
                 ].some((value) => String(value || "").toLowerCase().includes(keyword));
             });
         }
@@ -2078,8 +2545,11 @@
                             <div class="table-muted">${item.owner_user_id ? `用户 ID ${escapeHtml(String(item.owner_user_id))}` : "管理员侧未绑定用户"}</div>
                         </td>
                         <td>
-                            <strong>${escapeHtml(item.key_masked)}</strong>
-                            <div class="table-muted">${escapeHtml(item.key_prefix)}</div>
+                            <strong>${escapeHtml(item.raw_api_key || item.key_masked)}</strong>
+                            <div class="table-muted">${escapeHtml(item.raw_api_key ? item.key_prefix : "历史密钥未存明文，可编辑后重置")}</div>
+                            <div class="hero-actions">
+                                <button class="table-action-btn" type="button" ${item.raw_api_key ? `data-copy-text="${escapeHtml(item.raw_api_key)}"` : "disabled"}>${item.raw_api_key ? "复制密钥" : "不可复制"}</button>
+                            </div>
                         </td>
                         <td>
                             ${statusBadge(item.status)}
@@ -2117,6 +2587,25 @@
                 `;
             }).join("") || '<tr><td colspan="10"><div class="empty-state">暂无匹配的 API 密钥</div></td></tr>';
             enhanceInteractiveButtons(tableBody);
+        }
+
+        function refreshRawApiKeyInputState() {
+            const isEditing = Boolean(idInput.value);
+            if (isEditing) {
+                generationModeInput.disabled = true;
+                rawApiKeyInput.disabled = false;
+                rawApiKeyInput.placeholder = "留空表示保持当前密钥不变；填写则替换为新密钥";
+                return;
+            }
+            generationModeInput.disabled = false;
+            const isCustom = generationModeInput.value === "custom";
+            rawApiKeyInput.disabled = !isCustom;
+            rawApiKeyInput.placeholder = isCustom
+                ? "请输入自定义密钥，必须以 sk-aotu- 开头，长度 24-128 位"
+                : "自动生成时留空";
+            if (!isCustom) {
+                rawApiKeyInput.value = "";
+            }
         }
 
         function populateDefaultProviderOptions(selectedProviderId = null) {
@@ -2157,6 +2646,8 @@
             modalTitle.textContent = isEditing ? `编辑 API 密钥 #${apiKey.id}` : "新增 API 密钥";
             idInput.value = isEditing ? String(apiKey.id) : "";
             nameInput.value = apiKey?.name || "";
+            generationModeInput.value = isEditing ? "custom" : "auto";
+            rawApiKeyInput.value = isEditing ? (apiKey?.raw_api_key || "") : "";
             remarkInput.value = apiKey?.remark || "";
             routeModeInput.value = apiKey?.route_mode || "failover";
             enabledInput.checked = apiKey?.enabled ?? true;
@@ -2171,6 +2662,7 @@
             populateDefaultProviderOptions(apiKey?.default_provider_id || null);
             renderApiKeyProviderSelector(providerSelector, state.providers, apiKey?.allowed_provider_ids || []);
             refreshRoutePreview();
+            refreshRawApiKeyInputState();
             rawPanel.classList.add("hidden");
             rawValue.textContent = "";
             modal.classList.remove("hidden");
@@ -2182,12 +2674,15 @@
             rawValue.textContent = "";
             form.reset();
             idInput.value = "";
+            generationModeInput.value = "auto";
+            rawApiKeyInput.value = "";
             balanceAmountInput.disabled = false;
             balanceAmountInput.placeholder = "留空表示不限制";
             renderApiKeyProviderSelector(providerSelector, state.providers, []);
             populateDefaultProviderOptions();
             populateOwnerUserOptions();
             refreshRoutePreview();
+            refreshRawApiKeyInputState();
         }
 
         async function loadData({ silent = false } = {}) {
@@ -2231,8 +2726,18 @@
                 manual_allow_fallback: manualFallbackInput.checked,
                 allowed_provider_ids: allowedProviderIds,
             };
+            const rawApiKey = rawApiKeyInput.value.trim();
             if (!idInput.value) {
                 payload.balance_amount = balanceAmountInput.value === "" ? null : Number(balanceAmountInput.value);
+                if (generationModeInput.value === "custom") {
+                    if (!rawApiKey) {
+                        showToast("请填写自定义 API 密钥", "error");
+                        return;
+                    }
+                    payload.raw_api_key = rawApiKey;
+                }
+            } else if (rawApiKey) {
+                payload.raw_api_key = rawApiKey;
             }
             if (!payload.name) {
                 showToast("请填写 API 密钥名称", "error");
@@ -2268,6 +2773,7 @@
         });
         copyRawBtn.addEventListener("click", async () => copyText(rawValue.textContent));
         searchInput.addEventListener("input", renderTable);
+        generationModeInput.addEventListener("change", refreshRawApiKeyInputState);
         routeModeInput.addEventListener("change", refreshRoutePreview);
         manualFallbackInput.addEventListener("change", refreshRoutePreview);
         defaultProviderSelect.addEventListener("change", refreshRoutePreview);
@@ -2386,6 +2892,7 @@
                 <div><span>备注</span><strong>${escapeHtml(detail.remark || "-")}</strong></div>
                 <div><span>状态</span><strong>${escapeHtml(renderApiKeyStatusText(detail.status))}</strong></div>
                 <div><span>前缀</span><strong>${escapeHtml(detail.key_masked)}</strong></div>
+                <div><span>密钥明文</span><strong>${detail.raw_api_key ? `${escapeHtml(detail.raw_api_key)} <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="${escapeHtml(detail.raw_api_key)}">复制</button>` : "历史密钥未存明文，可在编辑时替换为新密钥"}</strong></div>
                 <div><span>默认中转</span><strong>${escapeHtml(detail.default_provider_id ? String(detail.default_provider_id) : "-")}</strong></div>
                 <div><span>过期时间</span><strong>${formatDate(detail.expires_at)}</strong></div>
                 <div><span>最近使用</span><strong>${formatDate(detail.last_used_at)}</strong></div>
@@ -2548,6 +3055,7 @@
         const clearBtn = document.getElementById("logs-clear-btn");
         const providerSelect = document.getElementById("logs-provider-id");
         const modelSelect = document.getElementById("logs-model-name");
+        const userAccountSelect = document.getElementById("logs-user-account-id");
         const apiClientKeyIdSelect = document.getElementById("logs-api-client-key-id");
         const apiClientKeyQuerySelect = document.getElementById("logs-api-client-key-query");
         const excludeHealthChecksInput = document.getElementById("logs-exclude-health-checks");
@@ -2561,6 +3069,7 @@
             "logs-log-type",
             "logs-provider-id",
             "logs-model-name",
+            "logs-user-account-id",
             "logs-api-client-key-id",
             "logs-api-client-key-query",
             "logs-success",
@@ -2641,6 +3150,25 @@
             });
         }
 
+        function formatMetricValue(value, suffix = "") {
+            if (value == null || Number.isNaN(Number(value))) return "-";
+            return `${formatNumber(Number(value))}${suffix}`;
+        }
+
+        function formatRateValue(value) {
+            if (value == null || Number.isNaN(Number(value))) return "-";
+            return Number(value).toFixed(2);
+        }
+
+        function formatCostValue(value) {
+            if (value == null || Number.isNaN(Number(value))) return "-";
+            return Number(value).toFixed(6);
+        }
+
+        function buildSessionValue(log) {
+            return log.session_id || log.conversation_key || log.request_id || "-";
+        }
+
         function renderSelectOptions(selectNode, items, emptyLabel = "全部") {
             const previousValue = selectNode.value;
             selectNode.innerHTML = [`<option value="">${escapeHtml(emptyLabel)}</option>`]
@@ -2663,6 +3191,7 @@
             const data = await api.get(`/api/logs/filter-options?${params.toString()}`);
             renderSelectOptions(providerSelect, data.providers);
             renderSelectOptions(modelSelect, data.model_names);
+            renderSelectOptions(userAccountSelect, data.users);
             renderSelectOptions(apiClientKeyIdSelect, data.api_client_key_ids);
             renderSelectOptions(apiClientKeyQuerySelect, data.api_client_key_queries);
             if (!initialFilterValuesApplied && currentParams.get("provider_id")) {
@@ -2670,6 +3199,9 @@
             }
             if (!initialFilterValuesApplied && currentParams.get("model_name")) {
                 modelSelect.value = currentParams.get("model_name");
+            }
+            if (!initialFilterValuesApplied && currentParams.get("user_account_id")) {
+                userAccountSelect.value = currentParams.get("user_account_id");
             }
             if (!initialFilterValuesApplied && currentParams.get("api_client_key_id")) {
                 apiClientKeyIdSelect.value = currentParams.get("api_client_key_id");
@@ -2700,6 +3232,7 @@
             const logType = document.getElementById("logs-log-type").value;
             const providerId = providerSelect.value;
             const modelName = modelSelect.value;
+            const userAccountId = userAccountSelect.value;
             const apiClientKeyId = apiClientKeyIdSelect.value;
             const apiClientKeyQuery = apiClientKeyQuerySelect.value;
             const success = document.getElementById("logs-success").value;
@@ -2708,6 +3241,7 @@
             if (logType) params.set("log_type", logType);
             if (providerId) params.set("provider_id", providerId);
             if (modelName) params.set("model_name", modelName);
+            if (userAccountId) params.set("user_account_id", userAccountId);
             if (apiClientKeyId) params.set("api_client_key_id", apiClientKeyId);
             if (apiClientKeyQuery) params.set("api_client_key_query", apiClientKeyQuery);
             if (success) params.set("success", success);
@@ -2722,18 +3256,27 @@
                     <tr>
                         <td>${formatDate(log.created_at)}</td>
                         <td>${escapeHtml(formatLogTypeLabel(log.log_type))}</td>
-                        <td>${escapeHtml(log.provider_name || "-")}</td>
-                        <td>${escapeHtml(log.model_name || "-")}</td>
                         <td>
                             <strong>${escapeHtml(log.api_client_key_name || "-")}</strong>
                             <div class="table-muted">${escapeHtml(log.api_client_key_prefix || "-")}</div>
+                            <div class="table-muted">${escapeHtml(log.user_account_name || "-")}</div>
                         </td>
-                        <td>${log.total_tokens ?? "-"}</td>
-                        <td>${escapeHtml(log.conversation_key || log.request_id || "-")}</td>
-                        <td>${log.success ? statusBadge("healthy") : statusBadge("unhealthy")}</td>
-                        <td>${log.status_code ?? "-"}</td>
-                        <td>${log.latency_ms ?? "-"}</td>
-                        <td>${escapeHtml(log.message || "-")}</td>
+                        <td>${escapeHtml(buildSessionValue(log))}</td>
+                        <td>${escapeHtml(log.requested_model || log.model_name || "-")}</td>
+                        <td>${escapeHtml(log.provider_name || "-")}</td>
+                        <td>${escapeHtml(log.reasoning_level || "无")}</td>
+                        <td>${escapeHtml(log.http_method || "-")}</td>
+                        <td>${log.success ? statusBadge("healthy") : statusBadge("unhealthy")}<div class="table-muted">${log.status_code ?? "-"}</div></td>
+                        <td>${formatMetricValue(log.attempt_count)}</td>
+                        <td>${formatMetricValue(log.ttfb_ms, " ms")}</td>
+                        <td>${formatRateValue(log.tps)}</td>
+                        <td>${formatMetricValue(log.duration_ms ?? log.latency_ms, " ms")}</td>
+                        <td>${formatMetricValue(log.prompt_tokens)}</td>
+                        <td>${formatMetricValue(log.completion_tokens)}</td>
+                        <td>${formatMetricValue(log.cache_read_tokens)}</td>
+                        <td>${formatMetricValue(log.cache_write_tokens)}</td>
+                        <td>${formatCostValue(log.total_cost)}</td>
+                        <td>${log.billing_multiplier == null ? "-" : `${Number(log.billing_multiplier).toFixed(2)}x`}</td>
                         <td>
                             <div class="table-actions">
                                 <button class="table-action-btn" data-action="show-trace" data-log-id="${log.id}">详情</button>
@@ -2741,7 +3284,7 @@
                             </div>
                         </td>
                     </tr>
-                `).join("") || '<tr><td colspan="12"><div class="empty-state">暂无日志</div></td></tr>';
+                `).join("") || '<tr><td colspan="20"><div class="empty-state">暂无日志</div></td></tr>';
                 tableBody.querySelectorAll('button[data-action="show-trace"]').forEach((button, index) => {
                     button.dataset.log = JSON.stringify(data.items[index] || {});
                 });
@@ -2783,20 +3326,37 @@
                 log_type: log.log_type,
                 request_id: log.request_id,
                 conversation_key: log.conversation_key,
+                session_id: log.session_id,
                 requested_model: log.requested_model,
                 model_name: log.model_name,
                 provider_name: log.provider_name,
+                user_account_id: log.user_account_id,
+                user_account_name: log.user_account_name,
                 api_client_key_id: log.api_client_key_id,
                 api_client_key_name: log.api_client_key_name,
                 api_client_key_prefix: log.api_client_key_prefix,
                 api_client_auth_result: log.api_client_auth_result,
                 api_client_remaining_tokens: log.api_client_remaining_tokens,
+                http_method: log.http_method,
+                reasoning_level: log.reasoning_level,
+                attempt_count: log.attempt_count,
                 success: log.success,
                 status_code: log.status_code,
                 latency_ms: log.latency_ms,
+                ttfb_ms: log.ttfb_ms,
+                duration_ms: log.duration_ms,
+                tps: log.tps,
                 prompt_tokens: log.prompt_tokens,
                 completion_tokens: log.completion_tokens,
                 total_tokens: log.total_tokens,
+                cache_read_tokens: log.cache_read_tokens,
+                cache_write_tokens: log.cache_write_tokens,
+                billing_multiplier: log.billing_multiplier,
+                channel_price_input_per_1k: log.channel_price_input_per_1k,
+                channel_price_output_per_1k: log.channel_price_output_per_1k,
+                prompt_cost: log.prompt_cost,
+                completion_cost: log.completion_cost,
+                total_cost: log.total_cost,
                 finish_reason: log.finish_reason,
                 upstream_request_id: log.upstream_request_id,
                 request_body_json: safeJsonParse(log.request_body_json || "") ?? log.request_body_json,
@@ -2955,13 +3515,21 @@
     }
 
     function updateActiveNavigation(pathname) {
-        document.querySelectorAll("[data-shell-link]").forEach((link) => {
+        const navLinks = Array.from(document.querySelectorAll(".nav-link[data-shell-link]"));
+        let bestMatchLength = -1;
+        let bestMatchPath = null;
+        navLinks.forEach((link) => {
             const linkPath = new URL(link.href, window.location.origin).pathname;
-            const isActive = link.classList.contains("nav-link") && (
-                (linkPath === "/" && pathname === "/")
-                || (linkPath !== "/" && (pathname === linkPath || pathname.startsWith(`${linkPath}/`)))
-            );
-            link.classList.toggle("active", isActive);
+            const isMatch = (linkPath === "/" && pathname === "/")
+                || (linkPath !== "/" && (pathname === linkPath || pathname.startsWith(`${linkPath}/`)));
+            if (isMatch && linkPath.length > bestMatchLength) {
+                bestMatchLength = linkPath.length;
+                bestMatchPath = linkPath;
+            }
+        });
+        navLinks.forEach((link) => {
+            const linkPath = new URL(link.href, window.location.origin).pathname;
+            link.classList.toggle("active", linkPath === bestMatchPath);
         });
     }
 
@@ -2971,6 +3539,7 @@
             enhanceInteractiveButtons(document);
             if (page === "dashboard") await initDashboard();
             if (page === "providers") await initProviders();
+            if (page === "models") await initModels();
             if (page === "settings") await initSettings();
             if (page === "playground") await initPlayground();
             if (page === "api-keys") await initApiKeys();
@@ -2985,6 +3554,11 @@
     async function navigateWithinShell(url, { replace = false } = {}) {
         const target = new URL(url, window.location.origin);
         const targetPath = `${target.pathname}${target.search}`;
+        const guardRedirect = resolveRouteRedirect(targetPath);
+        if (guardRedirect) {
+            window.location.href = guardRedirect;
+            return;
+        }
         const response = await fetch(targetPath, { headers: { "X-Requested-With": "shell-nav" } });
         if (response.redirected && new URL(response.url, window.location.origin).pathname !== target.pathname) {
             window.location.href = response.url;
@@ -3017,6 +3591,15 @@
 
     function initShellNavigation() {
         document.addEventListener("click", async (event) => {
+            const copyButton = event.target.closest("[data-copy-text]");
+            if (copyButton) {
+                event.preventDefault();
+                await copyText(copyButton.dataset.copyText);
+                return;
+            }
+        });
+
+        document.addEventListener("click", async (event) => {
             const link = event.target.closest("a[data-shell-link]");
             if (!link) return;
             const target = new URL(link.href, window.location.origin);
@@ -3040,6 +3623,11 @@
     }
 
     document.addEventListener("DOMContentLoaded", async () => {
+        const initialRedirect = resolveRouteRedirect(`${window.location.pathname}${window.location.search}`);
+        if (initialRedirect) {
+            window.location.replace(initialRedirect);
+            return;
+        }
         initShellNavigation();
         updateActiveNavigation(window.location.pathname);
         await initializePage();

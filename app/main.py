@@ -17,6 +17,7 @@ from app.routers.dashboard import router as dashboard_router
 from app.routers.conversations import router as conversations_router
 from app.routers.logs import router as logs_router
 from app.routers.metrics import router as metrics_router
+from app.routers.models import router as models_router
 from app.routers.pages import router as pages_router
 from app.routers.provider_models import router as provider_models_router
 from app.routers.providers import router as providers_router
@@ -27,11 +28,16 @@ from app.routers.user_portal import router as user_portal_router
 from app.scheduler import scheduler
 from app.services.api_key_service import ApiClientAuthError
 from app.services.log_service import LogService
+from app.services.model_catalog_service import ModelCatalogService
 from app.services.provider_service import ProviderService
 from app.services.setting_service import SettingService
 from app.services.user_auth_service import require_admin_api_user
 from app.tasks import configure_scheduler
 from app.utils.json_utils import dumps_json, safeJsonParse
+
+
+settings = get_settings()
+settings.validate_runtime_settings()
 
 
 def init_database() -> None:
@@ -46,6 +52,7 @@ def init_database() -> None:
             db.commit()
             db.refresh(setting)
         ProviderService.sync_legacy_provider_models(db)
+        ModelCatalogService.sync_model_catalogs(db)
     finally:
         db.close()
 
@@ -62,15 +69,27 @@ def _migrate_request_log_columns(db) -> None:
         "has_image": "ALTER TABLE request_logs ADD COLUMN has_image BOOLEAN NOT NULL DEFAULT 0",
         "request_id": "ALTER TABLE request_logs ADD COLUMN request_id TEXT",
         "conversation_key": "ALTER TABLE request_logs ADD COLUMN conversation_key TEXT",
+        "session_id": "ALTER TABLE request_logs ADD COLUMN session_id TEXT",
+        "http_method": "ALTER TABLE request_logs ADD COLUMN http_method TEXT",
         "first_token_latency_ms": "ALTER TABLE request_logs ADD COLUMN first_token_latency_ms INTEGER",
+        "ttfb_ms": "ALTER TABLE request_logs ADD COLUMN ttfb_ms INTEGER",
+        "duration_ms": "ALTER TABLE request_logs ADD COLUMN duration_ms INTEGER",
+        "tps": "ALTER TABLE request_logs ADD COLUMN tps FLOAT",
+        "reasoning_level": "ALTER TABLE request_logs ADD COLUMN reasoning_level TEXT",
+        "attempt_count": "ALTER TABLE request_logs ADD COLUMN attempt_count INTEGER",
         "prompt_cost": "ALTER TABLE request_logs ADD COLUMN prompt_cost NUMERIC",
         "completion_cost": "ALTER TABLE request_logs ADD COLUMN completion_cost NUMERIC",
         "total_cost": "ALTER TABLE request_logs ADD COLUMN total_cost NUMERIC",
         "billing_status": "ALTER TABLE request_logs ADD COLUMN billing_status TEXT",
+        "billing_multiplier": "ALTER TABLE request_logs ADD COLUMN billing_multiplier FLOAT",
+        "channel_price_input_per_1k": "ALTER TABLE request_logs ADD COLUMN channel_price_input_per_1k FLOAT",
+        "channel_price_output_per_1k": "ALTER TABLE request_logs ADD COLUMN channel_price_output_per_1k FLOAT",
         "api_client_balance_after": "ALTER TABLE request_logs ADD COLUMN api_client_balance_after NUMERIC",
         "prompt_tokens": "ALTER TABLE request_logs ADD COLUMN prompt_tokens INTEGER",
         "completion_tokens": "ALTER TABLE request_logs ADD COLUMN completion_tokens INTEGER",
         "total_tokens": "ALTER TABLE request_logs ADD COLUMN total_tokens INTEGER",
+        "cache_read_tokens": "ALTER TABLE request_logs ADD COLUMN cache_read_tokens INTEGER",
+        "cache_write_tokens": "ALTER TABLE request_logs ADD COLUMN cache_write_tokens INTEGER",
         "finish_reason": "ALTER TABLE request_logs ADD COLUMN finish_reason TEXT",
         "upstream_request_id": "ALTER TABLE request_logs ADD COLUMN upstream_request_id TEXT",
         "request_body_json": "ALTER TABLE request_logs ADD COLUMN request_body_json TEXT",
@@ -79,6 +98,8 @@ def _migrate_request_log_columns(db) -> None:
         "api_client_key_id": "ALTER TABLE request_logs ADD COLUMN api_client_key_id INTEGER",
         "api_client_key_name": "ALTER TABLE request_logs ADD COLUMN api_client_key_name TEXT",
         "api_client_key_prefix": "ALTER TABLE request_logs ADD COLUMN api_client_key_prefix TEXT",
+        "user_account_id": "ALTER TABLE request_logs ADD COLUMN user_account_id INTEGER",
+        "user_account_name": "ALTER TABLE request_logs ADD COLUMN user_account_name TEXT",
         "api_client_auth_result": "ALTER TABLE request_logs ADD COLUMN api_client_auth_result TEXT",
         "api_client_remaining_tokens": "ALTER TABLE request_logs ADD COLUMN api_client_remaining_tokens INTEGER",
         "api_client_policy_snapshot_json": "ALTER TABLE request_logs ADD COLUMN api_client_policy_snapshot_json TEXT",
@@ -99,6 +120,7 @@ def _migrate_request_log_columns(db) -> None:
     provider_model_additions = {
         "circuit_state": "ALTER TABLE provider_models ADD COLUMN circuit_state TEXT NOT NULL DEFAULT 'closed'",
         "circuit_opened_at": "ALTER TABLE provider_models ADD COLUMN circuit_opened_at DATETIME",
+        "price_multiplier": "ALTER TABLE provider_models ADD COLUMN price_multiplier FLOAT NOT NULL DEFAULT 1.0",
         "input_price_per_1k": "ALTER TABLE provider_models ADD COLUMN input_price_per_1k FLOAT",
         "output_price_per_1k": "ALTER TABLE provider_models ADD COLUMN output_price_per_1k FLOAT",
     }
@@ -121,6 +143,7 @@ def _migrate_request_log_columns(db) -> None:
         "balance_amount": "ALTER TABLE api_client_keys ADD COLUMN balance_amount NUMERIC",
         "total_recharge_amount": "ALTER TABLE api_client_keys ADD COLUMN total_recharge_amount NUMERIC NOT NULL DEFAULT 0",
         "owner_user_id": "ALTER TABLE api_client_keys ADD COLUMN owner_user_id INTEGER",
+        "raw_key_encrypted": "ALTER TABLE api_client_keys ADD COLUMN raw_key_encrypted TEXT",
     }
     changed_api_keys = False
     for column, ddl in api_key_additions.items():
@@ -155,7 +178,9 @@ def _migrate_request_log_columns(db) -> None:
     request_log_indexes = {
         "ix_request_logs_request_id": "CREATE INDEX IF NOT EXISTS ix_request_logs_request_id ON request_logs (request_id)",
         "ix_request_logs_conversation_key": "CREATE INDEX IF NOT EXISTS ix_request_logs_conversation_key ON request_logs (conversation_key)",
+        "ix_request_logs_session_id": "CREATE INDEX IF NOT EXISTS ix_request_logs_session_id ON request_logs (session_id)",
         "ix_request_logs_api_client_key_id": "CREATE INDEX IF NOT EXISTS ix_request_logs_api_client_key_id ON request_logs (api_client_key_id)",
+        "ix_request_logs_user_account_created_at": "CREATE INDEX IF NOT EXISTS ix_request_logs_user_account_created_at ON request_logs (user_account_id, created_at)",
         "ix_request_logs_created_at": "CREATE INDEX IF NOT EXISTS ix_request_logs_created_at ON request_logs (created_at)",
         "ix_request_logs_route_metrics": "CREATE INDEX IF NOT EXISTS ix_request_logs_route_metrics ON request_logs (log_type, created_at, provider_id, requested_model, success)",
         "ix_request_logs_api_key_created_at": "CREATE INDEX IF NOT EXISTS ix_request_logs_api_key_created_at ON request_logs (api_client_key_id, created_at)",
@@ -177,8 +202,26 @@ def _migrate_request_log_columns(db) -> None:
         row[1]
         for row in db.execute(text("PRAGMA table_info(user_accounts)")).fetchall()
     }
-    if existing_user_columns and "last_login_at" not in existing_user_columns:
-        db.execute(text("ALTER TABLE user_accounts ADD COLUMN last_login_at DATETIME"))
+    user_additions = {
+        "last_login_at": "ALTER TABLE user_accounts ADD COLUMN last_login_at DATETIME",
+        "frozen_amount": "ALTER TABLE user_accounts ADD COLUMN frozen_amount NUMERIC NOT NULL DEFAULT 0",
+        "request_limit_total": "ALTER TABLE user_accounts ADD COLUMN request_limit_total INTEGER",
+        "request_limit_daily": "ALTER TABLE user_accounts ADD COLUMN request_limit_daily INTEGER",
+        "request_limit_monthly": "ALTER TABLE user_accounts ADD COLUMN request_limit_monthly INTEGER",
+        "token_limit_total": "ALTER TABLE user_accounts ADD COLUMN token_limit_total INTEGER",
+        "token_limit_daily": "ALTER TABLE user_accounts ADD COLUMN token_limit_daily INTEGER",
+        "token_limit_monthly": "ALTER TABLE user_accounts ADD COLUMN token_limit_monthly INTEGER",
+        "cost_limit_total": "ALTER TABLE user_accounts ADD COLUMN cost_limit_total NUMERIC",
+        "cost_limit_daily": "ALTER TABLE user_accounts ADD COLUMN cost_limit_daily NUMERIC",
+        "cost_limit_monthly": "ALTER TABLE user_accounts ADD COLUMN cost_limit_monthly NUMERIC",
+    }
+    changed_users = False
+    for column, ddl in user_additions.items():
+        if not existing_user_columns or column in existing_user_columns:
+            continue
+        db.execute(text(ddl))
+        changed_users = True
+    if changed_users:
         db.commit()
 
 
@@ -200,7 +243,7 @@ app = FastAPI(
     redoc_url="/api-redoc",
     openapi_url="/openapi.json",
 )
-app.add_middleware(SessionMiddleware, secret_key=get_settings().session_secret_key, same_site="lax")
+app.add_middleware(SessionMiddleware, secret_key=settings.session_secret_key, same_site="lax")
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 
@@ -240,20 +283,26 @@ async def _log_api_client_auth_failure(request: Request, exc: ApiClientAuthError
             log_type="api_client_auth",
             model_name=requested_model,
             requested_model=requested_model,
+            session_id=LogService.extract_session_id(parsed_body if isinstance(parsed_body, dict) else None),
             request_path=request.url.path,
+            http_method=request.method.upper(),
             is_stream=bool(isinstance(parsed_body, dict) and parsed_body.get("stream") is True),
             has_image=ProxySafeHelpers.payload_has_image(parsed_body if isinstance(parsed_body, dict) else None),
             success=False,
             status_code=exc.status_code,
+            reasoning_level=LogService.extract_reasoning_level(parsed_body if isinstance(parsed_body, dict) else None),
             request_body_json=request_body_json,
             message=exc.message,
             api_client_key_id=exc.api_client_key_id,
             api_client_key_name=exc.api_client_key_name,
             api_client_key_prefix=exc.api_client_key_prefix,
+            user_account_id=exc.user_account_id,
+            user_account_name=exc.user_account_name,
             api_client_auth_result=exc.code,
             api_client_remaining_tokens=exc.remaining_tokens,
             api_client_policy_snapshot_json=exc.policy_snapshot_json,
             trace=[{"result": "auth_rejected", "error": exc.code, "latency_ms": 0}],
+            attempt_count=1,
             token_request_payload=parsed_body if isinstance(parsed_body, dict) else None,
             schedule_token_fill=False,
         )
@@ -299,6 +348,7 @@ app.include_router(conversations_router, dependencies=[Depends(require_admin_api
 app.include_router(api_keys_router, dependencies=[Depends(require_admin_api_user)])
 app.include_router(providers_router, dependencies=[Depends(require_admin_api_user)])
 app.include_router(provider_models_router, dependencies=[Depends(require_admin_api_user)])
+app.include_router(models_router)
 app.include_router(settings_router, dependencies=[Depends(require_admin_api_user)])
 app.include_router(logs_router, dependencies=[Depends(require_admin_api_user)])
 app.include_router(metrics_router, dependencies=[Depends(require_admin_api_user)])

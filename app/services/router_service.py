@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
 from app.services.log_service import LogService
+from app.services.model_catalog_service import ModelCatalogService
 from app.services.provider_service import ProviderService
 from app.services.setting_service import SettingService
 
@@ -58,6 +59,7 @@ class RouterService:
         now = datetime.utcnow()
         metrics = LogService.route_metric_summary(db, window_minutes=RouterService.RECENT_WINDOW_MINUTES, requested_model=model_name)
         allowed_provider_ids = set(route_context.allowed_provider_ids) if route_context and route_context.allowed_provider_ids is not None else None
+        enabled_model_names = ModelCatalogService.enabled_model_name_set(db)
 
         candidates: list[RouteCandidate] = []
         for provider in providers:
@@ -67,6 +69,8 @@ class RouterService:
                 continue
             for provider_model in provider.provider_models:
                 if not provider_model.enabled:
+                    continue
+                if enabled_model_names and provider_model.model_name not in enabled_model_names:
                     continue
                 if model_name and provider_model.model_name != model_name:
                     continue

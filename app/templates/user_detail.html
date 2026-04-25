@@ -1,0 +1,279 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero-panel hero-panel-compact cockpit-hero">
+    <div class="cockpit-hero-copy">
+        <div class="eyebrow">User Detail</div>
+        <h2>用户详情 · {{ user.username }}</h2>
+        <p>查看该账号的基础资料、名下 API Key、最近日志与最近账单。</p>
+    </div>
+    <div class="cockpit-hero-aside">
+        <div class="cockpit-aside-label">用户摘要</div>
+        <div class="cockpit-aside-value">{{ user.id }}</div>
+        <div class="cockpit-aside-copy">{{ user.email }}</div>
+        <div class="cockpit-health-bar"><span style="width: 100%"></span></div>
+        <div class="cockpit-aside-meta">
+            <span>{{ '管理员' if user.role == 'admin' else '普通用户' }}</span>
+            <span>{{ '启用中' if user.enabled else '已禁用' }}</span>
+        </div>
+    </div>
+</section>
+
+{% if error_message %}
+<section class="panel-card"><div class="auth-alert">{{ error_message }}</div></section>
+{% endif %}
+{% if success_message %}
+<section class="panel-card"><div class="auth-success">
+    {% if success_message == 'quota_updated' %}账户额度与冻结金额已更新
+    {% else %}操作已完成
+    {% endif %}
+</div></section>
+{% endif %}
+
+<section class="stats-grid">
+    <article class="metric-card"><span>名下 API Key</span><strong>{{ owned_api_keys|length }}</strong></article>
+    <article class="metric-card"><span>总请求量</span><strong>{{ totals.total_requests }}</strong></article>
+    <article class="metric-card"><span>总 Token</span><strong>{{ totals.total_tokens }}</strong></article>
+    <article class="metric-card"><span>可用余额</span><strong>{{ '%.6f'|format(totals.available_balance) if totals.available_balance is not none else '不限' }}</strong></article>
+    <article class="metric-card"><span>冻结金额</span><strong>{{ '%.6f'|format(account_summary.frozen_amount or 0) }}</strong></article>
+    <article class="metric-card"><span>累计费用</span><strong>{{ '%.6f'|format(account_summary.total_cost_used or 0) }}</strong></article>
+    <article class="metric-card"><span>累计充值</span><strong>{{ '%.6f'|format(account_summary.total_recharge_amount or 0) }}</strong></article>
+</section>
+
+<section class="dashboard-command-grid">
+    <div class="panel-card section-shell">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">Profile</div>
+                <h3>基础信息</h3>
+            </div>
+        </div>
+        <div class="api-key-chip-grid">
+            <article class="api-key-chip-card"><strong>用户名</strong><span>{{ user.username }}</span></article>
+            <article class="api-key-chip-card"><strong>邮箱</strong><span>{{ user.email }}</span></article>
+            <article class="api-key-chip-card"><strong>角色</strong><span>{{ '管理员' if user.role == 'admin' else '普通用户' }}</span></article>
+            <article class="api-key-chip-card"><strong>最近登录</strong><span>{{ user.last_login_at or '-' }}</span></article>
+            <article class="api-key-chip-card"><strong>创建时间</strong><span>{{ user.created_at }}</span></article>
+            <article class="api-key-chip-card"><strong>会话数</strong><span>{{ conversation_count }}</span></article>
+            <article class="api-key-chip-card"><strong>账户总余额</strong><span>{{ '%.6f'|format(account_summary.balance_amount) if account_summary.balance_amount is not none else '不限' }}</span></article>
+            <article class="api-key-chip-card"><strong>冻结金额</strong><span>{{ '%.6f'|format(account_summary.frozen_amount or 0) }}</span></article>
+            <article class="api-key-chip-card"><strong>账户可用余额</strong><span>{{ '%.6f'|format(account_summary.available_balance) if account_summary.available_balance is not none else '不限' }}</span></article>
+            <article class="api-key-chip-card"><strong>今日请求</strong><span>{{ account_summary.day_requests }}</span></article>
+            <article class="api-key-chip-card"><strong>本月请求</strong><span>{{ account_summary.month_requests }}</span></article>
+            <article class="api-key-chip-card"><strong>本月费用</strong><span>{{ '%.6f'|format(account_summary.month_cost_used or 0) }}</span></article>
+        </div>
+    </div>
+    <div class="dashboard-command-side">
+        <div class="panel-card">
+            <div class="panel-head">
+                <div>
+                    <div class="panel-kicker">Actions</div>
+                    <h3>快捷入口</h3>
+                </div>
+            </div>
+            <div class="dashboard-signal-list">
+                <div><span>返回用户列表</span><strong><a href="/users" data-shell-link>回到用户管理</a></strong></div>
+                <div><span>名下 API Key</span><strong>{{ owned_api_keys|length }}</strong></div>
+                <div><span>累计费用</span><strong>{{ '%.6f'|format(totals.total_cost) }}</strong></div>
+                <div><span>累计会话</span><strong>{{ conversation_count }}</strong></div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="panel-card section-shell">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">Quota Policy</div>
+            <h3>账户额度与冻结金额</h3>
+        </div>
+    </div>
+    <form class="form-grid" method="post" action="/users/{{ user.id }}/quota-policy">
+        <label>
+            <span>冻结金额</span>
+            <input class="field-input" name="frozen_amount" type="number" step="0.000001" value="{{ '%.6f'|format(account_summary.frozen_amount or 0) }}">
+        </label>
+        <label>
+            <span>总调用次数上限</span>
+            <input class="field-input" name="request_limit_total" type="number" min="0" value="{{ account_summary.request_limit_total if account_summary.request_limit_total is not none else '' }}">
+        </label>
+        <label>
+            <span>日调用次数上限</span>
+            <input class="field-input" name="request_limit_daily" type="number" min="0" value="{{ account_summary.request_limit_daily if account_summary.request_limit_daily is not none else '' }}">
+        </label>
+        <label>
+            <span>月调用次数上限</span>
+            <input class="field-input" name="request_limit_monthly" type="number" min="0" value="{{ account_summary.request_limit_monthly if account_summary.request_limit_monthly is not none else '' }}">
+        </label>
+        <label>
+            <span>总 Token 上限</span>
+            <input class="field-input" name="token_limit_total" type="number" min="0" value="{{ account_summary.token_limit_total if account_summary.token_limit_total is not none else '' }}">
+        </label>
+        <label>
+            <span>日 Token 上限</span>
+            <input class="field-input" name="token_limit_daily" type="number" min="0" value="{{ account_summary.token_limit_daily if account_summary.token_limit_daily is not none else '' }}">
+        </label>
+        <label>
+            <span>月 Token 上限</span>
+            <input class="field-input" name="token_limit_monthly" type="number" min="0" value="{{ account_summary.token_limit_monthly if account_summary.token_limit_monthly is not none else '' }}">
+        </label>
+        <label>
+            <span>总金额上限</span>
+            <input class="field-input" name="cost_limit_total" type="number" step="0.000001" min="0" value="{{ '%.6f'|format(account_summary.cost_limit_total) if account_summary.cost_limit_total is not none else '' }}">
+        </label>
+        <label>
+            <span>日金额上限</span>
+            <input class="field-input" name="cost_limit_daily" type="number" step="0.000001" min="0" value="{{ '%.6f'|format(account_summary.cost_limit_daily) if account_summary.cost_limit_daily is not none else '' }}">
+        </label>
+        <label>
+            <span>月金额上限</span>
+            <input class="field-input" name="cost_limit_monthly" type="number" step="0.000001" min="0" value="{{ '%.6f'|format(account_summary.cost_limit_monthly) if account_summary.cost_limit_monthly is not none else '' }}">
+        </label>
+        <div class="form-actions form-span-2">
+            <button class="btn btn-accent" type="submit">保存账户额度</button>
+        </div>
+        <div class="form-span-2 table-muted">日/月配额按 UTC 自然日与自然月统计；若名下 API Key 存在“不限余额”密钥，则账户余额仅展示，不参与余额拦截。</div>
+    </form>
+</section>
+
+<section class="panel-card section-shell">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">API Keys</div>
+            <h3>名下 API Key</h3>
+        </div>
+    </div>
+    <div class="table-shell">
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>名称</th>
+                    <th>前缀</th>
+                    <th>状态</th>
+                    <th>余额</th>
+                    <th>累计 Token</th>
+                    <th>最近使用</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% if owned_api_keys %}
+                    {% for item in owned_api_keys %}
+                    <tr>
+                        <td>{{ item.id }}</td>
+                        <td>{{ item.name }}</td>
+                        <td>{{ item.key_masked }}</td>
+                        <td>
+                            {% if item.status == 'active' %}正常可用
+                            {% elif item.status == 'disabled' %}已禁用
+                            {% elif item.status == 'expired' %}已过期
+                            {% elif item.status == 'quota_exhausted' %}额度耗尽
+                            {% elif item.status == 'cost_quota_exhausted' %}金额额度耗尽
+                            {% elif item.status == 'balance_exhausted' %}余额耗尽
+                            {% elif item.status == 'unbound' %}未绑定渠道
+                            {% else %}{{ item.status }}
+                            {% endif %}
+                        </td>
+                        <td>{{ item.balance_amount if item.balance_amount is not none else '不限' }}</td>
+                        <td>{{ item.total_tokens_used }}</td>
+                        <td>{{ item.last_used_at or '-' }}</td>
+                    </tr>
+                    {% endfor %}
+                {% else %}
+                    <tr><td colspan="7"><div class="empty-state">该用户当前没有绑定 API Key。</div></td></tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<section class="dashboard-command-grid">
+    <div class="panel-card section-shell">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">Recent Logs</div>
+                <h3>最近日志</h3>
+            </div>
+        </div>
+        <div class="table-shell">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>时间</th>
+                        <th>类型</th>
+                        <th>模型</th>
+                        <th>会话号</th>
+                        <th>状态</th>
+                        <th>Tokens</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% if recent_logs %}
+                        {% for item in recent_logs %}
+                        <tr>
+                            <td>{{ item.created_at }}</td>
+                            <td>
+                                {% if item.log_type == 'chat' %}对话请求
+                                {% elif item.log_type == 'responses' %}响应请求
+                                {% elif item.log_type == 'embeddings' %}历史向量请求（已下线）
+                                {% elif item.log_type == 'api_client_auth' %}密钥鉴权
+                                {% else %}{{ item.log_type }}
+                                {% endif %}
+                            </td>
+                            <td>{{ item.requested_model or item.model_name or '-' }}</td>
+                            <td>{{ item.conversation_key or '-' }}</td>
+                            <td>{{ '成功' if item.success else '失败' }}</td>
+                            <td>{{ item.total_tokens or 0 }}</td>
+                        </tr>
+                        {% endfor %}
+                    {% else %}
+                        <tr><td colspan="6"><div class="empty-state">暂无日志。</div></td></tr>
+                    {% endif %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="dashboard-command-side">
+        <div class="panel-card section-shell">
+            <div class="section-subhead">
+                <div>
+                    <div class="panel-kicker">Recent Billing</div>
+                    <h3>最近账单</h3>
+                </div>
+            </div>
+            <div class="table-shell">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>时间</th>
+                            <th>类型</th>
+                            <th>金额</th>
+                            <th>备注</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% if recent_billing %}
+                            {% for item in recent_billing %}
+                            <tr>
+                                <td>{{ item.created_at }}</td>
+                                <td>
+                                    {% if item.record_type == 'request_charge' %}请求扣费
+                                    {% elif item.record_type == 'top_up' %}充值
+                                    {% elif item.record_type == 'manual_adjustment' %}人工调整
+                                    {% else %}{{ item.record_type }}
+                                    {% endif %}
+                                </td>
+                                <td>{{ '%.6f'|format(item.amount) }}</td>
+                                <td>{{ item.remark or '-' }}</td>
+                            </tr>
+                            {% endfor %}
+                        {% else %}
+                            <tr><td colspan="4"><div class="empty-state">暂无账单记录。</div></td></tr>
+                        {% endif %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock %}

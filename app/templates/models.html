@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero-panel hero-panel-compact cockpit-hero">
+    <div class="cockpit-hero-copy">
+        <div class="eyebrow">Model Registry</div>
+        <h2>模型配置</h2>
+        <p>统一维护模型基础价格、速度标签、全局启用状态，并控制各个中转站对同一模型的可用性与价格倍率。</p>
+        <div class="hero-actions">
+            <button class="btn btn-accent interactive-btn" id="add-model-btn" type="button">新增模型</button>
+            <button class="btn btn-ghost interactive-btn" id="models-refresh-btn" type="button">刷新</button>
+        </div>
+    </div>
+    <div class="cockpit-hero-aside">
+        <div class="cockpit-aside-label">配置口径</div>
+        <div class="cockpit-aside-value">每百万</div>
+        <div class="cockpit-aside-copy">界面按每百万 token 录入，系统自动换算为底层每千 token 计费字段</div>
+        <div class="cockpit-health-bar"><span style="width: 100%"></span></div>
+        <div class="cockpit-aside-meta">
+            <span>基础价 × 渠道倍率</span>
+            <span>统一管理</span>
+        </div>
+    </div>
+</section>
+
+<section class="stats-grid">
+    <article class="metric-card"><span>模型总数</span><strong data-model-summary="total">0</strong></article>
+    <article class="metric-card"><span>已启用模型</span><strong data-model-summary="enabled">0</strong></article>
+    <article class="metric-card"><span>已绑定渠道</span><strong data-model-summary="boundProviders">0</strong></article>
+    <article class="metric-card"><span>可路由渠道</span><strong data-model-summary="enabledProviders">0</strong></article>
+</section>
+
+<section class="panel-card section-shell">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">Model Matrix</div>
+            <h3>模型聚合列表</h3>
+        </div>
+    </div>
+    <div class="table-toolbar">
+        <input class="field-input search-input" id="models-search" type="search" placeholder="搜索模型名、展示名、速度标签、渠道名">
+    </div>
+    <div class="table-shell">
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>模型</th>
+                    <th>状态</th>
+                    <th>基础价格</th>
+                    <th>速度</th>
+                    <th>可用中转站</th>
+                    <th>平均倍率</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody id="models-table-body"></tbody>
+        </table>
+    </div>
+</section>
+
+<div class="modal-shell hidden" id="model-modal">
+    <div class="modal-card modal-lg">
+        <div class="modal-head">
+            <h3 id="model-modal-title">新增模型</h3>
+            <button class="icon-btn interactive-btn" id="model-modal-close" type="button">×</button>
+        </div>
+        <form class="form-grid" id="model-form">
+            <label>
+                <span>模型名</span>
+                <input class="field-input" id="model-name" required>
+            </label>
+            <label>
+                <span>展示名</span>
+                <input class="field-input" id="model-display-name" placeholder="留空则直接显示模型名">
+            </label>
+            <label>
+                <span>输入单价 /1M</span>
+                <input class="field-input" id="model-input-price" type="number" min="0" step="0.0001" placeholder="例如 3">
+            </label>
+            <label>
+                <span>输出单价 /1M</span>
+                <input class="field-input" id="model-output-price" type="number" min="0" step="0.0001" placeholder="例如 12">
+            </label>
+            <label>
+                <span>速度标签</span>
+                <input class="field-input" id="model-speed-label" placeholder="例如 快 / 均衡 / 慢">
+            </label>
+            <label class="toggle-row">
+                <input id="model-enabled" type="checkbox" checked>
+                <span>全局启用该模型</span>
+            </label>
+            <label class="form-span-2">
+                <span>备注</span>
+                <textarea class="field-input" id="model-remark" rows="3" placeholder="可填写适用场景、限制说明、推荐用途"></textarea>
+            </label>
+            <label class="form-span-2">
+                <span>渠道绑定与倍率</span>
+                <div class="settings-note">
+                    <strong>价格计算</strong>
+                    <span>渠道实际价格 = 模型基础价格 × 该渠道倍率。勾选“绑定”后，这个模型才会出现在对应中转站。</span>
+                </div>
+                <div class="table-shell">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>绑定</th>
+                                <th>渠道</th>
+                                <th>渠道启用</th>
+                                <th>模型启用</th>
+                                <th>倍率</th>
+                                <th>优先级</th>
+                                <th>权重</th>
+                                <th>预估价格</th>
+                            </tr>
+                        </thead>
+                        <tbody id="model-binding-body"></tbody>
+                    </table>
+                </div>
+            </label>
+            <div class="form-actions form-span-2">
+                <button class="btn btn-ghost interactive-btn" id="model-form-cancel" type="button">取消</button>
+                <button class="btn btn-accent interactive-btn" id="model-submit-btn" type="submit">保存</button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,151 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero-panel hero-panel-compact cockpit-hero">
+    <div class="cockpit-hero-copy">
+        <div class="eyebrow">Conversations</div>
+        <h2>我的会话回放</h2>
+        <p>查看当前账号下产生的会话，并按会话号、模型、回复摘要快速定位。</p>
+    </div>
+    <div class="cockpit-hero-aside">
+        <div class="cockpit-aside-label">会话概览</div>
+        <div class="cockpit-aside-value">{{ pagination.total }}</div>
+        <div class="cockpit-aside-copy">当前筛选命中的会话数</div>
+        <div class="cockpit-health-bar"><span style="width: 100%"></span></div>
+        <div class="cockpit-aside-meta">
+            <span>当前页 {{ pagination.page }}</span>
+            <span>总页数 {{ pagination.total_pages }}</span>
+        </div>
+    </div>
+</section>
+
+<section class="panel-card section-shell conversation-toolbar">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">Search</div>
+            <h3>搜索会话</h3>
+        </div>
+    </div>
+    <form class="filter-grid" method="get" action="/user/conversations">
+        <label>
+            <span>关键字</span>
+            <input class="field-input" name="query" value="{{ filters.query }}" placeholder="会话号 / 模型 / 提示词 / 回复摘要">
+        </label>
+        <label>
+            <span>每页数量</span>
+            <select class="field-input" name="page_size">
+                {% for size in [10,20,50,100] %}
+                <option value="{{ size }}" {% if pagination.page_size == size %}selected{% endif %}>{{ size }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        {% if active_key %}
+        <input type="hidden" name="conversation_key" value="{{ active_key }}">
+        {% endif %}
+        <div class="form-actions">
+            <button class="btn btn-accent" type="submit">查询</button>
+        </div>
+    </form>
+</section>
+
+<section class="conversation-shell">
+    <div class="panel-card section-shell conversation-list-panel">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">List</div>
+                <h3>会话列表</h3>
+            </div>
+        </div>
+        <div class="conversation-list">
+            {% if conversations %}
+                {% for item in conversations %}
+                <a class="conversation-item {% if active_key == item.conversation_key %}active{% endif %}" href="/user/conversations?query={{ filters.query | urlencode }}&page={{ pagination.page }}&page_size={{ pagination.page_size }}&conversation_key={{ item.conversation_key | urlencode }}" data-shell-link>
+                    <div class="conversation-item-top">
+                        <strong>{{ item.conversation_key }}</strong>
+                        <span>{{ item.request_count }} 次</span>
+                    </div>
+                    <div class="conversation-item-meta">
+                        <span>{{ item.latest_model or '-' }}</span>
+                        <span>{{ item.total_tokens }} tokens</span>
+                    </div>
+                    <p>{{ item.preview_text or '暂无回复预览' }}</p>
+                    <div class="conversation-item-foot">
+                        <span>{{ item.updated_at }}</span>
+                        <span>{{ item.latest_provider_name or '-' }}</span>
+                    </div>
+                </a>
+                {% endfor %}
+            {% else %}
+                <div class="empty-state">暂无会话记录。</div>
+            {% endif %}
+        </div>
+        <div class="logs-pagination-bar topbar-actions">
+            <div class="logs-page-meta">第 {{ pagination.page }} / {{ pagination.total_pages }} 页</div>
+            <div class="logs-page-actions">
+                {% if pagination.has_prev %}
+                <a class="topbar-btn" href="/user/conversations?query={{ filters.query | urlencode }}&page_size={{ pagination.page_size }}&page={{ pagination.prev_page }}{% if active_key %}&conversation_key={{ active_key | urlencode }}{% endif %}" data-shell-link>上一页</a>
+                {% endif %}
+                {% if pagination.has_next %}
+                <a class="topbar-btn" href="/user/conversations?query={{ filters.query | urlencode }}&page_size={{ pagination.page_size }}&page={{ pagination.next_page }}{% if active_key %}&conversation_key={{ active_key | urlencode }}{% endif %}" data-shell-link>下一页</a>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <div class="panel-card section-shell conversation-detail-panel">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">Replay</div>
+                <h3>{{ replay.conversation_key if replay else '选择左侧会话' }}</h3>
+            </div>
+        </div>
+        {% if replay %}
+        <div class="conversation-summary">
+            <div class="conversation-summary-grid">
+                <article class="conversation-summary-card">
+                    <span>请求数</span>
+                    <strong>{{ replay.request_count }}</strong>
+                </article>
+                <article class="conversation-summary-card">
+                    <span>成功 / 失败</span>
+                    <strong>{{ replay.success_count }} / {{ replay.failure_count }}</strong>
+                </article>
+                <article class="conversation-summary-card">
+                    <span>总 Token</span>
+                    <strong>{{ replay.total_tokens }}</strong>
+                </article>
+                <article class="conversation-summary-card">
+                    <span>最近模型</span>
+                    <strong>{{ replay.latest_model or '-' }}</strong>
+                </article>
+            </div>
+            <div class="conversation-meta-bar">
+                <span>开始时间 {{ replay.started_at }}</span>
+                <span>最近更新时间 {{ replay.updated_at }}</span>
+                <span>最近命中线路 {{ replay.latest_provider_name or '-' }}</span>
+            </div>
+        </div>
+        <div class="conversation-timeline">
+            {% for turn in replay.turns %}
+            <article class="conversation-turn conversation-turn-{{ turn.role }}">
+                <div class="conversation-turn-head">
+                    <div>
+                        <span class="conversation-role">{{ turn.role }}</span>
+                        <strong>{{ turn.provider_name or turn.requested_model or '-' }}</strong>
+                    </div>
+                    <div class="conversation-turn-meta">
+                        <span>{{ turn.created_at }}</span>
+                        <span>{{ turn.total_tokens or 0 }} tokens</span>
+                        <span>{{ 'stream' if turn.is_stream else 'json' }}</span>
+                        <span>{{ 'vision' if turn.has_image else 'text' }}</span>
+                    </div>
+                </div>
+                <pre class="conversation-turn-body">{{ turn.content }}</pre>
+            </article>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="empty-state">选择一个会话后，可查看完整回放内容。</div>
+        {% endif %}
+    </div>
+</section>
+{% endblock %}

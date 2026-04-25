@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation
 from math import ceil
 from urllib.parse import parse_qsl, urlencode
 
@@ -13,6 +14,7 @@ from app.models.user_account import UserAccount
 from app.services.setting_service import SettingService
 from app.services.user_auth_service import USER_ROLE_ADMIN, USER_ROLE_USER, require_admin_api_user, UserAuthService
 from app.services.user_portal_service import UserPortalService
+from app.services.user_quota_service import UserQuotaService
 
 
 router = APIRouter()
@@ -22,7 +24,7 @@ templates = Jinja2Templates(directory="app/templates")
 def require_admin_html(request: Request, db: Session) -> UserAccount | RedirectResponse:
     user = UserAuthService.get_current_user(request, db)
     if user is None:
-        return RedirectResponse("/login", status_code=303)
+        return RedirectResponse(UserAuthService.build_login_redirect_path(request), status_code=303)
     if user.role != USER_ROLE_ADMIN:
         return RedirectResponse("/user", status_code=303)
     return user
@@ -41,6 +43,37 @@ def _merge_query(query_string: str | None, **updates) -> str:
 def _redirect_users(return_to: str | None = None, **updates):
     query = _merge_query(return_to, **updates)
     return RedirectResponse(f"/users?{query}" if query else "/users", status_code=303)
+
+
+def _redirect_user_detail(user_id: int, **updates):
+    query = _merge_query(None, **updates)
+    return RedirectResponse(f"/users/{user_id}?{query}" if query else f"/users/{user_id}", status_code=303)
+
+
+def _parse_optional_int(value: str | None, *, field_label: str) -> int | None:
+    text = (value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = int(text)
+    except ValueError as exc:
+        raise ValueError(f"{field_label}必须为整数") from exc
+    if parsed < 0:
+        raise ValueError(f"{field_label}不能为负数")
+    return parsed
+
+
+def _parse_optional_decimal(value: str | None, *, field_label: str) -> Decimal | None:
+    text = (value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = Decimal(text)
+    except InvalidOperation as exc:
+        raise ValueError(f"{field_label}必须为数字") from exc
+    if parsed < 0:
+        raise ValueError(f"{field_label}不能为负数")
+    return parsed
 
 
 def _users_page_response(
@@ -143,6 +176,8 @@ def user_detail_page(user_id: int, request: Request, db: Session = Depends(get_d
             "page_name": "users",
             "portal_type": "admin",
             "current_user": current_user,
+            "error_message": request.query_params.get("error"),
+            "success_message": request.query_params.get("success"),
             **payload,
         },
     )
@@ -241,6 +276,48 @@ def reset_user_password(
     except ValueError as exc:
         return _redirect_users(return_to, error=str(exc))
     return _redirect_users(return_to, success="updated")
+
+
+@router.post("/users/{user_id}/quota-policy")
+def update_user_quota_policy(
+    user_id: int,
+    request: Request,
+    frozen_amount: str = Form(default="0"),
+    request_limit_total: str = Form(default=""),
+    request_limit_daily: str = Form(default=""),
+    request_limit_monthly: str = Form(default=""),
+    token_limit_total: str = Form(default=""),
+    token_limit_daily: str = Form(default=""),
+    token_limit_monthly: str = Form(default=""),
+    cost_limit_total: str = Form(default=""),
+    cost_limit_daily: str = Form(default=""),
+    cost_limit_monthly: str = Form(default=""),
+    db: Session = Depends(get_db),
+):
+    current_user = require_admin_html(request, db)
+    if isinstance(current_user, RedirectResponse):
+        return current_user
+    user = db.get(UserAccount, user_id)
+    if user is None:
+        return _redirect_users(error="not_found")
+    try:
+        UserQuotaService.update_limits(
+            db,
+            user=user,
+            frozen_amount=_parse_optional_decimal(frozen_amount, field_label="冻结金额") or Decimal("0"),
+            request_limit_total=_parse_optional_int(request_limit_total, field_label="总调用次数上限"),
+            request_limit_daily=_parse_optional_int(request_limit_daily, field_label="日调用次数上限"),
+            request_limit_monthly=_parse_optional_int(request_limit_monthly, field_label="月调用次数上限"),
+            token_limit_total=_parse_optional_int(token_limit_total, field_label="总 Token 上限"),
+            token_limit_daily=_parse_optional_int(token_limit_daily, field_label="日 Token 上限"),
+            token_limit_monthly=_parse_optional_int(token_limit_monthly, field_label="月 Token 上限"),
+            cost_limit_total=_parse_optional_decimal(cost_limit_total, field_label="总金额上限"),
+            cost_limit_daily=_parse_optional_decimal(cost_limit_daily, field_label="日金额上限"),
+            cost_limit_monthly=_parse_optional_decimal(cost_limit_monthly, field_label="月金额上限"),
+        )
+    except ValueError as exc:
+        return _redirect_user_detail(user_id, error=str(exc))
+    return _redirect_user_detail(user_id, success="quota_updated")
 
 
 @router.get("/api/users/options")

@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import secrets
 from datetime import datetime
+from urllib.parse import quote, urlsplit
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
@@ -22,6 +23,17 @@ USER_ROLE_USER = "user"
 
 
 class UserAuthService:
+    ADMIN_PORTAL_PREFIXES = (
+        "/providers",
+        "/settings",
+        "/playground",
+        "/docs",
+        "/api-keys",
+        "/logs",
+        "/conversations",
+        "/users",
+    )
+
     @staticmethod
     def normalize_username(value: str) -> str:
         return value.strip().lower()
@@ -213,6 +225,55 @@ class UserAuthService:
             request.session.clear()
             return None
         return user
+
+    @staticmethod
+    def normalize_next_path(next_path: str | None) -> str | None:
+        text = (next_path or "").strip()
+        if not text:
+            return None
+        parsed = urlsplit(text)
+        if parsed.scheme or parsed.netloc:
+            return None
+        if not parsed.path.startswith("/") or parsed.path.startswith("//"):
+            return None
+        normalized = parsed.path
+        if parsed.query:
+            normalized = f"{normalized}?{parsed.query}"
+        return normalized
+
+    @staticmethod
+    def get_role_home_path(role: str) -> str:
+        return "/" if role == USER_ROLE_ADMIN else "/user"
+
+    @staticmethod
+    def _match_path(path: str, prefix: str) -> bool:
+        return path == prefix or path.startswith(f"{prefix}/")
+
+    @staticmethod
+    def is_route_allowed_for_role(path: str, role: str) -> bool:
+        normalized = UserAuthService.normalize_next_path(path)
+        if not normalized:
+            return False
+        route_path = urlsplit(normalized).path
+        if role == USER_ROLE_ADMIN:
+            return route_path == "/" or any(UserAuthService._match_path(route_path, prefix) for prefix in UserAuthService.ADMIN_PORTAL_PREFIXES)
+        if role == USER_ROLE_USER:
+            return UserAuthService._match_path(route_path, "/user")
+        return False
+
+    @staticmethod
+    def resolve_post_login_path(role: str, next_path: str | None = None) -> str:
+        normalized = UserAuthService.normalize_next_path(next_path)
+        if normalized and UserAuthService.is_route_allowed_for_role(normalized, role):
+            return normalized
+        return UserAuthService.get_role_home_path(role)
+
+    @staticmethod
+    def build_login_redirect_path(request: Request) -> str:
+        current_path = request.url.path
+        if request.url.query:
+            current_path = f"{current_path}?{request.url.query}"
+        return f"/login?next={quote(current_path, safe='')}"
 
 
 def require_admin_api_user(

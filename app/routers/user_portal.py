@@ -8,6 +8,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.services.model_catalog_service import ModelCatalogService
 from app.services.user_auth_service import USER_ROLE_ADMIN, UserAuthService
 from app.services.user_portal_service import UserPortalService
 
@@ -19,7 +20,7 @@ templates = Jinja2Templates(directory="app/templates")
 def require_user_html(request: Request, db: Session):
     user = UserAuthService.get_current_user(request, db)
     if user is None:
-        return RedirectResponse("/login", status_code=303)
+        return RedirectResponse(UserAuthService.build_login_redirect_path(request), status_code=303)
     if user.role == USER_ROLE_ADMIN:
         return RedirectResponse("/", status_code=303)
     return user
@@ -76,6 +77,25 @@ def user_profile_page(request: Request, db: Session = Depends(get_db)):
             "error_message": request.query_params.get("error"),
             "success_message": request.query_params.get("success"),
             **overview,
+        },
+    )
+
+
+@router.get("/user/models", response_class=HTMLResponse)
+def user_models_page(request: Request, db: Session = Depends(get_db)):
+    current_user = require_user_html(request, db)
+    if isinstance(current_user, RedirectResponse):
+        return current_user
+    models = ModelCatalogService.list_user_models(db, user=current_user)
+    return templates.TemplateResponse(
+        "user_models.html",
+        {
+            "request": request,
+            "title": "可用模型",
+            "page_name": "user-models",
+            "portal_type": "user",
+            "current_user": current_user,
+            "models": models,
         },
     )
 

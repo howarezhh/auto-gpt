@@ -16,6 +16,7 @@ from app.services.api_key_admin_service import ApiKeyAdminService
 from app.services.billing_service import BillingService
 from app.services.conversation_service import ConversationService
 from app.services.log_service import LogService
+from app.services.user_quota_service import UserQuotaService
 
 
 class UserPortalService:
@@ -44,33 +45,33 @@ class UserPortalService:
         owned_keys = UserPortalService.list_owned_api_keys(db, user_id=user.id)
         serialized_keys = [ApiKeyAdminService.serialize_api_key(item) for item in owned_keys]
         key_ids = [item.id for item in owned_keys]
+        quota_snapshot = UserQuotaService.get_usage_snapshot(db, user=user)
+        account_summary = UserQuotaService.serialize_policy(user=user, snapshot=quota_snapshot)
         totals = {
-            "total_requests": 0,
-            "total_tokens": 0,
-            "total_cost": 0.0,
-            "available_balance": sum(float(item.balance_amount or 0) for item in owned_keys),
+            "total_requests": quota_snapshot.total_requests,
+            "total_tokens": quota_snapshot.total_tokens,
+            "total_cost": BillingService.to_float(quota_snapshot.total_cost_used) or 0,
+            "balance_amount": account_summary["balance_amount"],
+            "frozen_amount": account_summary["frozen_amount"],
+            "available_balance": account_summary["available_balance"],
+            "total_recharge_amount": account_summary["total_recharge_amount"],
             "conversation_count": 0,
         }
         if key_ids:
-            aggregate_row = db.execute(
-                select(
-                    func.count(RequestLog.id).label("total_requests"),
-                    func.sum(RequestLog.total_tokens).label("total_tokens"),
-                    func.sum(RequestLog.total_cost).label("total_cost"),
-                    func.count(func.distinct(RequestLog.conversation_key)).label("conversation_count"),
-                ).where(RequestLog.api_client_key_id.in_(key_ids))
-            ).one()
-            totals = {
-                "total_requests": int(aggregate_row.total_requests or 0),
-                "total_tokens": int(aggregate_row.total_tokens or 0),
-                "total_cost": float(aggregate_row.total_cost or 0),
-                "available_balance": sum(float(item.balance_amount or 0) for item in owned_keys),
-                "conversation_count": int(aggregate_row.conversation_count or 0),
-            }
+            totals["conversation_count"] = int(
+                db.scalar(
+                    select(func.count(func.distinct(RequestLog.conversation_key))).where(
+                        RequestLog.api_client_key_id.in_(key_ids),
+                        RequestLog.conversation_key.is_not(None),
+                    )
+                )
+                or 0
+            )
 
         return {
             "owned_api_keys": serialized_keys,
             "totals": totals,
+            "account_summary": account_summary,
         }
 
     @staticmethod
@@ -90,18 +91,23 @@ class UserPortalService:
         key_ids = [item.id for item in owned_keys]
         if not key_ids:
             return 0, [], {"total_requests": 0, "success_requests": 0, "failed_requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "matched_api_keys": 0}, []
+        if api_client_key_id is not None and api_client_key_id not in key_ids:
+            return 0, [], {"total_requests": 0, "success_requests": 0, "failed_requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "matched_api_keys": 0}, [ApiKeyAdminService.serialize_api_key(item) for item in owned_keys]
+        effective_log_type = log_type if log_type in LogService.USER_VISIBLE_LOG_TYPES else None
         total, items, summary = LogService.list_logs(
             db,
             page=page,
             page_size=page_size,
-            log_type=log_type,
+            log_type=effective_log_type,
+            log_types=list(LogService.USER_VISIBLE_LOG_TYPES),
             provider_id=None,
             model_name=None,
             conversation_key=conversation_key,
             api_client_key_id=api_client_key_id,
             api_client_key_query=None,
+            user_account_id=user.id,
             success=success,
-            exclude_health_checks=exclude_health_checks,
+            exclude_health_checks=True,
             api_client_key_ids=key_ids,
         )
         return total, [RequestLogOut.model_validate(item) for item in items], summary, [ApiKeyAdminService.serialize_api_key(item) for item in owned_keys]
@@ -115,28 +121,44 @@ class UserPortalService:
     ) -> dict:
         owned_keys = UserPortalService.list_owned_api_keys(db, user_id=user.id)
         key_ids = [item.id for item in owned_keys]
+        quota_snapshot = UserQuotaService.get_usage_snapshot(db, user=user)
+        account_summary = UserQuotaService.serialize_policy(user=user, snapshot=quota_snapshot)
         if not key_ids:
             return {
                 "summary": {
                     "total_keys": 0,
-                    "balance_amount": 0.0,
-                    "total_cost_used": 0.0,
-                    "total_recharge_amount": 0.0,
+                    "balance_amount": account_summary["balance_amount"],
+                    "frozen_amount": account_summary["frozen_amount"],
+                    "available_balance": account_summary["available_balance"],
+                    "total_cost_used": account_summary["total_cost_used"],
+                    "total_recharge_amount": account_summary["total_recharge_amount"],
                     "recent_billed_cost": 0.0,
                     "total_billing_records": 0,
                 },
                 "key_summaries": [],
                 "records": [],
+                "account_summary": account_summary,
             }
 
         recent_since = datetime.utcnow() - timedelta(hours=24)
         summary_row = db.execute(
             select(
                 func.count(ApiClientBillingRecord.id).label("total_billing_records"),
-                func.sum(case((ApiClientBillingRecord.record_type == "request_charge", func.abs(ApiClientBillingRecord.amount)), else_=0)).label("total_request_charge"),
-                func.sum(case((ApiClientBillingRecord.record_type == "request_charge", func.abs(ApiClientBillingRecord.amount)), else_=0)).filter(ApiClientBillingRecord.created_at >= recent_since).label("recent_billed_cost"),
+                func.sum(
+                    case(
+                        (ApiClientBillingRecord.record_type == "request_charge", func.abs(ApiClientBillingRecord.amount)),
+                        else_=0,
+                    )
+                ).label("total_request_charge"),
             ).where(ApiClientBillingRecord.api_client_key_id.in_(key_ids))
         ).one()
+        recent_billed_cost = db.scalar(
+            select(func.sum(func.abs(ApiClientBillingRecord.amount))).where(
+                ApiClientBillingRecord.api_client_key_id.in_(key_ids),
+                ApiClientBillingRecord.record_type == "request_charge",
+                ApiClientBillingRecord.created_at >= recent_since,
+            )
+        ) or 0
 
         records = list(
             db.scalars(
@@ -146,18 +168,27 @@ class UserPortalService:
                 .limit(max(1, limit))
             )
         )
+        key_name_map = {item.id: item.name for item in owned_keys}
+        serialized_records = []
+        for item in records:
+            serialized = BillingService.serialize_billing_record(item).model_dump()
+            serialized["api_client_key_name"] = key_name_map.get(item.api_client_key_id)
+            serialized_records.append(serialized)
         key_summaries = [ApiKeyAdminService.serialize_api_key(item) for item in owned_keys]
         return {
             "summary": {
                 "total_keys": len(owned_keys),
-                "balance_amount": sum(float(item.balance_amount or 0) for item in owned_keys),
-                "total_cost_used": sum(float(item.total_cost_used or 0) for item in owned_keys),
-                "total_recharge_amount": sum(float(item.total_recharge_amount or 0) for item in owned_keys),
-                "recent_billed_cost": float(summary_row.recent_billed_cost or 0),
+                "balance_amount": account_summary["balance_amount"],
+                "frozen_amount": account_summary["frozen_amount"],
+                "available_balance": account_summary["available_balance"],
+                "total_cost_used": account_summary["total_cost_used"],
+                "total_recharge_amount": account_summary["total_recharge_amount"],
+                "recent_billed_cost": float(recent_billed_cost or 0),
                 "total_billing_records": int(summary_row.total_billing_records or 0),
             },
             "key_summaries": key_summaries,
-            "records": [BillingService.serialize_billing_record(item) for item in records],
+            "records": serialized_records,
+            "account_summary": account_summary,
         }
 
     @staticmethod
@@ -224,6 +255,7 @@ class UserPortalService:
             "user": user,
             "owned_api_keys": overview["owned_api_keys"],
             "totals": overview["totals"],
+            "account_summary": overview["account_summary"],
             "conversation_count": conversation_count,
             "recent_logs": [RequestLogOut.model_validate(item) for item in recent_logs],
             "recent_billing": [BillingService.serialize_billing_record(item) for item in recent_billing],

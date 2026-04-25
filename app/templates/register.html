@@ -9,6 +9,9 @@
     {% endif %}
     {% if public_registration_enabled %}
     <form class="auth-form" method="post" action="/register">
+        {% if next_path %}
+        <input name="next_path" type="hidden" value="{{ next_path }}">
+        {% endif %}
         <label>
             <span>用户名</span>
             <input class="field-input" name="username" required>

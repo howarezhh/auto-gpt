@@ -37,7 +37,9 @@ def create_api_key(payload: ApiKeyCreate, db: Session = Depends(get_db)) -> ApiK
         api_key, raw_api_key = ApiKeyAdminService.create_api_key(db, payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return ApiKeyCreateResponse(**ApiKeyAdminService.serialize_api_key(api_key), raw_api_key=raw_api_key)
+    data = ApiKeyAdminService.serialize_api_key(api_key)
+    data["raw_api_key"] = raw_api_key
+    return ApiKeyCreateResponse(**data)
 
 
 @router.get("/{api_key_id}", response_model=ApiKeyDetailOut)

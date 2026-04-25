@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
+from app.config import get_settings
 from app.database import get_db
 from app.models.provider_model import ProviderModel
 from app.models.request_log import RequestLog
@@ -20,10 +21,17 @@ router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
 
 
+def _resolve_external_base_url(request: Request) -> str:
+    configured = get_settings().normalized_external_base_url()
+    if configured:
+        return configured
+    return str(request.base_url).rstrip("/")
+
+
 def require_admin_html(request: Request, db: Session):
     user = UserAuthService.get_current_user(request, db)
     if user is None:
-        return RedirectResponse("/login", status_code=303)
+        return RedirectResponse(UserAuthService.build_login_redirect_path(request), status_code=303)
     if user.role != USER_ROLE_ADMIN:
         return RedirectResponse("/user", status_code=303)
     return user
@@ -76,6 +84,23 @@ def providers_page(request: Request, db: Session = Depends(get_db)) -> HTMLRespo
     return templates.TemplateResponse("providers.html", {"request": request, "providers": ProviderService.list_providers(db), "page_name": "providers", "portal_type": "admin", "current_user": current_user})
 
 
+@router.get("/models", response_class=HTMLResponse)
+def models_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
+    current_user = require_admin_html(request, db)
+    if isinstance(current_user, RedirectResponse):
+        return current_user
+    return templates.TemplateResponse(
+        "models.html",
+        {
+            "request": request,
+            "page_name": "models",
+            "title": "模型配置",
+            "portal_type": "admin",
+            "current_user": current_user,
+        },
+    )
+
+
 @router.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
     current_user = require_admin_html(request, db)
@@ -97,6 +122,8 @@ def docs_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
     current_user = require_admin_html(request, db)
     if isinstance(current_user, RedirectResponse):
         return current_user
+    external_base_url = _resolve_external_base_url(request)
+    external_v1_base_url = f"{external_base_url}/v1"
     return templates.TemplateResponse(
         "docs.html",
         {
@@ -105,6 +132,8 @@ def docs_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
             "title": "使用文档",
             "portal_type": "admin",
             "current_user": current_user,
+            "external_base_url": external_base_url,
+            "external_v1_base_url": external_v1_base_url,
         },
     )
 

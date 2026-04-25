@@ -25,6 +25,7 @@ class ProviderModel(Base):
     circuit_opened_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     supports_stream: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     supports_vision: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    price_multiplier: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
     input_price_per_1k: Mapped[float | None] = mapped_column(Float, nullable=True)
     output_price_per_1k: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)

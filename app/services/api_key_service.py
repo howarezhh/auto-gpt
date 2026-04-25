@@ -1,16 +1,22 @@
 from dataclasses import dataclass
 from datetime import datetime
+import base64
 import hashlib
+import re
 import secrets
 from decimal import Decimal
 
+from cryptography.fernet import Fernet, InvalidToken
 from fastapi import Depends, Header, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from app.config import get_settings
 from app.database import get_db
 from app.models.api_client_key import ApiClientKey
+from app.models.user_account import UserAccount
 from app.services.router_service import RoutePolicyContext
+from app.services.user_quota_service import UserQuotaService
 from app.utils.json_utils import dumps_json
 
 
@@ -24,6 +30,8 @@ class ApiClientAuthError(Exception):
         api_client_key_id: int | None = None,
         api_client_key_name: str | None = None,
         api_client_key_prefix: str | None = None,
+        user_account_id: int | None = None,
+        user_account_name: str | None = None,
         remaining_tokens: int | None = None,
         remaining_balance: float | None = None,
         policy_snapshot_json: str | None = None,
@@ -34,6 +42,8 @@ class ApiClientAuthError(Exception):
         self.api_client_key_id = api_client_key_id
         self.api_client_key_name = api_client_key_name
         self.api_client_key_prefix = api_client_key_prefix
+        self.user_account_id = user_account_id
+        self.user_account_name = user_account_name
         self.remaining_tokens = remaining_tokens
         self.remaining_balance = remaining_balance
         self.policy_snapshot_json = policy_snapshot_json
@@ -51,10 +61,17 @@ class ApiClientAuthContext:
 
 class ApiKeyService:
     DEFAULT_KEY_PREFIX = "sk-aotu-"
+    MIN_KEY_LENGTH = 24
+    MAX_KEY_LENGTH = 128
+    KEY_PATTERN = re.compile(r"^[A-Za-z0-9\-_]+$")
 
     @staticmethod
     def generate_api_key() -> str:
         return f"{ApiKeyService.DEFAULT_KEY_PREFIX}{secrets.token_urlsafe(24)}"
+
+    @staticmethod
+    def normalize_raw_key(raw_key: str) -> str:
+        return raw_key.strip()
 
     @staticmethod
     def extract_key_prefix(raw_key: str) -> str:
@@ -62,8 +79,48 @@ class ApiKeyService:
 
     @staticmethod
     def hash_api_key(raw_key: str) -> str:
-        normalized = raw_key.strip()
+        normalized = ApiKeyService.normalize_raw_key(raw_key)
         return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def validate_raw_api_key(raw_key: str) -> str:
+        normalized = ApiKeyService.normalize_raw_key(raw_key)
+        if len(normalized) < ApiKeyService.MIN_KEY_LENGTH:
+            raise ValueError(f"API 密钥长度至少 {ApiKeyService.MIN_KEY_LENGTH} 位")
+        if len(normalized) > ApiKeyService.MAX_KEY_LENGTH:
+            raise ValueError(f"API 密钥长度不能超过 {ApiKeyService.MAX_KEY_LENGTH} 位")
+        if not normalized.startswith(ApiKeyService.DEFAULT_KEY_PREFIX):
+            raise ValueError(f"API 密钥必须以 {ApiKeyService.DEFAULT_KEY_PREFIX} 开头")
+        if not ApiKeyService.KEY_PATTERN.fullmatch(normalized):
+            raise ValueError("API 密钥仅允许字母、数字、连字符和下划线")
+        return normalized
+
+    @staticmethod
+    def build_raw_api_key(raw_key: str | None) -> str:
+        if raw_key is None or not str(raw_key).strip():
+            return ApiKeyService.generate_api_key()
+        return ApiKeyService.validate_raw_api_key(str(raw_key))
+
+    @staticmethod
+    def _get_fernet() -> Fernet:
+        settings = get_settings()
+        secret = settings.api_key_encryption_secret or settings.session_secret_key
+        derived = hashlib.sha256(secret.encode("utf-8")).digest()
+        return Fernet(base64.urlsafe_b64encode(derived))
+
+    @staticmethod
+    def encrypt_raw_api_key(raw_key: str) -> str:
+        normalized = ApiKeyService.normalize_raw_key(raw_key)
+        return ApiKeyService._get_fernet().encrypt(normalized.encode("utf-8")).decode("utf-8")
+
+    @staticmethod
+    def decrypt_raw_api_key(ciphertext: str | None) -> str | None:
+        if not ciphertext:
+            return None
+        try:
+            return ApiKeyService._get_fernet().decrypt(ciphertext.encode("utf-8")).decode("utf-8")
+        except (InvalidToken, ValueError, TypeError):
+            return None
 
     @staticmethod
     def mask_key_prefix(key_prefix: str) -> str:
@@ -94,7 +151,7 @@ class ApiKeyService:
         key_hash = ApiKeyService.hash_api_key(raw_key)
         api_client_key = db.scalar(
             select(ApiClientKey)
-            .options(selectinload(ApiClientKey.provider_bindings))
+            .options(selectinload(ApiClientKey.provider_bindings), selectinload(ApiClientKey.owner_user))
             .where(ApiClientKey.key_hash == key_hash)
         )
         if api_client_key is None:
@@ -114,14 +171,19 @@ class ApiKeyService:
         default_provider_id = api_client_key.default_provider_id
         if default_provider_id not in allowed_provider_ids:
             default_provider_id = None
-        policy_snapshot_json = dumps_json(
-            {
-                "route_mode": api_client_key.route_mode,
-                "default_provider_id": default_provider_id,
-                "manual_allow_fallback": api_client_key.manual_allow_fallback,
-                "allowed_provider_ids": allowed_provider_ids,
-            }
-        )
+        owner_user = db.get(UserAccount, api_client_key.owner_user_id) if api_client_key.owner_user_id is not None else None
+        owner_user_id = owner_user.id if owner_user is not None else None
+        owner_user_name = owner_user.username if owner_user is not None else None
+        user_quota_snapshot = UserQuotaService.get_usage_snapshot(db, user=owner_user) if owner_user is not None else None
+        policy_snapshot = {
+            "route_mode": api_client_key.route_mode,
+            "default_provider_id": default_provider_id,
+            "manual_allow_fallback": api_client_key.manual_allow_fallback,
+            "allowed_provider_ids": allowed_provider_ids,
+        }
+        if owner_user is not None and user_quota_snapshot is not None:
+            policy_snapshot["owner_user"] = UserQuotaService.serialize_policy(user=owner_user, snapshot=user_quota_snapshot)
+        policy_snapshot_json = dumps_json(policy_snapshot)
         if not api_client_key.enabled:
             raise ApiClientAuthError(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -130,6 +192,8 @@ class ApiKeyService:
                 api_client_key_id=api_client_key.id,
                 api_client_key_name=api_client_key.name,
                 api_client_key_prefix=api_client_key.key_prefix,
+                user_account_id=owner_user_id,
+                user_account_name=owner_user_name,
                 remaining_tokens=remaining_tokens,
                 remaining_balance=remaining_balance,
                 policy_snapshot_json=policy_snapshot_json,
@@ -142,6 +206,8 @@ class ApiKeyService:
                 api_client_key_id=api_client_key.id,
                 api_client_key_name=api_client_key.name,
                 api_client_key_prefix=api_client_key.key_prefix,
+                user_account_id=owner_user_id,
+                user_account_name=owner_user_name,
                 remaining_tokens=remaining_tokens,
                 remaining_balance=remaining_balance,
                 policy_snapshot_json=policy_snapshot_json,
@@ -157,6 +223,8 @@ class ApiKeyService:
                 api_client_key_id=api_client_key.id,
                 api_client_key_name=api_client_key.name,
                 api_client_key_prefix=api_client_key.key_prefix,
+                user_account_id=owner_user_id,
+                user_account_name=owner_user_name,
                 remaining_tokens=remaining_tokens,
                 remaining_balance=remaining_balance,
                 policy_snapshot_json=policy_snapshot_json,
@@ -169,6 +237,8 @@ class ApiKeyService:
                 api_client_key_id=api_client_key.id,
                 api_client_key_name=api_client_key.name,
                 api_client_key_prefix=api_client_key.key_prefix,
+                user_account_id=owner_user_id,
+                user_account_name=owner_user_name,
                 remaining_tokens=remaining_tokens,
                 remaining_balance=remaining_balance,
                 policy_snapshot_json=policy_snapshot_json,
@@ -181,10 +251,33 @@ class ApiKeyService:
                 api_client_key_id=api_client_key.id,
                 api_client_key_name=api_client_key.name,
                 api_client_key_prefix=api_client_key.key_prefix,
+                user_account_id=owner_user_id,
+                user_account_name=owner_user_name,
                 remaining_tokens=remaining_tokens,
                 remaining_balance=remaining_balance,
                 policy_snapshot_json=policy_snapshot_json,
             )
+        if owner_user is not None and user_quota_snapshot is not None:
+            violation = UserQuotaService.evaluate_violation(user=owner_user, snapshot=user_quota_snapshot)
+            if violation is not None:
+                status_code = status.HTTP_403_FORBIDDEN if violation.code == "owner_user_disabled" else status.HTTP_429_TOO_MANY_REQUESTS
+                raise ApiClientAuthError(
+                    status_code=status_code,
+                    code=violation.code,
+                    message=violation.message,
+                    api_client_key_id=api_client_key.id,
+                    api_client_key_name=api_client_key.name,
+                    api_client_key_prefix=api_client_key.key_prefix,
+                    user_account_id=owner_user_id,
+                    user_account_name=owner_user_name,
+                    remaining_tokens=remaining_tokens,
+                    remaining_balance=(
+                        float(user_quota_snapshot.available_balance)
+                        if user_quota_snapshot.available_balance is not None
+                        else remaining_balance
+                    ),
+                    policy_snapshot_json=policy_snapshot_json,
+                )
         if not allowed_provider_ids:
             raise ApiClientAuthError(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -193,6 +286,8 @@ class ApiKeyService:
                 api_client_key_id=api_client_key.id,
                 api_client_key_name=api_client_key.name,
                 api_client_key_prefix=api_client_key.key_prefix,
+                user_account_id=owner_user_id,
+                user_account_name=owner_user_name,
                 remaining_tokens=remaining_tokens,
                 remaining_balance=remaining_balance,
                 policy_snapshot_json=policy_snapshot_json,

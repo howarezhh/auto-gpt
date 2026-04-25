@@ -63,7 +63,7 @@
             <div class="dashboard-signal-list">
                 <div><span>账号角色</span><strong>普通用户</strong></div>
                 <div><span>最近登录</span><strong>{{ current_user.last_login_at or '-' }}</strong></div>
-                <div><span>当前余额</span><strong>{{ '%.6f'|format(totals.available_balance) }}</strong></div>
+                <div><span>当前余额</span><strong>{{ '%.6f'|format(totals.available_balance) if totals.available_balance is not none else '不限' }}</strong></div>
                 <div><span>累计费用</span><strong>{{ '%.6f'|format(totals.total_cost) }}</strong></div>
             </div>
         </div>

@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero-panel hero-panel-compact cockpit-hero">
+    <div class="cockpit-hero-copy">
+        <div class="eyebrow">Available Models</div>
+        <h2>可用模型</h2>
+        <p>查看当前账号下已授权可用模型的基础价格、速度标签与可命中渠道，便于外部接入时选型。</p>
+    </div>
+    <div class="cockpit-hero-aside">
+        <div class="cockpit-aside-label">展示口径</div>
+        <div class="cockpit-aside-value">/1M</div>
+        <div class="cockpit-aside-copy">价格统一按每百万 token 展示</div>
+        <div class="cockpit-health-bar"><span style="width: 100%"></span></div>
+        <div class="cockpit-aside-meta">
+            <span>仅显示当前账号可用模型</span>
+            <span>{{ models|length }} 个</span>
+        </div>
+    </div>
+</section>
+
+<section class="stats-grid">
+    <article class="metric-card"><span>可用模型数</span><strong>{{ models|length }}</strong></article>
+    <article class="metric-card"><span>有价格模型</span><strong>{{ models | selectattr('input_price_per_1k') | list | length }}</strong></article>
+    <article class="metric-card"><span>可命中渠道总数</span><strong>{{ models | sum(attribute='enabled_provider_count') }}</strong></article>
+    <article class="metric-card"><span>接入建议</span><strong>优先先测后上量</strong></article>
+</section>
+
+<section class="dashboard-command-grid">
+    <div class="panel-card section-shell">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">Model List</div>
+                <h3>模型清单</h3>
+            </div>
+        </div>
+        <div class="table-shell">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>模型</th>
+                        <th>输入价格</th>
+                        <th>输出价格</th>
+                        <th>速度</th>
+                        <th>可用渠道</th>
+                        <th>说明</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% if models %}
+                        {% for item in models %}
+                        <tr>
+                            <td>
+                                <strong>{{ item.display_name or item.model_name }}</strong>
+                                <div class="table-muted">{{ item.model_name }}</div>
+                            </td>
+                            <td>{{ '%.4f'|format((item.input_price_per_1k or 0) * 1000) if item.input_price_per_1k is not none else '-' }}/1M</td>
+                            <td>{{ '%.4f'|format((item.output_price_per_1k or 0) * 1000) if item.output_price_per_1k is not none else '-' }}/1M</td>
+                            <td>{{ item.speed_label or '-' }}</td>
+                            <td>
+                                <strong>{{ item.enabled_provider_count }}</strong>
+                                <div class="table-muted">{{ item.available_provider_names | join('、') }}</div>
+                            </td>
+                            <td>{{ item.remark or '-' }}</td>
+                        </tr>
+                        {% endfor %}
+                    {% else %}
+                        <tr><td colspan="6"><div class="empty-state">当前账号下还没有可用模型，请先让管理员为你的 API Key 绑定可用渠道。</div></td></tr>
+                    {% endif %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="dashboard-command-side">
+        <div class="panel-card">
+            <div class="panel-head">
+                <div>
+                    <div class="panel-kicker">How To Use</div>
+                    <h3>使用提醒</h3>
+                </div>
+            </div>
+            <div class="dashboard-signal-list">
+                <div><span>模型名</span><strong>以这里的模型名作为请求参数</strong></div>
+                <div><span>价格口径</span><strong>统一按每百万 token 展示</strong></div>
+                <div><span>可用渠道</span><strong>只统计当前账号已授权范围</strong></div>
+                <div><span>接入前</span><strong>建议先用小流量请求测试返回质量和速度</strong></div>
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock %}

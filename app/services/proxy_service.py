@@ -40,10 +40,6 @@ class ProxyService:
         return await ProxyService.forward_stream_request(db, endpoint_path="/responses", payload=payload, log_type="responses")
 
     @staticmethod
-    async def embeddings(db: Session, payload: dict[str, Any]) -> tuple[dict[str, Any], Provider, list[dict], int]:
-        return await ProxyService.forward_json_request(db, endpoint_path="/embeddings", payload=payload, log_type="embeddings")
-
-    @staticmethod
     async def forward_json_request(
         db: Session,
         *,
@@ -59,6 +55,8 @@ class ProxyService:
         setting = SettingService.get_or_create(db)
         request_id = uuid4().hex
         conversation_key = ProxyService._extract_conversation_key(payload, request_id)
+        session_id = LogService.extract_session_id(payload, conversation_key=conversation_key, fallback=request_id)
+        reasoning_level = LogService.extract_reasoning_level(payload)
         request_body_json = ProxyService._serialize_payload_for_logging(payload, setting=setting)
         if payload.get("stream") is True:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Use stream endpoint handler for {endpoint_path}")
@@ -79,15 +77,19 @@ class ProxyService:
                 requested_model=model_name,
                 request_id=request_id,
                 conversation_key=conversation_key,
+                session_id=session_id,
                 request_path=f"/v1{endpoint_path}",
+                http_method="POST",
                 is_stream=False,
                 has_image=has_image,
                 success=False,
                 status_code=status.HTTP_404_NOT_FOUND,
+                reasoning_level=reasoning_level,
                 request_body_json=request_body_json,
                 message="No available provider for requested model",
                 **ProxyService._build_api_client_log_kwargs(api_client_auth, auth_result="authenticated"),
                 trace=[],
+                attempt_count=0,
                 token_request_payload=payload,
                 schedule_token_fill=setting.enable_token_logging,
             )
@@ -95,12 +97,14 @@ class ProxyService:
 
         trace: list[dict] = []
         last_upstream_error: dict[str, Any] | None = None
+        attempt_count = 0
 
         for candidate in candidates:
             provider = candidate.provider
             provider_model = candidate.provider_model
             retries = max(1, min(provider.max_retries, setting.global_max_retries))
             for _ in range(retries):
+                attempt_count += 1
                 started = time.perf_counter()
                 try:
                     response, upstream_request_id = await ProxyService._forward_json(provider, endpoint_path, payload)
@@ -128,13 +132,18 @@ class ProxyService:
                         requested_model=model_name,
                         request_id=request_id,
                         conversation_key=conversation_key,
+                        session_id=session_id,
                         resolved_provider_model_id=provider_model.id,
                         request_path=f"/v1{endpoint_path}",
+                        http_method="POST",
                         is_stream=False,
                         has_image=has_image,
                         success=True,
                         status_code=200,
                         latency_ms=latency_ms,
+                        duration_ms=latency_ms,
+                        reasoning_level=reasoning_level,
+                        attempt_count=attempt_count,
                         prompt_tokens=usage_info["prompt_tokens"],
                         completion_tokens=usage_info["completion_tokens"],
                         total_tokens=usage_info["total_tokens"],
@@ -145,6 +154,7 @@ class ProxyService:
                         response_text=response_text,
                         message=f"{log_type} success",
                         **ProxyService._build_api_client_log_kwargs(api_client_auth, auth_result="authenticated"),
+                        **ProxyService._build_provider_log_kwargs(provider_model),
                         trace=trace,
                         token_request_payload=payload,
                         token_response_payload=response,
@@ -208,12 +218,15 @@ class ProxyService:
             requested_model=model_name,
             request_id=request_id,
             conversation_key=conversation_key,
+            session_id=session_id,
             resolved_provider_model_id=None,
             is_stream=False,
             has_image=has_image,
             request_body_json=request_body_json,
             request_payload=payload,
             schedule_token_fill=setting.enable_token_logging,
+            reasoning_level=reasoning_level,
+            attempt_count=attempt_count,
             api_client_auth=api_client_auth,
         )
 
@@ -233,6 +246,8 @@ class ProxyService:
         setting = SettingService.get_or_create(db)
         request_id = uuid4().hex
         conversation_key = ProxyService._extract_conversation_key(payload, request_id)
+        session_id = LogService.extract_session_id(payload, conversation_key=conversation_key, fallback=request_id)
+        reasoning_level = LogService.extract_reasoning_level(payload)
         request_body_json = ProxyService._serialize_payload_for_logging(payload, setting=setting)
         candidates = RouterService.order_candidates(
             db,
@@ -250,15 +265,19 @@ class ProxyService:
                 requested_model=model_name,
                 request_id=request_id,
                 conversation_key=conversation_key,
+                session_id=session_id,
                 request_path=f"/v1{endpoint_path}",
+                http_method="POST",
                 is_stream=True,
                 has_image=has_image,
                 success=False,
                 status_code=status.HTTP_404_NOT_FOUND,
+                reasoning_level=reasoning_level,
                 request_body_json=request_body_json,
                 message="No available provider for requested model",
                 **ProxyService._build_api_client_log_kwargs(api_client_auth, auth_result="authenticated"),
                 trace=[],
+                attempt_count=0,
                 token_request_payload=payload,
                 schedule_token_fill=setting.enable_token_logging,
             )
@@ -266,12 +285,14 @@ class ProxyService:
 
         trace: list[dict] = []
         last_upstream_error: dict[str, Any] | None = None
+        attempt_count = 0
 
         for candidate in candidates:
             provider = candidate.provider
             provider_model = candidate.provider_model
             retries = max(1, min(provider.max_retries, setting.global_max_retries))
             for _ in range(retries):
+                attempt_count += 1
                 started = time.perf_counter()
                 stream_context = None
                 trace.append(ProxyService._build_trace_item(provider, provider_model, "connecting", 0))
@@ -368,14 +389,20 @@ class ProxyService:
                                     requested_model=model_name,
                                     request_id=request_id,
                                     conversation_key=conversation_key,
+                                    session_id=session_id,
                                     resolved_provider_model_id=provider_model.id,
                                     request_path=f"/v1{endpoint_path}",
+                                    http_method="POST",
                                     is_stream=True,
                                     has_image=has_image,
                                     success=True,
                                     status_code=200,
                                     latency_ms=latency_ms,
                                     first_token_latency_ms=first_chunk_latency_ms,
+                                    ttfb_ms=first_chunk_latency_ms,
+                                    duration_ms=total_duration_ms,
+                                    reasoning_level=reasoning_level,
+                                    attempt_count=attempt_count,
                                     prompt_tokens=usage_info["prompt_tokens"],
                                     completion_tokens=usage_info["completion_tokens"],
                                     total_tokens=usage_info["total_tokens"],
@@ -385,6 +412,7 @@ class ProxyService:
                                     response_text=ProxyService._finalize_text_capture(response_text_parts),
                                     message=f"stream {log_type} success",
                                     **ProxyService._build_api_client_log_kwargs(api_client_auth, auth_result="authenticated"),
+                                    **ProxyService._build_provider_log_kwargs(provider_model),
                                     trace=final_trace,
                                     token_request_payload=payload,
                                     token_response_text=ProxyService._finalize_text_capture(token_response_parts),
@@ -428,13 +456,20 @@ class ProxyService:
                                     requested_model=model_name,
                                     request_id=request_id,
                                     conversation_key=conversation_key,
+                                    session_id=session_id,
                                     resolved_provider_model_id=provider_model.id,
                                     request_path=f"/v1{endpoint_path}",
+                                    http_method="POST",
                                     is_stream=True,
                                     has_image=has_image,
                                     success=False,
                                     status_code=502,
                                     latency_ms=latency_ms,
+                                    first_token_latency_ms=first_chunk_latency_ms,
+                                    ttfb_ms=first_chunk_latency_ms,
+                                    duration_ms=total_duration_ms,
+                                    reasoning_level=reasoning_level,
+                                    attempt_count=attempt_count,
                                     prompt_tokens=usage_info["prompt_tokens"],
                                     completion_tokens=usage_info["completion_tokens"],
                                     total_tokens=usage_info["total_tokens"],
@@ -444,6 +479,7 @@ class ProxyService:
                                     response_text=ProxyService._finalize_text_capture(response_text_parts),
                                     message=error_message or f"stream {log_type} failed",
                                     **ProxyService._build_api_client_log_kwargs(api_client_auth, auth_result="authenticated"),
+                                    **ProxyService._build_provider_log_kwargs(provider_model),
                                     trace=interrupted_trace,
                                     token_request_payload=payload,
                                     token_response_text=ProxyService._finalize_text_capture(token_response_parts),
@@ -502,12 +538,15 @@ class ProxyService:
             requested_model=model_name,
             request_id=request_id,
             conversation_key=conversation_key,
+            session_id=session_id,
             resolved_provider_model_id=None,
             is_stream=True,
             has_image=has_image,
             request_body_json=request_body_json,
             request_payload=payload,
             schedule_token_fill=setting.enable_token_logging,
+            reasoning_level=reasoning_level,
+            attempt_count=attempt_count,
             api_client_auth=api_client_auth,
         )
 
@@ -597,12 +636,15 @@ class ProxyService:
         requested_model: str | None,
         request_id: str | None,
         conversation_key: str | None,
+        session_id: str | None,
         resolved_provider_model_id: int | None,
         is_stream: bool,
         has_image: bool,
         request_body_json: str | None,
         request_payload: dict[str, Any] | None,
         schedule_token_fill: bool,
+        reasoning_level: str,
+        attempt_count: int,
         api_client_auth: ApiClientAuthContext | None = None,
     ) -> None:
         if ProxyService._attempt_count(trace) <= 1 and upstream_error is not None:
@@ -616,16 +658,20 @@ class ProxyService:
                 requested_model=requested_model,
                 request_id=request_id,
                 conversation_key=conversation_key,
+                session_id=session_id,
                 resolved_provider_model_id=resolved_provider_model_id,
                 request_path=f"/v1{endpoint_path}",
+                http_method="POST",
                 is_stream=is_stream,
                 has_image=has_image,
                 success=False,
                 status_code=status_code,
+                reasoning_level=reasoning_level,
                 request_body_json=request_body_json,
                 message=message,
                 **ProxyService._build_api_client_log_kwargs(api_client_auth, auth_result="authenticated"),
                 trace=trace,
+                attempt_count=attempt_count,
                 token_request_payload=request_payload,
                 schedule_token_fill=schedule_token_fill,
             )
@@ -639,16 +685,20 @@ class ProxyService:
             requested_model=requested_model,
             request_id=request_id,
             conversation_key=conversation_key,
+            session_id=session_id,
             resolved_provider_model_id=resolved_provider_model_id,
             request_path=f"/v1{endpoint_path}",
+            http_method="POST",
             is_stream=is_stream,
             has_image=has_image,
             success=False,
             status_code=502,
+            reasoning_level=reasoning_level,
             request_body_json=request_body_json,
             message="All providers failed",
             **ProxyService._build_api_client_log_kwargs(api_client_auth, auth_result="authenticated"),
             trace=trace,
+            attempt_count=attempt_count,
             token_request_payload=request_payload,
             schedule_token_fill=schedule_token_fill,
         )
@@ -964,9 +1014,25 @@ class ProxyService:
             "api_client_key_id": api_client_auth.api_client_key.id,
             "api_client_key_name": api_client_auth.api_client_key.name,
             "api_client_key_prefix": api_client_auth.api_client_key.key_prefix,
+            "user_account_id": api_client_auth.api_client_key.owner_user_id,
+            "user_account_name": (
+                api_client_auth.api_client_key.owner_user.username
+                if api_client_auth.api_client_key.owner_user is not None
+                else None
+            ),
             "api_client_auth_result": auth_result,
             "api_client_remaining_tokens": remaining_tokens if remaining_tokens is not None else api_client_auth.remaining_tokens,
             "api_client_policy_snapshot_json": api_client_auth.policy_snapshot_json,
+        }
+
+    @staticmethod
+    def _build_provider_log_kwargs(provider_model: ProviderModel | None) -> dict[str, Any]:
+        if provider_model is None:
+            return {}
+        return {
+            "billing_multiplier": provider_model.price_multiplier,
+            "channel_price_input_per_1k": provider_model.input_price_per_1k,
+            "channel_price_output_per_1k": provider_model.output_price_per_1k,
         }
 
     @staticmethod
