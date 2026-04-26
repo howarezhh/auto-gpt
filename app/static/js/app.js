@@ -191,10 +191,29 @@
         return `${fallbackName} 测试${statusText}${providerText}${healthText}，状态码 ${statusCode}，耗时 ${latencyMs} ms${modelText}${message}`;
     }
 
+    function renderEndpointProbeHtml(endpointResults) {
+        const items = Array.isArray(endpointResults) ? endpointResults : [];
+        if (!items.length) {
+            return '<div class="table-muted">未返回正式代理端点测试明细</div>';
+        }
+        return items.map((item) => `
+            <div class="playground-info-row">
+                <div class="playground-info-label">${escapeHtml(item.endpoint_label || item.endpoint_path || "-")}</div>
+                <div class="playground-info-value">
+                    ${item.success ? '<span class="playground-status-success">成功</span>' : '<span class="playground-status-danger">失败</span>'}
+                    · 状态码 ${escapeHtml(String(item.status_code ?? "-"))}
+                    · 耗时 ${escapeHtml(String(item.latency_ms ?? "-"))} ms
+                    · ${escapeHtml(item.message || "-")}
+                </div>
+            </div>
+        `).join("");
+    }
+
     function renderProviderTestModalBody(result, options = {}) {
         const scope = options.scope || "provider";
         const titleName = options.name || result?.provider_name || result?.model_name || "测试对象";
         const modelResults = Array.isArray(result?.model_results) ? result.model_results : [];
+        const endpointResults = Array.isArray(result?.endpoint_results) ? result.endpoint_results : [];
         const summaryRows = [
             ["测试对象", titleName],
             ["测试范围", scope === "model" ? "单模型测试" : "中转站测试"],
@@ -224,6 +243,7 @@
                         </div>
                         <div class="table-muted">状态码 ${item.status_code ?? "-"} · 耗时 ${item.latency_ms ?? "-"} ms</div>
                         <div class="provider-test-model-message">${escapeHtml(item.message || "-")}</div>
+                        <div class="provider-test-model-message">${renderEndpointProbeHtml(item.endpoint_results)}</div>
                     </article>
                 `).join("")
                 : '<div class="empty-state">当前中转站没有可展示的模型测试结果</div>')
@@ -237,6 +257,10 @@
                 <section class="provider-test-result-card">
                     <div class="panel-kicker">Result Message</div>
                     <div class="provider-test-message">${messageHtml}</div>
+                </section>
+                <section class="provider-test-result-card">
+                    <div class="panel-kicker">Endpoint Results</div>
+                    <div class="provider-test-model-message">${renderEndpointProbeHtml(endpointResults)}</div>
                 </section>
                 ${scope === "provider" ? `
                 <section class="provider-test-result-card">
@@ -877,6 +901,7 @@
                                 </div>
                                 <div class="table-muted">状态码 ${model.status_code ?? "-"} · 耗时 ${model.latency_ms ?? "-"} ms</div>
                                 <div class="playground-batch-model-message">${escapeHtml(model.message || "-")}</div>
+                                <div class="playground-batch-model-message">${renderEndpointProbeHtml(model.endpoint_results)}</div>
                             </article>
                         `).join("") : '<div class="playground-provider-list-empty">当前渠道没有可测试模型</div>'}
                     </div>

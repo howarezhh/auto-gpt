@@ -1930,6 +1930,11 @@ textarea.field-input {
     font-weight: 700;
 }
 
+.playground-status-danger {
+    color: var(--danger);
+    font-weight: 700;
+}
+
 .playground-copy-btn {
     margin-left: 8px;
     padding: 3px 9px;
