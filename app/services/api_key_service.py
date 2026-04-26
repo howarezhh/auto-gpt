@@ -1,24 +1,27 @@
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 import base64
 import hashlib
+import ipaddress
 import re
 import secrets
 from decimal import Decimal
 
 from cryptography.fernet import Fernet, InvalidToken
-from fastapi import Depends, Header, status
+from fastapi import Depends, Header, Request, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.config import get_settings
-from app.database import get_db
+from app.database import SessionLocal, get_db
 from app.models.api_client_key import ApiClientKey
 from app.models.request_log import RequestLog
 from app.models.user_account import UserAccount
+from app.scheduler import scheduler
+from app.services.billing_service import BillingService
 from app.services.router_service import RoutePolicyContext
 from app.services.user_quota_service import UserQuotaService
-from app.utils.json_utils import dumps_json
+from app.utils.json_utils import dumps_json, loads_json
 
 
 class ApiClientAuthError(Exception):
@@ -35,6 +38,8 @@ class ApiClientAuthError(Exception):
         user_account_name: str | None = None,
         remaining_tokens: int | None = None,
         remaining_balance: float | None = None,
+        remaining_requests_daily: int | None = None,
+        remaining_cost_daily: float | None = None,
         policy_snapshot_json: str | None = None,
     ):
         self.status_code = status_code
@@ -47,6 +52,8 @@ class ApiClientAuthError(Exception):
         self.user_account_name = user_account_name
         self.remaining_tokens = remaining_tokens
         self.remaining_balance = remaining_balance
+        self.remaining_requests_daily = remaining_requests_daily
+        self.remaining_cost_daily = remaining_cost_daily
         self.policy_snapshot_json = policy_snapshot_json
         super().__init__(message)
 
@@ -57,6 +64,8 @@ class ApiClientAuthContext:
     route_context: RoutePolicyContext
     remaining_tokens: int | None
     remaining_balance: float | None
+    remaining_requests_daily: int | None
+    remaining_cost_daily: float | None
     policy_snapshot_json: str
 
 
@@ -65,6 +74,9 @@ class ApiKeyService:
     MIN_KEY_LENGTH = 24
     MAX_KEY_LENGTH = 128
     KEY_PATTERN = re.compile(r"^[A-Za-z0-9\-_]+$")
+    LAST_USED_TOUCH_DELAY_SECONDS = 15
+    _pending_last_used_ids: set[int] = set()
+    _last_used_flush_scheduled = False
 
     @staticmethod
     def generate_api_key() -> str:
@@ -101,6 +113,17 @@ class ApiKeyService:
         if raw_key is None or not str(raw_key).strip():
             return ApiKeyService.generate_api_key()
         return ApiKeyService.validate_raw_api_key(str(raw_key))
+
+    @staticmethod
+    def extract_source_ip(request: Request) -> str | None:
+        forwarded_for = request.headers.get("x-forwarded-for")
+        if forwarded_for:
+            candidate = forwarded_for.split(",")[0].strip()
+            if candidate:
+                return candidate
+        if request.client is None:
+            return None
+        return request.client.host
 
     @staticmethod
     def _get_fernet() -> Fernet:
@@ -147,7 +170,13 @@ class ApiKeyService:
         return value.strip()
 
     @staticmethod
-    def authenticate_request(db: Session, authorization: str | None) -> ApiClientAuthContext:
+    def authenticate_request(
+        db: Session,
+        authorization: str | None,
+        *,
+        request_path: str | None = None,
+        source_ip: str | None = None,
+    ) -> ApiClientAuthContext:
         raw_key = ApiKeyService.parse_bearer_token(authorization)
         key_hash = ApiKeyService.hash_api_key(raw_key)
         api_client_key = db.scalar(
@@ -165,6 +194,8 @@ class ApiKeyService:
         remaining_tokens = None
         if api_client_key.token_limit_total is not None:
             remaining_tokens = max(0, api_client_key.token_limit_total - api_client_key.total_tokens_used)
+        remaining_requests_daily = None
+        remaining_cost_daily = None
         allowed_provider_ids = [binding.provider_id for binding in api_client_key.provider_bindings]
         default_provider_id = api_client_key.default_provider_id
         if default_provider_id not in allowed_provider_ids:
@@ -178,11 +209,32 @@ class ApiKeyService:
             remaining_balance = float(user_quota_snapshot.available_balance)
         elif api_client_key.balance_amount is not None:
             remaining_balance = float(api_client_key.balance_amount)
+        key_daily_usage = ApiKeyService.get_daily_usage_snapshot(db, api_client_key_id=api_client_key.id)
+        if api_client_key.request_limit_daily is not None:
+            remaining_requests_daily = max(0, api_client_key.request_limit_daily - key_daily_usage["request_count"])
+        if api_client_key.cost_limit_daily is not None:
+            remaining_cost_daily = max(
+                0.0,
+                float(BillingService.to_decimal(api_client_key.cost_limit_daily) - BillingService.to_decimal(key_daily_usage["total_cost"])),
+            )
         policy_snapshot = {
             "route_mode": api_client_key.route_mode,
             "default_provider_id": default_provider_id,
             "manual_allow_fallback": api_client_key.manual_allow_fallback,
             "allowed_provider_ids": allowed_provider_ids,
+            "allowed_model_names": loads_json(api_client_key.allowed_model_names_json, []),
+            "allowed_endpoint_paths": loads_json(api_client_key.allowed_endpoint_paths_json, []),
+            "allowed_source_ips": loads_json(api_client_key.allowed_source_ips_json, []),
+            "preferred_provider_ids": loads_json(api_client_key.preferred_provider_ids_json, []),
+            "preferred_region_tags": loads_json(api_client_key.preferred_region_tags_json, []),
+            "max_candidate_count": api_client_key.max_candidate_count,
+            "latency_bias": api_client_key.latency_bias,
+            "success_rate_bias": api_client_key.success_rate_bias,
+            "cost_bias": api_client_key.cost_bias,
+            "tenant_name": api_client_key.tenant_name,
+            "project_name": api_client_key.project_name,
+            "app_name": api_client_key.app_name,
+            "environment_name": api_client_key.environment_name,
         }
         if owner_user is not None and user_quota_snapshot is not None:
             policy_snapshot["owner_user"] = UserQuotaService.serialize_policy(user=owner_user, snapshot=user_quota_snapshot)
@@ -215,6 +267,34 @@ class ApiKeyService:
                 remaining_balance=remaining_balance,
                 policy_snapshot_json=policy_snapshot_json,
             )
+        if request_path and not ApiKeyService.is_endpoint_allowed(api_client_key, request_path):
+            raise ApiClientAuthError(
+                status_code=status.HTTP_403_FORBIDDEN,
+                code="endpoint_not_allowed",
+                message="Api key is not allowed to access this endpoint",
+                api_client_key_id=api_client_key.id,
+                api_client_key_name=api_client_key.name,
+                api_client_key_prefix=api_client_key.key_prefix,
+                user_account_id=owner_user_id,
+                user_account_name=owner_user_name,
+                remaining_tokens=remaining_tokens,
+                remaining_balance=remaining_balance,
+                policy_snapshot_json=policy_snapshot_json,
+            )
+        if source_ip and not ApiKeyService.is_source_ip_allowed(api_client_key, source_ip):
+            raise ApiClientAuthError(
+                status_code=status.HTTP_403_FORBIDDEN,
+                code="source_ip_not_allowed",
+                message="Api key is not allowed to call from this source ip",
+                api_client_key_id=api_client_key.id,
+                api_client_key_name=api_client_key.name,
+                api_client_key_prefix=api_client_key.key_prefix,
+                user_account_id=owner_user_id,
+                user_account_name=owner_user_name,
+                remaining_tokens=remaining_tokens,
+                remaining_balance=remaining_balance,
+                policy_snapshot_json=policy_snapshot_json,
+            )
         if (
             api_client_key.token_limit_total is not None
             and api_client_key.total_tokens_used >= api_client_key.token_limit_total
@@ -232,6 +312,57 @@ class ApiKeyService:
                 remaining_balance=remaining_balance,
                 policy_snapshot_json=policy_snapshot_json,
             )
+        if api_client_key.request_limit_daily is not None and key_daily_usage["request_count"] >= api_client_key.request_limit_daily:
+            raise ApiClientAuthError(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                code="daily_request_quota_exhausted",
+                message="Api key daily request quota exhausted",
+                api_client_key_id=api_client_key.id,
+                api_client_key_name=api_client_key.name,
+                api_client_key_prefix=api_client_key.key_prefix,
+                user_account_id=owner_user_id,
+                user_account_name=owner_user_name,
+                remaining_tokens=remaining_tokens,
+                remaining_balance=remaining_balance,
+                policy_snapshot_json=policy_snapshot_json,
+            )
+        if api_client_key.token_limit_daily is not None and key_daily_usage["total_tokens"] >= api_client_key.token_limit_daily:
+            raise ApiClientAuthError(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                code="daily_token_quota_exhausted",
+                message="Api key daily token quota exhausted",
+                api_client_key_id=api_client_key.id,
+                api_client_key_name=api_client_key.name,
+                api_client_key_prefix=api_client_key.key_prefix,
+                user_account_id=owner_user_id,
+                user_account_name=owner_user_name,
+                remaining_tokens=remaining_tokens,
+                remaining_balance=remaining_balance,
+                policy_snapshot_json=policy_snapshot_json,
+            )
+        if api_client_key.cost_limit_daily is not None and BillingService.to_decimal(key_daily_usage["total_cost"]) >= BillingService.to_decimal(api_client_key.cost_limit_daily):
+            raise ApiClientAuthError(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                code="daily_cost_quota_exhausted",
+                message="Api key daily cost quota exhausted",
+                api_client_key_id=api_client_key.id,
+                api_client_key_name=api_client_key.name,
+                api_client_key_prefix=api_client_key.key_prefix,
+                user_account_id=owner_user_id,
+                user_account_name=owner_user_name,
+                remaining_tokens=remaining_tokens,
+                remaining_balance=remaining_balance,
+                policy_snapshot_json=policy_snapshot_json,
+            )
+        ApiKeyService._validate_rate_limits(
+            db,
+            api_client_key=api_client_key,
+            owner_user_id=owner_user_id,
+            owner_user_name=owner_user_name,
+            remaining_tokens=remaining_tokens,
+            remaining_balance=remaining_balance,
+            policy_snapshot_json=policy_snapshot_json,
+        )
         if api_client_key.cost_limit_total is not None and Decimal(str(api_client_key.total_cost_used or 0)) >= Decimal(str(api_client_key.cost_limit_total)):
             raise ApiClientAuthError(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -301,17 +432,168 @@ class ApiKeyService:
             default_provider_id=default_provider_id,
             manual_allow_fallback=api_client_key.manual_allow_fallback,
             allowed_provider_ids=allowed_provider_ids,
+            preferred_provider_ids=loads_json(api_client_key.preferred_provider_ids_json, []),
+            preferred_region_tags=loads_json(api_client_key.preferred_region_tags_json, []),
+            max_candidate_count=api_client_key.max_candidate_count,
+            latency_bias=api_client_key.latency_bias,
+            success_rate_bias=api_client_key.success_rate_bias,
+            cost_bias=api_client_key.cost_bias,
         )
-        api_client_key.last_used_at = datetime.utcnow()
-        db.commit()
-        db.refresh(api_client_key)
+        ApiKeyService.enqueue_last_used_touch(api_client_key.id)
         return ApiClientAuthContext(
             api_client_key=api_client_key,
             route_context=route_context,
             remaining_tokens=remaining_tokens,
             remaining_balance=remaining_balance,
+            remaining_requests_daily=remaining_requests_daily,
+            remaining_cost_daily=remaining_cost_daily,
             policy_snapshot_json=policy_snapshot_json,
         )
+
+    @staticmethod
+    def get_daily_usage_snapshot(db: Session, *, api_client_key_id: int) -> dict[str, int | float]:
+        now = datetime.utcnow()
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        row = db.execute(
+            select(
+                func.count(RequestLog.id).label("request_count"),
+                func.sum(RequestLog.total_tokens).label("total_tokens"),
+                func.sum(RequestLog.total_cost).label("total_cost"),
+            ).where(
+                RequestLog.api_client_key_id == api_client_key_id,
+                RequestLog.created_at >= day_start,
+                RequestLog.request_path != "/v1/models",
+            )
+        ).one()
+        return {
+            "request_count": int(row.request_count or 0),
+            "total_tokens": int(row.total_tokens or 0),
+            "total_cost": float(row.total_cost or 0),
+        }
+
+    @staticmethod
+    def is_endpoint_allowed(api_client_key: ApiClientKey, request_path: str) -> bool:
+        allowed_paths = loads_json(api_client_key.allowed_endpoint_paths_json, [])
+        if not allowed_paths:
+            return True
+        normalized_path = request_path.strip()
+        return normalized_path in allowed_paths
+
+    @staticmethod
+    def is_source_ip_allowed(api_client_key: ApiClientKey, source_ip: str) -> bool:
+        allowed_items = loads_json(api_client_key.allowed_source_ips_json, [])
+        if not allowed_items:
+            return True
+        try:
+            ip_obj = ipaddress.ip_address(source_ip)
+        except ValueError:
+            return False
+        for item in allowed_items:
+            text = str(item).strip()
+            if not text:
+                continue
+            try:
+                if "/" in text:
+                    if ip_obj in ipaddress.ip_network(text, strict=False):
+                        return True
+                elif ip_obj == ipaddress.ip_address(text):
+                    return True
+            except ValueError:
+                continue
+        return False
+
+    @staticmethod
+    def is_model_allowed(api_client_key: ApiClientKey, model_name: str | None) -> bool:
+        allowed_models = loads_json(api_client_key.allowed_model_names_json, [])
+        if not allowed_models or not model_name:
+            return True
+        return model_name in allowed_models
+
+    @staticmethod
+    def _validate_rate_limits(
+        db: Session,
+        *,
+        api_client_key: ApiClientKey,
+        owner_user_id: int | None,
+        owner_user_name: str | None,
+        remaining_tokens: int | None,
+        remaining_balance: float | None,
+        policy_snapshot_json: str | None,
+    ) -> None:
+        now = datetime.utcnow()
+        checks = []
+        if api_client_key.qps_limit:
+            checks.append(("qps_limit_exceeded", "Api key QPS limit exceeded", now - timedelta(seconds=1), api_client_key.qps_limit, "count"))
+        if api_client_key.rpm_limit:
+            checks.append(("rpm_limit_exceeded", "Api key RPM limit exceeded", now - timedelta(minutes=1), api_client_key.rpm_limit, "count"))
+        if api_client_key.tpm_limit:
+            checks.append(("tpm_limit_exceeded", "Api key TPM limit exceeded", now - timedelta(minutes=1), api_client_key.tpm_limit, "tokens"))
+        for code, message, since, limit, mode in checks:
+            if mode == "count":
+                current = db.scalar(
+                    select(func.count(RequestLog.id)).where(
+                        RequestLog.api_client_key_id == api_client_key.id,
+                        RequestLog.created_at >= since,
+                    )
+                ) or 0
+            else:
+                current = db.scalar(
+                    select(func.sum(RequestLog.total_tokens)).where(
+                        RequestLog.api_client_key_id == api_client_key.id,
+                        RequestLog.created_at >= since,
+                    )
+                ) or 0
+            if int(current or 0) >= int(limit):
+                raise ApiClientAuthError(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    code=code,
+                    message=message,
+                    api_client_key_id=api_client_key.id,
+                    api_client_key_name=api_client_key.name,
+                    api_client_key_prefix=api_client_key.key_prefix,
+                    user_account_id=owner_user_id,
+                    user_account_name=owner_user_name,
+                    remaining_tokens=remaining_tokens,
+                    remaining_balance=remaining_balance,
+                    policy_snapshot_json=policy_snapshot_json,
+                )
+
+    @classmethod
+    def enqueue_last_used_touch(cls, api_client_key_id: int | None) -> None:
+        if api_client_key_id is None:
+            return
+        cls._pending_last_used_ids.add(int(api_client_key_id))
+        if cls._last_used_flush_scheduled or not scheduler.running:
+            return
+        scheduler.add_job(
+            cls.flush_pending_last_used_touches,
+            "date",
+            run_date=datetime.now() + timedelta(seconds=cls.LAST_USED_TOUCH_DELAY_SECONDS),
+            id="api_key_last_used_flush",
+            replace_existing=True,
+            misfire_grace_time=30,
+        )
+        cls._last_used_flush_scheduled = True
+
+    @classmethod
+    def flush_pending_last_used_touches(cls) -> None:
+        pending_ids = list(cls._pending_last_used_ids)
+        cls._pending_last_used_ids.clear()
+        cls._last_used_flush_scheduled = False
+        if not pending_ids:
+            return
+        db = SessionLocal()
+        try:
+            touched_at = datetime.utcnow()
+            api_keys = list(
+                db.scalars(select(ApiClientKey).where(ApiClientKey.id.in_(pending_ids)))
+            )
+            for api_key in api_keys:
+                api_key.last_used_at = touched_at
+            if api_keys:
+                db.commit()
+        finally:
+            db.close()
 
     @staticmethod
     def apply_token_usage(
@@ -378,7 +660,13 @@ class ApiKeyService:
 
 
 def require_api_client_auth(
+    request: Request,
     authorization: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ) -> ApiClientAuthContext:
-    return ApiKeyService.authenticate_request(db, authorization)
+    return ApiKeyService.authenticate_request(
+        db,
+        authorization,
+        request_path=request.url.path,
+        source_ip=ApiKeyService.extract_source_ip(request),
+    )

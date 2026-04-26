@@ -25,6 +25,10 @@ DEFAULT_SETTING = {
     "allow_public_user_registration": False,
     "request_log_retention_days": 90,
     "admin_audit_log_retention_days": 180,
+    "route_candidate_cache_ttl_sec": 10,
+    "model_list_cache_ttl_sec": 15,
+    "provider_status_cache_ttl_sec": 10,
+    "async_request_logging": True,
 }
 
 

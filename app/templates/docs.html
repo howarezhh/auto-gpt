@@ -16,7 +16,7 @@
         <div class="cockpit-aside-copy">文档中的正式接入地址统一由配置或当前访问地址生成，避免写死域名、IP 或协议。</div>
         <div class="cockpit-health-bar"><span class="cockpit-health-fill-full"></span></div>
         <div class="cockpit-aside-meta">
-            <span>OpenAI 兼容</span>
+            <span>OpenAI 兼容子集</span>
             <span>只走 /v1/*</span>
         </div>
     </div>
@@ -49,7 +49,7 @@
                 <div class="docs-flow-index">2</div>
                 <div>
                     <h4>复制 Base URL 和标准路径</h4>
-                    <p>把 OpenAI 兼容入口设为 <code>{{ external_v1_base_url }}</code>，只使用标准 <code>/v1/models</code>、<code>/v1/chat/completions</code>、<code>/v1/responses</code>。</p>
+                    <p>把 OpenAI 兼容入口设为 <code>{{ external_v1_base_url }}</code>，只使用当前正式支持的 <code>/v1/models</code>、<code>/v1/chat/completions</code>、<code>/v1/responses</code>；本平台当前提供的是兼容子集，不等同于 OpenAI 全量官方能力。</p>
                 </div>
             </article>
             <article class="docs-flow-card">
@@ -186,6 +186,8 @@ OPENAI_BASE_URL={{ external_v1_base_url }}</code></pre></div>
     "model": "gpt-4o-mini",
     "input": "你好，请用一句话介绍本平台"
   }'</code></pre></div>
+            <p><code>/v1/responses</code> 当前按兼容子集提供能力。图片输入适配时，支持透传字段为 <code>model</code>、<code>instructions</code>、<code>input</code>、<code>temperature</code>、<code>top_p</code>、<code>presence_penalty</code>、<code>frequency_penalty</code>、<code>tools</code>、<code>tool_choice</code>、<code>response_format</code>、<code>stream</code>、<code>user</code>、<code>metadata</code>、<code>seed</code>、<code>max_output_tokens</code>、<code>max_tokens</code>。</p>
+            <p>当前不适配并会直接返回 <code>400</code> 的字段包括 <code>previous_response_id</code>、<code>parallel_tool_calls</code>、<code>reasoning</code>、<code>reasoning_effort</code>、<code>store</code>、<code>text</code>、<code>include</code>、<code>max_tool_calls</code>、<code>truncation</code>、<code>background</code>。</p>
             <div class="hero-actions">
                 <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="curl {{ external_v1_base_url }}/responses &#10;  -H &quot;Content-Type: application/json&quot; &#10;  -H &quot;Authorization: Bearer YOUR_PLATFORM_API_KEY&quot; &#10;  -d '{&#10;    &quot;model&quot;: &quot;gpt-4o-mini&quot;,&#10;    &quot;input&quot;: &quot;你好，请用一句话介绍本平台&quot;&#10;  }'">复制 responses 示例</button>
             </div>

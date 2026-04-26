@@ -15,8 +15,13 @@ from app.schemas.api_key import (
     ApiKeyBalanceAdjustmentIn,
     ApiKeyBatchActionIn,
     ApiKeyBatchActionResultOut,
+    ApiKeyBatchTemplateApplyIn,
+    ApiKeyBatchRotateItemOut,
+    ApiKeyBatchRotateResultOut,
     ApiKeyBatchProviderUpdateIn,
     ApiKeyBillingSummaryOut,
+    ApiKeyCostInsightItemOut,
+    ApiKeyCostInsightResponseOut,
     ApiKeyCreate,
     ApiKeyDetailOut,
     ApiKeyListResponse,
@@ -30,6 +35,8 @@ from app.schemas.api_key import (
 )
 from app.services.api_key_service import ApiKeyService
 from app.services.billing_service import BillingService
+from app.services.log_service import LogService
+from app.utils.json_utils import dumps_json, loads_json
 
 
 class ApiKeyAdminService:
@@ -178,15 +185,27 @@ class ApiKeyAdminService:
         raw_api_key = ApiKeyService.build_raw_api_key(payload.raw_api_key)
         ApiKeyAdminService._validate_raw_api_key_uniqueness(db, raw_api_key)
         use_shared_wallet = payload.owner_user_id is not None
+        if use_shared_wallet and payload.balance_amount is not None:
+            raise ValueError("共享钱包模式下禁止在 API Key 上单独设置 balance_amount，请改为给用户账户充值")
         api_key = ApiClientKey(
             name=payload.name,
             remark=payload.remark,
+            tenant_name=payload.tenant_name,
+            project_name=payload.project_name,
+            app_name=payload.app_name,
+            environment_name=payload.environment_name,
             key_prefix=ApiKeyService.extract_key_prefix(raw_api_key),
             key_hash=ApiKeyService.hash_api_key(raw_api_key),
             raw_key_encrypted=ApiKeyService.encrypt_raw_api_key(raw_api_key),
             enabled=payload.enabled,
             expires_at=payload.expires_at,
             token_limit_total=payload.token_limit_total,
+            request_limit_daily=payload.request_limit_daily,
+            token_limit_daily=payload.token_limit_daily,
+            cost_limit_daily=BillingService.to_decimal(payload.cost_limit_daily) if payload.cost_limit_daily is not None else None,
+            qps_limit=payload.qps_limit,
+            rpm_limit=payload.rpm_limit,
+            tpm_limit=payload.tpm_limit,
             cost_limit_total=BillingService.to_decimal(payload.cost_limit_total) if payload.cost_limit_total is not None else None,
             balance_amount=None if use_shared_wallet else (BillingService.to_decimal(payload.balance_amount) if payload.balance_amount is not None else None),
             total_cost_used=BillingService.to_decimal(0),
@@ -195,6 +214,15 @@ class ApiKeyAdminService:
             default_provider_id=payload.default_provider_id,
             owner_user_id=payload.owner_user_id,
             manual_allow_fallback=payload.manual_allow_fallback,
+            allowed_model_names_json=dumps_json(payload.allowed_model_names),
+            allowed_endpoint_paths_json=dumps_json(payload.allowed_endpoint_paths),
+            allowed_source_ips_json=dumps_json(payload.allowed_source_ips),
+            preferred_provider_ids_json=dumps_json(payload.preferred_provider_ids),
+            preferred_region_tags_json=dumps_json(payload.preferred_region_tags),
+            max_candidate_count=payload.max_candidate_count,
+            latency_bias=payload.latency_bias,
+            success_rate_bias=payload.success_rate_bias,
+            cost_bias=payload.cost_bias,
         )
         db.add(api_key)
         db.flush()
@@ -231,6 +259,8 @@ class ApiKeyAdminService:
         )
         ApiKeyAdminService._validate_owner_user(db, owner_user_id)
         use_shared_wallet = owner_user_id is not None
+        if use_shared_wallet and "balance_amount" in data:
+            raise ValueError("共享钱包模式下禁止在 API Key 上单独设置 balance_amount，请改为给用户账户充值")
         raw_api_key = data.get("raw_api_key")
         if raw_api_key is not None:
             normalized_raw_api_key = ApiKeyService.build_raw_api_key(raw_api_key)
@@ -241,11 +271,21 @@ class ApiKeyAdminService:
         for field, value in data.items():
             if field in {"allowed_provider_ids", "raw_api_key"}:
                 continue
-            if field in {"cost_limit_total", "balance_amount"} and value is not None:
+            if field in {"cost_limit_total", "balance_amount", "cost_limit_daily"} and value is not None:
                 value = BillingService.to_decimal(value)
             if field == "balance_amount" and use_shared_wallet:
                 value = None
             setattr(api_key, field, value)
+        json_list_fields = {
+            "allowed_model_names": "allowed_model_names_json",
+            "allowed_endpoint_paths": "allowed_endpoint_paths_json",
+            "allowed_source_ips": "allowed_source_ips_json",
+            "preferred_provider_ids": "preferred_provider_ids_json",
+            "preferred_region_tags": "preferred_region_tags_json",
+        }
+        for payload_field, model_field in json_list_fields.items():
+            if payload_field in data:
+                setattr(api_key, model_field, dumps_json(data[payload_field] or []))
         if use_shared_wallet:
             api_key.balance_amount = None
             api_key.total_recharge_amount = BillingService.to_decimal(0)
@@ -347,6 +387,75 @@ class ApiKeyAdminService:
             item.default_provider_id = payload.default_provider_id
             item.manual_allow_fallback = payload.manual_allow_fallback
             ApiKeyAdminService._replace_provider_bindings(db, item, payload.allowed_provider_ids)
+        db.commit()
+        return ApiKeyBatchActionResultOut(
+            requested_count=len(payload.api_key_ids),
+            affected_count=len(items),
+            api_key_ids=[item.id for item in items],
+        )
+
+    @staticmethod
+    def batch_apply_template(db: Session, payload: ApiKeyBatchTemplateApplyIn) -> ApiKeyBatchActionResultOut:
+        from app.services.api_key_policy_template_service import ApiKeyPolicyTemplateService
+
+        template = ApiKeyPolicyTemplateService.get_template(db, payload.template_id)
+        if template is None or not template.enabled:
+            raise ValueError("策略模板不存在或未启用")
+        serialized_template = ApiKeyPolicyTemplateService.serialize(template)
+        items = list(
+            db.scalars(
+                select(ApiClientKey)
+                .options(selectinload(ApiClientKey.provider_bindings))
+                .where(ApiClientKey.id.in_(payload.api_key_ids))
+            )
+        )
+        for item in items:
+            update_payload = ApiKeyPolicyTemplateService.build_update_payload_from_template(serialized_template)
+            ApiKeyAdminService.update_api_key(db, item, update_payload)
+        return ApiKeyBatchActionResultOut(
+            requested_count=len(payload.api_key_ids),
+            affected_count=len(items),
+            api_key_ids=[item.id for item in items],
+        )
+
+    @staticmethod
+    def batch_rotate(db: Session, payload: ApiKeyBatchActionIn) -> ApiKeyBatchRotateResultOut:
+        items = list(
+            db.scalars(
+                select(ApiClientKey)
+                .options(
+                    selectinload(ApiClientKey.provider_bindings).selectinload(ApiClientKeyProviderBinding.provider),
+                    selectinload(ApiClientKey.owner_user),
+                )
+                .where(ApiClientKey.id.in_(payload.api_key_ids))
+            )
+        )
+        rotated_items: list[ApiKeyBatchRotateItemOut] = []
+        affected_ids: list[int] = []
+        for item in items:
+            updated, raw_api_key = ApiKeyAdminService.rotate_api_key(db, item)
+            rotated_items.append(
+                ApiKeyBatchRotateItemOut(
+                    id=updated.id,
+                    name=updated.name,
+                    raw_api_key=raw_api_key,
+                    key_masked=ApiKeyService.mask_key_prefix(updated.key_prefix),
+                )
+            )
+            affected_ids.append(updated.id)
+        return ApiKeyBatchRotateResultOut(
+            requested_count=len(payload.api_key_ids),
+            affected_count=len(affected_ids),
+            api_key_ids=affected_ids,
+            items=rotated_items,
+        )
+
+    @staticmethod
+    def batch_expire(db: Session, payload: ApiKeyBatchActionIn) -> ApiKeyBatchActionResultOut:
+        items = list(db.scalars(select(ApiClientKey).where(ApiClientKey.id.in_(payload.api_key_ids))))
+        now = datetime.utcnow()
+        for item in items:
+            item.expires_at = now
         db.commit()
         return ApiKeyBatchActionResultOut(
             requested_count=len(payload.api_key_ids),
@@ -516,6 +625,10 @@ class ApiKeyAdminService:
             "id": api_key.id,
             "name": api_key.name,
             "remark": api_key.remark,
+            "tenant_name": api_key.tenant_name,
+            "project_name": api_key.project_name,
+            "app_name": api_key.app_name,
+            "environment_name": api_key.environment_name,
             "enabled": api_key.enabled,
             "status": status,
             "key_prefix": api_key.key_prefix,
@@ -524,6 +637,12 @@ class ApiKeyAdminService:
             "has_stored_raw_key": raw_api_key is not None,
             "expires_at": api_key.expires_at,
             "token_limit_total": api_key.token_limit_total,
+            "request_limit_daily": api_key.request_limit_daily,
+            "token_limit_daily": api_key.token_limit_daily,
+            "cost_limit_daily": BillingService.to_float(api_key.cost_limit_daily),
+            "qps_limit": api_key.qps_limit,
+            "rpm_limit": api_key.rpm_limit,
+            "tpm_limit": api_key.tpm_limit,
             "prompt_tokens_used": api_key.prompt_tokens_used,
             "completion_tokens_used": api_key.completion_tokens_used,
             "total_tokens_used": api_key.total_tokens_used,
@@ -539,6 +658,15 @@ class ApiKeyAdminService:
             "owner_user_name": api_key.owner_user.username if api_key.owner_user else None,
             "manual_allow_fallback": api_key.manual_allow_fallback,
             "allowed_provider_ids": [binding.provider_id for binding in api_key.provider_bindings],
+            "allowed_model_names": loads_json(api_key.allowed_model_names_json, []),
+            "allowed_endpoint_paths": loads_json(api_key.allowed_endpoint_paths_json, []),
+            "allowed_source_ips": loads_json(api_key.allowed_source_ips_json, []),
+            "preferred_provider_ids": loads_json(api_key.preferred_provider_ids_json, []),
+            "preferred_region_tags": loads_json(api_key.preferred_region_tags_json, []),
+            "max_candidate_count": api_key.max_candidate_count,
+            "latency_bias": api_key.latency_bias,
+            "success_rate_bias": api_key.success_rate_bias,
+            "cost_bias": api_key.cost_bias,
             "allowed_providers": allowed_providers,
             "last_used_at": api_key.last_used_at,
             "created_at": api_key.created_at,
@@ -616,6 +744,55 @@ class ApiKeyAdminService:
             remark=payload.remark,
         )
         return BillingService.list_billing_records(db, api_key_id=api_key.id, limit=50)
+
+    @staticmethod
+    def get_cost_insights(
+        db: Session,
+        *,
+        group_by: str,
+        window_days: int,
+        limit: int = 20,
+    ) -> ApiKeyCostInsightResponseOut:
+        normalized_group_by = group_by if group_by in {"user", "model", "provider"} else "user"
+        normalized_window_days = max(1, min(window_days, 365))
+        since = datetime.utcnow() - timedelta(days=normalized_window_days)
+        if normalized_group_by == "model":
+            value_expr = func.coalesce(RequestLog.requested_model, RequestLog.model_name, "unknown")
+        elif normalized_group_by == "provider":
+            value_expr = func.coalesce(RequestLog.provider_name, "unknown")
+        else:
+            value_expr = func.coalesce(RequestLog.user_account_name, "未分配用户")
+        rows = db.execute(
+            select(
+                value_expr.label("dimension_value"),
+                func.count(RequestLog.id).label("total_requests"),
+                func.sum(RequestLog.total_tokens).label("total_tokens"),
+                func.sum(RequestLog.total_cost).label("total_cost"),
+                func.avg(RequestLog.latency_ms).label("avg_latency_ms"),
+            )
+            .where(
+                RequestLog.api_client_key_id.is_not(None),
+                RequestLog.created_at >= since,
+                LogService._route_traffic_expr(),
+            )
+            .group_by(value_expr)
+            .order_by(func.sum(RequestLog.total_cost).desc(), func.count(RequestLog.id).desc())
+            .limit(max(1, min(limit, 100)))
+        ).all()
+        return ApiKeyCostInsightResponseOut(
+            group_by=normalized_group_by,
+            window_days=normalized_window_days,
+            items=[
+                ApiKeyCostInsightItemOut(
+                    dimension_value=str(row.dimension_value or "unknown"),
+                    total_requests=int(row.total_requests or 0),
+                    total_tokens=int(row.total_tokens or 0),
+                    total_cost=float(row.total_cost or 0),
+                    avg_latency_ms=round(float(row.avg_latency_ms), 2) if row.avg_latency_ms is not None else None,
+                )
+                for row in rows
+            ],
+        )
 
     @staticmethod
     def _replace_provider_bindings(db: Session, api_key: ApiClientKey, allowed_provider_ids: list[int]) -> None:

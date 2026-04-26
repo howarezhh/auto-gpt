@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.models.provider_model import ProviderModel
 from app.models.request_log import RequestLog
+from app.services.runtime_state_service import RuntimeStateService
 from app.utils.json_utils import dumps_json, safeJsonParse
 
 
@@ -24,11 +25,17 @@ class LogService:
         log_type: str,
         provider_id: int | None = None,
         provider_name: str | None = None,
+        trace_id: str | None = None,
         model_name: str | None = None,
         requested_model: str | None = None,
+        tenant_name: str | None = None,
+        project_name: str | None = None,
+        app_name: str | None = None,
+        environment_name: str | None = None,
         request_id: str | None = None,
         conversation_key: str | None = None,
         session_id: str | None = None,
+        source_ip: str | None = None,
         resolved_provider_model_id: int | None = None,
         request_path: str | None = None,
         http_method: str | None = None,
@@ -54,6 +61,9 @@ class LogService:
         response_body_json: str | None = None,
         response_text: str | None = None,
         message: str | None = None,
+        error_type: str | None = None,
+        error_code: str | None = None,
+        retryable: bool | None = None,
         api_client_key_id: int | None = None,
         api_client_key_name: str | None = None,
         api_client_key_prefix: str | None = None,
@@ -61,6 +71,8 @@ class LogService:
         user_account_name: str | None = None,
         api_client_auth_result: str | None = None,
         api_client_remaining_tokens: int | None = None,
+        api_client_remaining_requests_daily: int | None = None,
+        api_client_remaining_cost_daily: float | None = None,
         api_client_policy_snapshot_json: str | None = None,
         billing_multiplier: float | None = None,
         channel_price_input_per_1k: float | None = None,
@@ -99,11 +111,17 @@ class LogService:
             log_type=log_type,
             provider_id=provider_id,
             provider_name=provider_name,
+            trace_id=trace_id,
             model_name=model_name,
             requested_model=requested_model,
+            tenant_name=tenant_name,
+            project_name=project_name,
+            app_name=app_name,
+            environment_name=environment_name,
             request_id=request_id,
             conversation_key=conversation_key,
             session_id=session_id or LogService.extract_session_id(token_request_payload, conversation_key=conversation_key, fallback=request_id),
+            source_ip=source_ip,
             resolved_provider_model_id=resolved_provider_model_id,
             request_path=request_path,
             http_method=http_method.upper() if isinstance(http_method, str) and http_method.strip() else None,
@@ -129,6 +147,9 @@ class LogService:
             response_body_json=response_body_json,
             response_text=response_text,
             message=message,
+            error_type=error_type,
+            error_code=error_code,
+            retryable=retryable,
             api_client_key_id=api_client_key_id,
             api_client_key_name=api_client_key_name,
             api_client_key_prefix=api_client_key_prefix,
@@ -136,6 +157,8 @@ class LogService:
             user_account_name=user_account_name,
             api_client_auth_result=api_client_auth_result,
             api_client_remaining_tokens=api_client_remaining_tokens,
+            api_client_remaining_requests_daily=api_client_remaining_requests_daily,
+            api_client_remaining_cost_daily=api_client_remaining_cost_daily,
             api_client_policy_snapshot_json=api_client_policy_snapshot_json,
             billing_multiplier=billing_multiplier if billing_multiplier is not None else (provider_model.price_multiplier if provider_model else None),
             channel_price_input_per_1k=(
@@ -157,22 +180,20 @@ class LogService:
             db.commit()
         db.refresh(log)
         if (
-            schedule_token_fill
-            and
             request_path
             and request_path != "/v1/models"
             and log_type not in LogService.HEALTH_CHECK_LOG_TYPES
-            and (prompt_tokens is None or completion_tokens is None or total_tokens is None)
         ):
             from app.services.token_usage_service import TokenUsageService
 
-            TokenUsageService.enqueue_log_usage_fill(
+            TokenUsageService.enqueue_log_finalize(
                 log_id=log.id,
                 model_name=requested_model or model_name,
                 request_path=request_path,
                 request_payload=token_request_payload,
                 response_payload=token_response_payload,
                 response_text=token_response_text,
+                enable_usage_fill=schedule_token_fill,
             )
         return log
 
@@ -203,6 +224,7 @@ class LogService:
             func.sum(RequestLog.prompt_tokens).label("prompt_tokens"),
             func.sum(RequestLog.completion_tokens).label("completion_tokens"),
             func.sum(RequestLog.total_tokens).label("total_tokens"),
+            func.sum(RequestLog.total_cost).label("total_cost"),
             func.count(func.distinct(RequestLog.api_client_key_id)).label("matched_api_keys"),
         )
         stmt = LogService._apply_log_filters(
@@ -256,6 +278,7 @@ class LogService:
             "prompt_tokens": int(summary_row.prompt_tokens or 0),
             "completion_tokens": int(summary_row.completion_tokens or 0),
             "total_tokens": int(summary_row.total_tokens or 0),
+            "total_cost": float(summary_row.total_cost or 0),
             "matched_api_keys": int(summary_row.matched_api_keys or 0),
         }
         items = list(
@@ -335,6 +358,8 @@ class LogService:
         db: Session,
         *,
         exclude_health_checks: bool = False,
+        user_account_id: int | None = None,
+        api_client_key_ids: list[int] | None = None,
     ) -> dict[str, list[dict[str, str]]]:
         provider_stmt = select(RequestLog.provider_id, RequestLog.provider_name).where(RequestLog.provider_id.is_not(None))
         model_stmt = select(RequestLog.model_name).where(RequestLog.model_name.is_not(None))
@@ -344,12 +369,62 @@ class LogService:
             RequestLog.api_client_key_prefix,
         ).where(RequestLog.api_client_key_id.is_not(None))
         user_stmt = select(RequestLog.user_account_id, RequestLog.user_account_name).where(RequestLog.user_account_id.is_not(None))
-        if exclude_health_checks:
-            non_health_check_expr = LogService._non_health_check_expr()
-            provider_stmt = provider_stmt.where(non_health_check_expr)
-            model_stmt = model_stmt.where(non_health_check_expr)
-            api_key_stmt = api_key_stmt.where(non_health_check_expr)
-            user_stmt = user_stmt.where(non_health_check_expr)
+        provider_stmt = LogService._apply_log_filters(
+            provider_stmt,
+            log_type=None,
+            log_types=None,
+            provider_id=None,
+            model_name=None,
+            conversation_key=None,
+            api_client_key_id=None,
+            api_client_key_query=None,
+            user_account_id=user_account_id,
+            success=None,
+            exclude_health_checks=exclude_health_checks,
+            api_client_key_ids=api_client_key_ids,
+        )
+        model_stmt = LogService._apply_log_filters(
+            model_stmt,
+            log_type=None,
+            log_types=None,
+            provider_id=None,
+            model_name=None,
+            conversation_key=None,
+            api_client_key_id=None,
+            api_client_key_query=None,
+            user_account_id=user_account_id,
+            success=None,
+            exclude_health_checks=exclude_health_checks,
+            api_client_key_ids=api_client_key_ids,
+        )
+        api_key_stmt = LogService._apply_log_filters(
+            api_key_stmt,
+            log_type=None,
+            log_types=None,
+            provider_id=None,
+            model_name=None,
+            conversation_key=None,
+            api_client_key_id=None,
+            api_client_key_query=None,
+            user_account_id=user_account_id,
+            success=None,
+            exclude_health_checks=exclude_health_checks,
+            api_client_key_ids=api_client_key_ids,
+        )
+        user_stmt = LogService._apply_log_filters(
+            user_stmt,
+            log_type=None,
+            log_types=None,
+            provider_id=None,
+            model_name=None,
+            conversation_key=None,
+            api_client_key_id=None,
+            api_client_key_query=None,
+            user_account_id=user_account_id,
+            success=None,
+            exclude_health_checks=exclude_health_checks,
+            api_client_key_ids=api_client_key_ids,
+        )
 
         provider_rows = db.execute(
             provider_stmt.distinct().order_by(RequestLog.provider_id.asc(), RequestLog.provider_name.asc())
@@ -634,51 +709,49 @@ class LogService:
     @staticmethod
     def metric_summary(db: Session, *, window_minutes: int) -> list[dict]:
         since = datetime.utcnow() - timedelta(minutes=window_minutes)
-        stmt = (
-            select(
-                RequestLog.provider_id,
-                RequestLog.provider_name,
-                RequestLog.requested_model,
-                func.count(RequestLog.id).label("total_requests"),
-                func.sum(case((RequestLog.success.is_(True), 1), else_=0)).label("success_requests"),
-                func.sum(case((RequestLog.success.is_(False), 1), else_=0)).label("failed_requests"),
-                func.avg(RequestLog.latency_ms).label("avg_latency_ms"),
-                func.avg(RequestLog.ttfb_ms).label("avg_ttfb_ms"),
-                func.avg(RequestLog.duration_ms).label("avg_duration_ms"),
-                func.sum(case((RequestLog.is_stream.is_(True), 1), else_=0)).label("stream_requests"),
-                func.sum(case((RequestLog.has_image.is_(True), 1), else_=0)).label("image_requests"),
-                func.count(func.distinct(RequestLog.user_account_id)).label("unique_users"),
-                func.sum(RequestLog.prompt_tokens).label("prompt_tokens"),
-                func.sum(RequestLog.completion_tokens).label("completion_tokens"),
-                func.sum(RequestLog.total_tokens).label("total_tokens"),
-            )
-            .where(RequestLog.created_at >= since)
-            .group_by(RequestLog.provider_id, RequestLog.provider_name, RequestLog.requested_model)
-            .order_by(func.count(RequestLog.id).desc(), RequestLog.provider_id.asc())
-        )
-        results = []
-        for row in db.execute(stmt):
-            total_requests = int(row.total_requests or 0)
-            success_requests = int(row.success_requests or 0)
-            failed_requests = int(row.failed_requests or 0)
+        logs = LogService._load_route_metric_logs(db, since=since)
+        grouped: dict[tuple[int | None, str | None, str | None], list[RequestLog]] = {}
+        for item in logs:
+            key = (item.provider_id, item.provider_name, item.requested_model)
+            grouped.setdefault(key, []).append(item)
+
+        window_seconds = max(1, window_minutes * 60)
+        results: list[dict] = []
+        for (provider_id, provider_name, requested_model), group_logs in sorted(
+            grouped.items(),
+            key=lambda item: len(item[1]),
+            reverse=True,
+        ):
+            total_requests = len(group_logs)
+            success_requests = sum(1 for item in group_logs if item.success)
+            failed_requests = total_requests - success_requests
+            latency_values = LogService._metric_values(group_logs, "latency_ms")
+            ttfb_values = LogService._metric_values(group_logs, "ttfb_ms")
+            duration_values = LogService._metric_values(group_logs, "duration_ms")
             results.append(
                 {
-                    "provider_id": row.provider_id,
-                    "provider_name": row.provider_name,
-                    "requested_model": row.requested_model,
+                    "provider_id": provider_id,
+                    "provider_name": provider_name,
+                    "requested_model": requested_model,
                     "total_requests": total_requests,
                     "success_requests": success_requests,
                     "failed_requests": failed_requests,
                     "failure_rate": round((failed_requests / total_requests) * 100, 2) if total_requests else 0.0,
-                    "avg_latency_ms": round(float(row.avg_latency_ms), 2) if row.avg_latency_ms is not None else None,
-                    "avg_ttfb_ms": round(float(row.avg_ttfb_ms), 2) if row.avg_ttfb_ms is not None else None,
-                    "avg_duration_ms": round(float(row.avg_duration_ms), 2) if row.avg_duration_ms is not None else None,
-                    "stream_requests": int(row.stream_requests or 0),
-                    "image_requests": int(row.image_requests or 0),
-                    "unique_users": int(row.unique_users or 0),
-                    "prompt_tokens": int(row.prompt_tokens or 0),
-                    "completion_tokens": int(row.completion_tokens or 0),
-                    "total_tokens": int(row.total_tokens or 0),
+                    "avg_latency_ms": LogService._average(latency_values),
+                    "avg_ttfb_ms": LogService._average(ttfb_values),
+                    "avg_duration_ms": LogService._average(duration_values),
+                    "p95_latency_ms": LogService._percentile(latency_values, 95),
+                    "p99_latency_ms": LogService._percentile(latency_values, 99),
+                    "p95_ttfb_ms": LogService._percentile(ttfb_values, 95),
+                    "p99_ttfb_ms": LogService._percentile(ttfb_values, 99),
+                    "qps": round(total_requests / window_seconds, 4),
+                    "peak_active_requests": LogService._compute_peak_active_requests(group_logs),
+                    "stream_requests": sum(1 for item in group_logs if item.is_stream),
+                    "image_requests": sum(1 for item in group_logs if item.has_image),
+                    "unique_users": len({item.user_account_id for item in group_logs if item.user_account_id is not None}),
+                    "prompt_tokens": sum(int(item.prompt_tokens or 0) for item in group_logs),
+                    "completion_tokens": sum(int(item.completion_tokens or 0) for item in group_logs),
+                    "total_tokens": sum(int(item.total_tokens or 0) for item in group_logs),
                 }
             )
         return results
@@ -758,14 +831,23 @@ class LogService:
         writer.writerow([
             "created_at",
             "log_type",
+            "trace_id",
             "request_id",
             "session_id",
             "conversation_key",
             "requested_model",
             "provider_name",
+            "tenant_name",
+            "project_name",
+            "app_name",
+            "environment_name",
+            "source_ip",
             "http_method",
             "success",
             "status_code",
+            "error_type",
+            "error_code",
+            "retryable",
             "is_stream",
             "has_image",
             "latency_ms",
@@ -781,20 +863,31 @@ class LogService:
             "reasoning_level",
             "api_client_key_name",
             "user_account_name",
+            "api_client_remaining_requests_daily",
+            "api_client_remaining_cost_daily",
             "message",
         ])
         for item in rows:
             writer.writerow([
                 item.created_at.isoformat() if item.created_at else "",
                 item.log_type,
+                item.trace_id or "",
                 item.request_id or "",
                 item.session_id or "",
                 item.conversation_key or "",
                 item.requested_model or item.model_name or "",
                 item.provider_name or "",
+                item.tenant_name or "",
+                item.project_name or "",
+                item.app_name or "",
+                item.environment_name or "",
+                item.source_ip or "",
                 item.http_method or "",
                 "true" if item.success else "false",
                 item.status_code if item.status_code is not None else "",
+                item.error_type or "",
+                item.error_code or "",
+                "" if item.retryable is None else ("true" if item.retryable else "false"),
                 "true" if item.is_stream else "false",
                 "true" if item.has_image else "false",
                 item.latency_ms if item.latency_ms is not None else "",
@@ -810,6 +903,8 @@ class LogService:
                 item.reasoning_level or "",
                 item.api_client_key_name or "",
                 item.user_account_name or "",
+                item.api_client_remaining_requests_daily if item.api_client_remaining_requests_daily is not None else "",
+                item.api_client_remaining_cost_daily if item.api_client_remaining_cost_daily is not None else "",
                 item.message or "",
             ])
         return buffer.getvalue()
@@ -823,7 +918,85 @@ class LogService:
     ) -> list[dict]:
         bucket_minutes = max(1, min(bucket_minutes, window_minutes))
         since = datetime.utcnow() - timedelta(minutes=window_minutes)
-        logs = list(
+        logs = LogService._load_route_metric_logs(db, since=since)
+        buckets: dict[datetime, list[RequestLog]] = {}
+        for item in logs:
+            if item.created_at is None:
+                continue
+            minute_floor = item.created_at.replace(second=0, microsecond=0)
+            bucket_minute = minute_floor.minute - (minute_floor.minute % bucket_minutes)
+            bucket_start = minute_floor.replace(minute=bucket_minute)
+            buckets.setdefault(bucket_start, []).append(item)
+
+        results = []
+        bucket_window_seconds = max(1, bucket_minutes * 60)
+        for bucket_start in sorted(buckets.keys()):
+            bucket_logs = buckets[bucket_start]
+            latency_values = LogService._metric_values(bucket_logs, "latency_ms")
+            ttfb_values = LogService._metric_values(bucket_logs, "ttfb_ms")
+            total_requests = len(bucket_logs)
+            success_requests = sum(1 for item in bucket_logs if item.success)
+            failed_requests = total_requests - success_requests
+            results.append(
+                {
+                    "bucket_start": bucket_start,
+                    "total_requests": total_requests,
+                    "success_requests": success_requests,
+                    "failed_requests": failed_requests,
+                    "stream_requests": sum(1 for item in bucket_logs if item.is_stream),
+                    "image_requests": sum(1 for item in bucket_logs if item.has_image),
+                    "avg_latency_ms": LogService._average(latency_values),
+                    "avg_ttfb_ms": LogService._average(ttfb_values),
+                    "p95_latency_ms": LogService._percentile(latency_values, 95),
+                    "p99_latency_ms": LogService._percentile(latency_values, 99),
+                    "qps": round(total_requests / bucket_window_seconds, 4),
+                    "peak_active_requests": LogService._compute_peak_active_requests(bucket_logs),
+                    "total_tokens": sum(int(item.total_tokens or 0) for item in bucket_logs),
+                }
+            )
+        return results
+
+    @staticmethod
+    def metric_period_report(
+        db: Session,
+        *,
+        window_days: int,
+        period_type: str,
+    ) -> list[dict]:
+        normalized_period = (period_type or "").strip().lower()
+        if normalized_period not in {"day", "week", "month"}:
+            raise ValueError("period_type must be one of: day, week, month")
+        since = datetime.utcnow() - timedelta(days=window_days)
+        logs = LogService._load_route_metric_logs(db, since=since)
+        grouped: dict[datetime, list[RequestLog]] = {}
+        for item in logs:
+            if item.created_at is None:
+                continue
+            period_start = LogService._period_start(item.created_at, normalized_period)
+            grouped.setdefault(period_start, []).append(item)
+
+        items: list[dict] = []
+        for period_start in sorted(grouped.keys()):
+            period_logs = grouped[period_start]
+            total_requests = len(period_logs)
+            success_requests = sum(1 for item in period_logs if item.success)
+            failed_requests = total_requests - success_requests
+            items.append(
+                {
+                    "period_start": period_start,
+                    "period_type": normalized_period,
+                    "total_requests": total_requests,
+                    "success_requests": success_requests,
+                    "failed_requests": failed_requests,
+                    "total_tokens": sum(int(item.total_tokens or 0) for item in period_logs),
+                    "total_cost": round(sum(float(item.total_cost or 0) for item in period_logs), 6),
+                }
+            )
+        return items
+
+    @staticmethod
+    def _load_route_metric_logs(db: Session, *, since: datetime) -> list[RequestLog]:
+        return list(
             db.scalars(
                 select(RequestLog)
                 .where(
@@ -833,44 +1006,66 @@ class LogService:
                 .order_by(RequestLog.created_at.asc(), RequestLog.id.asc())
             )
         )
-        buckets: dict[datetime, dict] = {}
+
+    @staticmethod
+    def _metric_values(logs: list[RequestLog], field_name: str) -> list[float]:
+        values: list[float] = []
+        for item in logs:
+            value = getattr(item, field_name, None)
+            if value is not None:
+                values.append(float(value))
+        return values
+
+    @staticmethod
+    def _average(values: list[float]) -> float | None:
+        if not values:
+            return None
+        return round(sum(values) / len(values), 2)
+
+    @staticmethod
+    def _percentile(values: list[float], percentile: int) -> float | None:
+        if not values:
+            return None
+        ordered = sorted(values)
+        if len(ordered) == 1:
+            return round(ordered[0], 2)
+        rank = max(0.0, min(1.0, percentile / 100)) * (len(ordered) - 1)
+        lower = int(rank)
+        upper = min(len(ordered) - 1, lower + 1)
+        fraction = rank - lower
+        value = ordered[lower] + (ordered[upper] - ordered[lower]) * fraction
+        return round(value, 2)
+
+    @staticmethod
+    def _compute_peak_active_requests(logs: list[RequestLog]) -> int:
+        if not logs:
+            return 0
+        events: list[tuple[datetime, int]] = []
         for item in logs:
             if item.created_at is None:
                 continue
-            minute_floor = item.created_at.replace(second=0, microsecond=0)
-            bucket_minute = minute_floor.minute - (minute_floor.minute % bucket_minutes)
-            bucket_start = minute_floor.replace(minute=bucket_minute)
-            current = buckets.setdefault(
-                bucket_start,
-                {
-                    "bucket_start": bucket_start,
-                    "total_requests": 0,
-                    "success_requests": 0,
-                    "failed_requests": 0,
-                    "stream_requests": 0,
-                    "image_requests": 0,
-                    "latency_values": [],
-                    "ttfb_values": [],
-                    "total_tokens": 0,
-                },
-            )
-            current["total_requests"] += 1
-            current["success_requests"] += 1 if item.success else 0
-            current["failed_requests"] += 0 if item.success else 1
-            current["stream_requests"] += 1 if item.is_stream else 0
-            current["image_requests"] += 1 if item.has_image else 0
-            current["total_tokens"] += int(item.total_tokens or 0)
-            if item.latency_ms is not None:
-                current["latency_values"].append(float(item.latency_ms))
-            if item.ttfb_ms is not None:
-                current["ttfb_values"].append(float(item.ttfb_ms))
+            duration_ms = max(1, int(item.duration_ms or item.latency_ms or 1))
+            start_at = item.created_at
+            end_at = start_at + timedelta(milliseconds=duration_ms)
+            events.append((start_at, 1))
+            events.append((end_at, -1))
+        if not events:
+            return 0
+        current = 0
+        peak = 0
+        for _, delta in sorted(events, key=lambda item: (item[0], item[1])):
+            current += delta
+            if current > peak:
+                peak = current
+        if peak <= 0:
+            return min(len(logs), RuntimeStateService.peak_active_requests())
+        return peak
 
-        results = []
-        for bucket_start in sorted(buckets.keys()):
-            current = buckets[bucket_start]
-            latency_values = current.pop("latency_values")
-            ttfb_values = current.pop("ttfb_values")
-            current["avg_latency_ms"] = round(sum(latency_values) / len(latency_values), 2) if latency_values else None
-            current["avg_ttfb_ms"] = round(sum(ttfb_values) / len(ttfb_values), 2) if ttfb_values else None
-            results.append(current)
-        return results
+    @staticmethod
+    def _period_start(value: datetime, period_type: str) -> datetime:
+        if period_type == "day":
+            return value.replace(hour=0, minute=0, second=0, microsecond=0)
+        if period_type == "week":
+            day_start = value.replace(hour=0, minute=0, second=0, microsecond=0)
+            return day_start - timedelta(days=day_start.weekday())
+        return value.replace(day=1, hour=0, minute=0, second=0, microsecond=0)

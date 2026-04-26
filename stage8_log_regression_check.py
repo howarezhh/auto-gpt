@@ -137,7 +137,6 @@ def _create_api_key(
             "manual_allow_fallback": True,
             "allowed_provider_ids": [provider_id],
             "owner_user_id": owner_user_id,
-            "balance_amount": 10,
         },
     )
     _assert(response.status_code == 201, f"create api key failed: {response.text}")
@@ -171,6 +170,10 @@ def main() -> None:
                 provider_model.price_multiplier = 1.5
                 provider_model.input_price_per_1k = 0.003
                 provider_model.output_price_per_1k = 0.006
+                user_a.balance_amount = 50
+                user_a.total_recharge_amount = 50
+                user_b.balance_amount = 50
+                user_b.total_recharge_amount = 50
                 db.commit()
                 user_a_id = user_a.id
                 user_b_id = user_b.id
@@ -272,7 +275,7 @@ def main() -> None:
 
             admin_logs_page = client.get("/logs")
             _assert(admin_logs_page.status_code == 200, f"admin logs page failed: {admin_logs_page.text}")
-            _assert("思维等级" in admin_logs_page.text and "TTFB" in admin_logs_page.text and "倍率" in admin_logs_page.text, "admin logs page headers missing")
+            _assert("日志中心" in admin_logs_page.text and "关键列日志列表" in admin_logs_page.text, "admin logs page headers missing")
 
             client.get("/logout")
             _login(client, identifier="stage8-user-a", password="Stage8User#123")
@@ -281,7 +284,7 @@ def main() -> None:
             _assert("sess-u1" in user_logs_page.text, "user own session missing from user logs page")
             _assert("sess-u2" not in user_logs_page.text, "other user session leaked into user logs page")
             _assert("health-u1" not in user_logs_page.text, "health check log leaked into user logs page")
-            _assert("缓存读" in user_logs_page.text and "缓存写" in user_logs_page.text, "user logs page headers missing")
+            _assert("请求记录与排障入口" in user_logs_page.text and "关键列请求记录" in user_logs_page.text, "user logs page headers missing")
 
     print("stage8 log regression passed")
 

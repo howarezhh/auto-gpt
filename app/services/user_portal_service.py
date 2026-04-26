@@ -93,17 +93,20 @@ class UserPortalService:
         page: int,
         page_size: int,
         log_type: str | None = None,
+        provider_id: int | None = None,
+        model_name: str | None = None,
         api_client_key_id: int | None = None,
+        api_client_key_query: str | None = None,
         conversation_key: str | None = None,
         success: bool | None = None,
         exclude_health_checks: bool = True,
-    ) -> tuple[int, list[RequestLogOut], dict[str, int], list[dict]]:
+    ) -> tuple[int, list[RequestLogOut], dict[str, int | float], list[dict]]:
         owned_keys = UserPortalService.list_owned_api_keys(db, user_id=user.id)
         key_ids = [item.id for item in owned_keys]
         if not key_ids:
-            return 0, [], {"total_requests": 0, "success_requests": 0, "failed_requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "matched_api_keys": 0}, []
+            return 0, [], {"total_requests": 0, "success_requests": 0, "failed_requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "total_cost": 0, "matched_api_keys": 0}, []
         if api_client_key_id is not None and api_client_key_id not in key_ids:
-            return 0, [], {"total_requests": 0, "success_requests": 0, "failed_requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "matched_api_keys": 0}, [ApiKeyAdminService.serialize_api_key(item) for item in owned_keys]
+            return 0, [], {"total_requests": 0, "success_requests": 0, "failed_requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "total_cost": 0, "matched_api_keys": 0}, [ApiKeyAdminService.serialize_api_key(item) for item in owned_keys]
         effective_log_type = log_type if log_type in LogService.USER_VISIBLE_LOG_TYPES else None
         total, items, summary = LogService.list_logs(
             db,
@@ -111,17 +114,67 @@ class UserPortalService:
             page_size=page_size,
             log_type=effective_log_type,
             log_types=list(LogService.USER_VISIBLE_LOG_TYPES),
-            provider_id=None,
-            model_name=None,
+            provider_id=provider_id,
+            model_name=model_name,
             conversation_key=conversation_key,
             api_client_key_id=api_client_key_id,
-            api_client_key_query=None,
+            api_client_key_query=api_client_key_query,
             user_account_id=user.id,
             success=success,
-            exclude_health_checks=True,
+            exclude_health_checks=exclude_health_checks,
             api_client_key_ids=key_ids,
         )
         return total, [RequestLogOut.model_validate(item) for item in items], summary, [ApiKeyAdminService.serialize_api_key(item) for item in owned_keys]
+
+    @staticmethod
+    def get_log_filter_options(
+        db: Session,
+        *,
+        user: UserAccount,
+        exclude_health_checks: bool = True,
+    ) -> dict[str, list[dict[str, str]]]:
+        owned_keys = UserPortalService.list_owned_api_keys(db, user_id=user.id)
+        key_ids = [item.id for item in owned_keys]
+        if not key_ids:
+            return {
+                "providers": [],
+                "model_names": [],
+                "api_client_key_ids": [],
+                "api_client_key_queries": [],
+                "users": [],
+            }
+        all_options = LogService.get_filter_options(
+            db,
+            exclude_health_checks=exclude_health_checks,
+            user_account_id=user.id,
+            api_client_key_ids=key_ids,
+        )
+        owned_key_options = [
+            item
+            for item in all_options["api_client_key_ids"]
+            if str(item.get("value")) in {str(key_id) for key_id in key_ids}
+        ]
+        owned_query_values = {
+            item.key_prefix or item.name or str(item.id)
+            for item in owned_keys
+        }
+        masked_values = {
+            serialized.get("key_masked")
+            for serialized in [ApiKeyAdminService.serialize_api_key(key) for key in owned_keys]
+            if serialized.get("key_masked")
+        }
+        owned_query_options = [
+            item
+            for item in all_options["api_client_key_queries"]
+            if item.get("value") in owned_query_values or item.get("value") in masked_values
+        ]
+        return {
+            "providers": all_options["providers"],
+            "model_names": all_options["model_names"],
+            "api_client_key_ids": owned_key_options,
+            "api_client_key_queries": owned_query_options or all_options["api_client_key_queries"],
+            "users": [],
+        }
 
     @staticmethod
     def get_billing_overview(

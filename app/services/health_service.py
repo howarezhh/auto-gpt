@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
+from app.services.cache_service import CacheService
 from app.services.log_service import LogService
 from app.services.provider_service import ProviderService
 from app.services.proxy_service import ProxyService
@@ -19,6 +20,23 @@ VISION_TEST_IMAGE_URL = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAA
 
 
 class HealthService:
+    @staticmethod
+    def cached_provider_status_summary(db: Session) -> dict:
+        setting = SettingService.get_or_create(db)
+        cache_key = "provider-status-summary"
+        cached = CacheService.get(cache_key)
+        if cached is not None:
+            return cached
+        providers = ProviderService.list_providers(db)
+        payload = {
+            "provider_count": len(providers),
+            "healthy_provider_count": len([item for item in providers if item.health_status == "healthy"]),
+            "degraded_provider_count": len([item for item in providers if item.health_status == "degraded"]),
+            "unhealthy_provider_count": len([item for item in providers if item.health_status == "unhealthy"]),
+            "open_circuit_provider_count": len([item for item in providers if item.circuit_state == "open"]),
+        }
+        return CacheService.set(cache_key, payload, ttl_seconds=max(0, int(setting.provider_status_cache_ttl_sec)))
+
     @staticmethod
     async def check_provider(
         db: Session,
@@ -271,7 +289,7 @@ class HealthService:
             "max_tokens": 16,
         }
         if stream_probe and provider_model.supports_stream:
-            payload["stream"] = False
+            payload["stream"] = True
         return payload
 
     @staticmethod
@@ -380,14 +398,18 @@ class HealthService:
             provider_model.circuit_state = "closed"
             provider_model.circuit_opened_at = None
         else:
-            threshold = SettingService.get_or_create(db).circuit_breaker_threshold
             provider_model.failure_count += 1
-            if provider_model.circuit_state == "half_open" or provider_model.failure_count >= threshold:
-                provider_model.health_status = "unhealthy"
-                provider_model.circuit_state = "open"
-                provider_model.circuit_opened_at = datetime.utcnow()
+            if provider.auto_circuit_break_enabled:
+                threshold = ProviderService.get_effective_circuit_breaker_threshold(db, provider)
+                if provider_model.circuit_state == "half_open" or provider_model.failure_count >= threshold:
+                    provider_model.health_status = "unhealthy"
+                    provider_model.circuit_state = "open"
+                    provider_model.circuit_opened_at = datetime.utcnow()
+                else:
+                    provider_model.health_status = "degraded"
             else:
                 provider_model.health_status = "degraded"
+                provider_model.circuit_state = "closed"
         provider.last_check_at = provider_model.last_check_at
         provider.last_latency_ms = latency_ms
         ProviderService.refresh_provider_state(provider)

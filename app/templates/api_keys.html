@@ -153,13 +153,124 @@
         <button class="btn btn-ghost interactive-btn" id="api-key-batch-enable-btn" type="button">批量启用</button>
         <button class="btn btn-ghost interactive-btn" id="api-key-batch-disable-btn" type="button">批量禁用</button>
         <button class="btn btn-ghost interactive-btn" id="api-key-batch-delete-btn" type="button">批量删除</button>
+        <button class="btn btn-ghost interactive-btn" id="api-key-batch-rotate-btn" type="button">批量轮换</button>
+        <button class="btn btn-ghost interactive-btn" id="api-key-batch-expire-btn" type="button">批量过期</button>
+        <button class="btn btn-ghost interactive-btn" id="api-key-batch-template-btn" type="button">批量套用模板</button>
         <button class="btn btn-ghost interactive-btn" id="api-key-batch-providers-btn" type="button">批量改渠道授权</button>
         <button class="btn btn-ghost interactive-btn" id="api-key-prev-page-btn" type="button">上一页</button>
         <button class="btn btn-ghost interactive-btn" id="api-key-next-page-btn" type="button">下一页</button>
     </div>
     <div class="settings-note">
         <strong>批量规则</strong>
-        <span>批量操作仅作用于已勾选的 API 密钥，可跨页累积选择。统一授权时会覆盖所选密钥的路由模式、默认中转站、回退策略和渠道授权集合。</span>
+        <span>批量操作仅作用于已勾选的 API 密钥，可跨页累积选择。除启停、删除、轮换外，还可以统一套用策略模板、立即过期或覆盖渠道授权策略。</span>
+    </div>
+</section>
+
+<section class="dashboard-command-grid anchor-section-offset">
+    <div class="panel-card section-shell">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">策略模板</div>
+                <h3>可复用的 API Key 治理模板</h3>
+            </div>
+            <button class="btn btn-ghost interactive-btn" id="api-key-template-add-btn" type="button">新增模板</button>
+        </div>
+        <div class="table-shell">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>名称</th>
+                        <th>路由策略</th>
+                        <th>授权渠道</th>
+                        <th>额度</th>
+                        <th>到期策略</th>
+                        <th>状态</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody id="api-key-template-table-body">
+                    <tr><td colspan="7"><div class="empty-state">正在加载策略模板...</div></td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="dashboard-command-side">
+        <div class="panel-card">
+            <div class="panel-head">
+                <div>
+                    <div class="panel-kicker">模板用途</div>
+                    <h3>统一发放标准</h3>
+                </div>
+            </div>
+            <div class="risk-grid">
+                <article class="risk-card" data-level="default">
+                    <strong>新建时套用</strong>
+                    <span>常见场景如“测试 Key”“生产只读 Key”“高配额企业 Key”可以直接复用模板。</span>
+                </article>
+                <article class="risk-card" data-level="warning">
+                    <strong>批量治理</strong>
+                    <span>当需要收紧或统一一批 Key 的路由和额度时，用模板比逐个编辑更稳定。</span>
+                </article>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="dashboard-command-grid anchor-section-offset">
+    <div class="panel-card section-shell">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">成本透视</div>
+                <h3>按用户 / 模型 / 渠道看成本</h3>
+            </div>
+        </div>
+        <div class="table-toolbar">
+            <select class="field-input" id="api-key-insight-group-by">
+                <option value="user">按用户</option>
+                <option value="model">按模型</option>
+                <option value="provider">按渠道</option>
+            </select>
+            <select class="field-input" id="api-key-insight-window-days">
+                <option value="7">最近 7 天</option>
+                <option value="30" selected>最近 30 天</option>
+                <option value="90">最近 90 天</option>
+            </select>
+            <button class="btn btn-ghost interactive-btn" id="api-key-insight-refresh-btn" type="button">刷新透视</button>
+        </div>
+        <div class="table-shell">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>维度</th>
+                        <th>请求数</th>
+                        <th>Token</th>
+                        <th>累计成本</th>
+                        <th>平均延迟</th>
+                    </tr>
+                </thead>
+                <tbody id="api-key-insight-table-body">
+                    <tr><td colspan="5"><div class="empty-state">正在加载成本透视...</div></td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="dashboard-command-side">
+        <div class="panel-card">
+            <div class="panel-head">
+                <div>
+                    <div class="panel-kicker">使用说明</div>
+                    <h3>透视口径</h3>
+                </div>
+            </div>
+            <div class="dashboard-signal-list">
+                <div><span>按用户</span><strong>看哪个账户最耗钱</strong></div>
+                <div><span>按模型</span><strong>看哪个模型最贵</strong></div>
+                <div><span>按渠道</span><strong>看哪个中转站成本最高</strong></div>
+                <div><span>统计来源</span><strong>统一来自 request_logs</strong></div>
+            </div>
+        </div>
     </div>
 </section>
 
@@ -220,6 +331,12 @@
             <label>
                 <span>名称</span>
                 <input class="field-input" id="api-key-name" maxlength="100" required>
+            </label>
+            <label>
+                <span>策略模板</span>
+                <select class="field-input" id="api-key-template-id">
+                    <option value="">不套用模板</option>
+                </select>
             </label>
             <label>
                 <span>密钥生成方式</span>
@@ -370,6 +487,108 @@
                 <button class="btn btn-accent interactive-btn" id="api-key-batch-provider-submit" type="submit">应用到已选 API 密钥</button>
             </div>
         </form>
+    </div>
+</div>
+
+<div class="modal-shell hidden" id="api-key-template-modal">
+    <div class="modal-card modal-lg">
+        <div class="modal-head">
+            <h3 id="api-key-template-modal-title">新增策略模板</h3>
+            <button class="icon-btn interactive-btn" id="api-key-template-modal-close" type="button">×</button>
+        </div>
+        <form id="api-key-template-form" class="form-grid">
+            <input id="api-key-template-edit-id" type="hidden">
+            <label>
+                <span>模板名称</span>
+                <input class="field-input" id="api-key-template-name" maxlength="100" required>
+            </label>
+            <label>
+                <span>路由模式</span>
+                <select class="field-input" id="api-key-template-route-mode">
+                    <option value="manual">手动优先</option>
+                    <option value="failover">故障切换</option>
+                    <option value="weighted">权重分流</option>
+                    <option value="sticky">会话粘滞</option>
+                </select>
+            </label>
+            <label>
+                <span>默认中转站</span>
+                <select class="field-input" id="api-key-template-default-provider-id">
+                    <option value="">未设置</option>
+                </select>
+            </label>
+            <label>
+                <span>Token 上限</span>
+                <input class="field-input" id="api-key-template-token-limit-total" type="number" min="0">
+            </label>
+            <label>
+                <span>金额额度</span>
+                <input class="field-input" id="api-key-template-cost-limit-total" type="number" min="0" step="0.000001">
+            </label>
+            <label>
+                <span>多少天后过期</span>
+                <input class="field-input" id="api-key-template-expires-in-days" type="number" min="0">
+            </label>
+            <label class="toggle-row">
+                <input id="api-key-template-enabled" type="checkbox" checked>
+                <span>启用模板</span>
+            </label>
+            <label class="toggle-row">
+                <input id="api-key-template-manual-allow-fallback" type="checkbox" checked>
+                <span>手动优先模式允许失败后回退</span>
+            </label>
+            <label class="form-span-2">
+                <span>备注</span>
+                <input class="field-input" id="api-key-template-remark" maxlength="200">
+            </label>
+            <div class="form-span-2">
+                <span>授权中转站</span>
+                <div class="api-key-provider-selector" id="api-key-template-provider-selector"></div>
+            </div>
+            <div class="form-actions form-span-2">
+                <button class="btn btn-ghost interactive-btn" id="api-key-template-cancel" type="button">取消</button>
+                <button class="btn btn-accent interactive-btn" id="api-key-template-submit-btn" type="submit">保存模板</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div class="modal-shell hidden" id="api-key-batch-template-modal">
+    <div class="modal-card">
+        <div class="modal-head">
+            <h3>批量套用策略模板</h3>
+            <button class="icon-btn interactive-btn" id="api-key-batch-template-close" type="button">×</button>
+        </div>
+        <form id="api-key-batch-template-form" class="form-grid">
+            <label class="form-span-2">
+                <span>选择模板</span>
+                <select class="field-input" id="api-key-batch-template-id" required>
+                    <option value="">请选择一个模板</option>
+                </select>
+            </label>
+            <div class="form-actions form-span-2">
+                <button class="btn btn-ghost interactive-btn" id="api-key-batch-template-cancel" type="button">取消</button>
+                <button class="btn btn-accent interactive-btn" id="api-key-batch-template-submit" type="submit">应用到已选 API 密钥</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div class="modal-shell hidden" id="api-key-batch-rotate-modal">
+    <div class="modal-card modal-lg">
+        <div class="modal-head">
+            <h3>批量轮换结果</h3>
+            <button class="icon-btn interactive-btn" id="api-key-batch-rotate-close" type="button">×</button>
+        </div>
+        <div class="settings-note">
+            <strong>结果说明</strong>
+            <span>以下明文只会在当前管理界面展示。请立即同步到外部业务系统，旧密钥已经失效。</span>
+        </div>
+        <textarea class="field-input" id="api-key-batch-rotate-result" rows="12" readonly placeholder="轮换后的密钥结果会显示在这里"></textarea>
+        <div class="form-actions">
+            <button class="btn btn-ghost interactive-btn" id="api-key-batch-rotate-cancel" type="button">关闭</button>
+            <button class="btn btn-accent interactive-btn" id="api-key-batch-rotate-copy" type="button">复制全部结果</button>
+        </div>
     </div>
 </div>
 {% endblock %}

@@ -690,11 +690,13 @@
         manualAllowFallback,
         providers = [],
     }) {
-        if (!modeCards || !liveSummary) return;
+        if (!modeCards) return;
         const defaultProviderLabel = getDefaultProviderLabel(providers, defaultProviderId);
         const hasDefaultProvider = Boolean(defaultProviderId) && providers.some((item) => item.id === Number(defaultProviderId));
         modeCards.innerHTML = buildRouteModeCards(routeMode, defaultProviderLabel, manualAllowFallback);
-        liveSummary.innerHTML = buildRouteLiveSummary(routeMode, defaultProviderLabel, manualAllowFallback, hasDefaultProvider);
+        if (liveSummary) {
+            liveSummary.innerHTML = buildRouteLiveSummary(routeMode, defaultProviderLabel, manualAllowFallback, hasDefaultProvider);
+        }
     }
 
     function renderRoutePolicyGuide({
@@ -1583,19 +1585,60 @@
         const testResultModal = document.getElementById("provider-test-result-modal");
         const testResultModalTitle = document.getElementById("provider-test-result-modal-title");
         const testResultModalContent = document.getElementById("provider-test-result-modal-content");
+        const credentialModal = document.getElementById("provider-credential-modal");
+        const credentialForm = document.getElementById("provider-credential-form");
+        const credentialProviderIdInput = document.getElementById("provider-credential-provider-id");
+        const credentialApiKeyInput = document.getElementById("provider-credential-api-key");
+        const credentialHintInput = document.getElementById("provider-credential-hint");
+        const credentialSubmitBtn = document.getElementById("provider-credential-submit-btn");
+        const availabilityProviderSelect = document.getElementById("provider-availability-provider");
+        const availabilityWindowSelect = document.getElementById("provider-availability-window");
+        const availabilityBucketSelect = document.getElementById("provider-availability-bucket");
+        const availabilityRefreshBtn = document.getElementById("provider-availability-refresh-btn");
+        const availabilityTableBody = document.getElementById("provider-availability-table-body");
         const searchInput = document.getElementById("provider-search");
         const checkAllBtn = document.getElementById("providers-check-all-btn");
         const submitBtn = document.getElementById("provider-submit-btn");
         const providerModelsTextarea = document.getElementById("provider-models");
         const customModelInput = document.getElementById("provider-custom-model-name");
         const addCustomModelBtn = document.getElementById("provider-add-custom-model");
+        const providerForm = document.getElementById("provider-form");
+        const providerIdInput = document.getElementById("provider-id");
+        const providerNameInput = document.getElementById("provider-name");
+        const providerBaseUrlInput = document.getElementById("provider-base-url");
+        const providerApiKeyInput = document.getElementById("provider-api-key");
+        const providerTypeInput = document.getElementById("provider-type");
+        const providerGroupNameInput = document.getElementById("provider-group-name");
+        const providerRegionTagInput = document.getElementById("provider-region-tag");
+        const providerPriorityInput = document.getElementById("provider-priority");
+        const providerWeightInput = document.getElementById("provider-weight");
+        const providerTimeoutMsInput = document.getElementById("provider-timeout-ms");
+        const providerMaxRetriesInput = document.getElementById("provider-max-retries");
+        const providerMaintenanceWindowInput = document.getElementById("provider-maintenance-window");
+        const providerMaintenanceModeEnabledInput = document.getElementById("provider-maintenance-mode-enabled");
+        const providerAutoCircuitBreakEnabledInput = document.getElementById("provider-auto-circuit-break-enabled");
+        const providerAutoRecoverEnabledInput = document.getElementById("provider-auto-recover-enabled");
+        const providerCircuitBreakerThresholdOverrideInput = document.getElementById("provider-circuit-breaker-threshold-override");
+        const providerRecoveryProbeIntervalOverrideInput = document.getElementById("provider-recovery-probe-interval-override");
+        const providerRemarkInput = document.getElementById("provider-remark");
+        const providerEnabledInput = document.getElementById("provider-enabled");
+        const discoverModelsBtn = document.getElementById("provider-discover-models-btn");
+        const importSelectedModelsBtn = document.getElementById("provider-import-selected-models-btn");
+        const importAllModelsBtn = document.getElementById("provider-import-all-models-btn");
+        const discoveredModelsCheckAll = document.getElementById("provider-discovered-models-check-all");
+        const discoveredModelsBody = document.getElementById("provider-discovered-models-body");
         let providers = [];
+        let discoveredModels = [];
+
+        if (!tableBody || !modelTableBody || !modal || !providerForm) return;
 
         enhanceInteractiveButtons(document);
         document.getElementById("add-provider-btn").addEventListener("click", () => openProviderModal());
         document.getElementById("provider-modal-close").addEventListener("click", closeProviderModal);
         document.getElementById("provider-form-cancel").addEventListener("click", closeProviderModal);
         document.getElementById("provider-test-result-modal-close")?.addEventListener("click", closeTestResultModal);
+        document.getElementById("provider-credential-modal-close")?.addEventListener("click", closeCredentialModal);
+        document.getElementById("provider-credential-cancel")?.addEventListener("click", closeCredentialModal);
         document.querySelectorAll("[data-model-preset]").forEach((button) => {
             button.addEventListener("click", () => {
                 const modelName = button.dataset.modelPreset;
@@ -1614,6 +1657,38 @@
                 customModelInput.value = "";
                 showToast(`已添加自定义模型 ${modelName}`);
             }
+        });
+        discoverModelsBtn?.addEventListener("click", async () => {
+            await discoverProviderModels();
+        });
+        importSelectedModelsBtn?.addEventListener("click", () => {
+            const selectedModelNames = getSelectedDiscoveredModelNames();
+            if (!selectedModelNames.length) {
+                showToast("请先选择至少一个上游模型", "error");
+                return;
+            }
+            importDiscoveredModels(selectedModelNames);
+        });
+        importAllModelsBtn?.addEventListener("click", () => {
+            const modelNames = discoveredModels
+                .filter((item) => !item.already_configured)
+                .map((item) => item.model_name);
+            if (!modelNames.length) {
+                showToast("当前没有可新增的上游模型", "error");
+                return;
+            }
+            importDiscoveredModels(modelNames);
+        });
+        discoveredModelsCheckAll?.addEventListener("change", () => {
+            discoveredModelsBody?.querySelectorAll("[data-discovered-model-name]").forEach((node) => {
+                if (!node.disabled) {
+                    node.checked = discoveredModelsCheckAll.checked;
+                }
+            });
+            syncDiscoveredCheckAllState();
+        });
+        discoveredModelsBody?.addEventListener("change", () => {
+            syncDiscoveredCheckAllState();
         });
         checkAllBtn.addEventListener("click", async () => {
             try {
@@ -1635,26 +1710,37 @@
         testResultModal?.addEventListener("click", (event) => {
             if (event.target === testResultModal) closeTestResultModal();
         });
+        credentialModal?.addEventListener("click", (event) => {
+            if (event.target === credentialModal) closeCredentialModal();
+        });
 
-        document.getElementById("provider-form").addEventListener("submit", async (event) => {
+        providerForm.addEventListener("submit", async (event) => {
             event.preventDefault();
-            const id = document.getElementById("provider-id").value;
-            const apiKey = document.getElementById("provider-api-key").value.trim();
+            const id = providerIdInput.value;
+            const apiKey = providerApiKeyInput.value.trim();
             if (!id && !apiKey) {
                 showToast("新增中转站时必须填写 API Key", "error");
                 return;
             }
             const payload = {
-                name: document.getElementById("provider-name").value.trim(),
-                base_url: document.getElementById("provider-base-url").value.trim(),
-                provider_type: document.getElementById("provider-type").value.trim() || "openai_compatible",
-                enabled: document.getElementById("provider-enabled").checked,
-                priority: Number(document.getElementById("provider-priority").value),
-                weight: Number(document.getElementById("provider-weight").value),
-                timeout_ms: Number(document.getElementById("provider-timeout-ms").value),
-                max_retries: Number(document.getElementById("provider-max-retries").value),
-                model_configs: parseModelConfigs(document.getElementById("provider-models").value),
-                remark: document.getElementById("provider-remark").value.trim(),
+                name: providerNameInput.value.trim(),
+                base_url: providerBaseUrlInput.value.trim(),
+                provider_type: providerTypeInput.value.trim() || "openai_compatible",
+                group_name: providerGroupNameInput.value.trim() || null,
+                region_tag: providerRegionTagInput.value.trim() || null,
+                enabled: providerEnabledInput.checked,
+                priority: Number(providerPriorityInput.value),
+                weight: Number(providerWeightInput.value),
+                timeout_ms: Number(providerTimeoutMsInput.value),
+                max_retries: Number(providerMaxRetriesInput.value),
+                maintenance_window: providerMaintenanceWindowInput.value.trim() || null,
+                maintenance_mode_enabled: providerMaintenanceModeEnabledInput.checked,
+                auto_circuit_break_enabled: providerAutoCircuitBreakEnabledInput.checked,
+                auto_recover_enabled: providerAutoRecoverEnabledInput.checked,
+                circuit_breaker_threshold_override: providerCircuitBreakerThresholdOverrideInput.value === "" ? null : Number(providerCircuitBreakerThresholdOverrideInput.value),
+                recovery_probe_interval_sec_override: providerRecoveryProbeIntervalOverrideInput.value === "" ? null : Number(providerRecoveryProbeIntervalOverrideInput.value),
+                model_configs: parseModelConfigs(providerModelsTextarea.value),
+                remark: providerRemarkInput.value.trim(),
             };
             if (id) {
                 if (apiKey) payload.api_key = apiKey;
@@ -1679,13 +1765,55 @@
             }
         });
 
-        searchInput.addEventListener("input", () => renderProviders(searchInput.value));
+        credentialForm?.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            const providerId = Number(credentialProviderIdInput.value);
+            if (!Number.isFinite(providerId)) return;
+            try {
+                setButtonLoading(credentialSubmitBtn, true);
+                await api.post(`/api/providers/${providerId}/rotate-credential`, {
+                    api_key: credentialApiKeyInput.value.trim(),
+                    credential_hint: credentialHintInput.value.trim() || null,
+                });
+                showToast("中转站凭据已轮换");
+                closeCredentialModal();
+                await loadProviders();
+            } catch (error) {
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(credentialSubmitBtn, false);
+            }
+        });
+
+        searchInput.addEventListener("input", () => {
+            renderProviders(searchInput.value);
+            renderProviderModels(searchInput.value);
+        });
+        providerModelsTextarea.addEventListener("input", () => {
+            if (discoveredModels.length) {
+                renderDiscoveredModels(discoveredModels);
+            }
+        });
+        availabilityProviderSelect?.addEventListener("change", async () => {
+            await loadAvailability({ manual: false });
+        });
+        availabilityWindowSelect?.addEventListener("change", async () => {
+            await loadAvailability({ manual: false });
+        });
+        availabilityBucketSelect?.addEventListener("change", async () => {
+            await loadAvailability({ manual: false });
+        });
+        availabilityRefreshBtn?.addEventListener("click", async () => {
+            await loadAvailability({ manual: true });
+        });
 
         async function loadProviders() {
             providers = await api.get("/api/providers");
             renderProviderTelemetry(providers);
             renderProviders(searchInput.value);
             renderProviderModels(searchInput.value);
+            populateAvailabilityProviderOptions();
+            await loadAvailability({ manual: false });
         }
 
         function renderProviderTelemetry(currentProviders) {
@@ -1719,11 +1847,170 @@
             `;
         }
 
+        function renderProviderScope(provider) {
+            return `
+                <strong>${escapeHtml(provider.group_name || "未分组")}</strong>
+                <div class="table-muted">${escapeHtml(provider.region_tag || "未标记地区")}</div>
+            `;
+        }
+
+        function renderProviderStrategy(provider) {
+            const maintenanceText = provider.maintenance_mode_enabled
+                ? `维护中 · ${provider.maintenance_window || "未填写维护窗口"}`
+                : (provider.maintenance_window || "未设置维护窗口");
+            const circuitText = [
+                `自动摘除 ${formatSwitchText(provider.auto_circuit_break_enabled)}`,
+                `自动恢复 ${formatSwitchText(provider.auto_recover_enabled)}`,
+            ].join(" · ");
+            const overrideText = [
+                provider.circuit_breaker_threshold_override == null ? null : `阈值 ${provider.circuit_breaker_threshold_override}`,
+                provider.recovery_probe_interval_sec_override == null ? null : `恢复 ${provider.recovery_probe_interval_sec_override}s`,
+            ].filter(Boolean).join(" · ");
+            const credentialText = provider.credential_rotated_at
+                ? `凭据轮换 ${formatDate(provider.credential_rotated_at)}`
+                : "凭据未记录轮换";
+            return `
+                <strong>${escapeHtml(maintenanceText)}</strong>
+                <div class="table-muted">${escapeHtml(circuitText)}</div>
+                <div class="table-muted">${escapeHtml(overrideText || credentialText)}</div>
+                ${provider.credential_hint ? `<div class="table-muted">${escapeHtml(provider.credential_hint)}</div>` : ""}
+            `;
+        }
+
+        function renderAvailability(items = []) {
+            if (!availabilityTableBody) return;
+            availabilityTableBody.innerHTML = items.length ? items.map((item) => `
+                <tr>
+                    <td>${formatDate(item.bucket_start)}</td>
+                    <td>${formatNumber(item.total_requests)}</td>
+                    <td>${formatNumber(item.success_requests)}</td>
+                    <td>${formatNumber(item.failed_requests)}</td>
+                    <td>${item.success_rate}%</td>
+                    <td>${item.avg_latency_ms ?? "-"} ms</td>
+                </tr>
+            `).join("") : '<tr><td colspan="6"><div class="empty-state">当前时间窗口内暂无历史请求。</div></td></tr>';
+        }
+
+        function getCurrentConfiguredModelNames() {
+            return parseModelConfigs(providerModelsTextarea.value).map((item) => item.model_name);
+        }
+
+        function getSelectedDiscoveredModelNames() {
+            if (!discoveredModelsBody) return [];
+            return Array.from(discoveredModelsBody.querySelectorAll("[data-discovered-model-name]:checked"))
+                .map((input) => String(input.dataset.discoveredModelName || "").trim())
+                .filter(Boolean);
+        }
+
+        function syncDiscoveredCheckAllState() {
+            if (!discoveredModelsCheckAll) return;
+            const total = discoveredModels.length;
+            const selected = getSelectedDiscoveredModelNames().length;
+            discoveredModelsCheckAll.checked = total > 0 && selected === total;
+            discoveredModelsCheckAll.indeterminate = selected > 0 && selected < total;
+        }
+
+        function renderDiscoveredModels(items = []) {
+            if (!discoveredModelsBody) return;
+            const configuredNameSet = new Set(getCurrentConfiguredModelNames());
+            discoveredModels = items.map((item) => ({
+                ...item,
+                already_configured: configuredNameSet.has(item.model_name),
+            }));
+            discoveredModelsBody.innerHTML = discoveredModels.length ? discoveredModels.map((item) => `
+                <tr>
+                    <td><input type="checkbox" data-discovered-model-name="${escapeHtml(item.model_name)}" ${item.already_configured ? "disabled" : ""}></td>
+                    <td>
+                        <strong>${escapeHtml(item.model_name)}</strong>
+                    </td>
+                    <td>${item.supports_stream ? "流式" : "非流式"} / ${item.supports_vision ? "图像" : "文本"}</td>
+                    <td>${item.already_configured ? "已在当前配置中" : "可导入"}</td>
+                </tr>
+            `).join("") : '<tr><td colspan="4"><div class="empty-state">当前没有可导入的上游模型。</div></td></tr>';
+            syncDiscoveredCheckAllState();
+        }
+
+        async function discoverProviderModels() {
+            const payload = {
+                provider_id: providerIdInput.value === "" ? null : Number(providerIdInput.value),
+                base_url: providerBaseUrlInput.value.trim() || null,
+                api_key: providerApiKeyInput.value.trim() || null,
+                provider_type: providerTypeInput.value.trim() || null,
+                timeout_ms: providerTimeoutMsInput.value === "" ? null : Number(providerTimeoutMsInput.value),
+                existing_model_names: getCurrentConfiguredModelNames(),
+            };
+            try {
+                setButtonLoading(discoverModelsBtn, true);
+                const data = await api.post("/api/providers/discover-models", payload);
+                renderDiscoveredModels(Array.isArray(data.items) ? data.items : []);
+                showToast(`已获取 ${formatNumber(data.total_models || 0)} 个可用模型`);
+            } catch (error) {
+                renderDiscoveredModels([]);
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(discoverModelsBtn, false);
+            }
+        }
+
+        function importDiscoveredModels(modelNames) {
+            let addedCount = 0;
+            modelNames.forEach((modelName) => {
+                if (appendModelConfigLine(providerModelsTextarea, modelName)) {
+                    addedCount += 1;
+                }
+            });
+            renderDiscoveredModels(discoveredModels);
+            if (addedCount > 0) {
+                showToast(`已添加 ${formatNumber(addedCount)} 个模型到当前中转站配置`);
+            }
+        }
+
+        function populateAvailabilityProviderOptions(selectedProviderId = availabilityProviderSelect?.value || "") {
+            if (!availabilityProviderSelect) return;
+            availabilityProviderSelect.innerHTML = '<option value="">请选择一个中转站</option>' + providers.map((provider) => `
+                <option value="${provider.id}" ${String(provider.id) === String(selectedProviderId) ? "selected" : ""}>
+                    ${escapeHtml(provider.name)}${provider.group_name ? ` · ${escapeHtml(provider.group_name)}` : ""}
+                </option>
+            `).join("");
+            if (!availabilityProviderSelect.value && providers.length) {
+                availabilityProviderSelect.value = String(providers[0].id);
+            }
+        }
+
+        async function loadAvailability({ manual = false } = {}) {
+            if (!availabilityProviderSelect || !availabilityWindowSelect || !availabilityBucketSelect || !availabilityTableBody) return;
+            const providerId = Number(availabilityProviderSelect.value);
+            if (!Number.isFinite(providerId)) {
+                renderAvailability([]);
+                return;
+            }
+            try {
+                if (manual) setButtonLoading(availabilityRefreshBtn, true);
+                const data = await api.get(`/api/providers/${providerId}/availability?window_hours=${encodeURIComponent(availabilityWindowSelect.value)}&bucket_minutes=${encodeURIComponent(availabilityBucketSelect.value)}`);
+                renderAvailability(Array.isArray(data.items) ? data.items : []);
+                if (manual) showToast(`已刷新 ${data.provider_name} 的历史可用率`);
+            } catch (error) {
+                renderAvailability([]);
+                if (manual) showToast(error.message, "error");
+            } finally {
+                if (manual) setButtonLoading(availabilityRefreshBtn, false);
+            }
+        }
+
         function renderProviders(keyword = "") {
             const query = keyword.trim().toLowerCase();
             const filtered = providers.filter((provider) => {
                 if (!query) return true;
-                const text = [provider.name, provider.base_url, provider.models.join(", "), provider.remark || ""].join(" ").toLowerCase();
+                const text = [
+                    provider.name,
+                    provider.group_name || "",
+                    provider.region_tag || "",
+                    provider.base_url,
+                    provider.models.join(", "),
+                    provider.maintenance_window || "",
+                    provider.credential_hint || "",
+                    provider.remark || "",
+                ].join(" ").toLowerCase();
                 return text.includes(query);
             });
             tableBody.innerHTML = filtered.map((provider) => `
@@ -1732,10 +2019,12 @@
                         <strong>${escapeHtml(provider.name)}</strong>
                         <div class="table-muted">API Key ${escapeHtml(provider.api_key_masked)}</div>
                     </td>
+                    <td>${renderProviderScope(provider)}</td>
                     <td>${escapeHtml(provider.base_url)}</td>
                     <td>${renderProviderModelHealth(provider.model_configs, provider.id)}</td>
                     <td>${statusBadge(provider.health_status)}</td>
                     <td>${statusBadge(provider.circuit_state)}</td>
+                    <td>${renderProviderStrategy(provider)}</td>
                     <td>${renderProviderCost(provider)}</td>
                     <td>${renderQualitySummary(provider)}</td>
                     <td>${provider.priority}</td>
@@ -1744,13 +2033,14 @@
                         <div class="table-actions">
                             <button class="table-action-btn" data-action="edit" data-id="${provider.id}">编辑</button>
                             <button class="table-action-btn" data-action="test" data-id="${provider.id}">测试</button>
+                            <button class="table-action-btn" data-action="rotate-credential" data-id="${provider.id}">轮换凭据</button>
                             <button class="table-action-btn" data-action="default" data-id="${provider.id}">设为默认</button>
                             <button class="table-action-btn" data-action="toggle" data-id="${provider.id}">${provider.enabled ? "禁用" : "启用"}</button>
                             <button class="table-action-btn" data-action="delete" data-id="${provider.id}">删除</button>
                         </div>
                     </td>
                 </tr>
-            `).join("") || '<tr><td colspan="10"><div class="empty-state">没有匹配的中转站</div></td></tr>';
+            `).join("") || '<tr><td colspan="12"><div class="empty-state">没有匹配的中转站</div></td></tr>';
             enhanceInteractiveButtons(tableBody);
         }
 
@@ -1759,7 +2049,7 @@
             const rows = providers.flatMap((provider) => provider.model_configs.map((model) => ({ provider, model })));
             const filtered = rows.filter(({ provider, model }) => {
                 if (!query) return true;
-                const text = [provider.name, provider.base_url, model.model_name, provider.remark || ""].join(" ").toLowerCase();
+                const text = [provider.name, provider.group_name || "", provider.region_tag || "", provider.base_url, model.model_name, provider.remark || ""].join(" ").toLowerCase();
                 return text.includes(query);
             });
             modelTableBody.innerHTML = filtered.map(({ provider, model }) => `
@@ -1801,35 +2091,17 @@
             if (!button) return;
             const action = button.dataset.action;
             const id = Number(button.dataset.id);
-            if (action === "test-model") {
-                const providerId = Number(button.dataset.providerId);
-                const modelId = Number(button.dataset.modelId);
-                const owner = providers.find((item) => item.id === providerId);
-                const modelConfig = owner?.model_configs?.find((item) => item.id === modelId);
-                if (!owner || !modelConfig) return;
-                try {
-                    setButtonLoading(button, true);
-                    const result = await api.post(`/api/providers/${providerId}/models/${modelId}/test`, {});
-                    showToast(
-                        formatTestResultLabel(result, `模型 ${modelConfig.model_name}`),
-                        result.success ? "success" : "error",
-                    );
-                    openTestResultModal(
-                        `模型测试结果 · ${modelConfig.model_name}`,
-                        renderProviderTestModalBody(result, { scope: "model", name: `${owner.name} / ${modelConfig.model_name}` }),
-                    );
-                    await loadProviders();
-                } catch (error) {
-                    showToast(error.message, "error");
-                } finally {
-                    setButtonLoading(button, false);
-                }
-                return;
-            }
             const provider = providers.find((item) => item.id === id);
             if (!provider) return;
             try {
-                if (action === "edit") openProviderModal(provider);
+                if (action === "edit") {
+                    openProviderModal(provider);
+                    return;
+                }
+                if (action === "rotate-credential") {
+                    openCredentialModal(provider);
+                    return;
+                }
                 if (action === "test") {
                     setButtonLoading(button, true);
                     const result = await api.post(`/api/providers/${id}/test`);
@@ -1842,12 +2114,14 @@
                         renderProviderTestModalBody(result, { scope: "provider", name: provider.name }),
                     );
                     await loadProviders();
+                    return;
                 }
                 if (action === "toggle") {
                     setButtonLoading(button, true);
                     await api.put(`/api/providers/${id}`, { enabled: !provider.enabled });
                     showToast(`${provider.enabled ? "已禁用" : "已启用"} ${provider.name}`);
                     await loadProviders();
+                    return;
                 }
                 if (action === "delete") {
                     if (!window.confirm(`确认删除 ${provider.name} 吗？`)) return;
@@ -1855,6 +2129,7 @@
                     await api.delete(`/api/providers/${id}`);
                     showToast("已删除中转站");
                     await loadProviders();
+                    return;
                 }
                 if (action === "default") {
                     setButtonLoading(button, true);
@@ -1929,24 +2204,50 @@
 
         function openProviderModal(provider) {
             document.getElementById("provider-modal-title").textContent = provider ? "编辑中转站" : "新增中转站";
-            document.getElementById("provider-id").value = provider?.id ?? "";
-            document.getElementById("provider-name").value = provider?.name ?? "";
-            document.getElementById("provider-base-url").value = provider?.base_url ?? "";
-            document.getElementById("provider-api-key").value = "";
-            document.getElementById("provider-type").value = provider?.provider_type ?? "openai_compatible";
-            document.getElementById("provider-priority").value = provider?.priority ?? 100;
-            document.getElementById("provider-weight").value = provider?.weight ?? 100;
-            document.getElementById("provider-timeout-ms").value = provider?.timeout_ms ?? 30000;
-            document.getElementById("provider-max-retries").value = provider?.max_retries ?? 1;
-            document.getElementById("provider-models").value = formatModelConfigs(provider?.model_configs ?? []);
+            providerIdInput.value = provider?.id ?? "";
+            providerNameInput.value = provider?.name ?? "";
+            providerBaseUrlInput.value = provider?.base_url ?? "";
+            providerApiKeyInput.value = "";
+            providerTypeInput.value = provider?.provider_type ?? "openai_compatible";
+            providerGroupNameInput.value = provider?.group_name ?? "";
+            providerRegionTagInput.value = provider?.region_tag ?? "";
+            providerPriorityInput.value = provider?.priority ?? 100;
+            providerWeightInput.value = provider?.weight ?? 100;
+            providerTimeoutMsInput.value = provider?.timeout_ms ?? 30000;
+            providerMaxRetriesInput.value = provider?.max_retries ?? 1;
+            providerMaintenanceWindowInput.value = provider?.maintenance_window ?? "";
+            providerMaintenanceModeEnabledInput.checked = provider?.maintenance_mode_enabled ?? false;
+            providerAutoCircuitBreakEnabledInput.checked = provider?.auto_circuit_break_enabled ?? true;
+            providerAutoRecoverEnabledInput.checked = provider?.auto_recover_enabled ?? true;
+            providerCircuitBreakerThresholdOverrideInput.value = provider?.circuit_breaker_threshold_override ?? "";
+            providerRecoveryProbeIntervalOverrideInput.value = provider?.recovery_probe_interval_sec_override ?? "";
+            providerModelsTextarea.value = formatModelConfigs(provider?.model_configs ?? []);
             customModelInput.value = "";
-            document.getElementById("provider-remark").value = provider?.remark ?? "";
-            document.getElementById("provider-enabled").checked = provider?.enabled ?? true;
+            providerRemarkInput.value = provider?.remark ?? "";
+            providerEnabledInput.checked = provider?.enabled ?? true;
+            renderDiscoveredModels([]);
             modal.classList.remove("hidden");
         }
 
         function closeProviderModal() {
+            renderDiscoveredModels([]);
             modal.classList.add("hidden");
+        }
+
+        function openCredentialModal(provider) {
+            if (!credentialModal) return;
+            credentialProviderIdInput.value = provider.id;
+            credentialApiKeyInput.value = "";
+            credentialHintInput.value = provider.credential_hint || "";
+            document.getElementById("provider-credential-modal-title").textContent = `轮换凭据 · ${provider.name}`;
+            credentialModal.classList.remove("hidden");
+        }
+
+        function closeCredentialModal() {
+            if (!credentialModal || !credentialForm) return;
+            credentialModal.classList.add("hidden");
+            credentialForm.reset();
+            credentialProviderIdInput.value = "";
         }
 
         function openTestResultModal(title, html) {
@@ -2216,6 +2517,67 @@
                 showToast(error.message, "error");
             } finally {
                 setButtonLoading(submitBtn, false);
+            }
+        });
+
+        templateForm?.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            const allowedProviderIds = getTemplateSelectedProviderIds();
+            const defaultProviderId = templateDefaultProviderSelect.value ? Number(templateDefaultProviderSelect.value) : null;
+            if (defaultProviderId && !allowedProviderIds.includes(defaultProviderId)) {
+                showToast("默认中转站必须包含在授权中转站里", "error");
+                return;
+            }
+            const payload = {
+                name: templateNameInput.value.trim(),
+                remark: templateRemarkInput.value.trim() || null,
+                enabled: templateEnabledInput.checked,
+                route_mode: templateRouteModeInput.value,
+                default_provider_id: defaultProviderId,
+                manual_allow_fallback: templateManualFallbackInput.checked,
+                token_limit_total: templateTokenLimitInput.value === "" ? null : Number(templateTokenLimitInput.value),
+                cost_limit_total: templateCostLimitInput.value === "" ? null : Number(templateCostLimitInput.value),
+                expires_in_days: templateExpiresInDaysInput.value === "" ? null : Number(templateExpiresInDaysInput.value),
+                allowed_provider_ids: allowedProviderIds,
+            };
+            try {
+                setButtonLoading(templateSubmitBtn, true);
+                if (templateEditIdInput.value) {
+                    await api.put(`/api/api-key-policy-templates/${templateEditIdInput.value}`, payload);
+                    showToast("策略模板已更新");
+                } else {
+                    await api.post("/api/api-key-policy-templates", payload);
+                    showToast("策略模板已创建");
+                }
+                closeTemplateModal();
+                await loadData({ silent: true, reloadReference: true });
+            } catch (error) {
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(templateSubmitBtn, false);
+            }
+        });
+
+        batchTemplateForm?.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            const templateId = Number(batchTemplateSelect.value);
+            if (!Number.isFinite(templateId)) {
+                showToast("请选择一个策略模板", "error");
+                return;
+            }
+            try {
+                setButtonLoading(batchTemplateSubmitBtn, true);
+                const result = await api.post("/api/api-keys/batch/template", {
+                    api_key_ids: Array.from(state.selectedIds),
+                    template_id: templateId,
+                });
+                showToast(`已批量套用模板 ${formatNumber(result.affected_count || 0)} 个`);
+                closeBatchTemplateModal();
+                await loadTableData({ silent: true });
+            } catch (error) {
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(batchTemplateSubmitBtn, false);
             }
         });
 
@@ -2700,6 +3062,126 @@
         });
     }
 
+    async function initUserApiKeys() {
+        const cards = Array.from(document.querySelectorAll("[data-user-key-card]"));
+        const directory = document.getElementById("user-api-key-directory");
+        const searchInput = document.getElementById("user-api-key-search");
+        const filterButtons = Array.from(document.querySelectorAll("[data-user-key-filter]"));
+        const visibleCountNode = document.getElementById("user-api-key-visible-count");
+        const emptyNode = document.getElementById("user-api-key-empty-filtered");
+        const createPanel = document.getElementById("user-api-key-create-panel");
+        const state = {
+            query: "",
+            filter: "all",
+        };
+
+        if (!searchInput || !filterButtons.length) {
+            return;
+        }
+
+        function matchesFilter(card) {
+            const text = String(card.dataset.filterText || "");
+            const status = String(card.dataset.status || "");
+            const hasRaw = card.dataset.hasRaw === "true";
+            const queryMatched = !state.query || text.includes(state.query);
+            if (!queryMatched) return false;
+            if (state.filter === "all") return true;
+            if (state.filter === "active") return status === "active";
+            if (state.filter === "disabled") return status === "disabled";
+            if (state.filter === "missing-raw") return !hasRaw;
+            if (state.filter === "risk") return status !== "active" && status !== "disabled";
+            return true;
+        }
+
+        function syncCardState(card) {
+            const editor = card.querySelector("[data-user-key-editor]");
+            card.classList.toggle("is-editing", Boolean(editor?.open));
+        }
+
+        function closeOtherEditors(activeCard = null) {
+            cards.forEach((card) => {
+                if (card === activeCard) return;
+                const editor = card.querySelector("[data-user-key-editor]");
+                if (editor?.open) {
+                    editor.open = false;
+                }
+            });
+        }
+
+        function applyFilters() {
+            let visibleCount = 0;
+            cards.forEach((card) => {
+                const visible = matchesFilter(card);
+                card.classList.toggle("hidden", !visible);
+                if (visible) visibleCount += 1;
+            });
+            if (visibleCountNode) {
+                visibleCountNode.textContent = formatNumber(visibleCount);
+            }
+            if (emptyNode) {
+                emptyNode.classList.toggle("hidden", visibleCount !== 0);
+            }
+        }
+
+        filterButtons.forEach((button) => {
+            button.addEventListener("click", () => {
+                state.filter = button.dataset.userKeyFilter || "all";
+                filterButtons.forEach((item) => item.classList.toggle("is-active", item === button));
+                applyFilters();
+            });
+        });
+
+        searchInput.addEventListener("input", () => {
+            state.query = searchInput.value.trim().toLowerCase();
+            applyFilters();
+        });
+
+        cards.forEach((card) => {
+            const editor = card.querySelector("[data-user-key-editor]");
+            if (!editor) return;
+            editor.addEventListener("toggle", () => {
+                if (editor.open) {
+                    closeOtherEditors(card);
+                }
+                syncCardState(card);
+            });
+            syncCardState(card);
+        });
+
+        directory?.addEventListener("click", (event) => {
+            const button = event.target.closest("[data-user-key-expand]");
+            if (!button) return;
+            const card = button.closest("[data-user-key-card]");
+            const editor = card?.querySelector("[data-user-key-editor]");
+            if (!card || !editor) return;
+            const nextOpen = !editor.open;
+            if (nextOpen) {
+                closeOtherEditors(card);
+            }
+            editor.open = nextOpen;
+            syncCardState(card);
+            if (nextOpen) {
+                window.requestAnimationFrame(() => {
+                    editor.scrollIntoView({ behavior: "smooth", block: "nearest" });
+                });
+            }
+        });
+
+        const initialEditingCard = document.querySelector(".user-key-object-card.is-editing");
+        if (initialEditingCard) {
+            closeOtherEditors(initialEditingCard);
+            window.requestAnimationFrame(() => {
+                initialEditingCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
+            });
+        } else if (createPanel?.classList.contains("is-focused")) {
+            window.requestAnimationFrame(() => {
+                createPanel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+            });
+        }
+
+        applyFilters();
+    }
+
     async function initUserHome() {
         renderTrendChart(document.getElementById("user-home-trend-chart"));
         const helperShell = document.getElementById("user-home-helper-shell");
@@ -2762,48 +3244,541 @@
     }
 
     async function initUserLogs() {
-        const modal = document.getElementById("user-log-detail-modal");
-        const closeBtn = document.getElementById("user-log-detail-close");
-        const title = document.getElementById("user-log-detail-title");
-        const summary = document.getElementById("user-log-detail-summary");
-        const requestBlock = document.getElementById("user-log-detail-request");
-        const responseBlock = document.getElementById("user-log-detail-response");
-        const traceBlock = document.getElementById("user-log-detail-trace");
-        if (!modal || !closeBtn || !title || !summary || !requestBlock || !responseBlock || !traceBlock) {
+        const tableBody = document.getElementById("logs-table-body");
+        const refreshBtn = document.getElementById("logs-refresh-btn");
+        const exportBtn = document.getElementById("logs-export-btn");
+        const lastRefreshLabel = document.getElementById("logs-last-refresh");
+        const providerSelect = document.getElementById("logs-provider-id");
+        const modelSelect = document.getElementById("logs-model-name");
+        const apiClientKeyIdSelect = document.getElementById("logs-api-client-key-id");
+        const apiClientKeyQuerySelect = document.getElementById("logs-api-client-key-query");
+        const excludeHealthChecksInput = document.getElementById("logs-exclude-health-checks");
+        const pageSizeSelect = document.getElementById("logs-page-size");
+        const pageMeta = document.getElementById("logs-page-meta");
+        const prevPageBtn = document.getElementById("logs-prev-page-btn");
+        const nextPageBtn = document.getElementById("logs-next-page-btn");
+        const traceModal = document.getElementById("log-trace-modal");
+        const traceContent = document.getElementById("log-trace-content");
+        const closeBtn = document.getElementById("log-trace-close");
+        const filterIds = [
+            "logs-log-type",
+            "logs-provider-id",
+            "logs-model-name",
+            "logs-api-client-key-id",
+            "logs-api-client-key-query",
+            "logs-success",
+            "logs-conversation-key",
+        ];
+        if (
+            !tableBody || !refreshBtn || !exportBtn || !lastRefreshLabel || !providerSelect || !modelSelect
+            || !apiClientKeyIdSelect || !apiClientKeyQuerySelect || !excludeHealthChecksInput || !pageSizeSelect
+            || !pageMeta || !prevPageBtn || !nextPageBtn || !traceModal || !traceContent || !closeBtn
+        ) {
             return;
         }
-        const closeModal = () => modal.classList.add("hidden");
+        const currentParams = new URLSearchParams(window.location.search);
+        const state = {
+            page: Math.max(1, Number.parseInt(currentParams.get("page") || "1", 10) || 1),
+            pageSize: [20, 50, 100, 200].includes(Number.parseInt(currentParams.get("page_size") || "20", 10))
+                ? Number.parseInt(currentParams.get("page_size") || "20", 10)
+                : 20,
+            total: 0,
+        };
+        let initialFilterValuesApplied = false;
+        if (currentParams.get("conversation_key")) {
+            document.getElementById("logs-conversation-key").value = currentParams.get("conversation_key");
+        }
+        if (currentParams.get("exclude_health_checks") === "false") {
+            excludeHealthChecksInput.checked = false;
+        }
+        pageSizeSelect.value = String(state.pageSize);
+        const closeModal = () => traceModal.classList.add("hidden");
         closeBtn.addEventListener("click", closeModal);
-        modal.addEventListener("click", (event) => {
-            if (event.target === modal) closeModal();
+        traceModal.addEventListener("click", (event) => {
+            if (event.target === traceModal) closeModal();
         });
-        document.querySelectorAll("[data-user-log-detail-id]").forEach((button) => {
-            button.addEventListener("click", async () => {
-                try {
-                    setButtonLoading(button, true);
-                    const detail = await api.get(`/api/user/logs/${button.dataset.userLogDetailId}`);
-                    title.textContent = `日志详情 #${detail.id}`;
-                    summary.innerHTML = `
-                        <div><span>API Key</span><strong>${escapeHtml(detail.api_client_key_name || "-")}</strong></div>
-                        <div><span>模型</span><strong>${escapeHtml(detail.requested_model || detail.model_name || "-")}</strong></div>
-                        <div><span>渠道</span><strong>${escapeHtml(detail.provider_name || "-")}</strong></div>
-                        <div><span>会话号</span><strong>${escapeHtml(detail.session_id || detail.conversation_key || "-")}</strong></div>
-                        <div><span>状态</span><strong>${detail.success ? "成功" : "失败"}${detail.status_code ? ` · ${detail.status_code}` : ""}</strong></div>
-                        <div><span>TTFB</span><strong>${detail.ttfb_ms ?? "-"}</strong></div>
-                        <div><span>耗时</span><strong>${detail.duration_ms ?? detail.latency_ms ?? "-"}</strong></div>
-                        <div><span>费用</span><strong>${formatMoney(detail.total_cost || 0)}</strong></div>
-                    `;
-                    requestBlock.textContent = formatCodeValue(detail.request_body_json);
-                    responseBlock.textContent = formatCodeValue(detail.response_body_json || detail.response_text);
-                    traceBlock.textContent = formatCodeValue(detail.trace_json || detail.message);
-                    modal.classList.remove("hidden");
-                } catch (error) {
-                    showToast(error.message, "error");
-                } finally {
-                    setButtonLoading(button, false);
-                }
+        for (const id of filterIds) {
+            document.getElementById(id).addEventListener("change", () => {
+                state.page = 1;
+                loadLogs();
             });
+            document.getElementById(id).addEventListener("input", () => {
+                state.page = 1;
+                loadLogs();
+            });
+        }
+        pageSizeSelect.addEventListener("change", () => {
+            state.pageSize = Number.parseInt(pageSizeSelect.value || "20", 10) || 20;
+            state.page = 1;
+            loadLogs();
         });
+        prevPageBtn.addEventListener("click", async () => {
+            if (state.page <= 1) return;
+            state.page -= 1;
+            await loadLogs();
+        });
+        nextPageBtn.addEventListener("click", async () => {
+            const totalPages = Math.max(1, Math.ceil((state.total || 0) / state.pageSize));
+            if (state.page >= totalPages) return;
+            state.page += 1;
+            await loadLogs();
+        });
+        exportBtn.addEventListener("click", () => {
+            const params = new URLSearchParams();
+            const logType = document.getElementById("logs-log-type").value;
+            const providerId = providerSelect.value;
+            const modelName = modelSelect.value;
+            const apiClientKeyId = apiClientKeyIdSelect.value;
+            const apiClientKeyQuery = apiClientKeyQuerySelect.value;
+            const success = document.getElementById("logs-success").value;
+            const conversationKey = document.getElementById("logs-conversation-key").value.trim();
+            if (logType) params.set("log_type", logType);
+            if (providerId) params.set("provider_id", providerId);
+            if (modelName) params.set("model_name", modelName);
+            if (apiClientKeyId) params.set("api_client_key_id", apiClientKeyId);
+            if (apiClientKeyQuery) params.set("api_client_key_query", apiClientKeyQuery);
+            if (success) params.set("success", success);
+            if (conversationKey) params.set("conversation_key", conversationKey);
+            params.set("exclude_health_checks", excludeHealthChecksInput.checked ? "true" : "false");
+            params.set("limit", "5000");
+            window.location.href = `/user/logs/export?${params.toString()}`;
+        });
+        refreshBtn.addEventListener("click", async (event) => {
+            event.preventDefault();
+            await loadFilterOptions();
+            await loadLogs({ manual: true });
+        });
+
+        function renderLogSummary(summary) {
+            document.querySelectorAll("[data-log-summary]").forEach((node) => {
+                const key = node.dataset.logSummary;
+                node.textContent = formatNumber(summary?.[key] ?? 0);
+            });
+            document.querySelectorAll("[data-log-summary-cost]").forEach((node) => {
+                const key = node.dataset.logSummaryCost;
+                const value = summary?.[key];
+                node.textContent = value == null || Number.isNaN(Number(value)) ? "0.000000" : Number(value).toFixed(6);
+            });
+        }
+
+        function formatMetricValue(value, suffix = "") {
+            if (value == null || Number.isNaN(Number(value))) return "-";
+            return `${formatNumber(Number(value))}${suffix}`;
+        }
+
+        function formatRateValue(value) {
+            if (value == null || Number.isNaN(Number(value))) return "-";
+            return Number(value).toFixed(2);
+        }
+
+        function formatCostValue(value) {
+            if (value == null || Number.isNaN(Number(value))) return "-";
+            return Number(value).toFixed(6);
+        }
+
+        function buildSessionValue(log) {
+            return log.session_id || log.conversation_key || log.request_id || "-";
+        }
+
+        function renderSelectOptions(selectNode, items, emptyLabel = "全部") {
+            const previousValue = selectNode.value;
+            selectNode.innerHTML = [`<option value="">${escapeHtml(emptyLabel)}</option>`]
+                .concat(
+                    (items || []).map((item) => (
+                        `<option value="${escapeHtml(item.value)}">${escapeHtml(item.label)}</option>`
+                    ))
+                )
+                .join("");
+            if (previousValue && Array.from(selectNode.options).some((option) => option.value === previousValue)) {
+                selectNode.value = previousValue;
+            }
+        }
+
+        async function loadFilterOptions() {
+            const params = new URLSearchParams({
+                exclude_health_checks: excludeHealthChecksInput.checked ? "true" : "false",
+                _ts: Date.now().toString(),
+            });
+            const data = await api.get(`/api/user/logs/filter-options?${params.toString()}`);
+            renderSelectOptions(providerSelect, data.providers);
+            renderSelectOptions(modelSelect, data.model_names);
+            renderSelectOptions(apiClientKeyIdSelect, data.api_client_key_ids);
+            renderSelectOptions(apiClientKeyQuerySelect, data.api_client_key_queries);
+            if (!initialFilterValuesApplied && currentParams.get("provider_id")) {
+                providerSelect.value = currentParams.get("provider_id");
+            }
+            if (!initialFilterValuesApplied && currentParams.get("model_name")) {
+                modelSelect.value = currentParams.get("model_name");
+            }
+            if (!initialFilterValuesApplied && currentParams.get("api_client_key_id")) {
+                apiClientKeyIdSelect.value = currentParams.get("api_client_key_id");
+            }
+            if (!initialFilterValuesApplied && currentParams.get("api_client_key_query")) {
+                apiClientKeyQuerySelect.value = currentParams.get("api_client_key_query");
+            }
+            if (!initialFilterValuesApplied && currentParams.get("log_type")) {
+                document.getElementById("logs-log-type").value = currentParams.get("log_type");
+            }
+            if (!initialFilterValuesApplied && currentParams.get("success")) {
+                document.getElementById("logs-success").value = currentParams.get("success");
+            }
+            initialFilterValuesApplied = true;
+        }
+
+        function renderLogPagination(total) {
+            state.total = Number(total || 0);
+            const totalPages = Math.max(1, Math.ceil(state.total / state.pageSize));
+            if (state.page > totalPages) {
+                state.page = totalPages;
+            }
+            pageMeta.textContent = `第 ${formatNumber(state.page)} 页，共 ${formatNumber(totalPages)} 页 · 共 ${formatNumber(state.total)} 条`;
+            prevPageBtn.disabled = state.page <= 1;
+            nextPageBtn.disabled = state.page >= totalPages;
+        }
+
+        async function loadLogs({ manual = false } = {}) {
+            setButtonLoading(refreshBtn, true);
+            const params = new URLSearchParams({
+                page: String(state.page),
+                page_size: String(state.pageSize),
+            });
+            const logType = document.getElementById("logs-log-type").value;
+            const providerId = providerSelect.value;
+            const modelName = modelSelect.value;
+            const apiClientKeyId = apiClientKeyIdSelect.value;
+            const apiClientKeyQuery = apiClientKeyQuerySelect.value;
+            const success = document.getElementById("logs-success").value;
+            const conversationKey = document.getElementById("logs-conversation-key").value.trim();
+            const excludeHealthChecks = excludeHealthChecksInput.checked;
+            if (logType) params.set("log_type", logType);
+            if (providerId) params.set("provider_id", providerId);
+            if (modelName) params.set("model_name", modelName);
+            if (apiClientKeyId) params.set("api_client_key_id", apiClientKeyId);
+            if (apiClientKeyQuery) params.set("api_client_key_query", apiClientKeyQuery);
+            if (success) params.set("success", success);
+            if (conversationKey) params.set("conversation_key", conversationKey);
+            params.set("exclude_health_checks", excludeHealthChecks ? "true" : "false");
+            params.set("_ts", Date.now().toString());
+            try {
+                const data = await api.get(`/api/user/logs?${params.toString()}`);
+                renderLogPagination(data.total ?? data.items.length);
+                renderLogSummary(data.summary || {});
+                tableBody.innerHTML = data.items.map((log) => `
+                    <tr>
+                        <td>
+                            <strong>${formatDate(log.created_at)}</strong>
+                            <div class="table-muted">${escapeHtml(log.http_method || "-")}</div>
+                        </td>
+                        <td>
+                            <strong>${escapeHtml(formatLogTypeLabel(log.log_type))}</strong>
+                            <div class="table-muted">思维等级 ${escapeHtml(log.reasoning_level || "无")}</div>
+                        </td>
+                        <td>
+                            <strong>${escapeHtml(log.api_client_key_name || "-")}</strong>
+                            <div class="table-muted">${escapeHtml(log.api_client_key_prefix || "-")}</div>
+                        </td>
+                        <td>${escapeHtml(buildSessionValue(log))}</td>
+                        <td>${escapeHtml(log.requested_model || log.model_name || "-")}</td>
+                        <td>${escapeHtml(log.provider_name || "-")}</td>
+                        <td>
+                            ${log.success ? statusBadge("healthy") : statusBadge("unhealthy")}
+                            <div class="table-muted">HTTP ${log.status_code ?? "-"} · 尝试 ${formatMetricValue(log.attempt_count)}</div>
+                        </td>
+                        <td>
+                            <strong>${formatMetricValue(log.total_tokens)}</strong>
+                            <div class="table-muted">输入 ${formatMetricValue(log.prompt_tokens)} / 输出 ${formatMetricValue(log.completion_tokens)}</div>
+                            <div class="table-muted">成本 ${formatCostValue(log.total_cost)}</div>
+                        </td>
+                        <td>
+                            <strong>${formatMetricValue(log.duration_ms ?? log.latency_ms, " ms")}</strong>
+                            <div class="table-muted">TTFB ${formatMetricValue(log.ttfb_ms, " ms")} · TPS ${formatRateValue(log.tps)}</div>
+                        </td>
+                        <td>
+                            <div class="table-actions">
+                                <button class="table-action-btn" data-action="show-trace" data-log-id="${log.id}">详情</button>
+                                ${log.conversation_key ? `<button class="table-action-btn" data-action="open-conversation" data-conversation-key="${encodeURIComponent(log.conversation_key)}">回放</button>` : ""}
+                            </div>
+                        </td>
+                    </tr>
+                `).join("") || '<tr><td colspan="10"><div class="empty-state">暂无日志</div></td></tr>';
+                tableBody.querySelectorAll('button[data-action="show-trace"]').forEach((button, index) => {
+                    button.dataset.log = JSON.stringify(data.items[index] || {});
+                });
+                enhanceInteractiveButtons(tableBody);
+                lastRefreshLabel.textContent = `最近刷新: ${formatDate(new Date().toISOString())}`;
+                if (manual) {
+                    showToast(`日志已刷新，第 ${state.page} 页 / ${Math.max(1, Math.ceil((state.total || 0) / state.pageSize))} 页`);
+                }
+            } catch (error) {
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(refreshBtn, false);
+            }
+        }
+
+        excludeHealthChecksInput.addEventListener("change", async () => {
+            state.page = 1;
+            await loadFilterOptions();
+            await loadLogs();
+        });
+
+        tableBody.addEventListener("click", (event) => {
+            const button = event.target.closest('button[data-action]');
+            if (!button) return;
+            if (button.dataset.action === "open-conversation") {
+                const conversationKey = decodeURIComponent(button.dataset.conversationKey);
+                const target = `/user/conversations?conversation_key=${encodeURIComponent(conversationKey)}`;
+                navigateWithinShell(target).catch(() => {
+                    window.location.href = target;
+                });
+                return;
+            }
+            if (button.dataset.action !== "show-trace") return;
+            const log = safeJsonParse(button.dataset.log || "") || {};
+            const detail = {
+                id: log.id,
+                log_type: log.log_type,
+                request_id: log.request_id,
+                conversation_key: log.conversation_key,
+                session_id: log.session_id,
+                requested_model: log.requested_model,
+                model_name: log.model_name,
+                provider_name: log.provider_name,
+                user_account_id: log.user_account_id,
+                user_account_name: log.user_account_name,
+                api_client_key_id: log.api_client_key_id,
+                api_client_key_name: log.api_client_key_name,
+                api_client_key_prefix: log.api_client_key_prefix,
+                api_client_auth_result: log.api_client_auth_result,
+                api_client_remaining_tokens: log.api_client_remaining_tokens,
+                http_method: log.http_method,
+                reasoning_level: log.reasoning_level,
+                attempt_count: log.attempt_count,
+                success: log.success,
+                status_code: log.status_code,
+                latency_ms: log.latency_ms,
+                ttfb_ms: log.ttfb_ms,
+                duration_ms: log.duration_ms,
+                tps: log.tps,
+                prompt_tokens: log.prompt_tokens,
+                completion_tokens: log.completion_tokens,
+                total_tokens: log.total_tokens,
+                cache_read_tokens: log.cache_read_tokens,
+                cache_write_tokens: log.cache_write_tokens,
+                billing_multiplier: log.billing_multiplier,
+                channel_price_input_per_1k: log.channel_price_input_per_1k,
+                channel_price_output_per_1k: log.channel_price_output_per_1k,
+                prompt_cost: log.prompt_cost,
+                completion_cost: log.completion_cost,
+                total_cost: log.total_cost,
+                finish_reason: log.finish_reason,
+                upstream_request_id: log.upstream_request_id,
+                request_body_json: safeJsonParse(log.request_body_json || "") ?? log.request_body_json,
+                response_body_json: safeJsonParse(log.response_body_json || "") ?? log.response_body_json,
+                response_text: log.response_text,
+                trace: safeJsonParse(log.trace_json || "") ?? log.trace_json,
+                created_at: log.created_at,
+            };
+            traceContent.textContent = JSON.stringify(detail, null, 2);
+            traceModal.classList.remove("hidden");
+        });
+
+        await loadFilterOptions();
+        await loadLogs();
+    }
+
+    async function initUserConversations() {
+        const listContainer = document.getElementById("conversation-list");
+        const timeline = document.getElementById("conversation-timeline");
+        const summary = document.getElementById("conversation-summary");
+        const searchInput = document.getElementById("conversation-search");
+        const refreshBtn = document.getElementById("conversation-refresh-btn");
+        const openLogsLink = document.getElementById("conversation-open-logs");
+        const title = document.getElementById("conversation-detail-title");
+        const totalCountPrimary = document.getElementById("conversation-total-count");
+        const totalCountSecondary = document.getElementById("conversation-total-count-secondary");
+        const totalRequestsNode = document.getElementById("conversation-total-requests");
+        const totalTokensNode = document.getElementById("conversation-total-tokens");
+        const activeQueryNode = document.getElementById("conversation-active-query");
+        const resultCountNode = document.getElementById("conversation-result-count");
+        const lastUpdatedNode = document.getElementById("conversation-last-updated");
+        const selectedProviderNode = document.getElementById("conversation-selected-provider");
+        const selectedUpdatedNode = document.getElementById("conversation-selected-updated");
+        if (
+            !listContainer || !timeline || !summary || !searchInput || !refreshBtn || !openLogsLink || !title
+            || !totalCountPrimary || !totalCountSecondary || !totalRequestsNode || !totalTokensNode
+            || !activeQueryNode || !resultCountNode || !lastUpdatedNode || !selectedProviderNode || !selectedUpdatedNode
+        ) {
+            return;
+        }
+        const currentParams = new URLSearchParams(window.location.search);
+        const state = {
+            items: [],
+            activeKey: null,
+            page: 1,
+            pageSize: 100,
+            total: 0,
+        };
+        if (currentParams.get("query")) {
+            searchInput.value = currentParams.get("query");
+        }
+
+        function renderConversationOverview() {
+            const totalCount = state.total || state.items.length;
+            const totalRequests = state.items.reduce((sum, item) => sum + Number(item.request_count || 0), 0);
+            const totalTokens = state.items.reduce((sum, item) => sum + Number(item.total_tokens || 0), 0);
+            const latestUpdatedAt = state.items[0]?.updated_at || null;
+            const queryText = searchInput.value.trim();
+            totalCountPrimary.textContent = formatNumber(totalCount);
+            totalCountSecondary.textContent = formatNumber(totalCount);
+            totalRequestsNode.textContent = formatNumber(totalRequests);
+            totalTokensNode.textContent = formatNumber(totalTokens);
+            activeQueryNode.textContent = queryText ? `当前检索：${queryText}` : "当前展示全部会话";
+            resultCountNode.textContent = `${formatNumber(state.items.length)} 条结果`;
+            lastUpdatedNode.textContent = `最近更新 ${formatDate(latestUpdatedAt)}`;
+        }
+
+        function renderConversationList() {
+            listContainer.innerHTML = state.items.map((item) => `
+                <button class="conversation-item ${state.activeKey === item.conversation_key ? "active" : ""}" data-conversation-key="${encodeURIComponent(item.conversation_key)}">
+                    <div class="conversation-item-top">
+                        <strong>${escapeHtml(item.conversation_key)}</strong>
+                        <span>${item.request_count} 次</span>
+                    </div>
+                    <div class="conversation-item-meta">
+                        <span>${escapeHtml(item.latest_model || "-")}</span>
+                        <span>${item.total_tokens} tokens</span>
+                    </div>
+                    <p>${escapeHtml(item.preview_text || "暂无回复预览")}</p>
+                    <div class="conversation-item-foot">
+                        <span>${formatDate(item.updated_at)}</span>
+                        <span>${escapeHtml(item.latest_provider_name || "-")}</span>
+                    </div>
+                </button>
+            `).join("") || '<div class="empty-state">暂无会话记录</div>';
+            enhanceInteractiveButtons(listContainer);
+        }
+
+        function resetConversationDetail() {
+            state.activeKey = null;
+            title.textContent = "选择左侧会话";
+            summary.innerHTML = '<div class="empty-state">选择一个会话后，可查看完整回放、命中线路与 token 使用。</div>';
+            timeline.innerHTML = "";
+            openLogsLink.classList.add("hidden");
+            selectedProviderNode.textContent = "-";
+            selectedUpdatedNode.textContent = "-";
+            renderConversationList();
+        }
+
+        async function openConversation(conversationKey, { replace = false } = {}) {
+            try {
+                const detail = await api.get(`/api/user/conversations/${encodeURIComponent(conversationKey)}`);
+                state.activeKey = detail.conversation_key;
+                title.textContent = detail.conversation_key;
+                summary.innerHTML = `
+                    <div class="conversation-summary-grid">
+                        <article class="conversation-summary-card">
+                            <span>请求数</span>
+                            <strong>${detail.request_count}</strong>
+                        </article>
+                        <article class="conversation-summary-card">
+                            <span>成功 / 失败</span>
+                            <strong>${detail.success_count} / ${detail.failure_count}</strong>
+                        </article>
+                        <article class="conversation-summary-card">
+                            <span>总 Token</span>
+                            <strong>${detail.total_tokens}</strong>
+                        </article>
+                        <article class="conversation-summary-card">
+                            <span>最近模型</span>
+                            <strong>${escapeHtml(detail.latest_model || "-")}</strong>
+                        </article>
+                    </div>
+                    <div class="conversation-meta-bar">
+                        <span>首条时间 ${formatDate(detail.started_at)}</span>
+                        <span>最近更新时间 ${formatDate(detail.updated_at)}</span>
+                        <span>最近命中线路 ${escapeHtml(detail.latest_provider_name || "-")}</span>
+                    </div>
+                `;
+                timeline.innerHTML = detail.turns.map((turn) => `
+                    <article class="conversation-turn conversation-turn-${escapeHtml(turn.role)}">
+                        <div class="conversation-turn-head">
+                            <div>
+                                <span class="conversation-role">${escapeHtml(turn.role)}</span>
+                                <strong>${escapeHtml(turn.provider_name || turn.requested_model || "-")}</strong>
+                            </div>
+                            <div class="conversation-turn-meta">
+                                <span>${formatDate(turn.created_at)}</span>
+                                <span>${turn.total_tokens ?? "-"} tokens</span>
+                                <span>${turn.is_stream ? "stream" : "json"}</span>
+                                <span>${turn.has_image ? "vision" : "text"}</span>
+                            </div>
+                        </div>
+                        <pre class="conversation-turn-body">${escapeHtml(turn.content || "")}</pre>
+                    </article>
+                `).join("") || '<div class="empty-state">该会话暂无可回放内容</div>';
+                openLogsLink.href = `/user/logs?conversation_key=${encodeURIComponent(detail.conversation_key)}`;
+                openLogsLink.classList.remove("hidden");
+                selectedProviderNode.textContent = detail.latest_provider_name || "-";
+                selectedUpdatedNode.textContent = formatDate(detail.updated_at);
+                renderConversationList();
+                const params = new URLSearchParams();
+                if (searchInput.value.trim()) params.set("query", searchInput.value.trim());
+                params.set("conversation_key", detail.conversation_key);
+                const url = `/user/conversations?${params.toString()}`;
+                if (replace) {
+                    window.history.replaceState({ path: url }, "", url);
+                } else {
+                    window.history.pushState({ path: url }, "", url);
+                }
+                updateActiveNavigation("/user/conversations");
+            } catch (error) {
+                showToast(error.message, "error");
+            }
+        }
+
+        async function loadConversations(preferredKey = null) {
+            try {
+                setButtonLoading(refreshBtn, true);
+                const params = new URLSearchParams({
+                    page: String(state.page),
+                    page_size: String(state.pageSize),
+                });
+                const query = searchInput.value.trim();
+                if (query) params.set("query", query);
+                const data = await api.get(`/api/user/conversations?${params.toString()}`);
+                state.items = data.items || [];
+                state.total = Number(data.total || state.items.length);
+                renderConversationOverview();
+                renderConversationList();
+                const urlKey = new URLSearchParams(window.location.search).get("conversation_key");
+                const nextKey = preferredKey || urlKey || state.activeKey || state.items[0]?.conversation_key || null;
+                if (nextKey) {
+                    await openConversation(nextKey, { replace: true });
+                } else {
+                    resetConversationDetail();
+                }
+            } catch (error) {
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(refreshBtn, false);
+            }
+        }
+
+        listContainer.addEventListener("click", async (event) => {
+            const button = event.target.closest("[data-conversation-key]");
+            if (!button) return;
+            await openConversation(decodeURIComponent(button.dataset.conversationKey));
+        });
+        searchInput.addEventListener("input", async () => {
+            state.page = 1;
+            await loadConversations();
+        });
+        refreshBtn.addEventListener("click", async () => {
+            await loadConversations(state.activeKey);
+        });
+
+        await loadConversations();
     }
 
     function deriveUserSelfTestResolution(result = {}) {
@@ -2812,12 +3787,16 @@
         const code = String(result.code || "");
         const statusCode = Number(result.status_code || 0);
         const normalized = `${code} ${message} ${JSON.stringify(result.trace || "")}`.toLowerCase();
+        const summary = result.summary || {};
+        const scenarios = Array.isArray(result.scenarios) ? result.scenarios : [];
+        const failedScenarios = scenarios.filter((item) => item && item.success === false);
+        const failedLabels = failedScenarios.slice(0, 3).map((item) => item.scenario_label || item.endpoint_path || "未命名场景");
 
         if (success) {
             return {
                 failure: [
                     { label: "状态", value: "本次测试成功" },
-                    { label: "摘要", value: "密钥、模型和当前命中的线路均已跑通，可以进入小流量正式接入。" },
+                    { label: "摘要", value: `本次共完成 ${summary.total_scenarios || scenarios.length || 0} 个自检场景，全部通过，可以进入小流量正式接入。` },
                 ],
                 fixes: [
                     { label: "建议", value: "保持当前 API Key、模型和 Base URL 组合，不要在正式接入前再随意替换。" },
@@ -2826,6 +3805,22 @@
                 next: [
                     { label: "下一步", value: "回到首页复制接入信息，或直接把当前组合写入你的业务服务。" },
                     { label: "排障入口", value: "若后续结果异常，去“我的日志”或“会话回放”核对请求体与返回内容。" },
+                ],
+            };
+        }
+
+        if (failedScenarios.length > 1) {
+            return {
+                failure: [
+                    { label: "状态", value: "多场景自检失败" },
+                    { label: "摘要", value: `本次共有 ${summary.failed_scenarios || failedScenarios.length} 个场景失败：${failedLabels.join("、")}` },
+                ],
+                fixes: [
+                    { label: "修复建议", value: "先看下方“场景明细”，确认是仅某个端点失败，还是文本、流式、图片整体都失败。" },
+                    { label: "补充检查", value: "若只有图片链路失败，优先排查模型视觉能力和图片输入格式；若流式单独失败，优先排查渠道对 SSE 的兼容性。" },
+                ],
+                next: [
+                    { label: "下一步", value: "下载本次自检报告，带着失败场景和调度链路去日志页或联系管理员定位。" },
                 ],
             };
         }
@@ -2940,6 +3935,109 @@
         };
     }
 
+    function updateUserSelfTestImageFields() {
+        const imageModeSelect = document.getElementById("user-self-test-image-mode");
+        const imageDetailSelect = document.getElementById("user-self-test-image-detail");
+        const imageUrlField = document.getElementById("user-self-test-image-url-field");
+        const imageUrlInput = document.getElementById("user-self-test-image-url");
+        const imageFileField = document.getElementById("user-self-test-image-file-field");
+        const imageFileInput = document.getElementById("user-self-test-image-file");
+        const imageNote = document.getElementById("user-self-test-image-note");
+        if (!imageModeSelect || !imageDetailSelect || !imageUrlField || !imageUrlInput || !imageFileField || !imageFileInput || !imageNote) {
+            return;
+        }
+        const mode = imageModeSelect.value || "none";
+        imageUrlField.classList.toggle("hidden", mode !== "url");
+        imageFileField.classList.toggle("hidden", mode !== "upload");
+        if (mode === "url") {
+            imageNote.textContent = "将额外补测图片链路，并把当前图片链接按标准视觉请求发送到内部自检接口。";
+            return;
+        }
+        if (mode === "upload") {
+            const file = imageFileInput.files?.[0];
+            imageNote.textContent = file
+                ? `将把本地图片通过内部 Session 自检接口发送，并追加视觉场景探测：${file.name}`
+                : "将把本地图片通过内部 Session 自检接口发送，并追加视觉场景探测。";
+            return;
+        }
+        imageNote.textContent = "当前默认只测试文本链路。若切换为图片链接或本地图片，将追加图片场景自检。";
+    }
+
+    function summarizeUserSelfTestScenarios(data = {}) {
+        const summary = data.summary || {};
+        const scenarios = Array.isArray(data.scenarios) ? data.scenarios : [];
+        return {
+            total: Number(summary.total_scenarios || scenarios.length || 0),
+            success: Number(summary.success_scenarios || scenarios.filter((item) => item?.success).length || 0),
+            failed: Number(summary.failed_scenarios || scenarios.filter((item) => item && item.success === false).length || 0),
+            imageEnabled: Boolean(summary.image_enabled),
+        };
+    }
+
+    function renderUserSelfTestScenarios(target, scenarios = []) {
+        if (!target) return;
+        if (!scenarios.length) {
+            target.innerHTML = '<tr><td colspan="7"><div class="empty-state">执行真实测试后，这里会展开每个场景的结果。</div></td></tr>';
+            return;
+        }
+        target.innerHTML = scenarios.map((item) => `
+            <tr>
+                <td>${escapeHtml(item.scenario_label || "-")}</td>
+                <td>${escapeHtml(item.endpoint_path || "-")}</td>
+                <td>${item.has_image ? "图片" : "文本"} / ${item.stream ? "流式" : "非流式"}</td>
+                <td>${item.success ? "成功" : "失败"}</td>
+                <td>${escapeHtml(item.provider_name || "-")}</td>
+                <td>${item.latency_ms ?? "-"}</td>
+                <td>${escapeHtml(item.message || "-")}</td>
+            </tr>
+        `).join("");
+        scheduleResponsiveTableSync(target.closest(".table-shell") || document);
+    }
+
+    function buildUserSelfTestReport(data = {}, options = {}) {
+        const summary = summarizeUserSelfTestScenarios(data);
+        const scenarios = Array.isArray(data.scenarios) ? data.scenarios : [];
+        const lines = [
+            "# aotu-gpt 接入自检报告",
+            "",
+            `- 生成时间：${formatDate(new Date().toISOString())}`,
+            `- API Key：${options.apiKeyLabel || "-"}`,
+            `- 模型：${options.modelName || data.model_name || "-"}`,
+            `- 图片链路：${summary.imageEnabled ? "已启用" : "未启用"}`,
+            `- 场景总数：${summary.total}`,
+            `- 成功场景：${summary.success}`,
+            `- 失败场景：${summary.failed}`,
+            `- 总体结果：${data.success ? "通过" : "未全部通过"}`,
+            "",
+            "## 场景明细",
+            "",
+        ];
+        scenarios.forEach((item, index) => {
+            lines.push(`### ${index + 1}. ${item.scenario_label || item.endpoint_path || "未命名场景"}`);
+            lines.push(`- 端点：${item.endpoint_path || "-"}`);
+            lines.push(`- 类型：${item.has_image ? "图片" : "文本"} / ${item.stream ? "流式" : "非流式"}`);
+            lines.push(`- 状态：${item.success ? "成功" : "失败"}`);
+            lines.push(`- 渠道：${item.provider_name || "-"}`);
+            lines.push(`- 状态码：${item.status_code ?? "-"}`);
+            lines.push(`- 耗时：${item.latency_ms ?? "-"} ms`);
+            lines.push(`- 摘要：${item.message || "-"}`);
+            if (item.output_text) {
+                lines.push("- 输出预览：");
+                lines.push("```text");
+                lines.push(String(item.output_text));
+                lines.push("```");
+            }
+            if (item.trace) {
+                lines.push("- 调度链路：");
+                lines.push("```json");
+                lines.push(JSON.stringify(item.trace, null, 2));
+                lines.push("```");
+            }
+            lines.push("");
+        });
+        return lines.join("\n");
+    }
+
     async function initUserSelfTest() {
         const runBtn = document.getElementById("user-self-test-run-btn");
         const keySelect = document.querySelector('form[action="/user/self-test"] select[name="api_key_id"]');
@@ -2950,7 +4048,17 @@
         const next = document.getElementById("user-self-test-next");
         const output = document.getElementById("user-self-test-output");
         const trace = document.getElementById("user-self-test-trace");
-        if (!runBtn || !keySelect || !modelSelect || !summary || !failure || !fixes || !next || !output || !trace) {
+        const imageModeSelect = document.getElementById("user-self-test-image-mode");
+        const imageDetailSelect = document.getElementById("user-self-test-image-detail");
+        const imageUrlInput = document.getElementById("user-self-test-image-url");
+        const imageFileInput = document.getElementById("user-self-test-image-file");
+        const scenarioTableBody = document.getElementById("user-self-test-scenarios");
+        const downloadBtn = document.getElementById("user-self-test-download-btn");
+        let lastSelfTestResult = null;
+        if (
+            !runBtn || !keySelect || !modelSelect || !summary || !failure || !fixes || !next || !output || !trace
+            || !imageModeSelect || !imageDetailSelect || !imageUrlInput || !imageFileInput || !scenarioTableBody || !downloadBtn
+        ) {
             return;
         }
 
@@ -2959,6 +4067,39 @@
                 <div><span>${escapeHtml(item.label || "-")}</span><strong>${escapeHtml(item.value || "-")}</strong></div>
             `).join("");
         }
+
+        function resetDownloadButton() {
+            downloadBtn.disabled = true;
+            downloadBtn.dataset.ready = "false";
+        }
+
+        imageModeSelect.addEventListener("change", updateUserSelfTestImageFields);
+        imageFileInput.addEventListener("change", updateUserSelfTestImageFields);
+        updateUserSelfTestImageFields();
+        renderUserSelfTestScenarios(scenarioTableBody, []);
+        resetDownloadButton();
+
+        downloadBtn.addEventListener("click", async () => {
+            if (!lastSelfTestResult) {
+                showToast("请先执行一次真实测试", "error");
+                return;
+            }
+            const apiKeyLabel = keySelect.options[keySelect.selectedIndex]?.textContent?.trim() || "";
+            const reportText = buildUserSelfTestReport(lastSelfTestResult, {
+                apiKeyLabel,
+                modelName: modelSelect.value,
+            });
+            const blob = new Blob([reportText], { type: "text/markdown;charset=utf-8" });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement("a");
+            link.href = url;
+            link.download = `user-self-test-${modelSelect.value || "model"}-${new Date().toISOString().replace(/[:.]/g, "-")}.md`;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            URL.revokeObjectURL(url);
+            showToast("自检报告已开始下载");
+        });
 
         runBtn.addEventListener("click", async () => {
             if (!keySelect.value || !modelSelect.value) {
@@ -2973,9 +4114,20 @@
                 renderResolution(next, [{ label: "动作", value: "测试完成后，这里会生成下一步动作。" }]);
                 output.textContent = "测试中...";
                 trace.textContent = "测试中...";
+                renderUserSelfTestScenarios(scenarioTableBody, []);
+                lastSelfTestResult = null;
+                resetDownloadButton();
                 const formData = new FormData();
                 formData.append("api_key_id", keySelect.value);
                 formData.append("model_name", modelSelect.value);
+                formData.append("image_mode", imageModeSelect.value || "none");
+                formData.append("image_detail", imageDetailSelect.value || "auto");
+                if ((imageModeSelect.value || "none") === "url" && imageUrlInput.value.trim()) {
+                    formData.append("image_url", imageUrlInput.value.trim());
+                }
+                if ((imageModeSelect.value || "none") === "upload" && imageFileInput.files?.[0]) {
+                    formData.append("image_file", imageFileInput.files[0]);
+                }
                 const response = await fetch("/api/user/self-test/run", {
                     method: "POST",
                     body: formData,
@@ -2983,34 +4135,41 @@
                 });
                 const text = await response.text();
                 const data = safeJsonParse(text) ?? {};
+                renderUserSelfTestScenarios(scenarioTableBody, data.scenarios || []);
                 if (!response.ok || data.success === false) {
                     const resolution = deriveUserSelfTestResolution(data);
+                    const summaryValue = summarizeUserSelfTestScenarios(data);
                     summary.innerHTML = `
                         <div><span>状态</span><strong>失败</strong></div>
                         <div><span>模型</span><strong>${escapeHtml(data.model_name || modelSelect.value)}</strong></div>
-                        <div><span>渠道</span><strong>${escapeHtml(data.provider_name || "-")}</strong></div>
-                        <div><span>状态码</span><strong>${data.status_code ?? "-"}</strong></div>
+                        <div><span>成功 / 失败</span><strong>${summaryValue.success} / ${summaryValue.failed}</strong></div>
+                        <div><span>代表渠道</span><strong>${escapeHtml(data.provider_name || "-")}</strong></div>
                     `;
                     renderResolution(failure, resolution.failure);
                     renderResolution(fixes, resolution.fixes);
                     renderResolution(next, resolution.next);
                     output.textContent = formatCodeValue(data.output_text || data.response_preview || data.message || data.detail || "测试失败");
                     trace.textContent = formatCodeValue(data.trace || data.message || data.detail || data);
+                    lastSelfTestResult = data;
+                    downloadBtn.disabled = false;
                     showToast(data.message || data.detail || "测试失败", "error");
                     return;
                 }
                 const resolution = deriveUserSelfTestResolution(data);
+                const summaryValue = summarizeUserSelfTestScenarios(data);
                 summary.innerHTML = `
                     <div><span>状态</span><strong>${data.success ? "成功" : "失败"}</strong></div>
                     <div><span>模型</span><strong>${escapeHtml(data.model_name || modelSelect.value)}</strong></div>
-                    <div><span>渠道</span><strong>${escapeHtml(data.provider_name || "-")}</strong></div>
-                    <div><span>耗时</span><strong>${data.latency_ms ?? "-"} ms</strong></div>
+                    <div><span>场景通过</span><strong>${summaryValue.success} / ${summaryValue.total}</strong></div>
+                    <div><span>图片链路</span><strong>${summaryValue.imageEnabled ? "已覆盖" : "未覆盖"}</strong></div>
                 `;
                 renderResolution(failure, resolution.failure);
                 renderResolution(fixes, resolution.fixes);
                 renderResolution(next, resolution.next);
                 output.textContent = formatCodeValue(data.output_text || data.response_preview || data.message);
                 trace.textContent = formatCodeValue(data.trace || data.message || data);
+                lastSelfTestResult = data;
+                downloadBtn.disabled = false;
                 showToast(data.success ? "真实测试完成" : "测试返回失败结果", data.success ? "success" : "error");
             } catch (error) {
                 const resolution = deriveUserSelfTestResolution({ success: false, message: error.message });
@@ -3020,6 +4179,9 @@
                 renderResolution(next, resolution.next);
                 output.textContent = error.message;
                 trace.textContent = error.message;
+                renderUserSelfTestScenarios(scenarioTableBody, []);
+                lastSelfTestResult = null;
+                resetDownloadButton();
                 showToast(error.message, "error");
             } finally {
                 setButtonLoading(runBtn, false);
@@ -3139,9 +4301,68 @@
         const hiddenInput = document.getElementById("users-batch-user-ids");
         const previewInput = document.getElementById("users-batch-user-ids-preview");
         const form = document.getElementById("users-batch-quota-form");
+        const submitBtn = document.getElementById("users-batch-apply-btn");
+        const quotaFieldNodes = Array.from(document.querySelectorAll("[data-batch-quota-field]"));
+        const quotaToggleNodes = Array.from(document.querySelectorAll("[data-batch-quota-toggle]"));
+        const quotaInputNodes = Array.from(document.querySelectorAll("[data-batch-quota-input]"));
+        const quotaCurrentNodes = Array.from(document.querySelectorAll("[data-batch-quota-current]"));
         if (!checkAll || !hiddenInput || !previewInput || !form) {
             return;
         }
+        const quotaInputsByField = new Map(quotaInputNodes.map((node) => [node.dataset.batchQuotaInput, node]));
+        const quotaCurrentByField = new Map(quotaCurrentNodes.map((node) => [node.dataset.batchQuotaCurrent, node]));
+        const quotaTogglesByField = new Map(quotaToggleNodes.map((node) => [node.dataset.batchQuotaToggle, node]));
+
+        const syncQuotaFieldState = () => {
+            quotaFieldNodes.forEach((fieldNode) => {
+                const fieldName = fieldNode.dataset.batchQuotaField;
+                const toggle = quotaTogglesByField.get(fieldName);
+                const input = quotaInputsByField.get(fieldName);
+                const enabled = Boolean(toggle?.checked);
+                fieldNode.classList.toggle("is-enabled", enabled);
+                if (input) {
+                    input.disabled = !enabled;
+                }
+            });
+        };
+
+        const resetQuotaPreview = () => {
+            quotaCurrentByField.forEach((node) => {
+                node.textContent = "当前值：未选择用户";
+            });
+            quotaInputsByField.forEach((node) => {
+                node.placeholder = "";
+            });
+        };
+
+        const refreshQuotaPreview = async () => {
+            const selectedIds = hiddenInput.value
+                .split(",")
+                .map((item) => item.trim())
+                .filter(Boolean);
+            if (!selectedIds.length) {
+                resetQuotaPreview();
+                return;
+            }
+            try {
+                const query = selectedIds.map((id) => `user_ids=${encodeURIComponent(id)}`).join("&");
+                const data = await api.get(`/api/users/quota-preview?${query}`);
+                Object.entries(data?.fields || {}).forEach(([fieldName, item]) => {
+                    const currentNode = quotaCurrentByField.get(fieldName);
+                    const input = quotaInputsByField.get(fieldName);
+                    if (currentNode) {
+                        currentNode.textContent = `当前值：${item.display_value || "未知"}`;
+                    }
+                    if (input && !input.value) {
+                        input.placeholder = item.raw_value == null ? "" : String(item.raw_value);
+                    }
+                });
+            } catch (error) {
+                console.error("批量额度原值预览失败", error);
+                showToast(error.message || "批量额度原值预览失败", "error");
+            }
+        };
+
         const updateSelection = () => {
             const selectedIds = Array.from(document.querySelectorAll("[data-user-batch-id]:checked"))
                 .map((node) => node.dataset.userBatchId)
@@ -3152,23 +4373,64 @@
             checkAll.checked = checkboxes.length > 0 && selectedIds.length === checkboxes.length;
             checkAll.indeterminate = selectedIds.length > 0 && selectedIds.length < checkboxes.length;
         };
+        const updateSelectionAndPreview = async () => {
+            updateSelection();
+            await refreshQuotaPreview();
+        };
         checkAll.addEventListener("change", () => {
             document.querySelectorAll("[data-user-batch-id]").forEach((node) => {
                 node.checked = checkAll.checked;
             });
-            updateSelection();
+            updateSelectionAndPreview();
+        });
+        quotaToggleNodes.forEach((node) => {
+            node.addEventListener("change", syncQuotaFieldState);
         });
         document.querySelectorAll("[data-user-batch-id]").forEach((node) => {
-            node.addEventListener("change", updateSelection);
+            node.addEventListener("change", updateSelectionAndPreview);
         });
-        form.addEventListener("submit", (event) => {
+        form.addEventListener("submit", async (event) => {
             updateSelection();
             if (!hiddenInput.value) {
                 event.preventDefault();
                 showToast("请先选择至少一个用户", "error");
+                console.error("批量应用额度失败：未选择用户");
+                return;
+            }
+            if (!quotaToggleNodes.some((node) => node.checked)) {
+                event.preventDefault();
+                showToast("请至少勾选一个要修改的额度项", "error");
+                console.error("批量应用额度失败：未勾选额度项");
+                return;
+            }
+            event.preventDefault();
+            const request = new Request(form.action, {
+                method: "POST",
+                body: new FormData(form),
+                credentials: "same-origin",
+                headers: {
+                    Accept: "application/json",
+                    "X-Requested-With": "XMLHttpRequest",
+                },
+            });
+            try {
+                if (submitBtn) setButtonLoading(submitBtn, true);
+                const data = await parseResponse(await fetch(request));
+                const message = data?.message || "已批量应用用户额度";
+                console.info(message, data);
+                showToast(message);
+                await refreshQuotaPreview();
+            } catch (error) {
+                const message = error?.message || "批量应用额度失败";
+                console.error(message, error);
+                showToast(message, "error");
+            } finally {
+                if (submitBtn) setButtonLoading(submitBtn, false);
             }
         });
+        syncQuotaFieldState();
         updateSelection();
+        await refreshQuotaPreview();
     }
 
     function renderApiKeyStatusText(status) {
@@ -3238,6 +4500,9 @@
         const batchEnableBtn = document.getElementById("api-key-batch-enable-btn");
         const batchDisableBtn = document.getElementById("api-key-batch-disable-btn");
         const batchDeleteBtn = document.getElementById("api-key-batch-delete-btn");
+        const batchRotateBtn = document.getElementById("api-key-batch-rotate-btn");
+        const batchExpireBtn = document.getElementById("api-key-batch-expire-btn");
+        const batchTemplateBtn = document.getElementById("api-key-batch-template-btn");
         const batchProvidersBtn = document.getElementById("api-key-batch-providers-btn");
         const checkAllVisibleInput = document.getElementById("api-key-check-all-visible");
         const addBtn = document.getElementById("add-api-key-btn");
@@ -3265,6 +4530,41 @@
         const remarkInput = document.getElementById("api-key-remark");
         const idInput = document.getElementById("api-key-id");
         const form = document.getElementById("api-key-form");
+        const templateSelect = document.getElementById("api-key-template-id");
+        const templateAddBtn = document.getElementById("api-key-template-add-btn");
+        const templateTableBody = document.getElementById("api-key-template-table-body");
+        const templateModal = document.getElementById("api-key-template-modal");
+        const templateModalTitle = document.getElementById("api-key-template-modal-title");
+        const templateModalCloseBtn = document.getElementById("api-key-template-modal-close");
+        const templateModalCancelBtn = document.getElementById("api-key-template-cancel");
+        const templateForm = document.getElementById("api-key-template-form");
+        const templateSubmitBtn = document.getElementById("api-key-template-submit-btn");
+        const templateEditIdInput = document.getElementById("api-key-template-edit-id");
+        const templateNameInput = document.getElementById("api-key-template-name");
+        const templateRouteModeInput = document.getElementById("api-key-template-route-mode");
+        const templateDefaultProviderSelect = document.getElementById("api-key-template-default-provider-id");
+        const templateTokenLimitInput = document.getElementById("api-key-template-token-limit-total");
+        const templateCostLimitInput = document.getElementById("api-key-template-cost-limit-total");
+        const templateExpiresInDaysInput = document.getElementById("api-key-template-expires-in-days");
+        const templateEnabledInput = document.getElementById("api-key-template-enabled");
+        const templateManualFallbackInput = document.getElementById("api-key-template-manual-allow-fallback");
+        const templateRemarkInput = document.getElementById("api-key-template-remark");
+        const templateProviderSelector = document.getElementById("api-key-template-provider-selector");
+        const batchTemplateModal = document.getElementById("api-key-batch-template-modal");
+        const batchTemplateCloseBtn = document.getElementById("api-key-batch-template-close");
+        const batchTemplateCancelBtn = document.getElementById("api-key-batch-template-cancel");
+        const batchTemplateForm = document.getElementById("api-key-batch-template-form");
+        const batchTemplateSelect = document.getElementById("api-key-batch-template-id");
+        const batchTemplateSubmitBtn = document.getElementById("api-key-batch-template-submit");
+        const batchRotateModal = document.getElementById("api-key-batch-rotate-modal");
+        const batchRotateCloseBtn = document.getElementById("api-key-batch-rotate-close");
+        const batchRotateCancelBtn = document.getElementById("api-key-batch-rotate-cancel");
+        const batchRotateCopyBtn = document.getElementById("api-key-batch-rotate-copy");
+        const batchRotateResult = document.getElementById("api-key-batch-rotate-result");
+        const insightGroupBySelect = document.getElementById("api-key-insight-group-by");
+        const insightWindowDaysSelect = document.getElementById("api-key-insight-window-days");
+        const insightRefreshBtn = document.getElementById("api-key-insight-refresh-btn");
+        const insightTableBody = document.getElementById("api-key-insight-table-body");
         const batchProviderModal = document.getElementById("api-key-batch-provider-modal");
         const batchProviderCloseBtn = document.getElementById("api-key-batch-provider-close");
         const batchProviderCancelBtn = document.getElementById("api-key-batch-provider-cancel");
@@ -3279,6 +4579,7 @@
             apiKeys: [],
             providers: [],
             users: [],
+            templates: [],
             total: 0,
             page: 1,
             pageSize: Number.parseInt(pageSizeSelect.value || "20", 10) || 20,
@@ -3358,6 +4659,9 @@
             batchEnableBtn.disabled = !hasSelection;
             batchDisableBtn.disabled = !hasSelection;
             batchDeleteBtn.disabled = !hasSelection;
+            batchRotateBtn.disabled = !hasSelection;
+            batchExpireBtn.disabled = !hasSelection;
+            batchTemplateBtn.disabled = !hasSelection;
             batchProvidersBtn.disabled = !hasSelection;
             clearSelectionBtn.disabled = !hasSelection;
             const visibleIds = getVisibleApiKeyIds();
@@ -3478,6 +4782,173 @@
                 .filter((value) => Number.isFinite(value));
         }
 
+        function getTemplateSelectedProviderIds() {
+            return Array.from(templateProviderSelector.querySelectorAll("[data-api-key-provider-id]:checked"))
+                .map((input) => Number(input.dataset.apiKeyProviderId))
+                .filter((value) => Number.isFinite(value));
+        }
+
+        function populateTemplateSelectOptions(selectedTemplateId = templateSelect?.value || "") {
+            if (!templateSelect) return;
+            const enabledTemplates = state.templates.filter((item) => item.enabled);
+            templateSelect.innerHTML = '<option value="">不套用模板</option>' + enabledTemplates.map((item) => `
+                <option value="${item.id}" ${String(item.id) === String(selectedTemplateId) ? "selected" : ""}>${escapeHtml(item.name)}</option>
+            `).join("");
+        }
+
+        function populateBatchTemplateOptions(selectedTemplateId = batchTemplateSelect?.value || "") {
+            if (!batchTemplateSelect) return;
+            const enabledTemplates = state.templates.filter((item) => item.enabled);
+            batchTemplateSelect.innerHTML = '<option value="">请选择一个模板</option>' + enabledTemplates.map((item) => `
+                <option value="${item.id}" ${String(item.id) === String(selectedTemplateId) ? "selected" : ""}>${escapeHtml(item.name)}</option>
+            `).join("");
+        }
+
+        function populateTemplateDefaultProviderOptions(selectedProviderId = null) {
+            if (!templateDefaultProviderSelect) return;
+            templateDefaultProviderSelect.innerHTML = '<option value="">未设置</option>' + state.providers.map((provider) => `
+                <option value="${provider.id}" ${Number(selectedProviderId) === provider.id ? "selected" : ""}>
+                    ${escapeHtml(provider.name)} ${provider.enabled ? "" : "(已禁用)"}
+                </option>
+            `).join("");
+        }
+
+        function applyTemplateToForm(templateId) {
+            const template = state.templates.find((item) => String(item.id) === String(templateId));
+            if (!template) return;
+            routeModeInput.value = template.route_mode || "failover";
+            manualFallbackInput.checked = template.manual_allow_fallback ?? true;
+            enabledInput.checked = template.enabled ?? true;
+            tokenLimitInput.value = template.token_limit_total ?? "";
+            costLimitInput.value = template.cost_limit_total ?? "";
+            expiresAtInput.value = template.expires_in_days ? toDatetimeLocalInputValue(new Date(Date.now() + (Number(template.expires_in_days) * 86400000)).toISOString()) : "";
+            populateDefaultProviderOptions(template.default_provider_id || null);
+            renderApiKeyProviderSelector(providerSelector, state.providers, template.allowed_provider_ids || []);
+            refreshRoutePreview();
+        }
+
+        function renderTemplateTable() {
+            if (!templateTableBody) return;
+            templateTableBody.innerHTML = state.templates.map((item) => {
+                const defaultProvider = state.providers.find((provider) => provider.id === item.default_provider_id);
+                return `
+                    <tr>
+                        <td>
+                            <strong>${escapeHtml(item.name)}</strong>
+                            <div class="table-muted">${escapeHtml(item.remark || "-")}</div>
+                        </td>
+                        <td>
+                            <strong>${escapeHtml(formatRouteModeLabel(item.route_mode))}</strong>
+                            <div class="table-muted">默认中转 ${escapeHtml(defaultProvider?.name || (item.default_provider_id ? String(item.default_provider_id) : "-"))} · 回退 ${formatSwitchText(item.manual_allow_fallback)}</div>
+                        </td>
+                        <td>
+                            <strong>${formatNumber((item.allowed_provider_ids || []).length)} 个</strong>
+                            <div class="table-muted">${escapeHtml((item.allowed_provider_ids || []).map((providerId) => state.providers.find((provider) => provider.id === providerId)?.name || String(providerId)).join(", ") || "未绑定")}</div>
+                        </td>
+                        <td>
+                            <strong>Token ${item.token_limit_total == null ? "不限" : formatNumber(item.token_limit_total)}</strong>
+                            <div class="table-muted">金额 ${item.cost_limit_total == null ? "不限" : formatMoney(item.cost_limit_total)}</div>
+                        </td>
+                        <td>
+                            <strong>${item.expires_in_days == null ? "不自动过期" : `${formatNumber(item.expires_in_days)} 天后过期`}</strong>
+                        </td>
+                        <td>${statusBadge(item.enabled ? "healthy" : "disabled")}</td>
+                        <td>
+                            <div class="table-actions">
+                                <button class="table-action-btn" data-action="edit-template" data-template-id="${item.id}">编辑</button>
+                                <button class="table-action-btn" data-action="delete-template" data-template-id="${item.id}">删除</button>
+                            </div>
+                        </td>
+                    </tr>
+                `;
+            }).join("") || '<tr><td colspan="7"><div class="empty-state">当前还没有策略模板</div></td></tr>';
+            enhanceInteractiveButtons(templateTableBody);
+        }
+
+        function openTemplateModal(template = null) {
+            if (!templateModal || !templateForm) return;
+            templateModalTitle.textContent = template ? `编辑策略模板 #${template.id}` : "新增策略模板";
+            templateEditIdInput.value = template?.id ?? "";
+            templateNameInput.value = template?.name ?? "";
+            templateRouteModeInput.value = template?.route_mode ?? "failover";
+            templateTokenLimitInput.value = template?.token_limit_total ?? "";
+            templateCostLimitInput.value = template?.cost_limit_total ?? "";
+            templateExpiresInDaysInput.value = template?.expires_in_days ?? "";
+            templateEnabledInput.checked = template?.enabled ?? true;
+            templateManualFallbackInput.checked = template?.manual_allow_fallback ?? true;
+            templateRemarkInput.value = template?.remark ?? "";
+            populateTemplateDefaultProviderOptions(template?.default_provider_id || null);
+            renderApiKeyProviderSelector(templateProviderSelector, state.providers, template?.allowed_provider_ids || []);
+            templateModal.classList.remove("hidden");
+        }
+
+        function closeTemplateModal() {
+            if (!templateModal || !templateForm) return;
+            templateModal.classList.add("hidden");
+            templateForm.reset();
+            templateEditIdInput.value = "";
+            renderApiKeyProviderSelector(templateProviderSelector, state.providers, []);
+            populateTemplateDefaultProviderOptions();
+        }
+
+        function openBatchTemplateModal() {
+            populateBatchTemplateOptions();
+            batchTemplateModal.classList.remove("hidden");
+        }
+
+        function closeBatchTemplateModal() {
+            batchTemplateModal.classList.add("hidden");
+            batchTemplateForm.reset();
+            populateBatchTemplateOptions();
+        }
+
+        function openBatchRotateModal(result) {
+            if (!batchRotateModal || !batchRotateResult) return;
+            batchRotateResult.value = (result.items || []).map((item) => `${item.name}\t${item.key_masked}\t${item.raw_api_key}`).join("\n");
+            batchRotateModal.classList.remove("hidden");
+        }
+
+        function closeBatchRotateModal() {
+            if (!batchRotateModal || !batchRotateResult) return;
+            batchRotateModal.classList.add("hidden");
+            batchRotateResult.value = "";
+        }
+
+        function renderCostInsights(items = []) {
+            if (!insightTableBody) return;
+            insightTableBody.innerHTML = items.length ? items.map((item) => `
+                <tr>
+                    <td>${escapeHtml(item.dimension_value || "-")}</td>
+                    <td>${formatNumber(item.total_requests || 0)}</td>
+                    <td>${formatNumber(item.total_tokens || 0)}</td>
+                    <td>${formatMoney(item.total_cost || 0)}</td>
+                    <td>${item.avg_latency_ms ?? "-"} ms</td>
+                </tr>
+            `).join("") : '<tr><td colspan="5"><div class="empty-state">当前时间窗口内暂无成本透视数据。</div></td></tr>';
+        }
+
+        async function loadTemplates() {
+            state.templates = await api.get("/api/api-key-policy-templates");
+            populateTemplateSelectOptions();
+            populateBatchTemplateOptions();
+            renderTemplateTable();
+        }
+
+        async function loadCostInsights({ manual = false } = {}) {
+            if (!insightGroupBySelect || !insightWindowDaysSelect) return;
+            try {
+                if (manual) setButtonLoading(insightRefreshBtn, true);
+                const data = await api.get(`/api/api-keys/insights/cost?group_by=${encodeURIComponent(insightGroupBySelect.value)}&window_days=${encodeURIComponent(insightWindowDaysSelect.value)}`);
+                renderCostInsights(Array.isArray(data.items) ? data.items : []);
+                if (manual) showToast("成本透视已刷新");
+            } catch (error) {
+                renderCostInsights([]);
+                if (manual) showToast(error.message, "error");
+            } finally {
+                if (manual) setButtonLoading(insightRefreshBtn, false);
+            }
+        }
+
         function refreshRoutePreview() {
             renderRoutePolicyGuideInto({
                 modeCards: document.getElementById("api-key-route-mode-cards"),
@@ -3493,6 +4964,7 @@
             const isEditing = Boolean(apiKey);
             modalTitle.textContent = isEditing ? `编辑 API 密钥 #${apiKey.id}` : "新增 API 密钥";
             idInput.value = isEditing ? String(apiKey.id) : "";
+            if (templateSelect) templateSelect.value = "";
             nameInput.value = apiKey?.name || "";
             generationModeInput.value = isEditing ? "custom" : "auto";
             rawApiKeyInput.value = isEditing ? (apiKey?.raw_api_key || "") : "";
@@ -3522,6 +4994,7 @@
             rawValue.textContent = "";
             form.reset();
             idInput.value = "";
+            if (templateSelect) templateSelect.value = "";
             generationModeInput.value = "auto";
             rawApiKeyInput.value = "";
             balanceAmountInput.disabled = false;
@@ -3568,8 +5041,11 @@
             state.users = users;
             populateOwnerFilterOptions(state.filters.ownerUserId);
             populateDefaultProviderOptions(defaultProviderSelect.value ? Number(defaultProviderSelect.value) : null);
+            populateTemplateDefaultProviderOptions(templateDefaultProviderSelect?.value ? Number(templateDefaultProviderSelect.value) : null);
             populateOwnerUserOptions(ownerUserSelect.value ? Number(ownerUserSelect.value) : null);
             renderApiKeyProviderSelector(providerSelector, state.providers, getSelectedProviderIds());
+            renderApiKeyProviderSelector(batchProviderSelector, state.providers, getBatchSelectedProviderIds());
+            renderApiKeyProviderSelector(templateProviderSelector, state.providers, getTemplateSelectedProviderIds());
             refreshRoutePreview();
         }
 
@@ -3605,7 +5081,13 @@
             if (reloadReference || !state.providers.length || !state.users.length) {
                 await loadReferenceData();
             }
-            await loadTableData({ silent });
+            if (reloadReference || !state.templates.length) {
+                await loadTemplates();
+            }
+            await Promise.all([
+                loadTableData({ silent }),
+                loadCostInsights({ manual: false }),
+            ]);
         }
 
         function removeSelectedIds(ids = []) {
@@ -3625,6 +5107,8 @@
                 enable: batchEnableBtn,
                 disable: batchDisableBtn,
                 delete: batchDeleteBtn,
+                rotate: batchRotateBtn,
+                expire: batchExpireBtn,
             };
             const button = buttonMap[action];
             try {
@@ -3703,10 +5187,32 @@
         addBtn.addEventListener("click", () => openModal());
         closeBtn.addEventListener("click", closeModal);
         cancelBtn.addEventListener("click", closeModal);
+        templateAddBtn?.addEventListener("click", () => openTemplateModal());
+        templateModalCloseBtn?.addEventListener("click", closeTemplateModal);
+        templateModalCancelBtn?.addEventListener("click", closeTemplateModal);
+        templateModal?.addEventListener("click", (event) => {
+            if (event.target === templateModal) closeTemplateModal();
+        });
+        batchTemplateCloseBtn?.addEventListener("click", closeBatchTemplateModal);
+        batchTemplateCancelBtn?.addEventListener("click", closeBatchTemplateModal);
+        batchTemplateModal?.addEventListener("click", (event) => {
+            if (event.target === batchTemplateModal) closeBatchTemplateModal();
+        });
+        batchRotateCloseBtn?.addEventListener("click", closeBatchRotateModal);
+        batchRotateCancelBtn?.addEventListener("click", closeBatchRotateModal);
+        batchRotateModal?.addEventListener("click", (event) => {
+            if (event.target === batchRotateModal) closeBatchRotateModal();
+        });
+        batchRotateCopyBtn?.addEventListener("click", async () => copyText(batchRotateResult.value));
         modal.addEventListener("click", (event) => {
             if (event.target === modal) closeModal();
         });
         copyRawBtn.addEventListener("click", async () => copyText(rawValue.textContent));
+        templateSelect?.addEventListener("change", () => {
+            if (!templateSelect.value) return;
+            applyTemplateToForm(templateSelect.value);
+            showToast("已按策略模板预填当前表单");
+        });
         searchInput.addEventListener("input", () => {
             window.clearTimeout(searchTimer);
             searchTimer = window.setTimeout(async () => {
@@ -3797,6 +5303,37 @@
         batchDeleteBtn.addEventListener("click", async () => {
             await runBatchAction("delete", `确认删除已选择的 ${state.selectedIds.size} 个 API Key 吗？`, "已批量删除");
         });
+        batchRotateBtn.addEventListener("click", async () => {
+            const apiKeyIds = Array.from(state.selectedIds);
+            if (!apiKeyIds.length) {
+                showToast("请先选择至少一个 API Key", "error");
+                return;
+            }
+            if (!window.confirm(`确认轮换已选择的 ${apiKeyIds.length} 个 API Key 吗？旧密钥将立即失效。`)) {
+                return;
+            }
+            try {
+                setButtonLoading(batchRotateBtn, true);
+                const result = await api.post("/api/api-keys/batch/rotate", { api_key_ids: apiKeyIds });
+                openBatchRotateModal(result);
+                showToast(`已批量轮换 ${formatNumber(result.affected_count || 0)} 个 API Key`);
+                await loadTableData({ silent: true });
+            } catch (error) {
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(batchRotateBtn, false);
+            }
+        });
+        batchExpireBtn.addEventListener("click", async () => {
+            await runBatchAction("expire", `确认让已选择的 ${state.selectedIds.size} 个 API Key 立即过期吗？`, "已批量过期");
+        });
+        batchTemplateBtn.addEventListener("click", () => {
+            if (!state.selectedIds.size) {
+                showToast("请先选择至少一个 API Key", "error");
+                return;
+            }
+            openBatchTemplateModal();
+        });
         batchProvidersBtn.addEventListener("click", () => {
             if (!state.selectedIds.size) {
                 showToast("请先选择至少一个 API Key", "error");
@@ -3818,6 +5355,15 @@
         manualFallbackInput.addEventListener("change", refreshRoutePreview);
         defaultProviderSelect.addEventListener("change", refreshRoutePreview);
         providerSelector.addEventListener("change", refreshRoutePreview);
+        insightGroupBySelect?.addEventListener("change", async () => {
+            await loadCostInsights({ manual: false });
+        });
+        insightWindowDaysSelect?.addEventListener("change", async () => {
+            await loadCostInsights({ manual: false });
+        });
+        insightRefreshBtn?.addEventListener("click", async () => {
+            await loadCostInsights({ manual: true });
+        });
         batchProviderCloseBtn.addEventListener("click", closeBatchProviderModal);
         batchProviderCancelBtn.addEventListener("click", closeBatchProviderModal);
         batchProviderModal.addEventListener("click", (event) => {
@@ -3847,6 +5393,28 @@
                 showToast(error.message, "error");
             } finally {
                 setButtonLoading(batchProviderSubmitBtn, false);
+            }
+        });
+
+        templateTableBody?.addEventListener("click", async (event) => {
+            const button = event.target.closest("[data-action][data-template-id]");
+            if (!button) return;
+            const templateId = Number(button.dataset.templateId);
+            const template = state.templates.find((item) => item.id === templateId);
+            if (!template) return;
+            if (button.dataset.action === "edit-template") {
+                openTemplateModal(template);
+                return;
+            }
+            if (button.dataset.action === "delete-template") {
+                if (!window.confirm(`确认删除策略模板「${template.name}」吗？`)) return;
+                try {
+                    await api.delete(`/api/api-key-policy-templates/${templateId}`);
+                    showToast("策略模板已删除");
+                    await loadData({ silent: true, reloadReference: true });
+                } catch (error) {
+                    showToast(error.message, "error");
+                }
             }
         });
 
@@ -4693,8 +6261,10 @@
             if (page === "users") await initUsersPage();
             if (page === "alerts") await initAlertsPage();
             if (page === "user-home") await initUserHome();
+            if (page === "user-api-keys") await initUserApiKeys();
             if (page === "user-billing") await initUserBilling();
             if (page === "user-logs") await initUserLogs();
+            if (page === "user-conversations") await initUserConversations();
             if (page === "user-self-test") await initUserSelfTest();
             if (page === "user-models") await initUserModels();
             if (page === "api-keys") await initApiKeys();

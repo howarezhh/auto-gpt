@@ -2,162 +2,62 @@
 {% block content %}
 <section class="hero-panel hero-panel-compact cockpit-hero">
     <div class="cockpit-hero-copy">
-        <div class="eyebrow">会话记录</div>
+        <div class="eyebrow">会话回放</div>
         <h2>我的会话回放</h2>
-        <p>右侧回放区改成更接近聊天界面的消息流展示。先用左侧列表缩小范围，再按消息流看用户输入、模型输出和渠道轨迹。</p>
+        <p>按 conversation_key 聚合当前账号的请求，回看用户输入、模型输出、命中线路和 token 消耗。</p>
     </div>
     <div class="cockpit-hero-aside">
-        <div class="cockpit-aside-label">会话概览</div>
-        <div class="cockpit-aside-value">{{ pagination.total }}</div>
-        <div class="cockpit-aside-copy">当前筛选命中的会话数</div>
+        <div class="cockpit-aside-label">结果集</div>
+        <div class="cockpit-aside-value" id="conversation-total-count">0</div>
+        <div class="cockpit-aside-copy" id="conversation-active-query">当前展示全部会话</div>
         <div class="cockpit-health-bar"><span class="cockpit-health-fill-full"></span></div>
         <div class="cockpit-aside-meta">
-            <span>当前页 {{ pagination.page }}</span>
-            <span>总页数 {{ pagination.total_pages }}</span>
+            <span id="conversation-last-updated">最近更新 -</span>
+            <span id="conversation-result-count">0 条结果</span>
         </div>
     </div>
 </section>
 
-<section class="panel-card section-shell conversation-toolbar">
-    <div class="section-subhead">
-        <div>
-            <div class="panel-kicker">搜索筛选</div>
-            <h3>搜索会话</h3>
-        </div>
-    </div>
-    <form class="filter-grid" method="get" action="/user/conversations">
-        <label>
-            <span>关键字</span>
-            <input class="field-input" name="query" value="{{ filters.query }}" placeholder="会话号 / 模型 / 提示词 / 回复摘要">
-        </label>
-        <label>
-            <span>每页数量</span>
-            <select class="field-input" name="page_size">
-                {% for size in [10,20,50,100] %}
-                <option value="{{ size }}" {% if pagination.page_size == size %}selected{% endif %}>{{ size }}</option>
-                {% endfor %}
-            </select>
-        </label>
-        {% if active_key %}
-        <input type="hidden" name="conversation_key" value="{{ active_key }}">
-        {% endif %}
-        <div class="form-actions">
-            <button class="btn btn-accent" type="submit">查询</button>
-        </div>
-    </form>
+<section class="stats-grid">
+    <article class="metric-card"><span>会话数</span><strong id="conversation-total-count-secondary">0</strong></article>
+    <article class="metric-card"><span>命中请求量</span><strong id="conversation-total-requests">0</strong></article>
+    <article class="metric-card"><span>总 Token</span><strong id="conversation-total-tokens">0</strong></article>
+    <article class="metric-card"><span>最近线路</span><strong id="conversation-selected-provider">-</strong></article>
 </section>
 
-<section class="conversation-shell">
-    <div class="panel-card section-shell conversation-list-panel">
+<section class="dashboard-command-grid">
+    <div class="panel-card conversation-list-panel" id="conversation-list-panel">
         <div class="section-subhead">
             <div>
-                <div class="panel-kicker">会话列表</div>
+                <div class="panel-kicker">筛选结果</div>
                 <h3>会话列表</h3>
             </div>
         </div>
-        <div class="conversation-list">
-            {% if conversations %}
-                {% for item in conversations %}
-                <a class="conversation-item {% if active_key == item.conversation_key %}active{% endif %}" href="/user/conversations?query={{ filters.query | urlencode }}&page={{ pagination.page }}&page_size={{ pagination.page_size }}&conversation_key={{ item.conversation_key | urlencode }}" data-shell-link>
-                    <div class="conversation-item-top">
-                        <strong>{{ item.conversation_key }}</strong>
-                        <span>{{ item.request_count }} 次</span>
-                    </div>
-                    <div class="conversation-item-meta">
-                        <span>{{ item.latest_model or '-' }}</span>
-                        <span>{{ item.total_tokens }} tokens</span>
-                    </div>
-                    <p>{{ item.preview_text or '暂无回复预览' }}</p>
-                    <div class="conversation-item-foot">
-                        <span>{{ item.updated_at }}</span>
-                        <span>{{ item.latest_provider_name or '-' }}</span>
-                    </div>
-                </a>
-                {% endfor %}
-            {% else %}
-                <div class="empty-state">暂无会话记录。</div>
-            {% endif %}
+        <div class="table-toolbar conversation-toolbar">
+            <input class="field-input" id="conversation-search" type="search" placeholder="搜索 conversation_key、模型、中转站、回复内容">
+            <button class="btn btn-ghost interactive-btn" id="conversation-refresh-btn" type="button">刷新</button>
         </div>
-        <div class="logs-pagination-bar topbar-actions">
-            <div class="logs-page-meta">第 {{ pagination.page }} / {{ pagination.total_pages }} 页</div>
-            <div class="logs-page-actions">
-                {% if pagination.has_prev %}
-                <a class="topbar-btn" href="/user/conversations?query={{ filters.query | urlencode }}&page_size={{ pagination.page_size }}&page={{ pagination.prev_page }}{% if active_key %}&conversation_key={{ active_key | urlencode }}{% endif %}" data-shell-link>上一页</a>
-                {% endif %}
-                {% if pagination.has_next %}
-                <a class="topbar-btn" href="/user/conversations?query={{ filters.query | urlencode }}&page_size={{ pagination.page_size }}&page={{ pagination.next_page }}{% if active_key %}&conversation_key={{ active_key | urlencode }}{% endif %}" data-shell-link>下一页</a>
-                {% endif %}
-            </div>
-        </div>
+        <div class="conversation-list" id="conversation-list"></div>
     </div>
 
-    <div class="panel-card section-shell conversation-detail-panel">
-        <div class="section-subhead">
-            <div>
-                <div class="panel-kicker">会话消息流</div>
-                <h3>{{ replay.conversation_key if replay else '选择左侧会话' }}</h3>
-            </div>
-        </div>
-        {% if replay %}
-        <div class="conversation-summary">
-            <div class="conversation-summary-grid">
-                <article class="conversation-summary-card">
-                    <span>请求数</span>
-                    <strong>{{ replay.request_count }}</strong>
-                </article>
-                <article class="conversation-summary-card">
-                    <span>成功 / 失败</span>
-                    <strong>{{ replay.success_count }} / {{ replay.failure_count }}</strong>
-                </article>
-                <article class="conversation-summary-card">
-                    <span>总 Token</span>
-                    <strong>{{ replay.total_tokens }}</strong>
-                </article>
-                <article class="conversation-summary-card">
-                    <span>最近模型</span>
-                    <strong>{{ replay.latest_model or '-' }}</strong>
-                </article>
-            </div>
-            <div class="conversation-meta-bar">
-                <span>开始时间 {{ replay.started_at }}</span>
-                <span>最近更新时间 {{ replay.updated_at }}</span>
-                <span>最近命中线路 {{ replay.latest_provider_name or '-' }}</span>
-            </div>
-        </div>
-        <div class="conversation-message-stream">
-            {% for turn in replay.turns %}
-            <article class="conversation-message conversation-message-{{ turn.role }}">
-                <div class="conversation-message-avatar">
-                    {% if turn.role == 'user' %}你
-                    {% elif turn.role == 'assistant' %}AI
-                    {% elif turn.role == 'system' %}系统
-                    {% elif turn.role == 'developer' %}开发
-                    {% else %}{{ turn.role[:2] }}
-                    {% endif %}
+    <div class="dashboard-command-side">
+        <section class="panel-card conversation-detail-panel" id="conversation-detail-panel">
+            <div class="panel-head">
+                <div>
+                    <div class="panel-kicker">回放详情</div>
+                    <h3 id="conversation-detail-title">选择左侧会话</h3>
                 </div>
-                <div class="conversation-message-main">
-                    <div class="conversation-turn-head">
-                        <div>
-                            <span class="conversation-role">{{ turn.role }}</span>
-                            <strong>{{ turn.provider_name or turn.requested_model or '-' }}</strong>
-                        </div>
-                        <div class="conversation-turn-meta">
-                            <span>{{ turn.created_at }}</span>
-                            <span>{{ turn.total_tokens or 0 }} tokens</span>
-                            <span>{{ 'stream' if turn.is_stream else 'json' }}</span>
-                            <span>{{ 'vision' if turn.has_image else 'text' }}</span>
-                        </div>
-                    </div>
-                    <div class="conversation-message-bubble">
-                        <div class="conversation-message-copy">{{ turn.content }}</div>
-                    </div>
-                </div>
-            </article>
-            {% endfor %}
-        </div>
-        {% else %}
-        <div class="empty-state">选择一个会话后，可查看完整消息流。</div>
-        {% endif %}
+                <a class="btn btn-ghost btn-sm interactive-btn hidden" id="conversation-open-logs" href="/user/logs" data-shell-link>查看相关日志</a>
+            </div>
+            <div class="conversation-selected-updated">
+                <span>最近更新时间</span>
+                <strong id="conversation-selected-updated">-</strong>
+            </div>
+            <div class="conversation-summary" id="conversation-summary">
+                <div class="empty-state">选择一个会话后，可查看完整回放、命中线路与 token 使用。</div>
+            </div>
+            <div class="conversation-timeline" id="conversation-timeline"></div>
+        </section>
     </div>
 </section>
 {% endblock %}

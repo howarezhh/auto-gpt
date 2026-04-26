@@ -1,14 +1,25 @@
 from collections import defaultdict
 from datetime import datetime, timedelta
 
+from httpx import HTTPError
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
 from app.models.request_log import RequestLog
-from app.schemas.provider import ProviderCreate, ProviderModelConfigInput, ProviderModelConfigUpdate, ProviderUpdate
+from app.schemas.provider import (
+    ProviderCreate,
+    ProviderDiscoverModelsIn,
+    ProviderDiscoverModelsResponse,
+    ProviderDiscoveredModelOut,
+    ProviderModelConfigInput,
+    ProviderModelConfigUpdate,
+    ProviderUpdate,
+)
 from app.services.log_service import LogService
+from app.services.setting_service import SettingService
+from app.services.upstream_client import UpstreamClientService
 from app.utils.json_utils import dumps_json, loads_json
 
 
@@ -80,11 +91,20 @@ class ProviderService:
             base_url=payload.base_url.rstrip("/"),
             api_key=payload.api_key,
             provider_type=payload.provider_type,
+            group_name=payload.group_name,
+            region_tag=payload.region_tag,
             enabled=payload.enabled,
             priority=payload.priority,
             weight=payload.weight,
             timeout_ms=payload.timeout_ms,
             max_retries=payload.max_retries,
+            maintenance_window=payload.maintenance_window,
+            maintenance_mode_enabled=payload.maintenance_mode_enabled,
+            auto_circuit_break_enabled=payload.auto_circuit_break_enabled,
+            auto_recover_enabled=payload.auto_recover_enabled,
+            circuit_breaker_threshold_override=payload.circuit_breaker_threshold_override,
+            recovery_probe_interval_sec_override=payload.recovery_probe_interval_sec_override,
+            credential_rotated_at=datetime.utcnow(),
             remark=payload.remark,
         )
         db.add(provider)
@@ -172,11 +192,19 @@ class ProviderService:
             "base_url": provider.base_url,
             "api_key_masked": ProviderService.mask_api_key(provider.api_key),
             "provider_type": provider.provider_type,
+            "group_name": provider.group_name,
+            "region_tag": provider.region_tag,
             "enabled": provider.enabled,
             "priority": provider.priority,
             "weight": provider.weight,
             "timeout_ms": provider.timeout_ms,
             "max_retries": provider.max_retries,
+            "maintenance_window": provider.maintenance_window,
+            "maintenance_mode_enabled": provider.maintenance_mode_enabled,
+            "auto_circuit_break_enabled": provider.auto_circuit_break_enabled,
+            "auto_recover_enabled": provider.auto_recover_enabled,
+            "circuit_breaker_threshold_override": provider.circuit_breaker_threshold_override,
+            "recovery_probe_interval_sec_override": provider.recovery_probe_interval_sec_override,
             "models": [item.model_name for item in provider.provider_models],
             "model_configs": [
                 ProviderService.provider_model_to_dict(item, metrics=metrics["provider_models"].get(item.id))
@@ -194,10 +222,167 @@ class ProviderService:
             "stability_score": provider_metric.get("stability_score"),
             "best_input_price_per_1k": best_input_price,
             "best_output_price_per_1k": best_output_price,
+            "credential_rotated_at": provider.credential_rotated_at,
+            "credential_hint": provider.credential_hint,
             "remark": provider.remark,
             "created_at": provider.created_at,
             "updated_at": provider.updated_at,
         }
+
+    @staticmethod
+    def get_effective_circuit_breaker_threshold(db: Session, provider: Provider) -> int:
+        if provider.circuit_breaker_threshold_override is not None and provider.circuit_breaker_threshold_override > 0:
+            return provider.circuit_breaker_threshold_override
+        return max(1, SettingService.get_or_create(db).circuit_breaker_threshold)
+
+    @staticmethod
+    def get_effective_recovery_probe_interval_sec(db: Session, provider: Provider) -> int:
+        if provider.recovery_probe_interval_sec_override is not None and provider.recovery_probe_interval_sec_override > 0:
+            return provider.recovery_probe_interval_sec_override
+        return max(10, SettingService.get_or_create(db).recovery_probe_interval_sec)
+
+    @staticmethod
+    def rotate_provider_credential(
+        db: Session,
+        provider: Provider,
+        *,
+        api_key: str,
+        credential_hint: str | None,
+    ) -> Provider:
+        provider.api_key = api_key.strip()
+        provider.credential_hint = credential_hint
+        provider.credential_rotated_at = datetime.utcnow()
+        provider.health_status = "unknown"
+        provider.circuit_state = "closed"
+        for provider_model in provider.provider_models:
+            provider_model.health_status = "unknown"
+            provider_model.circuit_state = "closed"
+            provider_model.circuit_opened_at = None
+            provider_model.last_error = None
+        db.commit()
+        db.refresh(provider)
+        return provider
+
+    @staticmethod
+    async def discover_models(
+        db: Session,
+        payload: ProviderDiscoverModelsIn,
+    ) -> ProviderDiscoverModelsResponse:
+        provider = None
+        if payload.provider_id is not None:
+            provider = ProviderService.get_provider(db, payload.provider_id)
+            if provider is None:
+                raise ValueError("Provider not found")
+        base_url = (payload.base_url or provider.base_url if provider else None)
+        api_key = (payload.api_key or provider.api_key if provider else None)
+        if not base_url or not api_key:
+            raise ValueError("必须提供 Base URL 和 API 密钥，或指定已存在的中转站")
+
+        normalized_base_url = base_url.rstrip("/")
+        timeout_sec = max(1, int((payload.timeout_ms or provider.timeout_ms if provider else 30000) / 1000))
+        response = None
+        try:
+            response = await UpstreamClientService.get_client().get(
+                f"{normalized_base_url}/models",
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=timeout_sec,
+            )
+            response.raise_for_status()
+        except HTTPError as exc:
+            detail = exc.response.text[:500] if exc.response is not None else str(exc)
+            raise ValueError(f"获取可用模型失败：{detail}") from exc
+        except Exception as exc:
+            raise ValueError(f"获取可用模型失败：{exc}") from exc
+
+        try:
+            body = response.json()
+        except Exception as exc:
+            raise ValueError(f"上游 /models 返回的不是合法 JSON：{exc}") from exc
+
+        items = body.get("data") if isinstance(body, dict) else None
+        if not isinstance(items, list):
+            raise ValueError("上游 /models 返回格式不符合预期，缺少 data 数组")
+
+        existing_names = set(payload.existing_model_names or [])
+        discovered_names: list[str] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            model_name = str(item.get("id") or "").strip()
+            if not model_name or model_name in discovered_names:
+                continue
+            discovered_names.append(model_name)
+
+        discovered_items = [
+            ProviderDiscoveredModelOut(
+                model_name=model_name,
+                supports_stream=ProviderService._infer_model_capabilities(model_name)["supports_stream"],
+                supports_vision=ProviderService._infer_model_capabilities(model_name)["supports_vision"],
+                already_configured=model_name in existing_names,
+            )
+            for model_name in discovered_names
+        ]
+        return ProviderDiscoverModelsResponse(
+            provider_name=provider.name if provider else None,
+            source_base_url=normalized_base_url,
+            total_models=len(discovered_items),
+            items=discovered_items,
+        )
+
+    @staticmethod
+    def availability_timeseries(
+        db: Session,
+        *,
+        provider: Provider,
+        window_hours: int,
+        bucket_minutes: int,
+    ) -> list[dict]:
+        normalized_window_hours = max(1, min(window_hours, 24 * 30))
+        normalized_bucket_minutes = max(5, min(bucket_minutes, 24 * 60))
+        since = datetime.utcnow() - timedelta(hours=normalized_window_hours)
+        logs = list(
+            db.scalars(
+                select(RequestLog)
+                .where(
+                    RequestLog.provider_id == provider.id,
+                    RequestLog.created_at >= since,
+                    LogService._route_traffic_expr(),
+                )
+                .order_by(RequestLog.created_at.asc(), RequestLog.id.asc())
+            )
+        )
+        buckets: dict[datetime, dict] = {}
+        for item in logs:
+            if item.created_at is None:
+                continue
+            minute_floor = item.created_at.replace(second=0, microsecond=0)
+            bucket_minute = minute_floor.minute - (minute_floor.minute % normalized_bucket_minutes)
+            bucket_start = minute_floor.replace(minute=bucket_minute)
+            current = buckets.setdefault(
+                bucket_start,
+                {
+                    "bucket_start": bucket_start,
+                    "total_requests": 0,
+                    "success_requests": 0,
+                    "failed_requests": 0,
+                    "latency_values": [],
+                },
+            )
+            current["total_requests"] += 1
+            current["success_requests"] += 1 if item.success else 0
+            current["failed_requests"] += 0 if item.success else 1
+            if item.latency_ms is not None:
+                current["latency_values"].append(float(item.latency_ms))
+        results = []
+        for bucket_start in sorted(buckets.keys()):
+            current = buckets[bucket_start]
+            latency_values = current.pop("latency_values")
+            total_requests = int(current["total_requests"] or 0)
+            success_requests = int(current["success_requests"] or 0)
+            current["success_rate"] = round((success_requests / total_requests) * 100, 2) if total_requests else 0.0
+            current["avg_latency_ms"] = round(sum(latency_values) / len(latency_values), 2) if latency_values else None
+            results.append(current)
+        return results
 
     @staticmethod
     def provider_model_to_dict(provider_model: ProviderModel, *, metrics: dict | None = None) -> dict:

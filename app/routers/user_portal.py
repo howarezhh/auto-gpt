@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import base64
+from collections.abc import AsyncIterator
+from datetime import datetime
 from math import ceil
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
@@ -11,17 +14,25 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.database import get_db
 from app.schemas.api_key import ApiKeyCreate, ApiKeyUpdate, RouteMode
+from app.schemas.conversation import ConversationReplay, ConversationSummaryList
+from app.schemas.log import LogFilterOptionsResponse, LogListResponse, LogSummaryOut, RequestLogOut
 from app.services.api_key_admin_service import ApiKeyAdminService
 from app.services.api_key_service import ApiClientAuthError, ApiKeyService
+from app.services.asset_service import AssetService
 from app.services.model_catalog_service import ModelCatalogService
 from app.services.provider_service import ProviderService
 from app.services.proxy_service import ProxyService
 from app.services.user_auth_service import USER_ROLE_ADMIN, UserAuthService
 from app.services.user_portal_service import UserPortalService
+from app.utils.json_utils import safeJsonParse
 
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
+
+SELF_TEST_IMAGE_MODES = {"none", "url", "upload"}
+SELF_TEST_TEXT_PROMPT = "请只回复 pong"
+SELF_TEST_IMAGE_PROMPT = "请确认你已看到这张测试图片，并用一句中文概括图片主体。"
 
 
 def require_user_html(request: Request, db: Session):
@@ -127,6 +138,266 @@ def _resolve_external_base_url(request: Request) -> str:
     if configured:
         return configured
     return str(request.base_url).rstrip("/")
+
+
+def _build_self_test_chat_content(message_text: str, image_input: dict | None) -> str | list[dict]:
+    if image_input is None:
+        return message_text
+    return [
+        {"type": "text", "text": message_text},
+        {
+            "type": "image_url",
+            "image_url": {
+                "url": image_input["url"],
+                "detail": image_input["detail"],
+            },
+        },
+    ]
+
+
+def _build_self_test_responses_input(message_text: str, image_input: dict | None) -> str | list[dict]:
+    if image_input is None:
+        return message_text
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": message_text},
+                {
+                    "type": "input_image",
+                    "image_url": image_input["url"],
+                    "detail": image_input["detail"],
+                },
+            ],
+        }
+    ]
+
+
+async def _read_self_test_upload_as_data_url(image_file: UploadFile) -> dict:
+    content_type = (image_file.content_type or "").strip().lower()
+    if content_type not in AssetService.IMAGE_CONTENT_TYPES:
+        raise HTTPException(status_code=400, detail="仅支持 PNG/JPEG/WEBP/GIF 图片")
+    content = await image_file.read(AssetService.MAX_IMAGE_BYTES + 1)
+    if not content:
+        raise HTTPException(status_code=400, detail="上传文件不能为空")
+    if len(content) > AssetService.MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=400, detail="图片大小不能超过 10 MB")
+    encoded = base64.b64encode(content).decode("ascii")
+    return {
+        "url": f"data:{content_type};base64,{encoded}",
+        "detail": "auto",
+        "source": "upload",
+        "filename": image_file.filename or "upload-image",
+        "content_type": content_type,
+        "file_size_bytes": len(content),
+    }
+
+
+async def _resolve_self_test_image_input(
+    *,
+    image_mode: str,
+    image_detail: str,
+    image_url: str | None,
+    image_file: UploadFile | None,
+) -> dict | None:
+    normalized_mode = (image_mode or "none").strip().lower()
+    if normalized_mode not in SELF_TEST_IMAGE_MODES:
+        raise HTTPException(status_code=400, detail="图片模式不合法")
+    normalized_detail = (image_detail or "auto").strip().lower() or "auto"
+    if normalized_mode == "none":
+        return None
+    if normalized_mode == "url":
+        normalized_url = (image_url or "").strip()
+        if not normalized_url:
+            raise HTTPException(status_code=400, detail="请选择图片链接，或切换为不附带图片")
+        return {
+            "url": normalized_url,
+            "detail": normalized_detail,
+            "source": "url",
+            "filename": None,
+            "content_type": None,
+            "file_size_bytes": None,
+        }
+    if image_file is None:
+        raise HTTPException(status_code=400, detail="请先选择一张本地图片")
+    payload = await _read_self_test_upload_as_data_url(image_file)
+    payload["detail"] = normalized_detail
+    return payload
+
+
+async def _consume_self_test_stream(stream: AsyncIterator[bytes]) -> dict:
+    event_buffer = bytearray()
+    output_parts: list[str] = []
+    event_preview: list[dict | str] = []
+
+    async for chunk in stream:
+        if not chunk:
+            continue
+        event_buffer.extend(chunk)
+        while True:
+            separator_index = event_buffer.find(b"\n\n")
+            if separator_index < 0:
+                break
+            raw_event = bytes(event_buffer[:separator_index])
+            del event_buffer[: separator_index + 2]
+            event_text = raw_event.decode("utf-8", errors="ignore")
+            for line in event_text.splitlines():
+                line = line.strip()
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if not data:
+                    continue
+                if data == "[DONE]":
+                    if len(event_preview) < 20:
+                        event_preview.append(data)
+                    continue
+                parsed = safeJsonParse(data)
+                if len(event_preview) < 20:
+                    event_preview.append(parsed if parsed is not None else data)
+                if isinstance(parsed, dict):
+                    text = ProxyService._extract_response_text(parsed, limit_bytes=600)
+                    if text and (not output_parts or output_parts[-1] != text):
+                        output_parts.append(text)
+    return {
+        "output_text": "".join(output_parts) or None,
+        "stream_event_preview": event_preview,
+    }
+
+
+def _self_test_provider_name_from_trace(trace) -> str | None:
+    if not isinstance(trace, list):
+        return None
+    for item in reversed(trace):
+        if isinstance(item, dict) and isinstance(item.get("provider_name"), str) and item["provider_name"].strip():
+            return item["provider_name"].strip()
+    return None
+
+
+async def _run_user_self_test_probe(
+    *,
+    db: Session,
+    auth_context,
+    model_name: str,
+    endpoint_path: str,
+    stream: bool,
+    image_input: dict | None,
+) -> dict:
+    normalized_endpoint_path = endpoint_path if endpoint_path == "/responses" else "/chat/completions"
+    has_image = image_input is not None
+    payload = {
+        "model": model_name,
+        "stream": stream,
+    }
+    prompt_text = SELF_TEST_IMAGE_PROMPT if has_image else SELF_TEST_TEXT_PROMPT
+    if normalized_endpoint_path == "/responses":
+        payload["input"] = _build_self_test_responses_input(prompt_text, image_input)
+        payload["max_output_tokens"] = 64 if has_image else 16
+        log_type = "responses"
+        endpoint_label = "/v1/responses"
+        scenario_key = f"{'image' if has_image else 'text'}_{'stream' if stream else 'json'}_responses"
+        scenario_label = f"{'图片' if has_image else '文本'} · {'流式' if stream else '非流式'} · responses"
+    else:
+        payload["messages"] = [
+            {
+                "role": "user",
+                "content": _build_self_test_chat_content(prompt_text, image_input),
+            }
+        ]
+        payload["max_tokens"] = 64 if has_image else 16
+        log_type = "chat"
+        endpoint_label = "/v1/chat/completions"
+        scenario_key = f"{'image' if has_image else 'text'}_{'stream' if stream else 'json'}_chat"
+        scenario_label = f"{'图片' if has_image else '文本'} · {'流式' if stream else '非流式'} · chat/completions"
+
+    try:
+        if stream:
+            response_stream, provider, trace, latency_ms = await ProxyService.forward_stream_request(
+                db,
+                endpoint_path=normalized_endpoint_path,
+                payload=payload,
+                log_type=log_type,
+                route_context=auth_context.route_context,
+                api_client_auth=auth_context,
+            )
+            stream_result = await _consume_self_test_stream(response_stream)
+            return {
+                "scenario_key": scenario_key,
+                "scenario_label": scenario_label,
+                "endpoint_path": endpoint_label,
+                "stream": True,
+                "has_image": has_image,
+                "success": True,
+                "provider_name": provider.name,
+                "model_name": model_name,
+                "status_code": 200,
+                "latency_ms": latency_ms,
+                "output_text": stream_result["output_text"],
+                "response_preview": stream_result["stream_event_preview"],
+                "trace": trace,
+                "message": "stream success",
+            }
+
+        response, provider, trace, latency_ms = await ProxyService.forward_json_request(
+            db,
+            endpoint_path=normalized_endpoint_path,
+            payload=payload,
+            log_type=log_type,
+            route_context=auth_context.route_context,
+            api_client_auth=auth_context,
+        )
+        return {
+            "scenario_key": scenario_key,
+            "scenario_label": scenario_label,
+            "endpoint_path": endpoint_label,
+            "stream": False,
+            "has_image": has_image,
+            "success": True,
+            "provider_name": provider.name,
+            "model_name": model_name,
+            "status_code": 200,
+            "latency_ms": latency_ms,
+            "output_text": ProxyService._extract_response_text(response, limit_bytes=600),
+            "response_preview": response,
+            "trace": trace,
+            "message": "json success",
+        }
+    except HTTPException as exc:
+        detail = exc.detail
+        trace = detail.get("trace") if isinstance(detail, dict) else None
+        return {
+            "scenario_key": scenario_key,
+            "scenario_label": scenario_label,
+            "endpoint_path": endpoint_label,
+            "stream": stream,
+            "has_image": has_image,
+            "success": False,
+            "provider_name": _self_test_provider_name_from_trace(trace),
+            "model_name": model_name,
+            "status_code": exc.status_code,
+            "latency_ms": None,
+            "output_text": None,
+            "response_preview": detail,
+            "trace": trace,
+            "message": str(detail),
+        }
+    except Exception as exc:
+        return {
+            "scenario_key": scenario_key,
+            "scenario_label": scenario_label,
+            "endpoint_path": endpoint_label,
+            "stream": stream,
+            "has_image": has_image,
+            "success": False,
+            "provider_name": None,
+            "model_name": model_name,
+            "status_code": 500,
+            "latency_ms": None,
+            "output_text": None,
+            "response_preview": None,
+            "trace": None,
+            "message": str(exc),
+        }
 
 
 @router.get("/user", response_class=HTMLResponse)
@@ -436,33 +707,11 @@ def rotate_user_api_key(
 @router.get("/user/logs", response_class=HTMLResponse)
 def user_logs_page(
     request: Request,
-    page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=20, ge=10, le=100),
-    log_type: str | None = None,
-    api_client_key_id: int | None = None,
-    conversation_key: str | None = None,
-    success: str | None = None,
     db: Session = Depends(get_db),
 ):
     current_user = require_user_html(request, db)
     if isinstance(current_user, RedirectResponse):
         return current_user
-    success_value = None
-    if success == "true":
-        success_value = True
-    elif success == "false":
-        success_value = False
-    total, items, summary, owned_api_keys = UserPortalService.list_logs(
-        db,
-        user=current_user,
-        page=page,
-        page_size=page_size,
-        log_type=log_type,
-        api_client_key_id=api_client_key_id,
-        conversation_key=conversation_key,
-        success=success_value,
-    )
-    pager = _pagination(total, page, page_size)
     return templates.TemplateResponse(
         "user_logs.html",
         {
@@ -471,17 +720,64 @@ def user_logs_page(
             "page_name": "user-logs",
             "portal_type": "user",
             "current_user": current_user,
-            "logs": items,
-            "summary": summary,
-            "owned_api_keys": owned_api_keys,
-            "filters": {
-                "log_type": log_type or "",
-                "api_client_key_id": api_client_key_id,
-                "conversation_key": conversation_key or "",
-                "success": success or "",
-            },
-            "pagination": pager,
         },
+    )
+
+
+@router.get("/api/user/logs/filter-options", response_model=LogFilterOptionsResponse)
+def user_log_filter_options(
+    request: Request,
+    exclude_health_checks: bool = Query(default=True),
+    db: Session = Depends(get_db),
+) -> LogFilterOptionsResponse:
+    current_user = require_user_html(request, db)
+    if isinstance(current_user, RedirectResponse):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    return LogFilterOptionsResponse.model_validate(
+        UserPortalService.get_log_filter_options(
+            db,
+            user=current_user,
+            exclude_health_checks=exclude_health_checks,
+        )
+    )
+
+
+@router.get("/api/user/logs", response_model=LogListResponse)
+def user_logs_api(
+    request: Request,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=200),
+    log_type: str | None = None,
+    provider_id: int | None = None,
+    model_name: str | None = None,
+    api_client_key_id: int | None = None,
+    api_client_key_query: str | None = None,
+    conversation_key: str | None = None,
+    success: bool | None = None,
+    exclude_health_checks: bool = Query(default=True),
+    db: Session = Depends(get_db),
+) -> LogListResponse:
+    current_user = require_user_html(request, db)
+    if isinstance(current_user, RedirectResponse):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    total, items, summary, _ = UserPortalService.list_logs(
+        db,
+        user=current_user,
+        page=page,
+        page_size=page_size,
+        log_type=log_type,
+        provider_id=provider_id,
+        model_name=model_name,
+        api_client_key_id=api_client_key_id,
+        api_client_key_query=api_client_key_query,
+        conversation_key=conversation_key,
+        success=success,
+        exclude_health_checks=exclude_health_checks,
+    )
+    return LogListResponse(
+        total=total,
+        items=items,
+        summary=LogSummaryOut.model_validate(summary),
     )
 
 
@@ -489,36 +785,35 @@ def user_logs_page(
 def export_user_logs(
     request: Request,
     log_type: str | None = None,
+    provider_id: int | None = None,
+    model_name: str | None = None,
     api_client_key_id: int | None = None,
+    api_client_key_query: str | None = None,
     conversation_key: str | None = None,
-    success: str | None = None,
+    success: bool | None = None,
+    exclude_health_checks: bool = Query(default=True),
     limit: int = Query(default=5000, ge=1, le=10000),
     db: Session = Depends(get_db),
 ):
     current_user = require_user_html(request, db)
     if isinstance(current_user, RedirectResponse):
         return current_user
-    success_value = None
-    if success == "true":
-        success_value = True
-    elif success == "false":
-        success_value = False
     csv_text = LogService.export_logs_csv(
         db,
         log_type=log_type if log_type in LogService.USER_VISIBLE_LOG_TYPES else None,
         log_types=list(LogService.USER_VISIBLE_LOG_TYPES),
-        provider_id=None,
-        model_name=None,
+        provider_id=provider_id,
+        model_name=model_name,
         conversation_key=conversation_key,
         api_client_key_id=api_client_key_id,
-        api_client_key_query=None,
+        api_client_key_query=api_client_key_query,
         user_account_id=current_user.id,
-        success=success_value,
-        exclude_health_checks=True,
+        success=success,
+        exclude_health_checks=exclude_health_checks,
         api_client_key_ids=UserPortalService.list_owned_api_key_ids(db, user_id=current_user.id),
         limit=limit,
     )
-    filename = f"user-logs-{current_user.username}-{request.query_params.get('page_size', 'all')}-{request.query_params.get('page', '1')}.csv"
+    filename = f"user-logs-{current_user.username}-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.csv"
     return Response(
         content=csv_text,
         media_type="text/csv; charset=utf-8",
@@ -611,27 +906,11 @@ def export_user_billing(
 @router.get("/user/conversations", response_class=HTMLResponse)
 def user_conversations_page(
     request: Request,
-    page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=20, ge=10, le=100),
-    query: str | None = None,
-    conversation_key: str | None = None,
     db: Session = Depends(get_db),
 ):
     current_user = require_user_html(request, db)
     if isinstance(current_user, RedirectResponse):
         return current_user
-    total, conversations = UserPortalService.list_conversations(
-        db,
-        user=current_user,
-        page=page,
-        page_size=page_size,
-        query=query,
-    )
-    active_key = conversation_key or (conversations[0].conversation_key if conversations else None)
-    replay = None
-    if active_key:
-        replay = UserPortalService.get_conversation_replay(db, user=current_user, conversation_key=active_key)
-    pager = _pagination(total, page, page_size)
     return templates.TemplateResponse(
         "user_conversations.html",
         {
@@ -640,13 +919,44 @@ def user_conversations_page(
             "page_name": "user-conversations",
             "portal_type": "user",
             "current_user": current_user,
-            "conversations": conversations,
-            "active_key": active_key,
-            "replay": replay,
-            "filters": {"query": query or ""},
-            "pagination": pager,
         },
     )
+
+
+@router.get("/api/user/conversations", response_model=ConversationSummaryList)
+def user_conversations_api(
+    request: Request,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=200),
+    query: str | None = None,
+    db: Session = Depends(get_db),
+) -> ConversationSummaryList:
+    current_user = require_user_html(request, db)
+    if isinstance(current_user, RedirectResponse):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    total, items = UserPortalService.list_conversations(
+        db,
+        user=current_user,
+        page=page,
+        page_size=page_size,
+        query=query,
+    )
+    return ConversationSummaryList(total=total, items=items)
+
+
+@router.get("/api/user/conversations/{conversation_key}", response_model=ConversationReplay)
+def user_conversation_detail_api(
+    conversation_key: str,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> ConversationReplay:
+    current_user = require_user_html(request, db)
+    if isinstance(current_user, RedirectResponse):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    replay = UserPortalService.get_conversation_replay(db, user=current_user, conversation_key=conversation_key)
+    if replay is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return replay
 
 
 @router.get("/user/self-test", response_class=HTMLResponse)
@@ -684,6 +994,10 @@ async def run_user_self_test(
     request: Request,
     api_key_id: int = Form(...),
     model_name: str = Form(...),
+    image_mode: str = Form(default="none"),
+    image_detail: str = Form(default="auto"),
+    image_url: str | None = Form(default=None),
+    image_file: UploadFile | None = File(default=None),
     db: Session = Depends(get_db),
 ):
     current_user = require_user_html(request, db)
@@ -696,29 +1010,77 @@ async def run_user_self_test(
     if not raw_api_key:
         return JSONResponse({"success": False, "message": "当前密钥无法回显明文，请先轮换后再测试"}, status_code=400)
     try:
-        auth_context = ApiKeyService.authenticate_request(db, f"Bearer {raw_api_key}")
-        response, provider, trace, latency_ms = await ProxyService.forward_json_request(
-            db,
-            endpoint_path="/responses",
-            payload={
-                "model": model_name.strip(),
-                "input": "ping",
-                "max_output_tokens": 16,
-            },
-            log_type="responses",
-            route_context=auth_context.route_context,
-            api_client_auth=auth_context,
+        normalized_model_name = model_name.strip()
+        image_input = await _resolve_self_test_image_input(
+            image_mode=image_mode,
+            image_detail=image_detail,
+            image_url=image_url,
+            image_file=image_file,
         )
-        output_text = ProxyService._extract_response_text(response, limit_bytes=500)
+        auth_context = ApiKeyService.authenticate_request(db, f"Bearer {raw_api_key}")
+        scenario_specs = [
+            {"endpoint_path": "/chat/completions", "stream": False, "image_input": None},
+            {"endpoint_path": "/chat/completions", "stream": True, "image_input": None},
+            {"endpoint_path": "/responses", "stream": False, "image_input": None},
+            {"endpoint_path": "/responses", "stream": True, "image_input": None},
+        ]
+        if image_input is not None:
+            scenario_specs.extend(
+                [
+                    {"endpoint_path": "/chat/completions", "stream": False, "image_input": image_input},
+                    {"endpoint_path": "/responses", "stream": False, "image_input": image_input},
+                ]
+            )
+        scenarios = []
+        for item in scenario_specs:
+            scenarios.append(
+                await _run_user_self_test_probe(
+                    db=db,
+                    auth_context=auth_context,
+                    model_name=normalized_model_name,
+                    endpoint_path=item["endpoint_path"],
+                    stream=item["stream"],
+                    image_input=item["image_input"],
+                )
+            )
+        success_count = sum(1 for item in scenarios if item["success"])
+        failed_count = len(scenarios) - success_count
+        overall_success = failed_count == 0 and len(scenarios) > 0
+        first_failure = next((item for item in scenarios if not item["success"]), None)
+        first_success = next((item for item in scenarios if item["success"]), None)
+        image_input_summary = None
+        if image_input is not None:
+            image_input_summary = {
+                "source": image_input.get("source"),
+                "detail": image_input.get("detail"),
+                "filename": image_input.get("filename"),
+                "content_type": image_input.get("content_type"),
+                "file_size_bytes": image_input.get("file_size_bytes"),
+            }
         return JSONResponse(
             {
-                "success": True,
-                "provider_name": provider.name,
-                "model_name": model_name.strip(),
-                "latency_ms": latency_ms,
-                "trace": trace,
-                "output_text": output_text,
-                "response_preview": response,
+                "success": overall_success,
+                "provider_name": (
+                    (first_failure or first_success or {}).get("provider_name")
+                ),
+                "model_name": normalized_model_name,
+                "latency_ms": (first_success or first_failure or {}).get("latency_ms"),
+                "trace": (first_failure or first_success or {}).get("trace"),
+                "output_text": (first_failure or first_success or {}).get("output_text"),
+                "response_preview": (first_failure or first_success or {}).get("response_preview"),
+                "message": (
+                    "全部自检场景通过"
+                    if overall_success
+                    else f"共有 {failed_count} 个自检场景失败，请查看明细和修复建议"
+                ),
+                "summary": {
+                    "total_scenarios": len(scenarios),
+                    "success_scenarios": success_count,
+                    "failed_scenarios": failed_count,
+                    "image_enabled": image_input is not None,
+                },
+                "image_input": image_input_summary,
+                "scenarios": scenarios,
             }
         )
     except ApiClientAuthError as exc:

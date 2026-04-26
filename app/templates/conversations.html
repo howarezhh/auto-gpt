@@ -26,7 +26,7 @@
 </section>
 
 <section class="dashboard-command-grid">
-    <div class="panel-card conversation-list-panel">
+    <div class="panel-card conversation-list-panel" id="conversation-list-panel">
         <div class="section-subhead">
             <div>
                 <div class="panel-kicker">筛选结果</div>
@@ -41,34 +41,23 @@
     </div>
 
     <div class="dashboard-command-side">
-        <div class="panel-card section-shell">
-            <div class="section-subhead">
+        <section class="panel-card conversation-detail-panel" id="conversation-detail-panel">
+            <div class="panel-head">
                 <div>
-                    <div class="panel-kicker">结果层级</div>
-                    <h3>阅读顺序</h3>
+                    <div class="panel-kicker">回放详情</div>
+                    <h3 id="conversation-detail-title">选择左侧会话</h3>
                 </div>
+                <a class="btn btn-ghost btn-sm interactive-btn hidden" id="conversation-open-logs" href="/logs" data-shell-link>查看相关日志</a>
             </div>
-            <div class="dashboard-signal-list">
-                <div><span>第一层</span><strong>先按关键字筛出目标会话</strong></div>
-                <div><span>第二层</span><strong>查看会话概览、请求量和最近线路</strong></div>
-                <div><span>第三层</span><strong>展开完整时间线，定位具体用户输入和模型输出</strong></div>
-                <div><span>最近更新时间</span><strong id="conversation-selected-updated">-</strong></div>
+            <div class="conversation-selected-updated">
+                <span>最近更新时间</span>
+                <strong id="conversation-selected-updated">-</strong>
             </div>
-        </div>
+            <div class="conversation-summary" id="conversation-summary">
+                <div class="empty-state">选择一个会话后，可查看完整回放、命中线路与 token 使用。</div>
+            </div>
+            <div class="conversation-timeline" id="conversation-timeline"></div>
+        </section>
     </div>
-</section>
-
-<section class="panel-card conversation-detail-panel">
-    <div class="panel-head">
-        <div>
-            <div class="panel-kicker">回放详情</div>
-            <h3 id="conversation-detail-title">选择左侧会话</h3>
-        </div>
-        <a class="btn btn-ghost btn-sm interactive-btn hidden" id="conversation-open-logs" href="/logs" data-shell-link>查看相关日志</a>
-    </div>
-    <div class="conversation-summary" id="conversation-summary">
-        <div class="empty-state">选择一个会话后，可查看完整回放、命中线路与 token 使用。</div>
-    </div>
-    <div class="conversation-timeline" id="conversation-timeline"></div>
 </section>
 {% endblock %}

@@ -8,11 +8,17 @@ class RequestLogOut(BaseModel):
     log_type: str
     provider_id: int | None
     provider_name: str | None
+    trace_id: str | None
     model_name: str | None
     requested_model: str | None
+    tenant_name: str | None
+    project_name: str | None
+    app_name: str | None
+    environment_name: str | None
     request_id: str | None
     conversation_key: str | None
     session_id: str | None
+    source_ip: str | None
     resolved_provider_model_id: int | None
     request_path: str | None
     http_method: str | None
@@ -46,6 +52,9 @@ class RequestLogOut(BaseModel):
     response_body_json: str | None
     response_text: str | None
     message: str | None
+    error_type: str | None
+    error_code: str | None
+    retryable: bool | None
     api_client_key_id: int | None
     api_client_key_name: str | None
     api_client_key_prefix: str | None
@@ -53,6 +62,8 @@ class RequestLogOut(BaseModel):
     user_account_name: str | None
     api_client_auth_result: str | None
     api_client_remaining_tokens: int | None
+    api_client_remaining_requests_daily: int | None
+    api_client_remaining_cost_daily: float | None
     api_client_policy_snapshot_json: str | None
     trace_json: str | None
     created_at: datetime
@@ -67,6 +78,7 @@ class LogSummaryOut(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    total_cost: float = 0
     matched_api_keys: int = 0
 
 
@@ -100,6 +112,12 @@ class MetricItem(BaseModel):
     avg_latency_ms: float | None
     avg_ttfb_ms: float | None = None
     avg_duration_ms: float | None = None
+    p95_latency_ms: float | None = None
+    p99_latency_ms: float | None = None
+    p95_ttfb_ms: float | None = None
+    p99_ttfb_ms: float | None = None
+    qps: float | None = None
+    peak_active_requests: int = 0
     stream_requests: int = 0
     image_requests: int = 0
     unique_users: int = 0
@@ -122,7 +140,27 @@ class MetricTimeSeriesItem(BaseModel):
     image_requests: int = 0
     avg_latency_ms: float | None = None
     avg_ttfb_ms: float | None = None
+    p95_latency_ms: float | None = None
+    p99_latency_ms: float | None = None
+    qps: float | None = None
+    peak_active_requests: int = 0
     total_tokens: int = 0
+
+
+class MetricPeriodItem(BaseModel):
+    period_start: datetime
+    period_type: str
+    total_requests: int
+    success_requests: int
+    failed_requests: int
+    total_tokens: int = 0
+    total_cost: float = 0
+
+
+class MetricPeriodResponse(BaseModel):
+    period_type: str
+    window_days: int
+    items: list[MetricPeriodItem]
 
 
 class MetricTimeSeriesResponse(BaseModel):

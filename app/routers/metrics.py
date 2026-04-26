@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.schemas.log import MetricItem, MetricListResponse
+from app.schemas.log import MetricPeriodItem, MetricPeriodResponse
 from app.schemas.log import MetricTimeSeriesItem, MetricTimeSeriesResponse
 from app.services.log_service import LogService
 
@@ -30,3 +31,16 @@ def metrics_timeseries(
         for item in LogService.metric_timeseries(db, window_minutes=window_minutes, bucket_minutes=bucket_minutes)
     ]
     return MetricTimeSeriesResponse(window_minutes=window_minutes, bucket_minutes=bucket_minutes, items=items)
+
+
+@router.get("/period", response_model=MetricPeriodResponse)
+def metrics_period_report(
+    period_type: str = Query(default="day", pattern="^(day|week|month)$"),
+    window_days: int = Query(default=30, ge=1, le=365),
+    db: Session = Depends(get_db),
+) -> MetricPeriodResponse:
+    items = [
+        MetricPeriodItem.model_validate(item)
+        for item in LogService.metric_period_report(db, window_days=window_days, period_type=period_type)
+    ]
+    return MetricPeriodResponse(period_type=period_type, window_days=window_days, items=items)

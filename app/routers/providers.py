@@ -4,7 +4,11 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.schemas.provider import (
     ProviderBatchConnectivityTestRequest,
+    ProviderAvailabilityResponse,
+    ProviderCredentialRotateIn,
     ProviderCreate,
+    ProviderDiscoverModelsIn,
+    ProviderDiscoverModelsResponse,
     ProviderModelConfigOut,
     ProviderModelConfigUpdate,
     ProviderOut,
@@ -72,6 +76,62 @@ def delete_provider(provider_id: int, db: Session = Depends(get_db)) -> dict:
         settings.default_provider_id = None
         db.commit()
     return {"message": "deleted"}
+
+
+@router.post("/{provider_id}/rotate-credential", response_model=ProviderOut)
+def rotate_provider_credential(
+    provider_id: int,
+    payload: ProviderCredentialRotateIn,
+    db: Session = Depends(get_db),
+) -> ProviderOut:
+    provider = ProviderService.get_provider(db, provider_id)
+    if not provider:
+        raise HTTPException(status_code=404, detail="Provider not found")
+    provider = ProviderService.rotate_provider_credential(
+        db,
+        provider,
+        api_key=payload.api_key,
+        credential_hint=payload.credential_hint,
+    )
+    return ProviderOut(**ProviderService.provider_to_dict(provider, metrics=ProviderService._build_quality_metrics(db, [provider])))
+
+
+@router.post("/discover-models", response_model=ProviderDiscoverModelsResponse)
+async def discover_provider_models(
+    payload: ProviderDiscoverModelsIn,
+    db: Session = Depends(get_db),
+) -> ProviderDiscoverModelsResponse:
+    try:
+        return await ProviderService.discover_models(db, payload)
+    except ValueError as exc:
+        detail = str(exc)
+        status_code = 404 if detail == "Provider not found" else 400
+        raise HTTPException(status_code=status_code, detail=detail) from exc
+
+
+@router.get("/{provider_id}/availability", response_model=ProviderAvailabilityResponse)
+def provider_availability(
+    provider_id: int,
+    window_hours: int = 24,
+    bucket_minutes: int = 60,
+    db: Session = Depends(get_db),
+) -> ProviderAvailabilityResponse:
+    provider = ProviderService.get_provider(db, provider_id)
+    if not provider:
+        raise HTTPException(status_code=404, detail="Provider not found")
+    items = ProviderService.availability_timeseries(
+        db,
+        provider=provider,
+        window_hours=window_hours,
+        bucket_minutes=bucket_minutes,
+    )
+    return ProviderAvailabilityResponse(
+        provider_id=provider.id,
+        provider_name=provider.name,
+        window_hours=max(1, min(window_hours, 24 * 30)),
+        bucket_minutes=max(5, min(bucket_minutes, 24 * 60)),
+        items=items,
+    )
 
 
 @router.post("/{provider_id}/test")

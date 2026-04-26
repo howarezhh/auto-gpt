@@ -28,7 +28,7 @@ class TokenUsageService:
     BACKFILL_BATCH_SIZE = 50
 
     @staticmethod
-    def enqueue_log_usage_fill(
+    def enqueue_log_finalize(
         *,
         log_id: int,
         model_name: str | None,
@@ -36,14 +36,15 @@ class TokenUsageService:
         request_payload: dict[str, Any] | None = None,
         response_payload: dict[str, Any] | None = None,
         response_text: str | None = None,
+        enable_usage_fill: bool = True,
     ) -> None:
-        if tiktoken is None or not request_path or request_path == "/v1/models":
+        if not request_path or request_path == "/v1/models":
             return
         if scheduler.running:
             scheduler.add_job(
-                TokenUsageService.fill_single_log_usage,
+                TokenUsageService.finalize_single_log,
                 "date",
-                run_date=datetime.utcnow() + timedelta(milliseconds=TokenUsageService.IMMEDIATE_DELAY_MS),
+                run_date=datetime.now() + timedelta(milliseconds=TokenUsageService.IMMEDIATE_DELAY_MS),
                 kwargs={
                     "log_id": log_id,
                     "model_name": model_name,
@@ -51,14 +52,15 @@ class TokenUsageService:
                     "request_payload": request_payload,
                     "response_payload": response_payload,
                     "response_text": response_text,
+                    "enable_usage_fill": enable_usage_fill,
                 },
-                id=f"token_usage_fill_{log_id}",
+                id=f"token_usage_finalize_{log_id}",
                 replace_existing=True,
                 misfire_grace_time=30,
             )
 
     @staticmethod
-    def fill_single_log_usage(
+    def finalize_single_log(
         *,
         log_id: int,
         model_name: str | None = None,
@@ -66,9 +68,8 @@ class TokenUsageService:
         request_payload: dict[str, Any] | None = None,
         response_payload: dict[str, Any] | None = None,
         response_text: str | None = None,
+        enable_usage_fill: bool = True,
     ) -> None:
-        if tiktoken is None:
-            return
         db = SessionLocal()
         try:
             log = db.get(RequestLog, log_id)
@@ -82,6 +83,7 @@ class TokenUsageService:
                 request_payload=request_payload,
                 response_payload=response_payload,
                 response_text=response_text,
+                enable_usage_fill=enable_usage_fill,
             )
         finally:
             db.close()
@@ -123,6 +125,7 @@ class TokenUsageService:
         request_payload: dict[str, Any] | None = None,
         response_payload: dict[str, Any] | None = None,
         response_text: str | None = None,
+        enable_usage_fill: bool = True,
     ) -> None:
         original_prompt_tokens = log.prompt_tokens
         original_completion_tokens = log.completion_tokens
@@ -138,19 +141,19 @@ class TokenUsageService:
         completion_tokens = log.completion_tokens if log.completion_tokens is not None else usage_from_upstream["completion_tokens"]
         total_tokens = log.total_tokens if log.total_tokens is not None else usage_from_upstream["total_tokens"]
 
-        if prompt_tokens is None and request_data is not None:
+        if enable_usage_fill and tiktoken is not None and prompt_tokens is None and request_data is not None:
             prompt_tokens = TokenUsageService._count_request_tokens(
                 request_data,
                 model_name=effective_model,
                 request_path=effective_path,
             )
 
-        if completion_tokens is None:
+        if enable_usage_fill and tiktoken is not None and completion_tokens is None:
             response_text_value = effective_response_text or TokenUsageService._extract_response_text(response_data)
             if response_text_value:
                 completion_tokens = TokenUsageService._count_text_tokens(response_text_value, effective_model)
 
-        if total_tokens is None and prompt_tokens is not None and completion_tokens is not None:
+        if enable_usage_fill and total_tokens is None and prompt_tokens is not None and completion_tokens is not None:
             total_tokens = prompt_tokens + completion_tokens
 
         changed = False
@@ -167,15 +170,20 @@ class TokenUsageService:
         if LogService.refresh_derived_fields(log, response_payload=response_data):
             changed = True
 
-        if changed:
+        should_finalize_billing = log.api_client_key_id is not None
+        should_commit = changed
+        if changed or should_finalize_billing:
             TokenUsageService._sync_api_client_key_usage_delta(
                 db,
                 log=log,
                 original_prompt_tokens=original_prompt_tokens,
                 original_completion_tokens=original_completion_tokens,
                 original_total_tokens=original_total_tokens,
+                force=should_finalize_billing,
             )
             BillingService.sync_request_billing(db, log)
+            should_commit = True
+        if should_commit:
             db.commit()
 
     @staticmethod
@@ -186,10 +194,13 @@ class TokenUsageService:
         original_prompt_tokens: int | None,
         original_completion_tokens: int | None,
         original_total_tokens: int | None,
+        force: bool = False,
     ) -> None:
         if log.api_client_key_id is None:
             return
         if (
+            not force
+            and
             log.prompt_tokens == original_prompt_tokens
             and log.completion_tokens == original_completion_tokens
             and log.total_tokens == original_total_tokens

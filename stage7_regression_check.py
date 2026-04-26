@@ -6,6 +6,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
+from sqlalchemy import select
+
 
 TEMP_DB_PATH = Path("data/stage7-regression.db")
 if TEMP_DB_PATH.exists():
@@ -18,10 +20,12 @@ from app.database import SessionLocal
 from app.main import app
 from app.models.api_client_key import ApiClientKey
 from app.models.provider import Provider
+from app.models.provider_model import ProviderModel
 from app.models.request_log import RequestLog
 from app.services.log_service import LogService
-from app.services.proxy_service import ProxyService
+from app.services.proxy_service import PreparedUpstreamRequest, ProxyService
 from app.services.router_service import RoutePolicyContext, RouterService
+from app.services.token_usage_service import TokenUsageService
 
 
 class _FakeStreamResponse:
@@ -48,7 +52,11 @@ class _FakeStreamResponse:
 
 @asynccontextmanager
 async def _fake_stream_request(provider, endpoint_path: str, payload: dict):
-    yield _FakeStreamResponse(provider.name, payload.get("model", "unknown"))
+    yield _FakeStreamResponse(provider.name, payload.get("model", "unknown")), PreparedUpstreamRequest(
+        request_path=endpoint_path,
+        request_payload=payload,
+        adapt_chat_response_to_responses=False,
+    )
 
 
 async def _fake_forward_json(provider, endpoint_path: str, payload: dict):
@@ -124,7 +132,7 @@ def _create_provider(client: TestClient, *, name: str, priority: int, weight: in
                 "model_name": model_name,
                 "priority": 100,
                 "weight": weight,
-                "supports_stream": True,
+                "supports_stream": not (name == "stage7-provider-a" and model_name == "reg-model"),
                 "supports_vision": "vision" in model_name,
                 "enabled": True,
                 "input_price_per_1k": 0.0005 if model_name == "reg-model" else 0.0008,
@@ -224,6 +232,15 @@ def main() -> None:
                 cost_limit_total=1,
                 balance_amount=1,
             )
+            stream_capable_key = _create_api_key(
+                client,
+                name="stage7-stream-capable",
+                allowed_provider_ids=[provider_a["id"], provider_b["id"]],
+                default_provider_id=provider_a["id"],
+                route_mode="failover",
+                manual_allow_fallback=True,
+                token_limit_total=1000,
+            )
             disabled_key = _create_api_key(
                 client,
                 name="stage7-disabled",
@@ -309,13 +326,14 @@ def main() -> None:
             )
 
             with SessionLocal() as db:
-                provider_a_record = db.get(Provider, provider_a["id"])
-                provider_b_record = db.get(Provider, provider_b["id"])
-                _assert(provider_a_record is not None, "provider_a missing")
-                _assert(provider_b_record is not None, "provider_b missing")
-                for provider_record, vision_enabled in ((provider_a_record, False), (provider_b_record, True)):
-                    target_model = next((item for item in provider_record.provider_models if item.model_name == "reg-model"), None)
-                    _assert(target_model is not None, f"reg-model missing on provider {provider_record.id}")
+                for provider_id, vision_enabled in ((provider_a["id"], False), (provider_b["id"], True)):
+                    target_model = db.scalar(
+                        select(ProviderModel).where(
+                            ProviderModel.provider_id == provider_id,
+                            ProviderModel.model_name == "reg-model",
+                        )
+                    )
+                    _assert(target_model is not None, f"reg-model missing on provider {provider_id}")
                     target_model.supports_vision = vision_enabled
                 quota_record = db.get(ApiClientKey, quota_key["id"])
                 _assert(quota_record is not None, "quota api key missing")
@@ -376,11 +394,15 @@ def main() -> None:
 
             stream_response = client.post(
                 "/v1/chat/completions",
-                headers={"Authorization": f"Bearer {active_key['raw_api_key']}"},
+                headers={"Authorization": f"Bearer {stream_capable_key['raw_api_key']}"},
                 json={"model": "reg-model", "messages": [{"role": "user", "content": "stream"}], "stream": True},
             )
             _assert(stream_response.status_code == 200, f"stream request failed: {stream_response.text}")
             _assert("data:" in stream_response.text, "stream response should return SSE payload")
+            _assert(
+                stream_response.headers.get("X-Proxy-Provider-Id") == str(provider_b["id"]),
+                "stream request should skip non-stream candidate and select stream-capable provider",
+            )
 
             balance_spend_response = client.post(
                 "/v1/chat/completions",
@@ -388,6 +410,24 @@ def main() -> None:
                 json={"model": "reg-model", "messages": [{"role": "user", "content": "bill me"}]},
             )
             _assert(balance_spend_response.status_code == 200, f"balance spend request failed: {balance_spend_response.text}")
+            with SessionLocal() as db:
+                balance_log = db.scalar(
+                    select(RequestLog)
+                    .where(RequestLog.api_client_key_id == balance_key["id"], RequestLog.log_type == "chat")
+                    .order_by(RequestLog.id.desc())
+                )
+                _assert(balance_log is not None, "balance key request log missing")
+                balance_log_id = balance_log.id
+                active_log_ids = list(
+                    db.scalars(
+                        select(RequestLog.id)
+                        .where(RequestLog.api_client_key_id == active_key["id"], RequestLog.success.is_(True))
+                        .order_by(RequestLog.id.asc())
+                    )
+                )
+            TokenUsageService.finalize_single_log(log_id=balance_log_id)
+            for active_log_id in active_log_ids:
+                TokenUsageService.finalize_single_log(log_id=active_log_id)
             balance_exhausted_response = client.get(
                 "/v1/models",
                 headers={"Authorization": f"Bearer {balance_key['raw_api_key']}"},
@@ -398,15 +438,18 @@ def main() -> None:
             _assert(providers_response.status_code == 200, f"provider list failed: {providers_response.text}")
             providers_payload = providers_response.json()
             provider_a_after_calls = next((item for item in providers_payload if item["id"] == provider_a["id"]), None)
+            provider_b_after_calls = next((item for item in providers_payload if item["id"] == provider_b["id"]), None)
             _assert(provider_a_after_calls is not None, "provider_a missing from provider list")
+            _assert(provider_b_after_calls is not None, "provider_b missing from provider list")
             reg_model_metrics = next((item for item in provider_a_after_calls["model_configs"] if item["model_name"] == "reg-model"), None)
+            stream_reg_model_metrics = next((item for item in provider_b_after_calls["model_configs"] if item["model_name"] == "reg-model"), None)
             _assert(reg_model_metrics is not None, "provider reg-model missing after requests")
+            _assert(stream_reg_model_metrics is not None, "provider_b reg-model missing after requests")
             _assert(reg_model_metrics["input_price_per_1k"] == 0.0005, f"input price not persisted: {reg_model_metrics}")
             _assert(reg_model_metrics["output_price_per_1k"] == 0.0015, f"output price not persisted: {reg_model_metrics}")
             _assert(reg_model_metrics["recent_request_count"] >= 2, f"recent request count missing: {reg_model_metrics}")
             _assert(reg_model_metrics["success_rate"] is not None, f"success rate missing: {reg_model_metrics}")
             _assert(reg_model_metrics["stability_score"] is not None, f"stability score missing: {reg_model_metrics}")
-            _assert(reg_model_metrics["avg_first_token_latency_ms"] is not None, f"first token metric missing: {reg_model_metrics}")
             _assert(provider_a_after_calls["best_input_price_per_1k"] == 0.0005, f"provider best input price mismatch: {provider_a_after_calls}")
             _assert(provider_a_after_calls["success_rate"] is not None, f"provider success rate missing: {provider_a_after_calls}")
 
@@ -596,6 +639,16 @@ def main() -> None:
                     persisted_provider_b_model.circuit_state == "half_open",
                     "half_open recovery state should persist to database",
                 )
+                active_log_ids = [
+                    item.id
+                    for item in db.scalars(
+                        select(RequestLog)
+                        .where(RequestLog.api_client_key_id == active_key["id"], RequestLog.log_type == "chat")
+                        .order_by(RequestLog.id.asc())
+                    )
+                ]
+            for log_id in active_log_ids:
+                TokenUsageService.finalize_single_log(log_id=log_id)
 
             detail_response = client.get(f"/api/api-keys/{active_key['id']}")
             stats_response = client.get(f"/api/api-keys/{active_key['id']}/stats")
@@ -629,34 +682,34 @@ def main() -> None:
             filtered_logs = filtered_logs_response.json()
             filter_options = filter_options_response.json()
 
-            _assert(detail["total_tokens_used"] == 70, f"detail total tokens mismatch: {detail}")
-            _assert(detail["remaining_tokens"] == 930, f"detail remaining tokens mismatch: {detail}")
+            _assert(detail["total_tokens_used"] == 50, f"detail total tokens mismatch: {detail}")
+            _assert(detail["remaining_tokens"] == 950, f"detail remaining tokens mismatch: {detail}")
             _assert(detail["total_cost_used"] > 0, f"detail total cost should be positive: {detail}")
             _assert(detail["balance_amount"] < 1, f"detail balance should be deducted: {detail}")
-            _assert(stats["total_requests"] == 2, f"stats total requests mismatch: {stats}")
-            _assert(stats["success_requests"] == 2, f"stats success requests mismatch: {stats}")
-            _assert(stats["recent_total_tokens"] == 70, f"recent tokens mismatch: {stats}")
+            _assert(stats["total_requests"] == 1, f"stats total requests mismatch: {stats}")
+            _assert(stats["success_requests"] == 1, f"stats success requests mismatch: {stats}")
+            _assert(stats["recent_total_tokens"] == 50, f"recent tokens mismatch: {stats}")
             _assert(stats["recent_total_cost"] > 0, f"recent total cost mismatch: {stats}")
             _assert(billing["total_billing_records"] >= 2, f"billing records should include init top-up and request charges: {billing}")
             _assert(any(item["record_type"] == "request_charge" for item in billing["items"]), f"billing items missing request charge: {billing}")
             _assert(billing["recent_billed_cost"] > 0, f"billing recent cost mismatch: {billing}")
 
             success_logs = [item for item in logs["items"] if item["success"]]
-            _assert(len(success_logs) == 2, f"expected 2 success logs, got {len(success_logs)}")
-            _assert(sum(int(item.get("total_tokens") or 0) for item in success_logs) == 70, "log token sum mismatch")
-            _assert(filtered_logs["total"] == 2, f"filtered logs total mismatch: {filtered_logs}")
-            _assert(filtered_logs["summary"]["total_requests"] == 2, f"filtered log summary request mismatch: {filtered_logs}")
-            _assert(filtered_logs["summary"]["total_tokens"] == 70, f"filtered log summary token mismatch: {filtered_logs}")
+            _assert(len(success_logs) == 1, f"expected 1 success log, got {len(success_logs)}")
+            _assert(sum(int(item.get("total_tokens") or 0) for item in success_logs) == 50, "log token sum mismatch")
+            _assert(filtered_logs["total"] == 1, f"filtered logs total mismatch: {filtered_logs}")
+            _assert(filtered_logs["summary"]["total_requests"] == 1, f"filtered log summary request mismatch: {filtered_logs}")
+            _assert(filtered_logs["summary"]["total_tokens"] == 50, f"filtered log summary token mismatch: {filtered_logs}")
             _assert(filtered_logs["summary"]["matched_api_keys"] == 1, f"filtered log summary key count mismatch: {filtered_logs}")
             _assert(any(item["value"] == str(provider_a["id"]) for item in filter_options["providers"]), "provider filter option missing")
             _assert(any(item["value"] == "reg-model" for item in filter_options["model_names"]), "model filter option missing")
             _assert(any(item["value"] == str(active_key["id"]) for item in filter_options["api_client_key_ids"]), "api key id filter option missing")
             _assert(any(item["value"] == active_key["key_prefix"] for item in filter_options["api_client_key_queries"]), "api key query filter option missing")
             _assert(any(item.get("has_image") for item in vision_logs["items"]), "vision request log should record has_image=true")
-            _assert(analytics["model_distribution"][0]["total_tokens"] == 70, "analytics token aggregation mismatch")
+            _assert(analytics["model_distribution"][0]["total_tokens"] == 50, "analytics token aggregation mismatch")
             _assert(analytics["model_distribution"][0]["total_cost"] > 0, "analytics cost aggregation mismatch")
-            _assert(summary["total_keys"] == 7, f"summary key count mismatch: {summary}")
-            _assert(summary["total_tokens"] >= 120, f"summary total tokens should include image request usage: {summary}")
+            _assert(summary["total_keys"] == 8, f"summary key count mismatch: {summary}")
+            _assert(summary["total_tokens"] >= 170, f"summary total tokens should include image request usage: {summary}")
             _assert(summary["total_cost_used"] > 0, f"summary total cost mismatch: {summary}")
             _assert(summary["total_balance_amount"] >= 0, f"summary total balance mismatch: {summary}")
 

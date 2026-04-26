@@ -25,6 +25,10 @@ class SettingUpdate(BaseModel):
     allow_public_user_registration: bool = False
     request_log_retention_days: int = Field(default=90, ge=0)
     admin_audit_log_retention_days: int = Field(default=180, ge=0)
+    route_candidate_cache_ttl_sec: int = Field(default=10, ge=0, le=300)
+    model_list_cache_ttl_sec: int = Field(default=15, ge=0, le=300)
+    provider_status_cache_ttl_sec: int = Field(default=10, ge=0, le=300)
+    async_request_logging: bool = True
 
 
 class SettingOut(SettingUpdate):

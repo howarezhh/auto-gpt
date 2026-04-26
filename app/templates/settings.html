@@ -29,27 +29,18 @@
             <span>默认中转站</span>
             <select class="field-input" id="setting-default-provider-id"></select>
         </label>
-        <div class="form-span-2 route-guide-grid">
-            <section class="route-guide-panel">
-                <div class="route-guide-head">
-                    <div>
-                        <div class="panel-kicker">模式说明</div>
-                        <h4>四种路由模式说明</h4>
-                    </div>
-                    <span class="route-guide-badge">按当前实现说明</span>
+        <details class="form-span-2 route-guide-collapse" id="settings-route-guide-collapse">
+            <summary class="route-guide-summary">
+                <div>
+                    <div class="panel-kicker">模式说明</div>
+                    <h4>四种路由模式说明</h4>
                 </div>
-                <div class="route-mode-cards" id="route-mode-cards"></div>
-            </section>
-            <section class="route-guide-panel route-guide-panel-accent">
-                <div class="route-guide-head">
-                    <div>
-                        <div class="panel-kicker">实时逻辑</div>
-                        <h4>当前实际命中逻辑说明</h4>
-                    </div>
-                </div>
-                <div class="route-live-summary" id="route-live-summary"></div>
-            </section>
-        </div>
+                <span class="route-guide-badge">默认折叠</span>
+            </summary>
+            <div class="route-guide-collapse-body">
+                <div class="route-mode-cards route-mode-cards-single" id="route-mode-cards"></div>
+            </div>
+        </details>
         <label>
             <span>全局超时毫秒</span>
             <input class="field-input" id="setting-global-timeout-ms" type="number">
@@ -90,34 +81,69 @@
             <span>审计日志保留天数</span>
             <input class="field-input" id="setting-admin-audit-log-retention-days" type="number" min="0">
         </label>
-        <div class="form-dual-check form-span-2">
-            <label class="toggle-row">
-                <input id="setting-manual-allow-fallback" type="checkbox">
-                <span>手动优先模式允许失败后回退</span>
+        <div class="form-span-2 settings-switch-grid">
+            <label class="settings-switch-card">
+                <span class="settings-switch-copy">
+                    <strong>手动优先模式允许失败后回退</strong>
+                </span>
+                <span class="settings-switch-control">
+                    <input id="setting-manual-allow-fallback" type="checkbox">
+                    <span class="settings-switch-slider"></span>
+                </span>
             </label>
-            <label class="toggle-row">
-                <input id="setting-auto-health-check" type="checkbox">
-                <span>启用自动健康检查</span>
+            <label class="settings-switch-card">
+                <span class="settings-switch-copy">
+                    <strong>启用自动健康检查</strong>
+                </span>
+                <span class="settings-switch-control">
+                    <input id="setting-auto-health-check" type="checkbox">
+                    <span class="settings-switch-slider"></span>
+                </span>
             </label>
-            <label class="toggle-row">
-                <input id="setting-enable-token-logging" type="checkbox">
-                <span>记录 token 使用量</span>
+            <label class="settings-switch-card">
+                <span class="settings-switch-copy">
+                    <strong>记录 token 使用量</strong>
+                </span>
+                <span class="settings-switch-control">
+                    <input id="setting-enable-token-logging" type="checkbox">
+                    <span class="settings-switch-slider"></span>
+                </span>
             </label>
-            <label class="toggle-row">
-                <input id="setting-enable-payload-logging" type="checkbox">
-                <span>记录请求与响应正文</span>
+            <label class="settings-switch-card">
+                <span class="settings-switch-copy">
+                    <strong>记录请求与响应正文</strong>
+                </span>
+                <span class="settings-switch-control">
+                    <input id="setting-enable-payload-logging" type="checkbox">
+                    <span class="settings-switch-slider"></span>
+                </span>
             </label>
-            <label class="toggle-row">
-                <input id="setting-enable-stream-response-persist" type="checkbox">
-                <span>记录流式最终回复文本</span>
+            <label class="settings-switch-card">
+                <span class="settings-switch-copy">
+                    <strong>记录流式最终回复文本</strong>
+                </span>
+                <span class="settings-switch-control">
+                    <input id="setting-enable-stream-response-persist" type="checkbox">
+                    <span class="settings-switch-slider"></span>
+                </span>
             </label>
-            <label class="toggle-row">
-                <input id="setting-mask-sensitive-fields" type="checkbox">
-                <span>日志中脱敏敏感字段</span>
+            <label class="settings-switch-card">
+                <span class="settings-switch-copy">
+                    <strong>日志中脱敏敏感字段</strong>
+                </span>
+                <span class="settings-switch-control">
+                    <input id="setting-mask-sensitive-fields" type="checkbox">
+                    <span class="settings-switch-slider"></span>
+                </span>
             </label>
-            <label class="toggle-row">
-                <input id="setting-allow-public-user-registration" type="checkbox">
-                <span>允许公开注册普通用户</span>
+            <label class="settings-switch-card">
+                <span class="settings-switch-copy">
+                    <strong>允许公开注册普通用户</strong>
+                </span>
+                <span class="settings-switch-control">
+                    <input id="setting-allow-public-user-registration" type="checkbox">
+                    <span class="settings-switch-slider"></span>
+                </span>
             </label>
         </div>
         <div class="form-actions form-span-2">

@@ -18,9 +18,19 @@ class ApiKeyBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     raw_api_key: str | None = Field(default=None, min_length=24, max_length=128)
     remark: str | None = None
+    tenant_name: str | None = Field(default=None, max_length=100)
+    project_name: str | None = Field(default=None, max_length=100)
+    app_name: str | None = Field(default=None, max_length=100)
+    environment_name: str | None = Field(default=None, max_length=100)
     enabled: bool = True
     expires_at: datetime | None = None
     token_limit_total: int | None = Field(default=None, ge=0)
+    request_limit_daily: int | None = Field(default=None, ge=0)
+    token_limit_daily: int | None = Field(default=None, ge=0)
+    cost_limit_daily: float | None = Field(default=None, ge=0)
+    qps_limit: int | None = Field(default=None, ge=0)
+    rpm_limit: int | None = Field(default=None, ge=0)
+    tpm_limit: int | None = Field(default=None, ge=0)
     cost_limit_total: float | None = Field(default=None, ge=0)
     balance_amount: float | None = Field(default=None, ge=0)
     route_mode: RouteMode = "failover"
@@ -28,6 +38,15 @@ class ApiKeyBase(BaseModel):
     owner_user_id: int | None = None
     manual_allow_fallback: bool = True
     allowed_provider_ids: list[int] = Field(default_factory=list)
+    allowed_model_names: list[str] = Field(default_factory=list)
+    allowed_endpoint_paths: list[str] = Field(default_factory=list)
+    allowed_source_ips: list[str] = Field(default_factory=list)
+    preferred_provider_ids: list[int] = Field(default_factory=list)
+    preferred_region_tags: list[str] = Field(default_factory=list)
+    max_candidate_count: int | None = Field(default=None, ge=1, le=20)
+    latency_bias: int = Field(default=1, ge=0, le=10)
+    success_rate_bias: int = Field(default=1, ge=0, le=10)
+    cost_bias: int = Field(default=0, ge=0, le=10)
 
     @field_validator("name")
     @classmethod
@@ -53,6 +72,10 @@ class ApiKeyBase(BaseModel):
     @field_validator("allowed_provider_ids")
     @classmethod
     def normalize_allowed_provider_ids(cls, value: list[int]) -> list[int]:
+        return cls._normalize_int_list(value)
+
+    @staticmethod
+    def _normalize_int_list(value: list[int]) -> list[int]:
         seen: set[int] = set()
         normalized: list[int] = []
         for item in value:
@@ -61,6 +84,36 @@ class ApiKeyBase(BaseModel):
             seen.add(item)
             normalized.append(item)
         return normalized
+
+    @staticmethod
+    def _normalize_str_list(value: list[str]) -> list[str]:
+        seen: set[str] = set()
+        normalized: list[str] = []
+        for raw in value:
+            item = str(raw).strip()
+            if not item or item in seen:
+                continue
+            seen.add(item)
+            normalized.append(item)
+        return normalized
+
+    @field_validator("tenant_name", "project_name", "app_name", "environment_name")
+    @classmethod
+    def normalize_scope_names(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+    @field_validator("allowed_model_names", "allowed_endpoint_paths", "allowed_source_ips", "preferred_region_tags")
+    @classmethod
+    def normalize_string_lists(cls, value: list[str]) -> list[str]:
+        return cls._normalize_str_list(value)
+
+    @field_validator("preferred_provider_ids")
+    @classmethod
+    def normalize_preferred_provider_ids(cls, value: list[int]) -> list[int]:
+        return cls._normalize_int_list(value)
 
 
 class ApiKeyCreate(ApiKeyBase):
@@ -71,9 +124,19 @@ class ApiKeyUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=100)
     raw_api_key: str | None = Field(default=None, min_length=24, max_length=128)
     remark: str | None = None
+    tenant_name: str | None = Field(default=None, max_length=100)
+    project_name: str | None = Field(default=None, max_length=100)
+    app_name: str | None = Field(default=None, max_length=100)
+    environment_name: str | None = Field(default=None, max_length=100)
     enabled: bool | None = None
     expires_at: datetime | None = None
     token_limit_total: int | None = Field(default=None, ge=0)
+    request_limit_daily: int | None = Field(default=None, ge=0)
+    token_limit_daily: int | None = Field(default=None, ge=0)
+    cost_limit_daily: float | None = Field(default=None, ge=0)
+    qps_limit: int | None = Field(default=None, ge=0)
+    rpm_limit: int | None = Field(default=None, ge=0)
+    tpm_limit: int | None = Field(default=None, ge=0)
     cost_limit_total: float | None = Field(default=None, ge=0)
     balance_amount: float | None = Field(default=None, ge=0)
     route_mode: RouteMode | None = None
@@ -81,6 +144,15 @@ class ApiKeyUpdate(BaseModel):
     owner_user_id: int | None = None
     manual_allow_fallback: bool | None = None
     allowed_provider_ids: list[int] | None = None
+    allowed_model_names: list[str] | None = None
+    allowed_endpoint_paths: list[str] | None = None
+    allowed_source_ips: list[str] | None = None
+    preferred_provider_ids: list[int] | None = None
+    preferred_region_tags: list[str] | None = None
+    max_candidate_count: int | None = Field(default=None, ge=1, le=20)
+    latency_bias: int | None = Field(default=None, ge=0, le=10)
+    success_rate_bias: int | None = Field(default=None, ge=0, le=10)
+    cost_bias: int | None = Field(default=None, ge=0, le=10)
 
     @field_validator("name")
     @classmethod
@@ -92,6 +164,14 @@ class ApiKeyUpdate(BaseModel):
     @field_validator("remark")
     @classmethod
     def normalize_remark(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+    @field_validator("tenant_name", "project_name", "app_name", "environment_name")
+    @classmethod
+    def normalize_scope_names(cls, value: str | None) -> str | None:
         if value is None:
             return None
         normalized = value.strip()
@@ -110,20 +190,31 @@ class ApiKeyUpdate(BaseModel):
     def normalize_allowed_provider_ids(cls, value: list[int] | None) -> list[int] | None:
         if value is None:
             return None
-        seen: set[int] = set()
-        normalized: list[int] = []
-        for item in value:
-            if item in seen:
-                continue
-            seen.add(item)
-            normalized.append(item)
-        return normalized
+        return ApiKeyBase._normalize_int_list(value)
+
+    @field_validator("allowed_model_names", "allowed_endpoint_paths", "allowed_source_ips", "preferred_region_tags")
+    @classmethod
+    def normalize_string_lists(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        return ApiKeyBase._normalize_str_list(value)
+
+    @field_validator("preferred_provider_ids")
+    @classmethod
+    def normalize_preferred_provider_ids(cls, value: list[int] | None) -> list[int] | None:
+        if value is None:
+            return None
+        return ApiKeyBase._normalize_int_list(value)
 
 
 class ApiKeyOut(BaseModel):
     id: int
     name: str
     remark: str | None
+    tenant_name: str | None
+    project_name: str | None
+    app_name: str | None
+    environment_name: str | None
     enabled: bool
     status: str
     key_prefix: str
@@ -132,6 +223,12 @@ class ApiKeyOut(BaseModel):
     has_stored_raw_key: bool
     expires_at: datetime | None
     token_limit_total: int | None
+    request_limit_daily: int | None
+    token_limit_daily: int | None
+    cost_limit_daily: float | None
+    qps_limit: int | None
+    rpm_limit: int | None
+    tpm_limit: int | None
     prompt_tokens_used: int
     completion_tokens_used: int
     total_tokens_used: int
@@ -147,6 +244,15 @@ class ApiKeyOut(BaseModel):
     owner_user_name: str | None
     manual_allow_fallback: bool
     allowed_provider_ids: list[int]
+    allowed_model_names: list[str]
+    allowed_endpoint_paths: list[str]
+    allowed_source_ips: list[str]
+    preferred_provider_ids: list[int]
+    preferred_region_tags: list[str]
+    max_candidate_count: int | None
+    latency_bias: int
+    success_rate_bias: int
+    cost_bias: int
     allowed_providers: list[ApiKeyProviderOut]
     last_used_at: datetime | None
     created_at: datetime
@@ -233,6 +339,17 @@ class ApiKeyBatchActionResultOut(BaseModel):
     api_key_ids: list[int] = Field(default_factory=list)
 
 
+class ApiKeyBatchRotateItemOut(BaseModel):
+    id: int
+    name: str
+    raw_api_key: str
+    key_masked: str
+
+
+class ApiKeyBatchRotateResultOut(ApiKeyBatchActionResultOut):
+    items: list[ApiKeyBatchRotateItemOut] = Field(default_factory=list)
+
+
 class ApiKeyBatchProviderUpdateIn(ApiKeyBatchActionIn):
     route_mode: RouteMode
     default_provider_id: int | None = None
@@ -250,6 +367,10 @@ class ApiKeyBatchProviderUpdateIn(ApiKeyBatchActionIn):
             seen.add(item)
             normalized.append(item)
         return normalized
+
+
+class ApiKeyBatchTemplateApplyIn(ApiKeyBatchActionIn):
+    template_id: int = Field(..., ge=1)
 
 
 class ApiKeyModelDistributionItemOut(BaseModel):
@@ -307,6 +428,20 @@ class ApiKeyBillingSummaryOut(BaseModel):
     recent_billed_cost: float = 0
     total_billing_records: int = 0
     items: list[ApiKeyBillingRecordOut] = Field(default_factory=list)
+
+
+class ApiKeyCostInsightItemOut(BaseModel):
+    dimension_value: str
+    total_requests: int
+    total_tokens: int
+    total_cost: float
+    avg_latency_ms: float | None = None
+
+
+class ApiKeyCostInsightResponseOut(BaseModel):
+    group_by: str
+    window_days: int
+    items: list[ApiKeyCostInsightItemOut] = Field(default_factory=list)
 
 
 class ApiKeyBalanceAdjustmentIn(BaseModel):

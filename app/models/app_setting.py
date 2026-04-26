@@ -27,6 +27,10 @@ class AppSetting(Base):
     allow_public_user_registration: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     request_log_retention_days: Mapped[int] = mapped_column(Integer, nullable=False, default=90)
     admin_audit_log_retention_days: Mapped[int] = mapped_column(Integer, nullable=False, default=180)
+    route_candidate_cache_ttl_sec: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
+    model_list_cache_ttl_sec: Mapped[int] = mapped_column(Integer, nullable=False, default=15)
+    provider_status_cache_ttl_sec: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
+    async_request_logging: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow

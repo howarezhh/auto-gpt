@@ -30,6 +30,19 @@ from app.services.user_quota_service import UserQuotaService
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
 
+QUOTA_FIELD_DEFINITIONS = (
+    ("frozen_amount", "冻结金额", "decimal", "0.000000"),
+    ("request_limit_total", "总调用次数上限", "int", "不限"),
+    ("request_limit_daily", "日调用次数上限", "int", "不限"),
+    ("request_limit_monthly", "月调用次数上限", "int", "不限"),
+    ("token_limit_total", "总 Token 上限", "int", "不限"),
+    ("token_limit_daily", "日 Token 上限", "int", "不限"),
+    ("token_limit_monthly", "月 Token 上限", "int", "不限"),
+    ("cost_limit_total", "总金额上限", "decimal", "不限"),
+    ("cost_limit_daily", "日金额上限", "decimal", "不限"),
+    ("cost_limit_monthly", "月金额上限", "decimal", "不限"),
+)
+
 
 def require_admin_html(request: Request, db: Session) -> UserAccount | RedirectResponse:
     user = UserAuthService.get_current_user(request, db)
@@ -58,6 +71,61 @@ def _redirect_users(return_to: str | None = None, **updates):
 def _redirect_user_detail(user_id: int, **updates):
     query = _merge_query(None, **updates)
     return RedirectResponse(f"/users/{user_id}?{query}" if query else f"/users/{user_id}", status_code=303)
+
+
+def _wants_json(request: Request) -> bool:
+    accept = (request.headers.get("accept") or "").lower()
+    requested_with = (request.headers.get("x-requested-with") or "").lower()
+    return "application/json" in accept or requested_with == "xmlhttprequest"
+
+
+def _format_quota_value(field_name: str, value) -> str:
+    field_map = {name: (field_type, empty_label) for name, _, field_type, empty_label in QUOTA_FIELD_DEFINITIONS}
+    field_type, empty_label = field_map[field_name]
+    if value is None:
+        return empty_label
+    if field_type == "decimal":
+        decimal_value = BillingService.to_decimal(value)
+        return f"{decimal_value:.6f}"
+    return str(int(value))
+
+
+def _build_quota_preview(users: list[UserAccount]) -> dict:
+    preview_fields: dict[str, dict] = {}
+    for field_name, field_label, field_type, empty_label in QUOTA_FIELD_DEFINITIONS:
+        raw_values = [getattr(user, field_name) for user in users]
+        normalized_values = [
+            BillingService.to_decimal(item) if field_type == "decimal" and item is not None else item
+            for item in raw_values
+        ]
+        unique_values = {str(item) for item in normalized_values}
+        is_mixed = len(unique_values) > 1
+        common_value = None if is_mixed or not normalized_values else normalized_values[0]
+        preview_fields[field_name] = {
+            "field_name": field_name,
+            "field_label": field_label,
+            "is_mixed": is_mixed,
+            "raw_value": None if common_value is None else (float(common_value) if field_type == "decimal" else int(common_value)),
+            "display_value": (
+                f"多值（{len(users)} 个用户不一致）"
+                if is_mixed
+                else _format_quota_value(field_name, common_value)
+            ),
+            "empty_label": empty_label,
+        }
+    return {
+        "selected_count": len(users),
+        "user_ids": [user.id for user in users],
+        "fields": preview_fields,
+    }
+
+
+def _apply_quota_updates_to_user(user: UserAccount, updates: dict[str, int | Decimal | None]) -> None:
+    for field_name, value in updates.items():
+        if field_name.startswith("cost_") or field_name == "frozen_amount":
+            setattr(user, field_name, BillingService.to_decimal(value) if value is not None else None)
+        else:
+            setattr(user, field_name, value)
 
 
 def _parse_optional_int(value: str | None, *, field_label: str) -> int | None:
@@ -467,7 +535,8 @@ def batch_update_user_quota_policy(
     request: Request,
     user_ids: list[int] = Form(default=[]),
     user_ids_text: str = Form(default=""),
-    frozen_amount: str = Form(default="0"),
+    apply_fields: list[str] = Form(default=[]),
+    frozen_amount: str = Form(default=""),
     request_limit_total: str = Form(default=""),
     request_limit_daily: str = Form(default=""),
     request_limit_monthly: str = Form(default=""),
@@ -484,38 +553,50 @@ def batch_update_user_quota_policy(
         return current_user
     try:
         target_user_ids = _parse_form_user_ids(user_ids, user_ids_text)
-        frozen_value = _parse_optional_decimal(frozen_amount, field_label="冻结金额") or Decimal("0")
-        request_total_value = _parse_optional_int(request_limit_total, field_label="总调用次数上限")
-        request_daily_value = _parse_optional_int(request_limit_daily, field_label="日调用次数上限")
-        request_monthly_value = _parse_optional_int(request_limit_monthly, field_label="月调用次数上限")
-        token_total_value = _parse_optional_int(token_limit_total, field_label="总 Token 上限")
-        token_daily_value = _parse_optional_int(token_limit_daily, field_label="日 Token 上限")
-        token_monthly_value = _parse_optional_int(token_limit_monthly, field_label="月 Token 上限")
-        cost_total_value = _parse_optional_decimal(cost_limit_total, field_label="总金额上限")
-        cost_daily_value = _parse_optional_decimal(cost_limit_daily, field_label="日金额上限")
-        cost_monthly_value = _parse_optional_decimal(cost_limit_monthly, field_label="月金额上限")
+        normalized_apply_fields = {item for item in apply_fields if item}
+        if not normalized_apply_fields:
+            raise ValueError("请至少勾选一个要应用的额度项")
+        field_text_map = {
+            "frozen_amount": frozen_amount,
+            "request_limit_total": request_limit_total,
+            "request_limit_daily": request_limit_daily,
+            "request_limit_monthly": request_limit_monthly,
+            "token_limit_total": token_limit_total,
+            "token_limit_daily": token_limit_daily,
+            "token_limit_monthly": token_limit_monthly,
+            "cost_limit_total": cost_limit_total,
+            "cost_limit_daily": cost_limit_daily,
+            "cost_limit_monthly": cost_limit_monthly,
+        }
+        parsed_updates: dict[str, int | Decimal | None] = {}
+        for field_name, field_label, field_type, _ in QUOTA_FIELD_DEFINITIONS:
+            if field_name not in normalized_apply_fields:
+                continue
+            raw_text = field_text_map[field_name]
+            if field_type == "decimal":
+                parsed_value = _parse_optional_decimal(raw_text, field_label=field_label)
+                if field_name == "frozen_amount" and parsed_value is None:
+                    raise ValueError("冻结金额已勾选时必须填写数值")
+                parsed_updates[field_name] = parsed_value if field_name != "frozen_amount" else (parsed_value or Decimal("0"))
+            else:
+                parsed_updates[field_name] = _parse_optional_int(raw_text, field_label=field_label)
     except ValueError as exc:
+        if _wants_json(request):
+            return JSONResponse(status_code=400, content={"success": False, "message": str(exc)})
         return _redirect_users(request.url.query, error=str(exc))
     affected_user_ids: list[int] = []
     for target_user_id in target_user_ids:
         user = db.get(UserAccount, target_user_id)
         if user is None:
             continue
-        UserQuotaService.update_limits(
-            db,
-            user=user,
-            frozen_amount=frozen_value,
-            request_limit_total=request_total_value,
-            request_limit_daily=request_daily_value,
-            request_limit_monthly=request_monthly_value,
-            token_limit_total=token_total_value,
-            token_limit_daily=token_daily_value,
-            token_limit_monthly=token_monthly_value,
-            cost_limit_total=cost_total_value,
-            cost_limit_daily=cost_daily_value,
-            cost_limit_monthly=cost_monthly_value,
-        )
+        _apply_quota_updates_to_user(user, parsed_updates)
         affected_user_ids.append(user.id)
+    if not affected_user_ids:
+        message = "未找到可应用额度的有效用户"
+        if _wants_json(request):
+            return JSONResponse(status_code=404, content={"success": False, "message": message})
+        return _redirect_users(request.url.query, error=message)
+    db.commit()
     AdminAuditService.create_log(
         db,
         actor_user_id=current_user.id,
@@ -527,19 +608,24 @@ def batch_update_user_quota_policy(
         summary=f"批量更新用户账户额度 {len(affected_user_ids)} 个",
         detail={
             "user_ids": affected_user_ids,
-            "frozen_amount": str(frozen_value),
-            "request_limit_total": request_total_value,
-            "request_limit_daily": request_daily_value,
-            "request_limit_monthly": request_monthly_value,
-            "token_limit_total": token_total_value,
-            "token_limit_daily": token_daily_value,
-            "token_limit_monthly": token_monthly_value,
-            "cost_limit_total": str(cost_total_value) if cost_total_value is not None else None,
-            "cost_limit_daily": str(cost_daily_value) if cost_daily_value is not None else None,
-            "cost_limit_monthly": str(cost_monthly_value) if cost_monthly_value is not None else None,
+            "apply_fields": sorted(normalized_apply_fields),
+            "updates": {
+                key: (str(value) if isinstance(value, Decimal) else value)
+                for key, value in parsed_updates.items()
+            },
         },
     )
-    return _redirect_users(request.url.query, success="updated")
+    success_message = f"已为 {len(affected_user_ids)} 个用户应用额度"
+    if _wants_json(request):
+        return JSONResponse(
+            content={
+                "success": True,
+                "message": success_message,
+                "affected_count": len(affected_user_ids),
+                "user_ids": affected_user_ids,
+            }
+        )
+    return _redirect_users(request.url.query, success="batch_quota_updated", affected_count=len(affected_user_ids))
 
 
 @router.post("/users/{user_id}/delete")
@@ -689,3 +775,20 @@ def user_options(
         if user.enabled
     ]
     return JSONResponse(items)
+
+
+@router.get("/api/users/quota-preview")
+def user_quota_preview(
+    user_ids: list[int] = Query(default=[]),
+    _: UserAccount = Depends(require_admin_api_user),
+    db: Session = Depends(get_db),
+):
+    try:
+        target_user_ids = _parse_form_user_ids(user_ids, ",".join(str(item) for item in user_ids))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    users = [db.get(UserAccount, user_id) for user_id in target_user_ids]
+    normalized_users = [user for user in users if user is not None]
+    if not normalized_users:
+        raise HTTPException(status_code=404, detail="未找到可预览的有效用户")
+    return JSONResponse(_build_quota_preview(normalized_users))

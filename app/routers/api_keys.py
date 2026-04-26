@@ -11,10 +11,13 @@ from app.schemas.api_key import (
     ApiKeyBalanceAdjustmentIn,
     ApiKeyBatchActionIn,
     ApiKeyBatchActionResultOut,
+    ApiKeyBatchTemplateApplyIn,
+    ApiKeyBatchRotateResultOut,
     ApiKeyBatchProviderUpdateIn,
     ApiKeyBillingSummaryOut,
     ApiKeyCreate,
     ApiKeyCreateResponse,
+    ApiKeyCostInsightResponseOut,
     ApiKeyDetailOut,
     ApiKeyListResponse,
     ApiKeyOut,
@@ -128,7 +131,7 @@ def create_api_key(
         entity_name=api_key.name,
         target_user_id=api_key.owner_user_id,
         summary=f"创建 API Key {api_key.name}",
-        detail=payload.model_dump(),
+        detail=payload.model_dump(mode="json"),
     )
     data = ApiKeyAdminService.serialize_api_key(api_key)
     data["raw_api_key"] = raw_api_key
@@ -171,7 +174,7 @@ def update_api_key(
         entity_name=updated.name,
         target_user_id=updated.owner_user_id,
         summary=f"更新 API Key {updated.name}",
-        detail=payload.model_dump(exclude_unset=True),
+        detail=payload.model_dump(mode="json", exclude_unset=True),
     )
     return ApiKeyOut(**ApiKeyAdminService.serialize_api_key(updated))
 
@@ -313,6 +316,48 @@ def batch_delete_api_keys(
     return result
 
 
+@router.post("/batch/rotate", response_model=ApiKeyBatchRotateResultOut)
+def batch_rotate_api_keys(
+    payload: ApiKeyBatchActionIn,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_admin_api_user),
+) -> ApiKeyBatchRotateResultOut:
+    result = ApiKeyAdminService.batch_rotate(db, payload)
+    AdminAuditService.create_log(
+        db,
+        actor_user_id=current_user.id,
+        actor_username=current_user.username,
+        action="batch_rotate",
+        entity_type="api_key",
+        entity_id=None,
+        entity_name="batch",
+        summary=f"批量轮换 API Key {result.affected_count} 个",
+        detail={"api_key_ids": payload.api_key_ids},
+    )
+    return result
+
+
+@router.post("/batch/expire", response_model=ApiKeyBatchActionResultOut)
+def batch_expire_api_keys(
+    payload: ApiKeyBatchActionIn,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_admin_api_user),
+) -> ApiKeyBatchActionResultOut:
+    result = ApiKeyAdminService.batch_expire(db, payload)
+    AdminAuditService.create_log(
+        db,
+        actor_user_id=current_user.id,
+        actor_username=current_user.username,
+        action="batch_expire",
+        entity_type="api_key",
+        entity_id=None,
+        entity_name="batch",
+        summary=f"批量过期 API Key {result.affected_count} 个",
+        detail={"api_key_ids": payload.api_key_ids},
+    )
+    return result
+
+
 @router.post("/batch/providers", response_model=ApiKeyBatchActionResultOut)
 def batch_update_api_key_providers(
     payload: ApiKeyBatchProviderUpdateIn,
@@ -335,6 +380,45 @@ def batch_update_api_key_providers(
         detail=payload.model_dump(),
     )
     return result
+
+
+@router.post("/batch/template", response_model=ApiKeyBatchActionResultOut)
+def batch_apply_api_key_template(
+    payload: ApiKeyBatchTemplateApplyIn,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_admin_api_user),
+) -> ApiKeyBatchActionResultOut:
+    try:
+        result = ApiKeyAdminService.batch_apply_template(db, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    AdminAuditService.create_log(
+        db,
+        actor_user_id=current_user.id,
+        actor_username=current_user.username,
+        action="batch_apply_template",
+        entity_type="api_key",
+        entity_id=None,
+        entity_name="batch",
+        summary=f"批量应用 API Key 策略模板 {result.affected_count} 个",
+        detail=payload.model_dump(),
+    )
+    return result
+
+
+@router.get("/insights/cost", response_model=ApiKeyCostInsightResponseOut)
+def api_key_cost_insights(
+    group_by: str = Query(default="user"),
+    window_days: int = Query(default=30, ge=1, le=365),
+    limit: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+) -> ApiKeyCostInsightResponseOut:
+    return ApiKeyAdminService.get_cost_insights(
+        db,
+        group_by=group_by,
+        window_days=window_days,
+        limit=limit,
+    )
 
 
 @router.get("/{api_key_id}/logs", response_model=LogListResponse)

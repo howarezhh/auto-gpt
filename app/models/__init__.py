@@ -1,6 +1,7 @@
 from app.models.alert_event import AlertEvent
 from app.models.alert_subscription import AlertSubscription
 from app.models.api_client_billing_record import ApiClientBillingRecord
+from app.models.api_key_policy_template import ApiKeyPolicyTemplate
 from app.models.admin_audit_log import AdminAuditLog
 from app.models.app_setting import AppSetting
 from app.models.api_client_key import ApiClientKey
@@ -19,6 +20,7 @@ __all__ = [
     "AppSetting",
     "AdminAuditLog",
     "ApiClientBillingRecord",
+    "ApiKeyPolicyTemplate",
     "ApiClientKey",
     "ApiClientKeyProviderBinding",
     "ModelCatalog",

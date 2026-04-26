@@ -2,6 +2,7 @@ import asyncio
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 from uuid import uuid4
@@ -11,10 +12,12 @@ import requests
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
-from app.services.api_key_service import ApiClientAuthContext, ApiKeyService
-from app.services.billing_service import BillingService
+from app.services.api_key_service import ApiKeyService
+from app.services.api_key_service import ApiClientAuthContext
+from app.services.cache_service import CacheService
 from app.services.log_service import LogService
 from app.services.provider_service import ProviderService
 from app.services.router_service import RoutePolicyContext, RouterService
@@ -23,7 +26,51 @@ from app.services.upstream_client import UpstreamClientService
 from app.utils.json_utils import dumps_json, safeJsonParse
 
 
+@dataclass(slots=True)
+class PreparedUpstreamRequest:
+    request_path: str
+    request_payload: dict[str, Any]
+    adapt_chat_response_to_responses: bool = False
+
+
+@dataclass(slots=True)
+class RequestsUpstreamHTTPError(Exception):
+    status_code: int
+    detail: Any
+
+
 class ProxyService:
+    RESPONSES_CHAT_ADAPTER_SUPPORTED_FIELDS = {
+        "model",
+        "instructions",
+        "input",
+        "temperature",
+        "top_p",
+        "presence_penalty",
+        "frequency_penalty",
+        "tools",
+        "tool_choice",
+        "response_format",
+        "stream",
+        "user",
+        "metadata",
+        "seed",
+        "max_output_tokens",
+        "max_tokens",
+    }
+    RESPONSES_CHAT_ADAPTER_UNSUPPORTED_FIELDS = {
+        "previous_response_id",
+        "parallel_tool_calls",
+        "reasoning",
+        "reasoning_effort",
+        "store",
+        "text",
+        "include",
+        "max_tool_calls",
+        "truncation",
+        "background",
+    }
+
     @staticmethod
     async def chat_completions(db: Session, payload: dict[str, Any]) -> tuple[dict[str, Any], Provider, list[dict], int]:
         return await ProxyService.forward_json_request(db, endpoint_path="/chat/completions", payload=payload, log_type="chat")
@@ -52,6 +99,8 @@ class ProxyService:
         forced_provider_id: int | None = None,
         route_context: RoutePolicyContext | None = None,
         api_client_auth: ApiClientAuthContext | None = None,
+        trace_id: str | None = None,
+        source_ip: str | None = None,
     ) -> tuple[dict[str, Any], Provider, list[dict], int]:
         model_name = payload.get("model")
         has_image = ProxyService._payload_has_image(payload)
@@ -65,8 +114,17 @@ class ProxyService:
             setting=setting,
             preserve_request_content_when_disabled=True,
         )
+        if api_client_auth is not None and not ApiKeyService.is_model_allowed(api_client_auth.api_client_key, model_name):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"message": "Requested model is not allowed for this api key", "code": "model_not_allowed"},
+            )
+        ProxyService._validate_endpoint_payload(endpoint_path=endpoint_path, payload=payload)
         if payload.get("stream") is True:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Use stream endpoint handler for {endpoint_path}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"message": f"Use stream endpoint handler for {endpoint_path}", "code": "invalid_stream_mode"},
+            )
 
         candidates = RouterService.order_candidates(
             db,
@@ -75,17 +133,24 @@ class ProxyService:
             forced_provider_id=forced_provider_id,
             route_context=route_context,
             require_vision=has_image,
+            require_stream=False,
         )
         if not candidates:
             LogService.create_log(
                 db,
                 log_type=log_type,
+                trace_id=trace_id,
                 model_name=model_name,
                 requested_model=model_name,
+                tenant_name=api_client_auth.api_client_key.tenant_name if api_client_auth else None,
+                project_name=api_client_auth.api_client_key.project_name if api_client_auth else None,
+                app_name=api_client_auth.api_client_key.app_name if api_client_auth else None,
+                environment_name=api_client_auth.api_client_key.environment_name if api_client_auth else None,
                 request_id=request_id,
                 conversation_key=conversation_key,
                 session_id=session_id,
                 request_path=f"/v1{endpoint_path}",
+                source_ip=source_ip,
                 http_method="POST",
                 is_stream=False,
                 has_image=has_image,
@@ -94,13 +159,19 @@ class ProxyService:
                 reasoning_level=reasoning_level,
                 request_body_json=request_body_json,
                 message="No available provider for requested model",
+                error_type="invalid_request_error",
+                error_code="model_not_available",
+                retryable=False,
                 **ProxyService._build_api_client_log_kwargs(api_client_auth, auth_result="authenticated"),
                 trace=[],
                 attempt_count=0,
                 token_request_payload=payload,
                 schedule_token_fill=setting.enable_token_logging,
             )
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No available provider for requested model")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"message": "No available provider for requested model", "code": "model_not_available"},
+            )
 
         trace: list[dict] = []
         last_upstream_error: dict[str, Any] | None = None
@@ -133,15 +204,21 @@ class ProxyService:
                     created_log = LogService.create_log(
                         db,
                         log_type=log_type,
+                        trace_id=trace_id,
                         provider_id=provider.id,
                         provider_name=provider.name,
                         model_name=model_name,
                         requested_model=model_name,
+                        tenant_name=api_client_auth.api_client_key.tenant_name if api_client_auth else None,
+                        project_name=api_client_auth.api_client_key.project_name if api_client_auth else None,
+                        app_name=api_client_auth.api_client_key.app_name if api_client_auth else None,
+                        environment_name=api_client_auth.api_client_key.environment_name if api_client_auth else None,
                         request_id=request_id,
                         conversation_key=conversation_key,
                         session_id=session_id,
                         resolved_provider_model_id=provider_model.id,
                         request_path=f"/v1{endpoint_path}",
+                        source_ip=source_ip,
                         http_method="POST",
                         is_stream=False,
                         has_image=has_image,
@@ -160,6 +237,7 @@ class ProxyService:
                         response_body_json=response_body_json,
                         response_text=response_text,
                         message=f"{log_type} success",
+                        retryable=False,
                         **ProxyService._build_api_client_log_kwargs(api_client_auth, auth_result="authenticated"),
                         **ProxyService._build_provider_log_kwargs(provider_model),
                         trace=trace,
@@ -169,15 +247,6 @@ class ProxyService:
                         schedule_token_fill=setting.enable_token_logging,
                         auto_commit=False,
                     )
-                    ApiKeyService.apply_token_usage(
-                        db,
-                        api_client_key=api_client_auth.api_client_key if api_client_auth else None,
-                        prompt_tokens=usage_info["prompt_tokens"],
-                        completion_tokens=usage_info["completion_tokens"],
-                        total_tokens=usage_info["total_tokens"],
-                        auto_commit=False,
-                    )
-                    BillingService.sync_request_billing(db, created_log)
                     db.commit()
                     return response, provider, trace, latency_ms
                 except httpx.HTTPStatusError as exc:
@@ -199,6 +268,26 @@ class ProxyService:
                     }
                     ProxyService._mark_failure(db, provider, provider_model, latency_ms, error_body)
                     if exc.response.status_code not in {401, 403, 404, 429} and exc.response.status_code < 500:
+                        break
+                except RequestsUpstreamHTTPError as exc:
+                    latency_ms = int((time.perf_counter() - started) * 1000)
+                    error_body = ProxyService._error_message_for_log(exc.detail)
+                    trace.append(
+                        ProxyService._build_trace_item(
+                            provider,
+                            provider_model,
+                            ProxyService._classify_http_error(exc.status_code),
+                            latency_ms,
+                            status_code=exc.status_code,
+                            error=error_body,
+                        )
+                    )
+                    last_upstream_error = {
+                        "status_code": exc.status_code,
+                        "detail": exc.detail,
+                    }
+                    ProxyService._mark_failure(db, provider, provider_model, latency_ms, error_body)
+                    if exc.status_code not in {401, 403, 404, 429} and exc.status_code < 500:
                         break
                 except Exception as exc:
                     latency_ms = int((time.perf_counter() - started) * 1000)
@@ -237,6 +326,8 @@ class ProxyService:
             reasoning_level=reasoning_level,
             attempt_count=attempt_count,
             api_client_auth=api_client_auth,
+            trace_id=trace_id,
+            source_ip=source_ip,
         )
 
     @staticmethod
@@ -249,6 +340,8 @@ class ProxyService:
         forced_provider_id: int | None = None,
         route_context: RoutePolicyContext | None = None,
         api_client_auth: ApiClientAuthContext | None = None,
+        trace_id: str | None = None,
+        source_ip: str | None = None,
     ) -> tuple[AsyncIterator[bytes], Provider, list[dict], int]:
         model_name = payload.get("model")
         has_image = ProxyService._payload_has_image(payload)
@@ -262,6 +355,12 @@ class ProxyService:
             setting=setting,
             preserve_request_content_when_disabled=True,
         )
+        if api_client_auth is not None and not ApiKeyService.is_model_allowed(api_client_auth.api_client_key, model_name):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"message": "Requested model is not allowed for this api key", "code": "model_not_allowed"},
+            )
+        ProxyService._validate_endpoint_payload(endpoint_path=endpoint_path, payload=payload)
         candidates = RouterService.order_candidates(
             db,
             model_name=model_name,
@@ -269,17 +368,24 @@ class ProxyService:
             forced_provider_id=forced_provider_id,
             route_context=route_context,
             require_vision=has_image,
+            require_stream=True,
         )
         if not candidates:
             LogService.create_log(
                 db,
                 log_type=log_type,
+                trace_id=trace_id,
                 model_name=model_name,
                 requested_model=model_name,
+                tenant_name=api_client_auth.api_client_key.tenant_name if api_client_auth else None,
+                project_name=api_client_auth.api_client_key.project_name if api_client_auth else None,
+                app_name=api_client_auth.api_client_key.app_name if api_client_auth else None,
+                environment_name=api_client_auth.api_client_key.environment_name if api_client_auth else None,
                 request_id=request_id,
                 conversation_key=conversation_key,
                 session_id=session_id,
                 request_path=f"/v1{endpoint_path}",
+                source_ip=source_ip,
                 http_method="POST",
                 is_stream=True,
                 has_image=has_image,
@@ -288,13 +394,19 @@ class ProxyService:
                 reasoning_level=reasoning_level,
                 request_body_json=request_body_json,
                 message="No available provider for requested model",
+                error_type="invalid_request_error",
+                error_code="model_not_available",
+                retryable=False,
                 **ProxyService._build_api_client_log_kwargs(api_client_auth, auth_result="authenticated"),
                 trace=[],
                 attempt_count=0,
                 token_request_payload=payload,
                 schedule_token_fill=setting.enable_token_logging,
             )
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No available provider for requested model")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"message": "No available provider for requested model", "code": "model_not_available"},
+            )
 
         trace: list[dict] = []
         last_upstream_error: dict[str, Any] | None = None
@@ -311,7 +423,7 @@ class ProxyService:
                 trace.append(ProxyService._build_trace_item(provider, provider_model, "connecting", 0))
                 try:
                     stream_context = ProxyService._stream_request(provider, endpoint_path, payload)
-                    response = await stream_context.__aenter__()
+                    response, prepared = await stream_context.__aenter__()
                     latency_ms = int((time.perf_counter() - started) * 1000)
                     response.raise_for_status()
                     upstream_request_id = ProxyService._extract_upstream_request_id(response)
@@ -320,6 +432,7 @@ class ProxyService:
                     async def stream_generator() -> AsyncIterator[bytes]:
                         success = False
                         interrupted = False
+                        client_cancelled = False
                         error_message: str | None = None
                         exc_type = None
                         exc_value = None
@@ -331,16 +444,17 @@ class ProxyService:
                         response_text_bytes = 0
                         token_response_parts: list[str] = []
                         event_buffer = bytearray()
+                        downstream_transform_state = ProxyService._create_responses_stream_state(payload=payload)
                         try:
-                            async for chunk in response.aiter_bytes():
-                                if chunk:
+                            async for upstream_chunk in response.aiter_bytes():
+                                if upstream_chunk:
                                     if setting.enable_stream_response_persist or setting.enable_token_logging:
                                         (
                                             response_text_bytes,
                                             finish_reason,
                                             usage_info,
                                         ) = ProxyService._collect_stream_log_data(
-                                            chunk=chunk,
+                                            chunk=upstream_chunk,
                                             event_buffer=event_buffer,
                                             response_text_parts=response_text_parts,
                                             response_text_bytes=response_text_bytes,
@@ -362,7 +476,28 @@ class ProxyService:
                                             )
                                         )
                                     success = True
-                                    yield chunk
+                                    if prepared.adapt_chat_response_to_responses:
+                                        for downstream_chunk in ProxyService._adapt_chat_stream_chunk_to_responses_events(
+                                            upstream_chunk,
+                                            state=downstream_transform_state,
+                                            requested_model=str(payload.get("model") or ""),
+                                        ):
+                                            yield downstream_chunk
+                                    else:
+                                        yield upstream_chunk
+                            if prepared.adapt_chat_response_to_responses:
+                                for downstream_chunk in ProxyService._build_responses_stream_completion_events(
+                                    downstream_transform_state
+                                ):
+                                    yield downstream_chunk
+                        except asyncio.CancelledError as exc:
+                            interrupted = True
+                            client_cancelled = True
+                            error_message = "client cancelled stream"
+                            exc_type = type(exc)
+                            exc_value = exc
+                            exc_traceback = exc.__traceback__
+                            raise
                         except BaseException as exc:
                             interrupted = True
                             error_message = str(exc)
@@ -396,15 +531,21 @@ class ProxyService:
                                 created_log = LogService.create_log(
                                     db,
                                     log_type=log_type,
+                                    trace_id=trace_id,
                                     provider_id=provider.id,
                                     provider_name=provider.name,
                                     model_name=model_name,
                                     requested_model=model_name,
+                                    tenant_name=api_client_auth.api_client_key.tenant_name if api_client_auth else None,
+                                    project_name=api_client_auth.api_client_key.project_name if api_client_auth else None,
+                                    app_name=api_client_auth.api_client_key.app_name if api_client_auth else None,
+                                    environment_name=api_client_auth.api_client_key.environment_name if api_client_auth else None,
                                     request_id=request_id,
                                     conversation_key=conversation_key,
                                     session_id=session_id,
                                     resolved_provider_model_id=provider_model.id,
                                     request_path=f"/v1{endpoint_path}",
+                                    source_ip=source_ip,
                                     http_method="POST",
                                     is_stream=True,
                                     has_image=has_image,
@@ -424,6 +565,7 @@ class ProxyService:
                                     request_body_json=request_body_json,
                                     response_text=ProxyService._finalize_text_capture(response_text_parts),
                                     message=f"stream {log_type} success",
+                                    retryable=False,
                                     **ProxyService._build_api_client_log_kwargs(api_client_auth, auth_result="authenticated"),
                                     **ProxyService._build_provider_log_kwargs(provider_model),
                                     trace=final_trace,
@@ -432,31 +574,25 @@ class ProxyService:
                                     schedule_token_fill=setting.enable_token_logging,
                                     auto_commit=False,
                                 )
-                                ApiKeyService.apply_token_usage(
-                                    db,
-                                    api_client_key=api_client_auth.api_client_key if api_client_auth else None,
-                                    prompt_tokens=usage_info["prompt_tokens"],
-                                    completion_tokens=usage_info["completion_tokens"],
-                                    total_tokens=usage_info["total_tokens"],
-                                    auto_commit=False,
-                                )
-                                BillingService.sync_request_billing(db, created_log)
                                 db.commit()
                             else:
-                                ProxyService._mark_failure(
-                                    db,
-                                    provider,
-                                    provider_model,
-                                    latency_ms,
-                                    error_message or f"stream {log_type} failed",
-                                )
+                                terminal_result = "client_cancelled" if client_cancelled else ("interrupted" if interrupted else "finished")
+                                terminal_status_code = 499 if client_cancelled else (502 if interrupted or not success else 200)
+                                if not client_cancelled:
+                                    ProxyService._mark_failure(
+                                        db,
+                                        provider,
+                                        provider_model,
+                                        latency_ms,
+                                        error_message or f"stream {log_type} failed",
+                                    )
                                 interrupted_trace = trace + [
                                     ProxyService._build_trace_item(
                                         provider,
                                         provider_model,
-                                        "interrupted" if interrupted else "finished",
+                                        terminal_result,
                                         total_duration_ms,
-                                        status_code=502 if interrupted or not success else 200,
+                                        status_code=terminal_status_code,
                                         first_token_latency_ms=first_chunk_latency_ms,
                                         total_duration_ms=total_duration_ms,
                                         error=error_message,
@@ -465,20 +601,26 @@ class ProxyService:
                                 LogService.create_log(
                                     db,
                                     log_type=log_type,
+                                    trace_id=trace_id,
                                     provider_id=provider.id,
                                     provider_name=provider.name,
                                     model_name=model_name,
                                     requested_model=model_name,
+                                    tenant_name=api_client_auth.api_client_key.tenant_name if api_client_auth else None,
+                                    project_name=api_client_auth.api_client_key.project_name if api_client_auth else None,
+                                    app_name=api_client_auth.api_client_key.app_name if api_client_auth else None,
+                                    environment_name=api_client_auth.api_client_key.environment_name if api_client_auth else None,
                                     request_id=request_id,
                                     conversation_key=conversation_key,
                                     session_id=session_id,
                                     resolved_provider_model_id=provider_model.id,
                                     request_path=f"/v1{endpoint_path}",
+                                    source_ip=source_ip,
                                     http_method="POST",
                                     is_stream=True,
                                     has_image=has_image,
                                     success=False,
-                                    status_code=502,
+                                    status_code=terminal_status_code,
                                     latency_ms=latency_ms,
                                     first_token_latency_ms=first_chunk_latency_ms,
                                     ttfb_ms=first_chunk_latency_ms,
@@ -493,6 +635,9 @@ class ProxyService:
                                     request_body_json=request_body_json,
                                     response_text=ProxyService._finalize_text_capture(response_text_parts),
                                     message=error_message or f"stream {log_type} failed",
+                                    error_type="server_error" if not client_cancelled else "client_error",
+                                    error_code="client_cancelled" if client_cancelled else "stream_interrupted",
+                                    retryable=not client_cancelled,
                                     **ProxyService._build_api_client_log_kwargs(api_client_auth, auth_result="authenticated"),
                                     **ProxyService._build_provider_log_kwargs(provider_model),
                                     trace=interrupted_trace,
@@ -565,66 +710,52 @@ class ProxyService:
             reasoning_level=reasoning_level,
             attempt_count=attempt_count,
             api_client_auth=api_client_auth,
+            trace_id=trace_id,
+            source_ip=source_ip,
         )
 
     @staticmethod
     async def _forward_json(provider: Provider, endpoint_path: str, payload: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
         headers = {"Authorization": f"Bearer {provider.api_key}"}
-        if ProxyService._payload_has_image(payload):
-            return await ProxyService._forward_json_image_request(provider, endpoint_path=endpoint_path, payload=payload, headers=headers)
+        prepared = ProxyService._prepare_upstream_request(provider, endpoint_path=endpoint_path, payload=payload)
+        if ProxyService._payload_has_image(prepared.request_payload):
+            return await ProxyService._forward_json_image_request(provider, prepared=prepared, headers=headers)
         client = ProxyService._select_upstream_client(payload=payload)
-        if ProxyService._should_adapt_responses_image_request(provider, endpoint_path=endpoint_path, payload=payload):
-            chat_payload = ProxyService._build_chat_payload_from_responses_payload(payload)
-            response = await client.post(
-                f"{provider.base_url}/chat/completions",
-                headers=headers,
-                json=chat_payload,
-                timeout=ProxyService._resolve_upstream_timeout_seconds(provider, payload=payload),
-            )
-            response.raise_for_status()
-            response_json = response.json()
-            return (
-                ProxyService._convert_chat_completion_to_responses_payload(
-                    response_json,
-                    requested_model=str(payload.get("model") or response_json.get("model") or ""),
-                ),
-                ProxyService._extract_upstream_request_id(response),
-            )
         response = await client.post(
-            f"{provider.base_url}{endpoint_path}",
+            f"{provider.base_url}{prepared.request_path}",
             headers=headers,
-            json=payload,
-            timeout=ProxyService._resolve_upstream_timeout_seconds(provider, payload=payload),
+            json=prepared.request_payload,
+            timeout=ProxyService._build_httpx_timeout(provider, payload=prepared.request_payload, is_stream=False),
         )
         response.raise_for_status()
-        return response.json(), ProxyService._extract_upstream_request_id(response)
+        response_json = response.json()
+        if prepared.adapt_chat_response_to_responses:
+            response_json = ProxyService._convert_chat_completion_to_responses_payload(
+                response_json,
+                requested_model=str(payload.get("model") or response_json.get("model") or ""),
+            )
+        return response_json, ProxyService._extract_upstream_request_id(response)
 
     @staticmethod
     async def _forward_json_image_request(
         provider: Provider,
         *,
-        endpoint_path: str,
-        payload: dict[str, Any],
+        prepared: PreparedUpstreamRequest,
         headers: dict[str, str],
     ) -> tuple[dict[str, Any], str | None]:
-        request_path = endpoint_path
-        request_payload = payload
-        if ProxyService._should_adapt_responses_image_request(provider, endpoint_path=endpoint_path, payload=payload):
-            request_path = "/chat/completions"
-            request_payload = ProxyService._build_chat_payload_from_responses_payload(payload)
-        timeout_seconds = ProxyService._resolve_upstream_timeout_seconds(provider, payload=payload)
+        timeout = ProxyService._build_httpx_timeout(provider, payload=prepared.request_payload, is_stream=False)
         response_json, upstream_request_id = await asyncio.to_thread(
             ProxyService._send_image_request_via_requests,
             provider.base_url,
-            request_path,
+            prepared.request_path,
             headers,
-            request_payload,
-            timeout_seconds,
+            prepared.request_payload,
+            timeout,
         )
-        if request_path == "/chat/completions" and endpoint_path == "/responses":
+        if prepared.adapt_chat_response_to_responses:
             response_json = ProxyService._convert_chat_completion_to_responses_payload(
                 response_json,
-                requested_model=str(payload.get("model") or response_json.get("model") or ""),
+                requested_model=str(prepared.request_payload.get("model") or response_json.get("model") or ""),
             )
         return response_json, upstream_request_id
 
@@ -634,15 +765,22 @@ class ProxyService:
         request_path: str,
         headers: dict[str, str],
         request_payload: dict[str, Any],
-        timeout_seconds: float,
+        timeout: httpx.Timeout,
     ) -> tuple[dict[str, Any], str | None]:
         response = requests.post(
             f"{base_url}{request_path}",
             headers={**headers, "Content-Type": "application/json"},
             json=request_payload,
-            timeout=timeout_seconds,
+            timeout=(
+                timeout.connect if timeout.connect is not None else None,
+                timeout.read if timeout.read is not None else None,
+            ),
         )
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            detail = ProxyService._normalize_error_detail(response.text[:500] if response.text else "")
+            raise RequestsUpstreamHTTPError(status_code=response.status_code, detail=detail) from exc
         upstream_request_id = (
             response.headers.get("x-request-id")
             or response.headers.get("request-id")
@@ -652,17 +790,22 @@ class ProxyService:
 
     @staticmethod
     @asynccontextmanager
-    async def _stream_request(provider: Provider, endpoint_path: str, payload: dict[str, Any]) -> AsyncIterator[httpx.Response]:
+    async def _stream_request(
+        provider: Provider,
+        endpoint_path: str,
+        payload: dict[str, Any],
+    ) -> AsyncIterator[tuple[httpx.Response, PreparedUpstreamRequest]]:
         headers = {"Authorization": f"Bearer {provider.api_key}"}
         client = ProxyService._select_upstream_client(payload=payload)
+        prepared = ProxyService._prepare_upstream_request(provider, endpoint_path=endpoint_path, payload=payload)
         async with client.stream(
             "POST",
-            f"{provider.base_url}{endpoint_path}",
+            f"{provider.base_url}{prepared.request_path}",
             headers=headers,
-            json=payload,
-            timeout=ProxyService._resolve_upstream_timeout_seconds(provider, payload=payload),
+            json=prepared.request_payload,
+            timeout=ProxyService._build_httpx_timeout(provider, payload=prepared.request_payload, is_stream=True),
         ) as response:
-            yield response
+            yield response, prepared
 
     @staticmethod
     def _select_upstream_client(*, payload: dict[str, Any]) -> httpx.AsyncClient:
@@ -671,11 +814,27 @@ class ProxyService:
         return UpstreamClientService.get_client()
 
     @staticmethod
-    def _resolve_upstream_timeout_seconds(provider: Provider, *, payload: dict[str, Any]) -> float:
-        timeout_seconds = provider.timeout_ms / 1000
-        if ProxyService._payload_has_image(payload):
-            return max(timeout_seconds, 180.0)
-        return timeout_seconds
+    def _build_httpx_timeout(
+        provider: Provider,
+        *,
+        payload: dict[str, Any],
+        is_stream: bool,
+    ) -> httpx.Timeout:
+        settings = get_settings()
+        base_timeout_seconds = max(provider.timeout_ms / 1000, 1.0)
+        read_timeout: float | None
+        if is_stream:
+            read_timeout = None
+        elif ProxyService._payload_has_image(payload):
+            read_timeout = max(base_timeout_seconds, 180.0)
+        else:
+            read_timeout = base_timeout_seconds
+        return httpx.Timeout(
+            connect=base_timeout_seconds,
+            write=base_timeout_seconds,
+            read=read_timeout,
+            pool=settings.upstream_pool_timeout_s,
+        )
 
     @staticmethod
     def _should_adapt_responses_image_request(provider: Provider, *, endpoint_path: str, payload: dict[str, Any]) -> bool:
@@ -683,6 +842,44 @@ class ProxyService:
             endpoint_path == "/responses"
             and provider.provider_type == "openai_compatible"
             and ProxyService._payload_has_image(payload)
+        )
+
+    @staticmethod
+    def _validate_endpoint_payload(*, endpoint_path: str, payload: dict[str, Any]) -> None:
+        if endpoint_path == "/responses" and ProxyService._payload_has_image(payload):
+            unsupported_fields = sorted(
+                key
+                for key in payload.keys()
+                if key not in ProxyService.RESPONSES_CHAT_ADAPTER_SUPPORTED_FIELDS
+            )
+            explicitly_unsupported_fields = sorted(
+                key
+                for key in payload.keys()
+                if key in ProxyService.RESPONSES_CHAT_ADAPTER_UNSUPPORTED_FIELDS
+            )
+            if unsupported_fields:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "message": "Image inputs on /v1/responses currently support only the documented adapter field subset",
+                        "unsupported_fields": unsupported_fields,
+                        "explicitly_unsupported_fields": explicitly_unsupported_fields,
+                    },
+                )
+            ProxyService._build_chat_payload_from_responses_payload(payload)
+
+    @staticmethod
+    def _prepare_upstream_request(provider: Provider, *, endpoint_path: str, payload: dict[str, Any]) -> PreparedUpstreamRequest:
+        if ProxyService._should_adapt_responses_image_request(provider, endpoint_path=endpoint_path, payload=payload):
+            return PreparedUpstreamRequest(
+                request_path="/chat/completions",
+                request_payload=ProxyService._build_chat_payload_from_responses_payload(payload),
+                adapt_chat_response_to_responses=True,
+            )
+        return PreparedUpstreamRequest(
+            request_path=endpoint_path,
+            request_payload=payload,
+            adapt_chat_response_to_responses=False,
         )
 
     @staticmethod
@@ -708,22 +905,11 @@ class ProxyService:
                 messages.append(converted)
         chat_payload["messages"] = messages or [{"role": "user", "content": ""}]
 
-        passthrough_keys = (
-            "temperature",
-            "top_p",
-            "presence_penalty",
-            "frequency_penalty",
-            "tools",
-            "tool_choice",
-            "response_format",
-            "stream",
-            "user",
-            "metadata",
-            "seed",
-        )
-        for key in passthrough_keys:
-            if key in payload:
-                chat_payload[key] = payload[key]
+        passthrough_excluded_keys = {"input", "instructions", "max_output_tokens"}
+        for key, value in payload.items():
+            if key in passthrough_excluded_keys or key == "model":
+                continue
+            chat_payload[key] = value
         if "max_output_tokens" in payload and "max_completion_tokens" not in chat_payload and "max_tokens" not in chat_payload:
             chat_payload["max_completion_tokens"] = payload["max_output_tokens"]
         if "max_tokens" in payload and "max_completion_tokens" not in chat_payload:
@@ -735,7 +921,10 @@ class ProxyService:
         if isinstance(item, str):
             return {"role": "user", "content": item}
         if not isinstance(item, dict):
-            return {"role": "user", "content": str(item)}
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"message": "Responses adapter input items must be strings or objects"},
+            )
         role = str(item.get("role") or "user")
         content = item.get("content")
         if isinstance(content, list):
@@ -749,14 +938,20 @@ class ProxyService:
             return {"role": role, "content": content}
         if content is None and "text" in item and isinstance(item.get("text"), str):
             return {"role": role, "content": item["text"]}
-        return {"role": role, "content": str(content or "")}
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"message": "Responses adapter received an unsupported input item content format"},
+        )
 
     @staticmethod
     def _convert_responses_content_part_to_chat_content(part: Any) -> dict[str, Any] | None:
         if isinstance(part, str):
             return {"type": "text", "text": part}
         if not isinstance(part, dict):
-            return {"type": "text", "text": str(part)}
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"message": "Responses adapter content parts must be strings or objects"},
+            )
         part_type = part.get("type")
         if part_type in {"input_text", "text", "output_text"} and isinstance(part.get("text"), str):
             return {"type": "text", "text": part["text"]}
@@ -770,7 +965,13 @@ class ProxyService:
             if detail and "detail" not in image_url_payload:
                 image_url_payload["detail"] = detail
             return {"type": "image_url", "image_url": image_url_payload}
-        return {"type": "text", "text": dumps_json(part)}
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "message": "Responses adapter received an unsupported content part type",
+                "unsupported_part_type": part_type,
+            },
+        )
 
     @staticmethod
     def _convert_chat_completion_to_responses_payload(
@@ -825,6 +1026,166 @@ class ProxyService:
         }
 
     @staticmethod
+    def _create_responses_stream_state(*, payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "buffer": bytearray(),
+            "response_id": f"resp_{uuid4().hex}",
+            "message_id": f"msg_{uuid4().hex}",
+            "created_at": int(datetime.utcnow().timestamp()),
+            "model": str(payload.get("model") or ""),
+            "output_text_parts": [],
+            "finish_reason": None,
+            "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+            "created_sent": False,
+            "completed_sent": False,
+        }
+
+    @staticmethod
+    def _adapt_chat_stream_chunk_to_responses_events(
+        chunk: bytes,
+        *,
+        state: dict[str, Any],
+        requested_model: str,
+    ) -> list[bytes]:
+        events: list[bytes] = []
+        state_buffer = state["buffer"]
+        state_buffer.extend(chunk)
+        for event_text in ProxyService._consume_sse_event_texts(state_buffer):
+            for line in event_text.splitlines():
+                line = line.strip()
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if not data:
+                    continue
+                if data == "[DONE]":
+                    events.extend(ProxyService._build_responses_stream_completion_events(state))
+                    continue
+                parsed = safeJsonParse(data)
+                if not isinstance(parsed, dict):
+                    continue
+                if not state["created_sent"]:
+                    state["response_id"] = str(parsed.get("id") or state["response_id"])
+                    state["created_at"] = int(parsed.get("created") or state["created_at"])
+                    state["model"] = str(parsed.get("model") or requested_model or state["model"])
+                    state["created_sent"] = True
+                    events.append(
+                        ProxyService._format_sse_event(
+                            {
+                                "type": "response.created",
+                                "response": {
+                                    "id": state["response_id"],
+                                    "object": "response",
+                                    "created_at": state["created_at"],
+                                    "status": "in_progress",
+                                    "model": state["model"],
+                                },
+                            }
+                        )
+                    )
+                delta_text = ProxyService._extract_chat_stream_delta_text(parsed)
+                if delta_text:
+                    state["output_text_parts"].append(delta_text)
+                    events.append(
+                        ProxyService._format_sse_event(
+                            {
+                                "type": "response.output_text.delta",
+                                "response_id": state["response_id"],
+                                "item_id": state["message_id"],
+                                "output_index": 0,
+                                "content_index": 0,
+                                "delta": delta_text,
+                            }
+                        )
+                    )
+                usage = parsed.get("usage")
+                if isinstance(usage, dict):
+                    input_tokens = usage.get("prompt_tokens", usage.get("input_tokens"))
+                    output_tokens = usage.get("completion_tokens", usage.get("output_tokens"))
+                    total_tokens = usage.get("total_tokens")
+                    if isinstance(input_tokens, int):
+                        state["usage"]["input_tokens"] = input_tokens
+                    if isinstance(output_tokens, int):
+                        state["usage"]["output_tokens"] = output_tokens
+                    if isinstance(total_tokens, int):
+                        state["usage"]["total_tokens"] = total_tokens
+                finish_reason = ProxyService._extract_finish_reason(parsed)
+                if isinstance(finish_reason, str) and finish_reason:
+                    state["finish_reason"] = finish_reason
+                    events.extend(ProxyService._build_responses_stream_completion_events(state))
+        return events
+
+    @staticmethod
+    def _build_responses_stream_completion_events(state: dict[str, Any]) -> list[bytes]:
+        if state.get("completed_sent"):
+            return []
+        state["completed_sent"] = True
+        output_text = "".join(state["output_text_parts"])
+        finish_reason = state.get("finish_reason") or "completed"
+        usage = dict(state["usage"])
+        if not usage.get("total_tokens"):
+            usage["total_tokens"] = int(usage.get("input_tokens", 0) or 0) + int(usage.get("output_tokens", 0) or 0)
+        response_payload = {
+            "id": state["response_id"],
+            "object": "response",
+            "created_at": state["created_at"],
+            "status": "completed",
+            "model": state["model"],
+            "output_text": output_text,
+            "output": [
+                {
+                    "id": state["message_id"],
+                    "type": "message",
+                    "status": "completed",
+                    "role": "assistant",
+                    "finish_reason": finish_reason,
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": output_text,
+                            "annotations": [],
+                        }
+                    ],
+                }
+            ],
+            "usage": usage,
+        }
+        return [
+            ProxyService._format_sse_event(
+                {
+                    "type": "response.output_text.done",
+                    "response_id": state["response_id"],
+                    "item_id": state["message_id"],
+                    "output_index": 0,
+                    "content_index": 0,
+                    "text": output_text,
+                }
+            ),
+            ProxyService._format_sse_event({"type": "response.completed", "response": response_payload}),
+            b"data: [DONE]\n\n",
+        ]
+
+    @staticmethod
+    def _format_sse_event(payload: dict[str, Any]) -> bytes:
+        return f"data: {dumps_json(payload)}\n\n".encode("utf-8")
+
+    @staticmethod
+    def _extract_chat_stream_delta_text(event_json: dict[str, Any]) -> str | None:
+        choices = event_json.get("choices")
+        if not isinstance(choices, list):
+            return None
+        parts: list[str] = []
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            delta = choice.get("delta")
+            if isinstance(delta, dict):
+                content = delta.get("content")
+                if isinstance(content, str):
+                    parts.append(content)
+        return "".join(parts) or None
+
+    @staticmethod
     def _mark_failure(
         db: Session,
         provider: Provider,
@@ -832,16 +1193,20 @@ class ProxyService:
         latency_ms: int,
         error_message: str | None,
     ) -> None:
-        threshold = SettingService.get_or_create(db).circuit_breaker_threshold
         provider.failure_count += 1
         provider.last_latency_ms = latency_ms
         provider_model.failure_count += 1
         provider_model.last_latency_ms = latency_ms
         provider_model.last_error = error_message
-        if provider_model.circuit_state == "half_open" or provider_model.failure_count >= threshold:
-            provider_model.health_status = "unhealthy"
-            provider_model.circuit_state = "open"
-            provider_model.circuit_opened_at = datetime.utcnow()
+        if provider.auto_circuit_break_enabled:
+            threshold = ProviderService.get_effective_circuit_breaker_threshold(db, provider)
+            if provider_model.circuit_state == "half_open" or provider_model.failure_count >= threshold:
+                provider_model.health_status = "unhealthy"
+                provider_model.circuit_state = "open"
+                provider_model.circuit_opened_at = datetime.utcnow()
+            else:
+                provider_model.health_status = "degraded"
+                provider_model.circuit_state = "closed"
         else:
             provider_model.health_status = "degraded"
             provider_model.circuit_state = "closed"
@@ -876,9 +1241,9 @@ class ProxyService:
     @staticmethod
     def _normalize_error_detail(error_body: str) -> Any:
         if not error_body:
-            return {"message": "Upstream request failed"}
+            return {"message": "Upstream request failed", "code": "upstream_request_failed"}
         parsed = safeJsonParse(error_body)
-        return parsed if parsed is not None else {"message": error_body}
+        return parsed if parsed is not None else {"message": error_body, "code": "upstream_request_failed"}
 
     @staticmethod
     def _raise_final_error(
@@ -902,6 +1267,8 @@ class ProxyService:
         reasoning_level: str,
         attempt_count: int,
         api_client_auth: ApiClientAuthContext | None = None,
+        trace_id: str | None = None,
+        source_ip: str | None = None,
     ) -> None:
         if ProxyService._attempt_count(trace) <= 1 and upstream_error is not None:
             status_code = upstream_error["status_code"]
@@ -910,13 +1277,19 @@ class ProxyService:
             LogService.create_log(
                 db,
                 log_type=log_type,
+                trace_id=trace_id,
                 model_name=model_name,
                 requested_model=requested_model,
+                tenant_name=api_client_auth.api_client_key.tenant_name if api_client_auth else None,
+                project_name=api_client_auth.api_client_key.project_name if api_client_auth else None,
+                app_name=api_client_auth.api_client_key.app_name if api_client_auth else None,
+                environment_name=api_client_auth.api_client_key.environment_name if api_client_auth else None,
                 request_id=request_id,
                 conversation_key=conversation_key,
                 session_id=session_id,
                 resolved_provider_model_id=resolved_provider_model_id,
                 request_path=f"/v1{endpoint_path}",
+                source_ip=source_ip,
                 http_method="POST",
                 is_stream=is_stream,
                 has_image=has_image,
@@ -925,6 +1298,9 @@ class ProxyService:
                 reasoning_level=reasoning_level,
                 request_body_json=request_body_json,
                 message=message,
+                error_type=ProxyService._error_type_from_status(status_code),
+                error_code=ProxyService._error_code_from_detail(detail),
+                retryable=ProxyService._is_retryable_status(status_code),
                 **ProxyService._build_api_client_log_kwargs(api_client_auth, auth_result="authenticated"),
                 trace=trace,
                 attempt_count=attempt_count,
@@ -937,13 +1313,19 @@ class ProxyService:
         LogService.create_log(
             db,
             log_type=log_type,
+            trace_id=trace_id,
             model_name=model_name,
             requested_model=requested_model,
+            tenant_name=api_client_auth.api_client_key.tenant_name if api_client_auth else None,
+            project_name=api_client_auth.api_client_key.project_name if api_client_auth else None,
+            app_name=api_client_auth.api_client_key.app_name if api_client_auth else None,
+            environment_name=api_client_auth.api_client_key.environment_name if api_client_auth else None,
             request_id=request_id,
             conversation_key=conversation_key,
             session_id=session_id,
             resolved_provider_model_id=resolved_provider_model_id,
             request_path=f"/v1{endpoint_path}",
+            source_ip=source_ip,
             http_method="POST",
             is_stream=is_stream,
             has_image=has_image,
@@ -952,6 +1334,9 @@ class ProxyService:
             reasoning_level=reasoning_level,
             request_body_json=request_body_json,
             message="All providers failed",
+            error_type="server_error",
+            error_code="all_providers_failed",
+            retryable=True,
             **ProxyService._build_api_client_log_kwargs(api_client_auth, auth_result="authenticated"),
             trace=trace,
             attempt_count=attempt_count,
@@ -1239,13 +1624,7 @@ class ProxyService:
         limit_bytes: int,
     ) -> tuple[int, str | None, dict[str, int | None]]:
         event_buffer.extend(chunk)
-        while True:
-            separator_index = event_buffer.find(b"\n\n")
-            if separator_index < 0:
-                break
-            raw_event = bytes(event_buffer[:separator_index])
-            del event_buffer[: separator_index + 2]
-            event_text = raw_event.decode("utf-8", errors="ignore")
+        for event_text in ProxyService._consume_sse_event_texts(event_buffer):
             for line in event_text.splitlines():
                 line = line.strip()
                 if not line.startswith("data:"):
@@ -1275,6 +1654,25 @@ class ProxyService:
                     if delta_text and token_response_parts is not None:
                         token_response_parts.append(delta_text)
         return response_text_bytes, finish_reason, usage_info
+
+    @staticmethod
+    def _consume_sse_event_texts(event_buffer: bytearray) -> list[str]:
+        events: list[str] = []
+        while True:
+            separator_length = 0
+            separator_index = event_buffer.find(b"\r\n\r\n")
+            if separator_index >= 0:
+                separator_length = 4
+            else:
+                separator_index = event_buffer.find(b"\n\n")
+                if separator_index >= 0:
+                    separator_length = 2
+            if separator_index < 0:
+                break
+            raw_event = bytes(event_buffer[:separator_index])
+            del event_buffer[: separator_index + separator_length]
+            events.append(raw_event.decode("utf-8", errors="ignore"))
+        return events
 
     @staticmethod
     def _append_limited_text(parts: list[str], value: str, *, current_bytes: int, limit_bytes: int) -> int:
@@ -1322,6 +1720,8 @@ class ProxyService:
             ),
             "api_client_auth_result": auth_result,
             "api_client_remaining_tokens": remaining_tokens if remaining_tokens is not None else api_client_auth.remaining_tokens,
+            "api_client_remaining_requests_daily": api_client_auth.remaining_requests_daily,
+            "api_client_remaining_cost_daily": api_client_auth.remaining_cost_daily,
             "api_client_policy_snapshot_json": api_client_auth.policy_snapshot_json,
         }
 
@@ -1340,12 +1740,58 @@ class ProxyService:
         db: Session,
         *,
         route_context: RoutePolicyContext | None = None,
+        api_client_auth: ApiClientAuthContext | None = None,
     ) -> dict[str, Any]:
+        setting = SettingService.get_or_create(db)
+        cache_key = "v1-models|" + "|".join(
+            [
+                ",".join(str(item) for item in (route_context.allowed_provider_ids or [])) if route_context else "",
+                ",".join(str(item) for item in (route_context.preferred_provider_ids or [])) if route_context else "",
+                ",".join(route_context.preferred_region_tags or []) if route_context else "",
+                ",".join(
+                    str(item)
+                    for item in (
+                        safeJsonParse(api_client_auth.api_client_key.allowed_model_names_json)
+                        if api_client_auth is not None
+                        else []
+                    )
+                    or []
+                ),
+            ]
+        )
+        cached = CacheService.get(cache_key)
+        if cached is not None:
+            return cached
         model_set = {
             candidate.provider_model.model_name
             for candidate in RouterService.get_available_candidates(db, route_context=route_context)
+            if api_client_auth is None or ApiKeyService.is_model_allowed(api_client_auth.api_client_key, candidate.provider_model.model_name)
         }
-        return {
+        payload = {
             "object": "list",
             "data": [{"id": model_name, "object": "model", "owned_by": "aotu-gpt", "permission": []} for model_name in sorted(model_set)],
         }
+        return CacheService.set(cache_key, payload, ttl_seconds=max(0, int(setting.model_list_cache_ttl_sec)))
+
+    @staticmethod
+    def _error_type_from_status(status_code: int) -> str:
+        if status_code in {401, 403}:
+            return "authentication_error"
+        if status_code == 429:
+            return "rate_limit_error"
+        if status_code >= 500:
+            return "server_error"
+        return "invalid_request_error"
+
+    @staticmethod
+    def _is_retryable_status(status_code: int) -> bool:
+        return status_code in {408, 409, 429} or status_code >= 500
+
+    @staticmethod
+    def _error_code_from_detail(detail: Any) -> str | None:
+        if isinstance(detail, dict):
+            if isinstance(detail.get("code"), str):
+                return detail["code"]
+            if isinstance(detail.get("error"), dict) and isinstance(detail["error"].get("code"), str):
+                return detail["error"]["code"]
+        return None
