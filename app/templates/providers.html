@@ -2,7 +2,7 @@
 {% block content %}
 <section class="hero-panel hero-panel-compact cockpit-hero provider-cockpit-hero">
     <div class="cockpit-hero-copy">
-        <div class="eyebrow">Providers</div>
+        <div class="eyebrow">中转站管理</div>
         <h2>中转站管理</h2>
         <p>管理上游中转地址、模型、优先级与健康状态，作为统一代理的上游资源池。</p>
         <div class="hero-actions">
@@ -14,7 +14,7 @@
         <div class="cockpit-aside-label">渠道脉冲</div>
         <div class="cockpit-aside-value">0</div>
         <div class="cockpit-aside-copy">当前已启用中转站</div>
-        <div class="cockpit-health-bar"><span style="width:0%"></span></div>
+        <div class="cockpit-health-bar"><span class="cockpit-health-fill-empty"></span></div>
         <div class="cockpit-aside-meta">
             <span>模型 0</span>
             <span>支持流式 0</span>
@@ -53,12 +53,39 @@
     </article>
 </section>
 
+<section class="panel-card section-shell">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">对象管理流程</div>
+            <h3>中转站从录入到上线的四个步骤</h3>
+        </div>
+    </div>
+    <div class="stage-grid">
+        <article class="stage-card">
+            <strong>1. 录入基础信息</strong>
+            <span>填写名称、Base URL、密钥、优先级、权重和超时，明确这是哪个上游对象。</span>
+        </article>
+        <article class="stage-card">
+            <strong>2. 绑定模型能力</strong>
+            <span>为该对象挂载模型、能力标记与每百万 token 价格，避免能力声明和价格口径漂移。</span>
+        </article>
+        <article class="stage-card">
+            <strong>3. 做健康与单模型验证</strong>
+            <span>先做单对象、单模型测试，再判断是否放进正式路由池，而不是直接对外放量。</span>
+        </article>
+        <article class="stage-card">
+            <strong>4. 上线后持续巡检</strong>
+            <span>通过健康状态、熔断状态和模型矩阵持续观察对象质量，及时处理退化对象。</span>
+        </article>
+    </div>
+</section>
+
 <section class="provider-command-grid">
     <div class="panel-card section-shell provider-registry-panel">
         <div class="section-subhead">
             <div>
-                <div class="panel-kicker">Registry</div>
-                <h3>中转列表</h3>
+                <div class="panel-kicker">对象目录</div>
+                <h3>中转站对象目录</h3>
             </div>
         </div>
         <div class="table-toolbar provider-toolbar">
@@ -89,7 +116,7 @@
         <div class="panel-card">
             <div class="panel-head">
                 <div>
-                    <div class="panel-kicker">Capability Mix</div>
+                    <div class="panel-kicker">对象画像</div>
                     <h3>模型能力总览</h3>
                 </div>
             </div>
@@ -105,7 +132,7 @@
         <div class="panel-card">
             <div class="panel-head">
                 <div>
-                    <div class="panel-kicker">Registry Notes</div>
+                    <div class="panel-kicker">管理规则</div>
                     <h3>录入与调度提醒</h3>
                 </div>
             </div>
@@ -122,8 +149,8 @@
 <section class="panel-card section-shell provider-model-panel">
     <div class="section-subhead">
         <div>
-            <div class="panel-kicker">Model Matrix</div>
-            <h3>模型管理</h3>
+            <div class="panel-kicker">对象挂载</div>
+            <h3>中转站模型矩阵</h3>
         </div>
     </div>
     <div class="table-shell">
@@ -164,7 +191,7 @@
                 <input class="field-input" id="provider-base-url" placeholder="https://example.com/v1" required>
             </label>
             <label>
-                <span>API Key</span>
+                <span>API 密钥</span>
                 <input class="field-input" id="provider-api-key" placeholder="新增时必填；编辑时留空表示不修改">
             </label>
             <label>

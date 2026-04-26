@@ -1,0 +1,310 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero-panel hero-panel-compact cockpit-hero">
+    <div class="cockpit-hero-copy">
+        <div class="eyebrow">接入控制台</div>
+        <h2>{{ api_key.name }}</h2>
+        <p>这是用户侧最核心的接入控制台。首屏优先处理明文密钥、Base URL、示例请求和健康状态，其余分析、账单和日志放到后面的分区阅读。</p>
+        <div class="hero-actions">
+            <a class="btn btn-ghost interactive-btn" href="/user/api-keys" data-shell-link>返回密钥管理</a>
+            <a class="btn btn-accent interactive-btn" href="/user/self-test?api_key_id={{ api_key.id }}" data-shell-link>用这把密钥自检</a>
+        </div>
+    </div>
+    <div class="cockpit-hero-aside">
+        <div class="cockpit-aside-label">健康状态</div>
+        <div class="cockpit-aside-value">
+            {% if api_key.status == 'active' %}正常可用
+            {% elif api_key.status == 'disabled' %}已禁用
+            {% elif api_key.status == 'expired' %}已过期
+            {% elif api_key.status == 'quota_exhausted' %}额度耗尽
+            {% elif api_key.status == 'cost_quota_exhausted' %}金额额度耗尽
+            {% elif api_key.status == 'balance_exhausted' %}余额耗尽
+            {% elif api_key.status == 'unbound' %}未绑定渠道
+            {% else %}{{ api_key.status }}
+            {% endif %}
+        </div>
+        <div class="cockpit-aside-copy">{{ api_key.key_masked }}</div>
+        <div class="cockpit-health-bar"><span class="{% if api_key.status == 'active' %}cockpit-health-fill-full{% else %}cockpit-health-fill-empty{% endif %}"></span></div>
+        <div class="cockpit-aside-meta">
+            <span>24h 请求 {{ api_key.recent_usage.recent_requests }}</span>
+            <span>24h 失败 {{ api_key.recent_usage.recent_failed_requests }}</span>
+        </div>
+    </div>
+</section>
+
+{% if success_message == 'api_key_rotated' %}
+<section class="panel-card"><div class="auth-success">API Key 已轮换。新明文已写入当前控制台，请立即复制并同步到外部系统。</div></section>
+{% endif %}
+
+<nav class="page-anchor-bar">
+    <a class="page-anchor-link" href="#user-key-console">接入控制台</a>
+    <a class="page-anchor-link" href="#user-key-routing">授权与路由</a>
+    <a class="page-anchor-link" href="#user-key-observability">日志与分析</a>
+    <a class="page-anchor-link" href="#user-key-billing">账单视图</a>
+</nav>
+
+<section class="stats-grid anchor-section-offset">
+    <article class="metric-card"><span>累计 Token</span><strong>{{ api_key.total_tokens_used }}</strong></article>
+    <article class="metric-card"><span>累计费用</span><strong>{{ '%.6f'|format(api_key.total_cost_used or 0) }}</strong></article>
+    <article class="metric-card"><span>共享账户余额</span><strong>{{ '%.6f'|format(api_key.balance_amount) if api_key.balance_amount is not none else '不限' }}</strong></article>
+    <article class="metric-card"><span>24h 请求</span><strong>{{ api_key.recent_usage.recent_requests }}</strong></article>
+    <article class="metric-card"><span>24h 费用</span><strong>{{ '%.6f'|format(api_key.recent_usage.recent_total_cost or 0) }}</strong></article>
+    <article class="metric-card"><span>授权中转站</span><strong>{{ api_key.allowed_providers|length }}</strong></article>
+</section>
+
+<section class="dashboard-command-grid anchor-section-offset" id="user-key-console">
+    <div class="panel-card section-shell">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">接入控制台</div>
+                <h3>先复制，再验证，再正式接入</h3>
+            </div>
+            <form method="post" action="/user/api-keys/{{ api_key.id }}/rotate" onsubmit="return window.confirm('确认轮换该 API Key 吗？轮换后旧密钥会立即失效。');">
+                <button class="btn btn-ghost interactive-btn" type="submit">一键轮换</button>
+            </form>
+        </div>
+        <div class="api-key-chip-grid api-key-chip-grid-wide">
+            <article class="api-key-chip-card">
+                <strong>明文密钥</strong>
+                <span>{% if api_key.raw_api_key %}<code>{{ api_key.raw_api_key }}</code>{% else %}历史密钥未存明文，请先轮换{% endif %}</span>
+                {% if api_key.raw_api_key %}
+                <span><button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="{{ api_key.raw_api_key }}">复制明文</button></span>
+                {% endif %}
+            </article>
+            <article class="api-key-chip-card">
+                <strong>Base URL</strong>
+                <span><code>{{ external_base_url }}</code></span>
+                <span><button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="{{ external_base_url }}">复制基础地址</button></span>
+            </article>
+            <article class="api-key-chip-card">
+                <strong>OpenAI 兼容入口</strong>
+                <span><code>{{ external_base_url }}/v1</code></span>
+                <span><button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="{{ external_base_url }}/v1">复制 /v1 入口</button></span>
+            </article>
+            <article class="api-key-chip-card">
+                <strong>Authorization Header</strong>
+                <span><code>Authorization: Bearer {{ api_key.raw_api_key or '请先轮换当前密钥' }}</code></span>
+                {% if api_key.raw_api_key %}
+                <span><button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="Authorization: Bearer {{ api_key.raw_api_key }}">复制请求头</button></span>
+                {% endif %}
+            </article>
+            <article class="api-key-chip-card form-span-2">
+                <strong>curl 示例</strong>
+                <pre class="code-block">curl {{ external_base_url }}/v1/responses \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer {{ api_key.raw_api_key or 'YOUR_KEY' }}" \
+  -d '{"model":"gpt-4.1-mini","input":"ping"}'</pre>
+            </article>
+            <article class="api-key-chip-card form-span-2">
+                <strong>Python(OpenAI SDK)</strong>
+                <pre class="code-block">from openai import OpenAI
+
+client = OpenAI(
+    base_url="{{ external_base_url }}/v1",
+    api_key="{{ api_key.raw_api_key or 'YOUR_KEY' }}",
+)
+
+resp = client.responses.create(
+    model="gpt-4.1-mini",
+    input="ping",
+)
+print(resp.output_text)</pre>
+            </article>
+        </div>
+    </div>
+
+    <div class="dashboard-command-side">
+        <div class="panel-card">
+            <div class="panel-head">
+                <div>
+                    <div class="panel-kicker">健康判断</div>
+                    <h3>上线前先看这几项</h3>
+                </div>
+            </div>
+            <div class="dashboard-signal-list">
+                <div><span>状态</span><strong>{{ api_key.status }}</strong></div>
+                <div><span>最近窗口</span><strong>{{ api_key.recent_usage.recent_window_hours }} 小时</strong></div>
+                <div><span>最近请求</span><strong>{{ api_key.recent_usage.recent_requests }}</strong></div>
+                <div><span>最近失败</span><strong>{{ api_key.recent_usage.recent_failed_requests }}</strong></div>
+                <div><span>接入建议</span><strong><a href="/user/self-test?api_key_id={{ api_key.id }}" data-shell-link>先发起真实测试</a></strong></div>
+            </div>
+        </div>
+        <div class="panel-card">
+            <div class="panel-head">
+                <div>
+                    <div class="panel-kicker">下一步动作</div>
+                    <h3>推荐顺序</h3>
+                </div>
+            </div>
+            <div class="stage-grid stage-grid-single">
+                <article class="stage-card">
+                    <strong>1. 复制明文和 /v1</strong>
+                    <span>不要手动输入，统一从这里复制到环境变量或第三方客户端。</span>
+                </article>
+                <article class="stage-card">
+                    <strong>2. 立即自检</strong>
+                    <span>用本页这把密钥真实发起一次请求，确认候选中转站和模型授权没问题。</span>
+                </article>
+                <article class="stage-card">
+                    <strong>3. 看日志与账单</strong>
+                    <span>若上线后延迟高或费用异常，再回来核对最近日志和账单。</span>
+                </article>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="dashboard-command-grid anchor-section-offset" id="user-key-routing">
+    <div class="panel-card section-shell">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">授权与路由</div>
+                <h3>当前可用范围</h3>
+            </div>
+        </div>
+        <div class="api-key-chip-grid">
+            <article class="api-key-chip-card">
+                <strong>路由模式</strong>
+                <span>{{ api_key.route_mode }}</span>
+                <span>手动回退：{{ '开启' if api_key.manual_allow_fallback else '关闭' }}</span>
+            </article>
+            <article class="api-key-chip-card">
+                <strong>默认中转站</strong>
+                <span>{{ api_key.default_provider_id or '未指定' }}</span>
+                <span>未指定时按当前路由规则选择候选线路</span>
+            </article>
+            <article class="api-key-chip-card">
+                <strong>授权中转站</strong>
+                <span>{{ api_key.allowed_providers|length }} 个</span>
+                <span>{{ api_key.allowed_providers | map(attribute='name') | join('、') if api_key.allowed_providers else '未授权' }}</span>
+            </article>
+            <article class="api-key-chip-card">
+                <strong>剩余 Token</strong>
+                <span>{{ api_key.remaining_tokens if api_key.remaining_tokens is not none else '不限' }}</span>
+                <span>累计 Token {{ api_key.total_tokens_used }}</span>
+            </article>
+            <article class="api-key-chip-card">
+                <strong>共享账户余额</strong>
+                <span>{{ '%.6f'|format(api_key.balance_amount) if api_key.balance_amount is not none else '不限' }}</span>
+                <span>费用口径统一以账户共享金额池为准</span>
+            </article>
+            <article class="api-key-chip-card">
+                <strong>最近费用</strong>
+                <span>24h {{ '%.6f'|format(api_key.recent_usage.recent_total_cost or 0) }}</span>
+                <span>累计 {{ '%.6f'|format(api_key.total_cost_used or 0) }}</span>
+            </article>
+        </div>
+    </div>
+
+    <div class="dashboard-command-side">
+        <div class="panel-card">
+            <div class="panel-head">
+                <div>
+                    <div class="panel-kicker">模型分布</div>
+                    <h3>最近命中模型</h3>
+                </div>
+            </div>
+            <div class="dashboard-signal-list">
+                {% for item in analytics.model_distribution %}
+                <div><span>{{ item.model_name }}</span><strong>{{ item.total_requests }} 次 / {{ item.total_tokens }} tokens</strong></div>
+                {% else %}
+                <div><span>暂无数据</span><strong>-</strong></div>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="dashboard-command-grid anchor-section-offset" id="user-key-observability">
+    <div class="panel-card section-shell">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">日志与分析</div>
+                <h3>最近调用</h3>
+            </div>
+        </div>
+        <div class="table-shell">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>时间</th>
+                        <th>模型</th>
+                        <th>渠道</th>
+                        <th>结果</th>
+                        <th>Tokens</th>
+                        <th>详情</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for item in recent_logs %}
+                    <tr>
+                        <td>{{ item.created_at }}</td>
+                        <td>{{ item.requested_model or item.model_name or '-' }}</td>
+                        <td>{{ item.provider_name or '-' }}</td>
+                        <td>{{ '成功' if item.success else '失败' }}</td>
+                        <td>{{ item.total_tokens or 0 }}</td>
+                        <td><a href="/user/logs/{{ item.id }}" data-shell-link>查看日志</a></td>
+                    </tr>
+                    {% else %}
+                    <tr><td colspan="6"><div class="empty-state">暂无调用记录。</div></td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="dashboard-command-side">
+        <div class="panel-card section-shell">
+            <div class="section-subhead">
+                <div>
+                    <div class="panel-kicker">最近错误</div>
+                    <h3>错误提示</h3>
+                </div>
+            </div>
+            <div class="dashboard-signal-list">
+                {% for item in analytics.recent_errors %}
+                <div><span>{{ item.created_at }}</span><strong>{{ item.model_name or '-' }} / {{ item.status_code or '-' }}</strong></div>
+                {% else %}
+                <div><span>暂无错误</span><strong>-</strong></div>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="panel-card section-shell anchor-section-offset" id="user-key-billing">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">账单视图</div>
+            <h3>最近账单记录</h3>
+        </div>
+        <a class="btn btn-ghost interactive-btn" href="/user/billing" data-shell-link>打开完整账单页</a>
+    </div>
+    <div class="table-shell">
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>时间</th>
+                    <th>类型</th>
+                    <th>金额</th>
+                    <th>余额后</th>
+                    <th>备注</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for item in billing_summary.items %}
+                <tr>
+                    <td>{{ item.created_at }}</td>
+                    <td>{{ item.record_type }}</td>
+                    <td>{{ '%.6f'|format(item.amount) }}</td>
+                    <td>{{ '%.6f'|format(item.balance_after or 0) if item.balance_after is not none else '-' }}</td>
+                    <td>{{ item.remark or '-' }}</td>
+                </tr>
+                {% else %}
+                <tr><td colspan="5"><div class="empty-state">暂无账单记录。</div></td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

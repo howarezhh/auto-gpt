@@ -1,0 +1,177 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero-panel hero-panel-compact cockpit-hero">
+    <div class="cockpit-hero-copy">
+        <div class="eyebrow">操作审计</div>
+        <h2>操作审计日志</h2>
+        <p>集中追踪后台关键变更，包括账号治理、密钥维护、模型配置和系统设置调整。</p>
+    </div>
+    <div class="cockpit-hero-aside">
+        <div class="cockpit-aside-label">审计记录</div>
+        <div class="cockpit-aside-value">{{ pagination.total }}</div>
+        <div class="cockpit-aside-copy">当前筛选命中的审计事件数</div>
+        <div class="cockpit-health-bar"><span class="cockpit-health-fill-full"></span></div>
+        <div class="cockpit-aside-meta">
+            <span>动作 {{ filter_options.actions|length }}</span>
+            <span>对象 {{ filter_options.entity_types|length }}</span>
+        </div>
+    </div>
+</section>
+
+<section class="panel-card section-shell">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">筛选条件</div>
+            <h3>筛选条件</h3>
+        </div>
+    </div>
+    <form class="filter-grid" method="get" action="/audit-logs">
+        <label>
+            <span>关键词</span>
+            <input class="field-input" name="keyword" value="{{ filters.keyword }}" placeholder="操作者 / 对象 / 摘要 / 实体 ID">
+        </label>
+        <label>
+            <span>动作</span>
+            <select class="field-input" name="action">
+                <option value="">全部</option>
+                {% for item in filter_options.actions %}
+                <option value="{{ item }}" {% if filters.action == item %}selected{% endif %}>{{ item }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <label>
+            <span>对象类型</span>
+            <select class="field-input" name="entity_type">
+                <option value="">全部</option>
+                {% for item in filter_options.entity_types %}
+                <option value="{{ item }}" {% if filters.entity_type == item %}selected{% endif %}>{{ item }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <label>
+            <span>每页数量</span>
+            <select class="field-input" name="page_size">
+                {% for size in [10,20,50,100] %}
+                <option value="{{ size }}" {% if pagination.page_size == size %}selected{% endif %}>{{ size }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <div class="form-actions">
+            <button class="btn btn-accent" type="submit">查询</button>
+        </div>
+    </form>
+</section>
+
+<section class="panel-card section-shell">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">处理建议</div>
+            <h3>审计优先看这三类事件</h3>
+        </div>
+    </div>
+    <div class="risk-grid">
+        <article class="risk-card" data-level="danger">
+            <strong>高优先级</strong>
+            <span>删除、禁用、调账、额度策略修改等写操作优先复核，避免直接影响正式流量和账户资产。</span>
+        </article>
+        <article class="risk-card" data-level="warning">
+            <strong>中优先级</strong>
+            <span>创建、更新、授权变更等操作需要确认操作者、对象和摘要是否与计划一致。</span>
+        </article>
+        <article class="risk-card" data-level="default">
+            <strong>低优先级</strong>
+            <span>纯查询和低影响维护动作可保留追踪，但通常无需立即处置。</span>
+        </article>
+    </div>
+</section>
+
+<section class="panel-card section-shell">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">审计时间线</div>
+            <h3>审计明细</h3>
+        </div>
+    </div>
+    <div class="table-shell">
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>时间</th>
+                    <th>操作者</th>
+                    <th>优先级</th>
+                    <th>动作</th>
+                    <th>对象</th>
+                    <th>摘要</th>
+                    <th>建议</th>
+                    <th>详情</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% if logs %}
+                    {% for item in logs %}
+                    {% set action_text = (item.action or '')|lower %}
+                    <tr>
+                        <td>{{ item.created_at }}</td>
+                        <td>
+                            <div>{{ item.actor_username or '-' }}</div>
+                            <div class="table-muted">{{ item.actor_user_id or '-' }}</div>
+                        </td>
+                        <td>
+                            {% if 'delete' in action_text or 'disable' in action_text or 'quota' in action_text or 'balance' in action_text %}
+                            高
+                            {% elif 'create' in action_text or 'update' in action_text or 'enable' in action_text %}
+                            中
+                            {% else %}
+                            低
+                            {% endif %}
+                        </td>
+                        <td>{{ item.action }}</td>
+                        <td>
+                            <div>{{ item.entity_type }}</div>
+                            <div class="table-muted">{{ item.entity_name or '-' }}{% if item.entity_id %} · {{ item.entity_id }}{% endif %}</div>
+                        </td>
+                        <td>{{ item.summary }}</td>
+                        <td>
+                            {% if 'delete' in action_text %}
+                            复核是否误删，并确认是否需要恢复。
+                            {% elif 'disable' in action_text %}
+                            确认禁用原因和影响范围。
+                            {% elif 'balance' in action_text or 'quota' in action_text %}
+                            核对调账或配额口径，避免治理误伤。
+                            {% elif 'create' in action_text or 'update' in action_text %}
+                            检查新配置是否已同步到相关对象。
+                            {% else %}
+                            保留追踪即可。
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if item.detail_json %}
+                            <details>
+                                <summary>查看</summary>
+                                <pre class="code-block code-block-inline">{{ serialize_audit_detail(item.detail_json) }}</pre>
+                            </details>
+                            {% else %}
+                            -
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                {% else %}
+                    <tr><td colspan="8"><div class="empty-state">暂无符合条件的审计记录。</div></td></tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </div>
+    <div class="logs-pagination-bar topbar-actions">
+        <div class="logs-page-meta">第 {{ pagination.page }} / {{ pagination.total_pages }} 页，共 {{ pagination.total }} 条</div>
+        <div class="logs-page-actions">
+            {% if pagination.has_prev %}
+            <a class="topbar-btn" href="/audit-logs?keyword={{ filters.keyword | urlencode }}&action={{ filters.action | urlencode }}&entity_type={{ filters.entity_type | urlencode }}&page_size={{ pagination.page_size }}&page={{ pagination.prev_page }}" data-shell-link>上一页</a>
+            {% endif %}
+            {% if pagination.has_next %}
+            <a class="topbar-btn" href="/audit-logs?keyword={{ filters.keyword | urlencode }}&action={{ filters.action | urlencode }}&entity_type={{ filters.entity_type | urlencode }}&page_size={{ pagination.page_size }}&page={{ pagination.next_page }}" data-shell-link>下一页</a>
+            {% endif %}
+        </div>
+    </div>
+</section>
+{% endblock %}

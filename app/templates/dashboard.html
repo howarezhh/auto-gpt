@@ -5,7 +5,7 @@
 {% block content %}
 <section class="hero-panel hero-panel-compact cockpit-hero">
     <div class="cockpit-hero-copy">
-        <div class="eyebrow">Overview</div>
+        <div class="eyebrow">运行总览</div>
         <h2>概览</h2>
         <p>统一查看中转状态、路由配置、健康巡检与最近代理使用概况。</p>
         <div class="hero-actions">
@@ -37,10 +37,6 @@
         <strong data-stat="healthy_count">{{ stats.healthy_count }}</strong>
     </article>
     <article class="metric-card">
-        <span>降级中转站</span>
-        <strong data-stat="degraded_count">{{ stats.degraded_count or 0 }}</strong>
-    </article>
-    <article class="metric-card">
         <span>异常中转站</span>
         <strong data-stat="unhealthy_count">{{ stats.unhealthy_count or 0 }}</strong>
     </article>
@@ -64,30 +60,6 @@
         <span>API 密钥总数</span>
         <strong data-stat="api_key_total">{{ stats.api_key_total or 0 }}</strong>
     </article>
-    <article class="metric-card">
-        <span>API 密钥启用中</span>
-        <strong data-stat="api_key_enabled">{{ stats.api_key_enabled or 0 }}</strong>
-    </article>
-    <article class="metric-card">
-        <span>API 密钥禁用中</span>
-        <strong data-stat="api_key_disabled">{{ stats.api_key_disabled or 0 }}</strong>
-    </article>
-    <article class="metric-card">
-        <span>API Key 总请求量</span>
-        <strong data-stat="api_key_total_requests">{{ stats.api_key_total_requests or 0 }}</strong>
-    </article>
-    <article class="metric-card">
-        <span>API Key 输入 Token</span>
-        <strong data-stat="api_key_total_prompt_tokens">{{ stats.api_key_total_prompt_tokens or 0 }}</strong>
-    </article>
-    <article class="metric-card">
-        <span>API Key 输出 Token</span>
-        <strong data-stat="api_key_total_completion_tokens">{{ stats.api_key_total_completion_tokens or 0 }}</strong>
-    </article>
-    <article class="metric-card">
-        <span>API Key 总 Token</span>
-        <strong data-stat="api_key_total_tokens">{{ stats.api_key_total_tokens or 0 }}</strong>
-    </article>
     <article class="metric-card metric-card-alert">
         <span>24h 失败率</span>
         <strong data-stat="recent_failure_rate">{{ stats.recent_failure_rate or 0 }}%</strong>
@@ -98,11 +70,44 @@
     </article>
 </section>
 
+<section class="panel-card section-shell">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">二级指标</div>
+            <h3>密钥口径与稳定性补充</h3>
+        </div>
+    </div>
+    <div class="section-split-2">
+        <div class="summary-list-card">
+            <div class="panel-kicker">密钥运行</div>
+            <h4>API 密钥运行口径</h4>
+            <div class="detail-list">
+                <div><span>启用中</span><strong data-stat="api_key_enabled">{{ stats.api_key_enabled or 0 }}</strong></div>
+                <div><span>禁用中</span><strong data-stat="api_key_disabled">{{ stats.api_key_disabled or 0 }}</strong></div>
+                <div><span>总请求量</span><strong data-stat="api_key_total_requests">{{ stats.api_key_total_requests or 0 }}</strong></div>
+                <div><span>输入 Token</span><strong data-stat="api_key_total_prompt_tokens">{{ stats.api_key_total_prompt_tokens or 0 }}</strong></div>
+                <div><span>输出 Token</span><strong data-stat="api_key_total_completion_tokens">{{ stats.api_key_total_completion_tokens or 0 }}</strong></div>
+                <div><span>总 Token</span><strong data-stat="api_key_total_tokens">{{ stats.api_key_total_tokens or 0 }}</strong></div>
+            </div>
+        </div>
+        <div class="summary-list-card">
+            <div class="panel-kicker">稳定性补充</div>
+            <h4>健康与退化补充</h4>
+            <div class="detail-list">
+                <div><span>降级中转站</span><strong data-stat="degraded_count">{{ stats.degraded_count or 0 }}</strong></div>
+                <div><span>健康模型</span><strong>{{ stats.healthy_model_count or 0 }}</strong></div>
+                <div><span>降级模型</span><strong>{{ stats.degraded_model_count or 0 }}</strong></div>
+                <div><span>异常模型</span><strong>{{ stats.unhealthy_model_count or 0 }}</strong></div>
+            </div>
+        </div>
+    </div>
+</section>
+
 <section class="dashboard-command-grid">
     <div class="panel-card dashboard-command-main">
         <div class="panel-head">
             <div>
-                <div class="panel-kicker">Provider Radar</div>
+                <div class="panel-kicker">中转概览</div>
                 <h3>中转状态矩阵</h3>
             </div>
             <a class="btn btn-ghost btn-sm interactive-btn" href="/providers">查看全部</a>
@@ -135,7 +140,7 @@
         <div class="panel-card">
             <div class="panel-head">
                 <div>
-                    <div class="panel-kicker">Routing</div>
+                    <div class="panel-kicker">路由配置</div>
                     <h3>当前路由配置</h3>
                 </div>
             </div>
@@ -153,7 +158,7 @@
         <div class="panel-card">
             <div class="panel-head">
                 <div>
-                    <div class="panel-kicker">Capture Profile</div>
+                    <div class="panel-kicker">留痕策略</div>
                     <h3>采集与留痕</h3>
                 </div>
             </div>
@@ -168,7 +173,7 @@
         <div class="panel-card">
             <div class="panel-head">
                 <div>
-                    <div class="panel-kicker">Quick Actions</div>
+                    <div class="panel-kicker">快捷入口</div>
                     <h3>快捷入口</h3>
                 </div>
             </div>
@@ -186,7 +191,7 @@
 <section class="panel-card section-shell">
     <div class="panel-head">
         <div>
-            <div class="panel-kicker">Traffic Metrics</div>
+            <div class="panel-kicker">流量指标</div>
             <h3>最近 60 分钟模型流量统计</h3>
         </div>
     </div>
@@ -216,7 +221,7 @@
 <section class="panel-card section-shell">
     <div class="panel-head">
         <div>
-            <div class="panel-kicker">Time Series</div>
+            <div class="panel-kicker">时间序列</div>
             <h3>最近 3 小时流量时间序列</h3>
         </div>
     </div>

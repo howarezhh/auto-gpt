@@ -5,7 +5,7 @@
         userRole: document.body.dataset.userRole || "",
     };
     const PUBLIC_ROUTE_PREFIXES = ["/login", "/register", "/setup-admin"];
-    const ADMIN_ROUTE_PREFIXES = ["/providers", "/settings", "/playground", "/docs", "/api-keys", "/logs", "/conversations", "/users"];
+    const ADMIN_ROUTE_PREFIXES = ["/providers", "/settings", "/playground", "/docs", "/api-keys", "/logs", "/alerts", "/conversations", "/users", "/audit-logs"];
 
     const ROUTE_MODE_LABELS = {
         manual: "手动优先",
@@ -139,6 +139,31 @@
         } catch {
             return null;
         }
+    }
+
+    function syncResponsiveTableLabels(scope = document) {
+        const tables = scope.querySelectorAll(".table-shell table, .table-responsive table");
+        tables.forEach((table) => {
+            const headers = Array.from(table.querySelectorAll("thead th")).map((cell) => cell.textContent.replace(/\s+/g, " ").trim());
+            if (!headers.length) return;
+            table.querySelectorAll("tbody tr").forEach((row) => {
+                const cells = Array.from(row.querySelectorAll("td"));
+                cells.forEach((cell, index) => {
+                    cell.dataset.label = headers[index] || "";
+                });
+            });
+        });
+    }
+
+    let responsiveTableSyncHandle = 0;
+    function scheduleResponsiveTableSync(scope = document) {
+        if (responsiveTableSyncHandle) {
+            window.cancelAnimationFrame(responsiveTableSyncHandle);
+        }
+        responsiveTableSyncHandle = window.requestAnimationFrame(() => {
+            responsiveTableSyncHandle = 0;
+            syncResponsiveTableLabels(scope);
+        });
     }
 
     function showToast(message, type = "success") {
@@ -870,6 +895,75 @@
         }
     }
 
+    function formatCodeValue(value) {
+        if (value == null || value === "") return "-";
+        if (typeof value === "string") {
+            const parsed = safeJsonParse(value);
+            if (parsed !== null) {
+                return JSON.stringify(parsed, null, 2);
+            }
+            return value;
+        }
+        return JSON.stringify(value, null, 2);
+    }
+
+    function renderTrendChart(container) {
+        if (!container) return;
+        const trend = safeJsonParse(container.dataset.trend || "[]");
+        if (!Array.isArray(trend) || !trend.length) {
+            container.innerHTML = '<div class="empty-state">暂无趋势数据</div>';
+            return;
+        }
+        const width = 560;
+        const height = 220;
+        const paddingX = 28;
+        const paddingTop = 18;
+        const paddingBottom = 40;
+        const chartHeight = height - paddingTop - paddingBottom;
+        const chartWidth = width - paddingX * 2;
+        const maxRequests = Math.max(1, ...trend.map((item) => Number(item.requests || 0)));
+        const maxCost = Math.max(1, ...trend.map((item) => Number(item.cost || 0)));
+        const step = trend.length > 1 ? chartWidth / (trend.length - 1) : chartWidth;
+        const barWidth = Math.max(18, Math.min(44, chartWidth / Math.max(trend.length * 1.4, 1)));
+        const linePoints = trend.map((item, index) => {
+            const x = paddingX + index * step;
+            const y = paddingTop + chartHeight - (Number(item.cost || 0) / maxCost) * chartHeight;
+            return `${x},${y}`;
+        }).join(" ");
+        const bars = trend.map((item, index) => {
+            const x = paddingX + index * step - barWidth / 2;
+            const barHeight = (Number(item.requests || 0) / maxRequests) * chartHeight;
+            const y = paddingTop + chartHeight - barHeight;
+            return `<rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${barWidth.toFixed(2)}" height="${Math.max(barHeight, 4).toFixed(2)}" rx="10" fill="rgba(24, 119, 242, 0.18)" stroke="rgba(24, 119, 242, 0.6)"></rect>`;
+        }).join("");
+        const labels = trend.map((item, index) => {
+            const x = paddingX + index * step;
+            return `<text x="${x.toFixed(2)}" y="${(height - 12).toFixed(2)}" text-anchor="middle" fill="#6b7280" font-size="12">${escapeHtml(item.label || "-")}</text>`;
+        }).join("");
+        const nodes = trend.map((item, index) => {
+            const x = paddingX + index * step;
+            const y = paddingTop + chartHeight - (Number(item.cost || 0) / maxCost) * chartHeight;
+            return `<circle cx="${x.toFixed(2)}" cy="${y.toFixed(2)}" r="4" fill="#0f172a"></circle>`;
+        }).join("");
+        const totalRequests = trend.reduce((sum, item) => sum + Number(item.requests || 0), 0);
+        const totalTokens = trend.reduce((sum, item) => sum + Number(item.tokens || 0), 0);
+        const totalCost = trend.reduce((sum, item) => sum + Number(item.cost || 0), 0);
+        container.innerHTML = `
+            <div class="dashboard-signal-list">
+                <div><span>总请求</span><strong>${formatNumber(totalRequests)}</strong></div>
+                <div><span>总 Tokens</span><strong>${formatNumber(totalTokens)}</strong></div>
+                <div><span>总费用</span><strong>${formatMoney(totalCost)}</strong></div>
+            </div>
+            <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="使用趋势图">
+                <line x1="${paddingX}" y1="${paddingTop + chartHeight}" x2="${width - paddingX}" y2="${paddingTop + chartHeight}" stroke="rgba(148,163,184,0.45)"></line>
+                ${bars}
+                <polyline points="${linePoints}" fill="none" stroke="#0f172a" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></polyline>
+                ${nodes}
+                ${labels}
+            </svg>
+        `;
+    }
+
     function formatStatusText(finishReason) {
         if (!finishReason) return "已返回结果";
         const mapping = {
@@ -1124,6 +1218,23 @@
         `;
     }
 
+    function readProxyProviderName(headers) {
+        const rawValue = headers.get("X-Proxy-Provider-Name");
+        if (!rawValue) {
+            return "-";
+        }
+        const encoding = headers.get("X-Proxy-Provider-Name-Encoding");
+        if (encoding !== "utf-8-percent-encoded") {
+            return rawValue;
+        }
+        try {
+            return decodeURIComponent(rawValue);
+        } catch (error) {
+            console.warn("Failed to decode X-Proxy-Provider-Name header", error);
+            return rawValue;
+        }
+    }
+
     async function readStreamingResponse(response, payload, meta) {
         if (!response.body) {
             throw new Error("当前浏览器不支持流式读取响应");
@@ -1133,7 +1244,7 @@
             isStream: true,
             model: payload.model,
             endpointLabel: payload.endpointLabel,
-            providerName: response.headers.get("X-Proxy-Provider-Name") || "-",
+            providerName: readProxyProviderName(response.headers),
             latencyMs: response.headers.get("X-Proxy-Latency-Ms") || "-",
         };
         const reader = response.body.getReader();
@@ -1897,6 +2008,7 @@
                     <td>
                         <div class="table-actions">
                             <button class="table-action-btn" data-action="edit" data-model-name="${escapeHtml(item.model_name)}">编辑</button>
+                            <button class="table-action-btn" data-action="delete" data-model-name="${escapeHtml(item.model_name)}">删除</button>
                         </div>
                     </td>
                 </tr>
@@ -1917,7 +2029,7 @@
                 price_multiplier: 1,
             }));
             bindingBody.innerHTML = rows.map((item) => `
-                <tr data-provider-id="${item.provider_id}">
+                <tr data-provider-id="${item.provider_id}" data-initial-bound="${item.bound ? "true" : "false"}" data-bound-touched="false">
                     <td><input type="checkbox" data-binding-field="bound" ${item.bound ? "checked" : ""}></td>
                     <td>
                         <strong>${escapeHtml(item.provider_name)}</strong>
@@ -1983,15 +2095,21 @@
             nameInput.disabled = false;
         }
 
-        function collectBindings() {
-            return Array.from(bindingBody.querySelectorAll("tr")).map((row) => ({
-                provider_id: Number(row.dataset.providerId),
-                bound: row.querySelector('input[data-binding-field="bound"]').checked,
-                enabled: row.querySelector('input[data-binding-field="enabled"]').checked,
-                price_multiplier: Number(row.querySelector('input[data-binding-field="price_multiplier"]').value || 1),
-                priority: Number(row.querySelector('input[data-binding-field="priority"]').value || 100),
-                weight: Number(row.querySelector('input[data-binding-field="weight"]').value || 100),
-            }));
+        function collectBindings({ isEditing = false } = {}) {
+            return Array.from(bindingBody.querySelectorAll("tr")).map((row) => {
+                const initialBound = row.dataset.initialBound === "true";
+                const boundTouched = row.dataset.boundTouched === "true";
+                const requestedBound = row.querySelector('input[data-binding-field="bound"]').checked;
+                const effectiveBound = isEditing && !initialBound && requestedBound && !boundTouched ? false : requestedBound;
+                return {
+                    provider_id: Number(row.dataset.providerId),
+                    bound: effectiveBound,
+                    enabled: row.querySelector('input[data-binding-field="enabled"]').checked,
+                    price_multiplier: Number(row.querySelector('input[data-binding-field="price_multiplier"]').value || 1),
+                    priority: Number(row.querySelector('input[data-binding-field="priority"]').value || 100),
+                    weight: Number(row.querySelector('input[data-binding-field="weight"]').value || 100),
+                };
+            });
         }
 
         async function loadData({ silent = false } = {}) {
@@ -2004,8 +2122,21 @@
         }
 
         tableBody.addEventListener("click", async (event) => {
-            const button = event.target.closest("[data-action='edit']");
+            const button = event.target.closest("[data-action]");
             if (!button) return;
+            if (button.dataset.action === "delete") {
+                if (!window.confirm(`确认删除模型 ${button.dataset.modelName} 吗？相关渠道绑定也会一并移除。`)) {
+                    return;
+                }
+                try {
+                    await api.delete(`/api/models/${encodeURIComponent(button.dataset.modelName)}`);
+                    showToast("模型已删除");
+                    await loadData({ silent: true });
+                } catch (error) {
+                    showToast(error.message, "error");
+                }
+                return;
+            }
             try {
                 const detail = await api.get(`/api/models/${encodeURIComponent(button.dataset.modelName)}`);
                 openModal(detail);
@@ -2015,7 +2146,15 @@
         });
 
         bindingBody.addEventListener("input", refreshBindingRows);
-        bindingBody.addEventListener("change", refreshBindingRows);
+        bindingBody.addEventListener("change", (event) => {
+            if (event.target.matches('input[data-binding-field="bound"]')) {
+                const row = event.target.closest("tr");
+                if (row) {
+                    row.dataset.boundTouched = "true";
+                }
+            }
+            refreshBindingRows();
+        });
         inputPriceInput.addEventListener("input", refreshBindingRows);
         outputPriceInput.addEventListener("input", refreshBindingRows);
 
@@ -2028,7 +2167,7 @@
                 output_price_per_1k: outputPriceInput.value === "" ? null : toPricePer1K(Number(outputPriceInput.value)),
                 speed_label: speedLabelInput.value.trim() || null,
                 remark: remarkInput.value.trim() || null,
-                provider_bindings: collectBindings(),
+                provider_bindings: collectBindings({ isEditing: Boolean(state.editingModelName) }),
             };
             if (!state.editingModelName) {
                 payload.model_name = nameInput.value.trim();
@@ -2100,6 +2239,8 @@
         document.getElementById("setting-enable-stream-response-persist").checked = settings.enable_stream_response_persist;
         document.getElementById("setting-mask-sensitive-fields").checked = settings.mask_sensitive_fields;
         document.getElementById("setting-allow-public-user-registration").checked = settings.allow_public_user_registration;
+        document.getElementById("setting-request-log-retention-days").value = settings.request_log_retention_days;
+        document.getElementById("setting-admin-audit-log-retention-days").value = settings.admin_audit_log_retention_days;
 
         const refreshRouteGuide = () => {
             renderRoutePolicyGuide({
@@ -2133,6 +2274,8 @@
                 mask_sensitive_fields: document.getElementById("setting-mask-sensitive-fields").checked,
                 max_logged_body_bytes: Number(document.getElementById("setting-max-logged-body-bytes").value),
                 allow_public_user_registration: document.getElementById("setting-allow-public-user-registration").checked,
+                request_log_retention_days: Number(document.getElementById("setting-request-log-retention-days").value),
+                admin_audit_log_retention_days: Number(document.getElementById("setting-admin-audit-log-retention-days").value),
             };
             try {
                 setButtonLoading(submitBtn, true);
@@ -2422,7 +2565,7 @@
                     showPlaygroundRendered(renderPlaygroundResponse(data, {
                         isStream: false,
                         model: payload.model,
-                        providerName: response.headers.get("X-Proxy-Provider-Name") || "-",
+                        providerName: readProxyProviderName(response.headers),
                         latencyMs: response.headers.get("X-Proxy-Latency-Ms") || "-",
                     }));
                 }
@@ -2532,6 +2675,477 @@
         });
     }
 
+    async function initUserHome() {
+        renderTrendChart(document.getElementById("user-home-trend-chart"));
+        const helperShell = document.getElementById("user-home-helper-shell");
+        const keySelect = document.getElementById("user-helper-key-select");
+        const modelSelect = document.getElementById("user-helper-model-select");
+        const headerValue = document.getElementById("user-helper-header-value");
+        const providerValue = document.getElementById("user-helper-provider-value");
+        const curlBlock = document.getElementById("user-helper-curl-block");
+        const pythonBlock = document.getElementById("user-helper-python-block");
+        const copyHeaderBtn = document.getElementById("user-helper-copy-header-btn");
+        if (!helperShell || !keySelect || !modelSelect || !headerValue || !providerValue || !curlBlock || !pythonBlock || !copyHeaderBtn) {
+            return;
+        }
+        const profiles = safeJsonParse(helperShell.dataset.integrationProfiles || "[]");
+        const baseUrl = `${window.location.origin}/v1`;
+        if (!Array.isArray(profiles) || !profiles.length) {
+            headerValue.textContent = "当前没有可回显明文的 API Key";
+            providerValue.textContent = "-";
+            curlBlock.textContent = "当前没有可生成示例的 API Key";
+            pythonBlock.textContent = "当前没有可生成示例的 API Key";
+            copyHeaderBtn.disabled = true;
+            return;
+        }
+        const renderHelper = () => {
+            const profile = profiles.find((item) => String(item.api_key_id) === String(keySelect.value)) || profiles[0];
+            const modelName = modelSelect.value || "gpt-4.1-mini";
+            const header = `Authorization: Bearer ${profile.raw_api_key}`;
+            headerValue.textContent = header;
+            providerValue.textContent = (profile.allowed_provider_names || []).join("、") || "未配置";
+            curlBlock.textContent = [
+                `curl ${baseUrl}/responses \\`,
+                '  -H "Content-Type: application/json" \\',
+                `  -H "${header}" \\`,
+                `  -d '{"model":"${modelName}","input":"ping"}'`,
+            ].join("\n");
+            pythonBlock.textContent = [
+                "from openai import OpenAI",
+                "",
+                "client = OpenAI(",
+                `    base_url="${baseUrl}",`,
+                `    api_key=\"${profile.raw_api_key}\",`,
+                ")",
+                "",
+                "resp = client.responses.create(",
+                `    model=\"${modelName}\",`,
+                "    input=\"ping\",",
+                ")",
+                "print(resp.output_text)",
+            ].join("\n");
+            copyHeaderBtn.dataset.copyText = header;
+            copyHeaderBtn.disabled = false;
+        };
+        keySelect.addEventListener("change", renderHelper);
+        modelSelect.addEventListener("change", renderHelper);
+        renderHelper();
+    }
+
+    async function initUserBilling() {
+        renderTrendChart(document.getElementById("user-billing-trend-chart"));
+    }
+
+    async function initUserLogs() {
+        const modal = document.getElementById("user-log-detail-modal");
+        const closeBtn = document.getElementById("user-log-detail-close");
+        const title = document.getElementById("user-log-detail-title");
+        const summary = document.getElementById("user-log-detail-summary");
+        const requestBlock = document.getElementById("user-log-detail-request");
+        const responseBlock = document.getElementById("user-log-detail-response");
+        const traceBlock = document.getElementById("user-log-detail-trace");
+        if (!modal || !closeBtn || !title || !summary || !requestBlock || !responseBlock || !traceBlock) {
+            return;
+        }
+        const closeModal = () => modal.classList.add("hidden");
+        closeBtn.addEventListener("click", closeModal);
+        modal.addEventListener("click", (event) => {
+            if (event.target === modal) closeModal();
+        });
+        document.querySelectorAll("[data-user-log-detail-id]").forEach((button) => {
+            button.addEventListener("click", async () => {
+                try {
+                    setButtonLoading(button, true);
+                    const detail = await api.get(`/api/user/logs/${button.dataset.userLogDetailId}`);
+                    title.textContent = `日志详情 #${detail.id}`;
+                    summary.innerHTML = `
+                        <div><span>API Key</span><strong>${escapeHtml(detail.api_client_key_name || "-")}</strong></div>
+                        <div><span>模型</span><strong>${escapeHtml(detail.requested_model || detail.model_name || "-")}</strong></div>
+                        <div><span>渠道</span><strong>${escapeHtml(detail.provider_name || "-")}</strong></div>
+                        <div><span>会话号</span><strong>${escapeHtml(detail.session_id || detail.conversation_key || "-")}</strong></div>
+                        <div><span>状态</span><strong>${detail.success ? "成功" : "失败"}${detail.status_code ? ` · ${detail.status_code}` : ""}</strong></div>
+                        <div><span>TTFB</span><strong>${detail.ttfb_ms ?? "-"}</strong></div>
+                        <div><span>耗时</span><strong>${detail.duration_ms ?? detail.latency_ms ?? "-"}</strong></div>
+                        <div><span>费用</span><strong>${formatMoney(detail.total_cost || 0)}</strong></div>
+                    `;
+                    requestBlock.textContent = formatCodeValue(detail.request_body_json);
+                    responseBlock.textContent = formatCodeValue(detail.response_body_json || detail.response_text);
+                    traceBlock.textContent = formatCodeValue(detail.trace_json || detail.message);
+                    modal.classList.remove("hidden");
+                } catch (error) {
+                    showToast(error.message, "error");
+                } finally {
+                    setButtonLoading(button, false);
+                }
+            });
+        });
+    }
+
+    function deriveUserSelfTestResolution(result = {}) {
+        const success = Boolean(result.success);
+        const message = String(result.message || "");
+        const code = String(result.code || "");
+        const statusCode = Number(result.status_code || 0);
+        const normalized = `${code} ${message} ${JSON.stringify(result.trace || "")}`.toLowerCase();
+
+        if (success) {
+            return {
+                failure: [
+                    { label: "状态", value: "本次测试成功" },
+                    { label: "摘要", value: "密钥、模型和当前命中的线路均已跑通，可以进入小流量正式接入。" },
+                ],
+                fixes: [
+                    { label: "建议", value: "保持当前 API Key、模型和 Base URL 组合，不要在正式接入前再随意替换。" },
+                    { label: "补充", value: "若是生产接入，建议先小流量验证，再观察日志页的费用和延迟。" },
+                ],
+                next: [
+                    { label: "下一步", value: "回到首页复制接入信息，或直接把当前组合写入你的业务服务。" },
+                    { label: "排障入口", value: "若后续结果异常，去“我的日志”或“会话回放”核对请求体与返回内容。" },
+                ],
+            };
+        }
+
+        if (normalized.includes("无法回显明文") || normalized.includes("decrypt") || normalized.includes("轮换")) {
+            return {
+                failure: [
+                    { label: "状态", value: "当前密钥不能直接用于真实测试" },
+                    { label: "摘要", value: "这把 API Key 没有可回显的明文，浏览器侧无法代你发起 Bearer 测试。" },
+                ],
+                fixes: [
+                    { label: "修复建议", value: "到 API Key 管理页或密钥控制台执行轮换，生成新的可复制明文密钥。" },
+                    { label: "修复后", value: "重新复制明文和 Authorization Header，再回到自检页重试。" },
+                ],
+                next: [
+                    { label: "下一步", value: "打开 API Key 管理页，轮换当前密钥后再回来测试。" },
+                ],
+            };
+        }
+
+        if (normalized.includes("auth") || normalized.includes("鉴权") || normalized.includes("api key") || code === "api_key_invalid") {
+            return {
+                failure: [
+                    { label: "状态", value: "鉴权未通过" },
+                    { label: "摘要", value: "当前 Bearer 密钥不可用，可能已失效、被停用或复制错误。" },
+                ],
+                fixes: [
+                    { label: "修复建议", value: "回到 API Key 管理页确认密钥状态是否为正常可用，并重新复制明文密钥。" },
+                    { label: "补充检查", value: "若刚轮换过密钥，请同步更新外部系统中的旧环境变量。" },
+                ],
+                next: [
+                    { label: "下一步", value: "先修复密钥状态，再用同一模型重新跑一次真实测试。" },
+                ],
+            };
+        }
+
+        if (normalized.includes("model") || normalized.includes("模型")) {
+            return {
+                failure: [
+                    { label: "状态", value: "模型不可用或未授权" },
+                    { label: "摘要", value: "当前密钥命中的授权范围里没有这个模型，或者所选模型暂不可用。" },
+                ],
+                fixes: [
+                    { label: "修复建议", value: "去可用模型页确认模型名是否存在，再检查这把密钥的授权中转站是否覆盖该模型。" },
+                    { label: "补充检查", value: "若模型名是手工输入或从别处复制的，优先改成站内模型页展示的标准名称。" },
+                ],
+                next: [
+                    { label: "下一步", value: "回到可用模型页确认模型名，再重新选择模型执行自检。" },
+                ],
+            };
+        }
+
+        if (normalized.includes("unbound") || normalized.includes("中转") || normalized.includes("provider") || normalized.includes("route")) {
+            return {
+                failure: [
+                    { label: "状态", value: "授权线路不可用" },
+                    { label: "摘要", value: "当前密钥没有可命中的中转站，或默认路由和授权集合无法组成候选线路。" },
+                ],
+                fixes: [
+                    { label: "修复建议", value: "回到 API Key 管理页，检查授权中转站、默认中转站和路由模式是否配置正确。" },
+                    { label: "补充检查", value: "若是手动模式，确认是否需要开启回退，避免单线路失败后没有候选线路。" },
+                ],
+                next: [
+                    { label: "下一步", value: "修正密钥授权后，重新查看候选线路预览并再跑一次真实测试。" },
+                ],
+            };
+        }
+
+        if (normalized.includes("quota") || normalized.includes("余额") || normalized.includes("balance") || normalized.includes("额度")) {
+            return {
+                failure: [
+                    { label: "状态", value: "额度或余额不足" },
+                    { label: "摘要", value: "当前账号或密钥已触发余额、费用或配额限制，代理链路被提前拦截。" },
+                ],
+                fixes: [
+                    { label: "修复建议", value: "先去账单页核对共享余额和累计消费，再确认是否触发日/月或总额度限制。" },
+                    { label: "补充检查", value: "若是账户级限额导致，需联系管理员调整配额或充值。" },
+                ],
+                next: [
+                    { label: "下一步", value: "补足余额或解除额度限制后，再使用同一组参数重新测试。" },
+                ],
+            };
+        }
+
+        if ([502, 503, 504].includes(statusCode) || normalized.includes("timeout") || normalized.includes("上游") || normalized.includes("超时")) {
+            return {
+                failure: [
+                    { label: "状态", value: "上游线路异常或延迟过高" },
+                    { label: "摘要", value: "当前命中的渠道可能健康异常、响应超时或暂时不可用。" },
+                ],
+                fixes: [
+                    { label: "修复建议", value: "先看候选线路列表里的健康状态和成功率，必要时换模型或换一把授权范围更广的密钥重试。" },
+                    { label: "补充检查", value: "如果连续失败，去日志页确认是否同一渠道持续报错。" },
+                ],
+                next: [
+                    { label: "下一步", value: "保留当前报错信息，换一路径或稍后重试，并观察日志中心是否出现集中故障。" },
+                ],
+            };
+        }
+
+        return {
+            failure: [
+                { label: "状态", value: "测试失败" },
+                { label: "摘要", value: message || "当前请求未通过，请结合调度链路和原始返回继续排查。" },
+            ],
+            fixes: [
+                { label: "修复建议", value: "优先检查密钥状态、模型名、授权中转站和余额，再查看调度链路里的具体报错。" },
+            ],
+            next: [
+                { label: "下一步", value: "若无法直接判断原因，去“我的日志”或“会话回放”定位完整上下文。" },
+            ],
+        };
+    }
+
+    async function initUserSelfTest() {
+        const runBtn = document.getElementById("user-self-test-run-btn");
+        const keySelect = document.querySelector('form[action="/user/self-test"] select[name="api_key_id"]');
+        const modelSelect = document.querySelector('form[action="/user/self-test"] select[name="model_name"]');
+        const summary = document.getElementById("user-self-test-result-summary");
+        const failure = document.getElementById("user-self-test-failure");
+        const fixes = document.getElementById("user-self-test-fixes");
+        const next = document.getElementById("user-self-test-next");
+        const output = document.getElementById("user-self-test-output");
+        const trace = document.getElementById("user-self-test-trace");
+        if (!runBtn || !keySelect || !modelSelect || !summary || !failure || !fixes || !next || !output || !trace) {
+            return;
+        }
+
+        function renderResolution(target, items = []) {
+            target.innerHTML = items.map((item) => `
+                <div><span>${escapeHtml(item.label || "-")}</span><strong>${escapeHtml(item.value || "-")}</strong></div>
+            `).join("");
+        }
+
+        runBtn.addEventListener("click", async () => {
+            if (!keySelect.value || !modelSelect.value) {
+                showToast("请先选择 API Key 和模型", "error");
+                return;
+            }
+            try {
+                setButtonLoading(runBtn, true);
+                summary.innerHTML = '<div><span>状态</span><strong>测试中...</strong></div>';
+                renderResolution(failure, [{ label: "状态", value: "测试中" }, { label: "摘要", value: "正在发起最短真实调用，请稍候。" }]);
+                renderResolution(fixes, [{ label: "建议", value: "等待当前测试返回结果。" }]);
+                renderResolution(next, [{ label: "动作", value: "测试完成后，这里会生成下一步动作。" }]);
+                output.textContent = "测试中...";
+                trace.textContent = "测试中...";
+                const formData = new FormData();
+                formData.append("api_key_id", keySelect.value);
+                formData.append("model_name", modelSelect.value);
+                const response = await fetch("/api/user/self-test/run", {
+                    method: "POST",
+                    body: formData,
+                    credentials: "same-origin",
+                });
+                const text = await response.text();
+                const data = safeJsonParse(text) ?? {};
+                if (!response.ok || data.success === false) {
+                    const resolution = deriveUserSelfTestResolution(data);
+                    summary.innerHTML = `
+                        <div><span>状态</span><strong>失败</strong></div>
+                        <div><span>模型</span><strong>${escapeHtml(data.model_name || modelSelect.value)}</strong></div>
+                        <div><span>渠道</span><strong>${escapeHtml(data.provider_name || "-")}</strong></div>
+                        <div><span>状态码</span><strong>${data.status_code ?? "-"}</strong></div>
+                    `;
+                    renderResolution(failure, resolution.failure);
+                    renderResolution(fixes, resolution.fixes);
+                    renderResolution(next, resolution.next);
+                    output.textContent = formatCodeValue(data.output_text || data.response_preview || data.message || data.detail || "测试失败");
+                    trace.textContent = formatCodeValue(data.trace || data.message || data.detail || data);
+                    showToast(data.message || data.detail || "测试失败", "error");
+                    return;
+                }
+                const resolution = deriveUserSelfTestResolution(data);
+                summary.innerHTML = `
+                    <div><span>状态</span><strong>${data.success ? "成功" : "失败"}</strong></div>
+                    <div><span>模型</span><strong>${escapeHtml(data.model_name || modelSelect.value)}</strong></div>
+                    <div><span>渠道</span><strong>${escapeHtml(data.provider_name || "-")}</strong></div>
+                    <div><span>耗时</span><strong>${data.latency_ms ?? "-"} ms</strong></div>
+                `;
+                renderResolution(failure, resolution.failure);
+                renderResolution(fixes, resolution.fixes);
+                renderResolution(next, resolution.next);
+                output.textContent = formatCodeValue(data.output_text || data.response_preview || data.message);
+                trace.textContent = formatCodeValue(data.trace || data.message || data);
+                showToast(data.success ? "真实测试完成" : "测试返回失败结果", data.success ? "success" : "error");
+            } catch (error) {
+                const resolution = deriveUserSelfTestResolution({ success: false, message: error.message });
+                summary.innerHTML = `<div><span>状态</span><strong>失败</strong></div><div><span>原因</span><strong>${escapeHtml(error.message)}</strong></div>`;
+                renderResolution(failure, resolution.failure);
+                renderResolution(fixes, resolution.fixes);
+                renderResolution(next, resolution.next);
+                output.textContent = error.message;
+                trace.textContent = error.message;
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(runBtn, false);
+            }
+        });
+    }
+
+    async function initAlertsPage() {
+        const form = document.getElementById("alerts-subscription-form");
+        const refreshBtn = document.getElementById("alerts-feed-refresh-btn");
+        const tableBody = document.getElementById("alerts-event-table-body");
+        if (!form || !refreshBtn || !tableBody) {
+            return;
+        }
+        const notifiedKeys = new Set();
+        let pollTimer = null;
+
+        function renderEvents(events = []) {
+            tableBody.innerHTML = events.length
+                ? events.map((item) => `
+                    <tr>
+                        <td>${escapeHtml(item.alert_type || "-")}</td>
+                        <td>${escapeHtml(item.severity || "-")}</td>
+                        <td>${escapeHtml(item.title || "-")}</td>
+                        <td>${escapeHtml(item.message || "-")}</td>
+                        <td>${escapeHtml(item.last_seen_at || "-")}</td>
+                        <td><button class="btn btn-ghost btn-sm interactive-btn" type="button" data-alert-ack-id="${item.id}">确认</button></td>
+                    </tr>
+                `).join("")
+                : '<tr><td colspan="6"><div class="empty-state">当前没有活跃告警事件。</div></td></tr>';
+            enhanceInteractiveButtons(tableBody);
+        }
+
+        async function maybeNotify(events, subscription) {
+            if (!subscription?.enabled || !subscription.browser_notifications_enabled || !("Notification" in window)) {
+                return;
+            }
+            if (Notification.permission === "default") {
+                await Notification.requestPermission();
+            }
+            if (Notification.permission !== "granted") {
+                return;
+            }
+            events.forEach((item) => {
+                if (notifiedKeys.has(item.alert_key)) return;
+                notifiedKeys.add(item.alert_key);
+                new Notification(item.title || "新告警", { body: item.message || "" });
+            });
+        }
+
+        async function loadFeed(manual = false) {
+            try {
+                if (manual) setButtonLoading(refreshBtn, true);
+                const data = await api.get("/api/alerts/feed");
+                renderEvents(data.events || []);
+                await maybeNotify(data.events || [], data.subscription || {});
+                if (pollTimer) window.clearTimeout(pollTimer);
+                const nextPoll = Math.max(10, Number(data.subscription?.poll_interval_seconds || 30)) * 1000;
+                pollTimer = window.setTimeout(() => {
+                    loadFeed().catch(() => undefined);
+                }, nextPoll);
+            } catch (error) {
+                if (manual) showToast(error.message, "error");
+            } finally {
+                if (manual) setButtonLoading(refreshBtn, false);
+            }
+        }
+
+        form.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            try {
+                const formData = new FormData();
+                formData.append("enabled", document.getElementById("alerts-subscription-enabled").checked ? "true" : "false");
+                formData.append("notify_provider_alerts", document.getElementById("alerts-subscription-provider").checked ? "true" : "false");
+                formData.append("notify_api_key_alerts", document.getElementById("alerts-subscription-api-key").checked ? "true" : "false");
+                formData.append("notify_account_alerts", document.getElementById("alerts-subscription-account").checked ? "true" : "false");
+                formData.append("notify_failure_rate_alerts", document.getElementById("alerts-subscription-failure-rate").checked ? "true" : "false");
+                formData.append("browser_notifications_enabled", document.getElementById("alerts-subscription-browser").checked ? "true" : "false");
+                formData.append("poll_interval_seconds", document.getElementById("alerts-subscription-poll").value || "30");
+                const response = await fetch("/api/alerts/subscription", { method: "POST", body: formData, credentials: "same-origin" });
+                if (!response.ok) {
+                    const text = await response.text();
+                    throw new Error(text || "保存订阅失败");
+                }
+                showToast("告警订阅已保存");
+                await loadFeed();
+            } catch (error) {
+                showToast(error.message, "error");
+            }
+        });
+
+        refreshBtn.addEventListener("click", async () => {
+            await loadFeed(true);
+        });
+
+        tableBody.addEventListener("click", async (event) => {
+            const button = event.target.closest("[data-alert-ack-id]");
+            if (!button) return;
+            try {
+                const response = await fetch(`/api/alerts/${button.dataset.alertAckId}/ack`, { method: "POST", credentials: "same-origin" });
+                if (!response.ok) {
+                    const text = await response.text();
+                    throw new Error(text || "确认失败");
+                }
+                showToast("告警已确认");
+                await loadFeed();
+            } catch (error) {
+                showToast(error.message, "error");
+            }
+        });
+
+        await loadFeed();
+    }
+
+    async function initUsersPage() {
+        const checkAll = document.getElementById("users-check-all-visible");
+        const hiddenInput = document.getElementById("users-batch-user-ids");
+        const previewInput = document.getElementById("users-batch-user-ids-preview");
+        const form = document.getElementById("users-batch-quota-form");
+        if (!checkAll || !hiddenInput || !previewInput || !form) {
+            return;
+        }
+        const updateSelection = () => {
+            const selectedIds = Array.from(document.querySelectorAll("[data-user-batch-id]:checked"))
+                .map((node) => node.dataset.userBatchId)
+                .filter(Boolean);
+            hiddenInput.value = selectedIds.join(",");
+            previewInput.value = selectedIds.join(", ");
+            const checkboxes = Array.from(document.querySelectorAll("[data-user-batch-id]"));
+            checkAll.checked = checkboxes.length > 0 && selectedIds.length === checkboxes.length;
+            checkAll.indeterminate = selectedIds.length > 0 && selectedIds.length < checkboxes.length;
+        };
+        checkAll.addEventListener("change", () => {
+            document.querySelectorAll("[data-user-batch-id]").forEach((node) => {
+                node.checked = checkAll.checked;
+            });
+            updateSelection();
+        });
+        document.querySelectorAll("[data-user-batch-id]").forEach((node) => {
+            node.addEventListener("change", updateSelection);
+        });
+        form.addEventListener("submit", (event) => {
+            updateSelection();
+            if (!hiddenInput.value) {
+                event.preventDefault();
+                showToast("请先选择至少一个用户", "error");
+            }
+        });
+        updateSelection();
+    }
+
     function renderApiKeyStatusText(status) {
         return formatApiKeyStatusLabel(status);
     }
@@ -2583,8 +3197,24 @@
 
     async function initApiKeys() {
         const summarySignal = document.getElementById("api-key-summary-signal");
+        const summarySignalSlots = document.querySelectorAll("[data-api-key-summary-signal]");
         const tableBody = document.getElementById("api-key-table-body");
         const searchInput = document.getElementById("api-key-search");
+        const statusFilter = document.getElementById("api-key-status-filter");
+        const enabledFilter = document.getElementById("api-key-enabled-filter");
+        const ownerFilter = document.getElementById("api-key-owner-filter");
+        const pageSizeSelect = document.getElementById("api-key-page-size");
+        const refreshBtn = document.getElementById("api-key-refresh-btn");
+        const pageMeta = document.getElementById("api-key-page-meta");
+        const prevPageBtn = document.getElementById("api-key-prev-page-btn");
+        const nextPageBtn = document.getElementById("api-key-next-page-btn");
+        const selectPageBtn = document.getElementById("api-key-select-page");
+        const clearSelectionBtn = document.getElementById("api-key-clear-selection-btn");
+        const batchEnableBtn = document.getElementById("api-key-batch-enable-btn");
+        const batchDisableBtn = document.getElementById("api-key-batch-disable-btn");
+        const batchDeleteBtn = document.getElementById("api-key-batch-delete-btn");
+        const batchProvidersBtn = document.getElementById("api-key-batch-providers-btn");
+        const checkAllVisibleInput = document.getElementById("api-key-check-all-visible");
         const addBtn = document.getElementById("add-api-key-btn");
         const modal = document.getElementById("api-key-modal");
         const modalTitle = document.getElementById("api-key-modal-title");
@@ -2610,7 +3240,32 @@
         const remarkInput = document.getElementById("api-key-remark");
         const idInput = document.getElementById("api-key-id");
         const form = document.getElementById("api-key-form");
-        const state = { summary: null, apiKeys: [], providers: [], users: [] };
+        const batchProviderModal = document.getElementById("api-key-batch-provider-modal");
+        const batchProviderCloseBtn = document.getElementById("api-key-batch-provider-close");
+        const batchProviderCancelBtn = document.getElementById("api-key-batch-provider-cancel");
+        const batchProviderForm = document.getElementById("api-key-batch-provider-form");
+        const batchProviderRouteMode = document.getElementById("api-key-batch-provider-route-mode");
+        const batchProviderDefault = document.getElementById("api-key-batch-provider-default");
+        const batchProviderFallback = document.getElementById("api-key-batch-provider-fallback");
+        const batchProviderSelector = document.getElementById("api-key-batch-provider-selector");
+        const batchProviderSubmitBtn = document.getElementById("api-key-batch-provider-submit");
+        const state = {
+            summary: null,
+            apiKeys: [],
+            providers: [],
+            users: [],
+            total: 0,
+            page: 1,
+            pageSize: Number.parseInt(pageSizeSelect.value || "20", 10) || 20,
+            filters: {
+                keyword: "",
+                status: "",
+                enabled: "",
+                ownerUserId: "",
+            },
+            selectedIds: new Set(),
+        };
+        let searchTimer = null;
 
         function renderSummary(summary) {
             document.querySelectorAll("[data-api-key-summary]").forEach((node) => {
@@ -2625,7 +3280,7 @@
             const enabled = Number(summary?.enabled_keys || 0);
             const disabled = Number(summary?.disabled_keys || 0);
             const activeRatio = total ? Math.round((enabled / total) * 100) : 0;
-            summarySignal.innerHTML = `
+            const summaryMarkup = `
                 <div class="cockpit-aside-label">密钥总览</div>
                 <div class="cockpit-aside-value">${formatNumber(total)}</div>
                 <div class="cockpit-aside-copy">当前可运维的 API 密钥总数</div>
@@ -2635,31 +3290,67 @@
                     <span>禁用 ${formatNumber(disabled)}</span>
                 </div>
             `;
+            if (summarySignalSlots.length) {
+                summarySignalSlots.forEach((node) => {
+                    node.innerHTML = summaryMarkup;
+                });
+            } else if (summarySignal) {
+                summarySignal.innerHTML = summaryMarkup;
+            }
         }
 
-        function getFilteredApiKeys() {
-            const keyword = searchInput.value.trim().toLowerCase();
-            if (!keyword) return state.apiKeys;
-            return state.apiKeys.filter((item) => {
-                return [
-                    item.name,
-                    item.remark,
-                    item.owner_user_name,
-                    item.key_prefix,
-                    item.status,
-                    item.key_masked,
-                    item.raw_api_key,
-                ].some((value) => String(value || "").toLowerCase().includes(keyword));
-            });
+        function syncFilterStateFromInputs() {
+            state.filters.keyword = searchInput.value.trim();
+            state.filters.status = statusFilter.value;
+            state.filters.enabled = enabledFilter.value;
+            state.filters.ownerUserId = ownerFilter.value;
+        }
+
+        function populateOwnerFilterOptions(selectedUserId = ownerFilter.value) {
+            ownerFilter.innerHTML = '<option value="">全部归属用户</option>' + state.users.map((user) => `
+                <option value="${user.id}" ${String(selectedUserId || "") === String(user.id) ? "selected" : ""}>
+                    ${escapeHtml(user.username)} · ${escapeHtml(user.email)}
+                </option>
+            `).join("");
+        }
+
+        function getVisibleApiKeyIds() {
+            return state.apiKeys.map((item) => item.id);
+        }
+
+        function renderPagination() {
+            const totalPages = Math.max(1, Math.ceil((state.total || 0) / state.pageSize));
+            if (state.page > totalPages) {
+                state.page = totalPages;
+            }
+            pageMeta.textContent = `第 ${formatNumber(state.page)} 页，共 ${formatNumber(totalPages)} 页 · 共 ${formatNumber(state.total)} 条 · 已选 ${formatNumber(state.selectedIds.size)} 条`;
+            prevPageBtn.disabled = state.page <= 1;
+            nextPageBtn.disabled = state.page >= totalPages;
+        }
+
+        function renderBatchButtons() {
+            const hasSelection = state.selectedIds.size > 0;
+            batchEnableBtn.disabled = !hasSelection;
+            batchDisableBtn.disabled = !hasSelection;
+            batchDeleteBtn.disabled = !hasSelection;
+            batchProvidersBtn.disabled = !hasSelection;
+            clearSelectionBtn.disabled = !hasSelection;
+            const visibleIds = getVisibleApiKeyIds();
+            const visibleSelectedCount = visibleIds.filter((id) => state.selectedIds.has(id)).length;
+            checkAllVisibleInput.checked = visibleIds.length > 0 && visibleSelectedCount === visibleIds.length;
+            checkAllVisibleInput.indeterminate = visibleSelectedCount > 0 && visibleSelectedCount < visibleIds.length;
         }
 
         function renderTable() {
-            const filteredItems = getFilteredApiKeys();
-            tableBody.innerHTML = filteredItems.map((item) => {
+            tableBody.innerHTML = state.apiKeys.map((item) => {
                 const quota = buildApiKeyQuotaSummary(item);
                 const cost = buildApiKeyCostSummary(item);
+                const defaultProvider = state.providers.find((provider) => provider.id === item.default_provider_id);
                 return `
                     <tr>
+                        <td>
+                            <input type="checkbox" data-api-key-select="${item.id}" ${state.selectedIds.has(item.id) ? "checked" : ""} aria-label="选择 API Key ${escapeHtml(item.name)}">
+                        </td>
                         <td>
                             <strong>${escapeHtml(item.name)}</strong>
                             <div class="table-muted">${escapeHtml(item.remark || "-")}</div>
@@ -2681,7 +3372,7 @@
                         </td>
                         <td>
                             <strong>${escapeHtml(formatRouteModeLabel(item.route_mode))}</strong>
-                            <div class="table-muted">默认中转 ${escapeHtml(item.default_provider_id ? String(item.default_provider_id) : "-")} · 失败后回退 ${formatSwitchText(item.manual_allow_fallback)}</div>
+                            <div class="table-muted">默认中转 ${escapeHtml(defaultProvider?.name || (item.default_provider_id ? String(item.default_provider_id) : "-"))} · 失败后回退 ${formatSwitchText(item.manual_allow_fallback)}</div>
                         </td>
                         <td>
                             <strong>${formatNumber(item.allowed_provider_ids.length)} 个</strong>
@@ -2709,8 +3400,10 @@
                         </td>
                     </tr>
                 `;
-            }).join("") || '<tr><td colspan="10"><div class="empty-state">暂无匹配的 API 密钥</div></td></tr>';
+            }).join("") || '<tr><td colspan="11"><div class="empty-state">当前筛选条件下暂无 API 密钥</div></td></tr>';
             enhanceInteractiveButtons(tableBody);
+            renderPagination();
+            renderBatchButtons();
         }
 
         function refreshRawApiKeyInputState() {
@@ -2750,6 +3443,12 @@
 
         function getSelectedProviderIds() {
             return Array.from(providerSelector.querySelectorAll("[data-api-key-provider-id]:checked"))
+                .map((input) => Number(input.dataset.apiKeyProviderId))
+                .filter((value) => Number.isFinite(value));
+        }
+
+        function getBatchSelectedProviderIds() {
+            return Array.from(batchProviderSelector.querySelectorAll("[data-api-key-provider-id]:checked"))
                 .map((input) => Number(input.dataset.apiKeyProviderId))
                 .filter((value) => Number.isFinite(value));
         }
@@ -2809,24 +3508,111 @@
             refreshRawApiKeyInputState();
         }
 
-        async function loadData({ silent = false } = {}) {
-            const [summary, apiKeys, providers, users] = await Promise.all([
-                api.get("/api/api-keys/summary"),
-                api.get("/api/api-keys"),
+        function populateBatchProviderOptions(selectedProviderId = null) {
+            batchProviderDefault.innerHTML = '<option value="">未设置</option>' + state.providers.map((provider) => `
+                <option value="${provider.id}" ${Number(selectedProviderId) === provider.id ? "selected" : ""}>
+                    ${escapeHtml(provider.name)} ${provider.enabled ? "" : "(已禁用)"}
+                </option>
+            `).join("");
+        }
+
+        function openBatchProviderModal() {
+            populateBatchProviderOptions();
+            renderApiKeyProviderSelector(batchProviderSelector, state.providers, []);
+            batchProviderRouteMode.value = "failover";
+            batchProviderFallback.checked = true;
+            batchProviderModal.classList.remove("hidden");
+        }
+
+        function closeBatchProviderModal() {
+            batchProviderModal.classList.add("hidden");
+        }
+
+        function renderLoadingState() {
+            tableBody.innerHTML = '<tr><td colspan="11"><div class="empty-state">正在加载 API 密钥...</div></td></tr>';
+            renderPagination();
+            renderBatchButtons();
+        }
+
+        async function loadReferenceData() {
+            const [providers, users] = await Promise.all([
                 api.get("/api/providers"),
                 api.get("/api/users/options"),
             ]);
-            state.summary = summary;
-            state.apiKeys = apiKeys;
             state.providers = providers;
             state.users = users;
-            renderSummary(summary);
-            renderTable();
+            populateOwnerFilterOptions(state.filters.ownerUserId);
             populateDefaultProviderOptions(defaultProviderSelect.value ? Number(defaultProviderSelect.value) : null);
             populateOwnerUserOptions(ownerUserSelect.value ? Number(ownerUserSelect.value) : null);
             renderApiKeyProviderSelector(providerSelector, state.providers, getSelectedProviderIds());
             refreshRoutePreview();
+        }
+
+        async function loadTableData({ silent = false } = {}) {
+            syncFilterStateFromInputs();
+            const params = new URLSearchParams({
+                page: String(state.page),
+                page_size: String(state.pageSize),
+            });
+            if (state.filters.keyword) params.set("keyword", state.filters.keyword);
+            if (state.filters.status) params.set("status", state.filters.status);
+            if (state.filters.enabled) params.set("enabled", state.filters.enabled);
+            if (state.filters.ownerUserId) params.set("owner_user_id", state.filters.ownerUserId);
+            renderLoadingState();
+            const [summary, result] = await Promise.all([
+                api.get("/api/api-keys/summary"),
+                api.get(`/api/api-keys/query?${params.toString()}`),
+            ]);
+            const totalPages = Math.max(1, Math.ceil((Number(result.total || 0)) / state.pageSize));
+            if (Number(result.total || 0) > 0 && state.page > totalPages) {
+                state.page = totalPages;
+                return loadTableData({ silent: true });
+            }
+            state.summary = summary;
+            state.apiKeys = result.items || [];
+            state.total = Number(result.total || 0);
+            renderSummary(summary);
+            renderTable();
             if (!silent) showToast("API 密钥数据已刷新");
+        }
+
+        async function loadData({ silent = false, reloadReference = false } = {}) {
+            if (reloadReference || !state.providers.length || !state.users.length) {
+                await loadReferenceData();
+            }
+            await loadTableData({ silent });
+        }
+
+        function removeSelectedIds(ids = []) {
+            ids.forEach((id) => state.selectedIds.delete(id));
+        }
+
+        async function runBatchAction(action, confirmMessage, successMessage) {
+            const apiKeyIds = Array.from(state.selectedIds);
+            if (!apiKeyIds.length) {
+                showToast("请先选择至少一个 API Key", "error");
+                return;
+            }
+            if (confirmMessage && !window.confirm(confirmMessage)) {
+                return;
+            }
+            const buttonMap = {
+                enable: batchEnableBtn,
+                disable: batchDisableBtn,
+                delete: batchDeleteBtn,
+            };
+            const button = buttonMap[action];
+            try {
+                setButtonLoading(button, true);
+                const result = await api.post(`/api/api-keys/batch/${action}`, { api_key_ids: apiKeyIds });
+                removeSelectedIds(result.api_key_ids || apiKeyIds);
+                showToast(`${successMessage} ${formatNumber(result.affected_count || 0)} 个`);
+                await loadTableData({ silent: true });
+            } catch (error) {
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(button, false);
+            }
         }
 
         form.addEventListener("submit", async (event) => {
@@ -2881,7 +3667,7 @@
                     modalTitle.textContent = `编辑 API 密钥 #${created.id}`;
                     showToast("API 密钥已创建");
                 }
-                await loadData({ silent: true });
+                await loadData({ silent: true, reloadReference: true });
             } catch (error) {
                 showToast(error.message, "error");
             } finally {
@@ -2896,12 +3682,148 @@
             if (event.target === modal) closeModal();
         });
         copyRawBtn.addEventListener("click", async () => copyText(rawValue.textContent));
-        searchInput.addEventListener("input", renderTable);
+        searchInput.addEventListener("input", () => {
+            window.clearTimeout(searchTimer);
+            searchTimer = window.setTimeout(async () => {
+                state.page = 1;
+                try {
+                    await loadTableData({ silent: true });
+                } catch (error) {
+                    showToast(error.message, "error");
+                }
+            }, 250);
+        });
+        statusFilter.addEventListener("change", async () => {
+            state.page = 1;
+            try {
+                await loadTableData({ silent: true });
+            } catch (error) {
+                showToast(error.message, "error");
+            }
+        });
+        enabledFilter.addEventListener("change", async () => {
+            state.page = 1;
+            try {
+                await loadTableData({ silent: true });
+            } catch (error) {
+                showToast(error.message, "error");
+            }
+        });
+        ownerFilter.addEventListener("change", async () => {
+            state.page = 1;
+            try {
+                await loadTableData({ silent: true });
+            } catch (error) {
+                showToast(error.message, "error");
+            }
+        });
+        pageSizeSelect.addEventListener("change", async () => {
+            state.pageSize = Number.parseInt(pageSizeSelect.value || "20", 10) || 20;
+            state.page = 1;
+            try {
+                await loadTableData({ silent: true });
+            } catch (error) {
+                showToast(error.message, "error");
+            }
+        });
+        refreshBtn.addEventListener("click", async () => {
+            try {
+                setButtonLoading(refreshBtn, true);
+                await loadData();
+            } catch (error) {
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(refreshBtn, false);
+            }
+        });
+        prevPageBtn.addEventListener("click", async () => {
+            if (state.page <= 1) return;
+            state.page -= 1;
+            try {
+                await loadTableData({ silent: true });
+            } catch (error) {
+                showToast(error.message, "error");
+            }
+        });
+        nextPageBtn.addEventListener("click", async () => {
+            const totalPages = Math.max(1, Math.ceil((state.total || 0) / state.pageSize));
+            if (state.page >= totalPages) return;
+            state.page += 1;
+            try {
+                await loadTableData({ silent: true });
+            } catch (error) {
+                showToast(error.message, "error");
+            }
+        });
+        selectPageBtn.addEventListener("click", () => {
+            getVisibleApiKeyIds().forEach((id) => state.selectedIds.add(id));
+            renderTable();
+        });
+        clearSelectionBtn.addEventListener("click", () => {
+            state.selectedIds.clear();
+            renderTable();
+        });
+        batchEnableBtn.addEventListener("click", async () => {
+            await runBatchAction("enable", null, "已批量启用");
+        });
+        batchDisableBtn.addEventListener("click", async () => {
+            await runBatchAction("disable", null, "已批量禁用");
+        });
+        batchDeleteBtn.addEventListener("click", async () => {
+            await runBatchAction("delete", `确认删除已选择的 ${state.selectedIds.size} 个 API Key 吗？`, "已批量删除");
+        });
+        batchProvidersBtn.addEventListener("click", () => {
+            if (!state.selectedIds.size) {
+                showToast("请先选择至少一个 API Key", "error");
+                return;
+            }
+            openBatchProviderModal();
+        });
+        checkAllVisibleInput.addEventListener("change", () => {
+            const visibleIds = getVisibleApiKeyIds();
+            if (checkAllVisibleInput.checked) {
+                visibleIds.forEach((id) => state.selectedIds.add(id));
+            } else {
+                visibleIds.forEach((id) => state.selectedIds.delete(id));
+            }
+            renderTable();
+        });
         generationModeInput.addEventListener("change", refreshRawApiKeyInputState);
         routeModeInput.addEventListener("change", refreshRoutePreview);
         manualFallbackInput.addEventListener("change", refreshRoutePreview);
         defaultProviderSelect.addEventListener("change", refreshRoutePreview);
         providerSelector.addEventListener("change", refreshRoutePreview);
+        batchProviderCloseBtn.addEventListener("click", closeBatchProviderModal);
+        batchProviderCancelBtn.addEventListener("click", closeBatchProviderModal);
+        batchProviderModal.addEventListener("click", (event) => {
+            if (event.target === batchProviderModal) closeBatchProviderModal();
+        });
+        batchProviderForm.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            const allowedProviderIds = getBatchSelectedProviderIds();
+            const defaultProviderId = batchProviderDefault.value ? Number(batchProviderDefault.value) : null;
+            if (defaultProviderId && !allowedProviderIds.includes(defaultProviderId)) {
+                showToast("默认中转站必须包含在授权中转站里", "error");
+                return;
+            }
+            try {
+                setButtonLoading(batchProviderSubmitBtn, true);
+                const result = await api.post("/api/api-keys/batch/providers", {
+                    api_key_ids: Array.from(state.selectedIds),
+                    route_mode: batchProviderRouteMode.value,
+                    default_provider_id: defaultProviderId,
+                    manual_allow_fallback: batchProviderFallback.checked,
+                    allowed_provider_ids: allowedProviderIds,
+                });
+                showToast(`已批量更新渠道授权 ${formatNumber(result.affected_count || 0)} 个`);
+                closeBatchProviderModal();
+                await loadTableData({ silent: true });
+            } catch (error) {
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(batchProviderSubmitBtn, false);
+            }
+        });
 
         tableBody.addEventListener("click", async (event) => {
             const button = event.target.closest("[data-action]");
@@ -2922,8 +3844,9 @@
                 if (!window.confirm(`确认删除 API 密钥「${apiKey.name}」吗？`)) return;
                 try {
                     await api.delete(`/api/api-keys/${apiKeyId}`);
+                    state.selectedIds.delete(apiKeyId);
                     showToast("API 密钥已删除");
-                    await loadData({ silent: true });
+                    await loadTableData({ silent: true });
                 } catch (error) {
                     showToast(error.message, "error");
                 }
@@ -2933,14 +3856,27 @@
                 try {
                     await api.post(`/api/api-keys/${apiKeyId}/${button.dataset.action}`);
                     showToast(`API 密钥已${button.dataset.action === "enable" ? "启用" : "禁用"}`);
-                    await loadData({ silent: true });
+                    await loadTableData({ silent: true });
                 } catch (error) {
                     showToast(error.message, "error");
                 }
             }
         });
+        tableBody.addEventListener("change", (event) => {
+            const checkbox = event.target.closest("[data-api-key-select]");
+            if (!checkbox) return;
+            const apiKeyId = Number(checkbox.dataset.apiKeySelect);
+            if (!Number.isFinite(apiKeyId)) return;
+            if (checkbox.checked) {
+                state.selectedIds.add(apiKeyId);
+            } else {
+                state.selectedIds.delete(apiKeyId);
+            }
+            renderBatchButtons();
+            renderPagination();
+        });
 
-        await loadData({ silent: true });
+        await loadData({ silent: true, reloadReference: true });
     }
 
     async function initApiKeyDetail() {
@@ -3401,29 +4337,35 @@
                 renderLogSummary(data.summary || {});
                 tableBody.innerHTML = data.items.map((log) => `
                     <tr>
-                        <td>${formatDate(log.created_at)}</td>
-                        <td>${escapeHtml(formatLogTypeLabel(log.log_type))}</td>
                         <td>
-                            <strong>${escapeHtml(log.api_client_key_name || "-")}</strong>
+                            <strong>${formatDate(log.created_at)}</strong>
+                            <div class="table-muted">${escapeHtml(log.http_method || "-")}</div>
+                        </td>
+                        <td>
+                            <strong>${escapeHtml(formatLogTypeLabel(log.log_type))}</strong>
+                            <div class="table-muted">思维等级 ${escapeHtml(log.reasoning_level || "无")}</div>
+                        </td>
+                        <td>
+                            <strong>${escapeHtml(log.user_account_name || "-")}</strong>
+                            <div class="table-muted">${escapeHtml(log.api_client_key_name || "-")}</div>
                             <div class="table-muted">${escapeHtml(log.api_client_key_prefix || "-")}</div>
-                            <div class="table-muted">${escapeHtml(log.user_account_name || "-")}</div>
                         </td>
                         <td>${escapeHtml(buildSessionValue(log))}</td>
                         <td>${escapeHtml(log.requested_model || log.model_name || "-")}</td>
                         <td>${escapeHtml(log.provider_name || "-")}</td>
-                        <td>${escapeHtml(log.reasoning_level || "无")}</td>
-                        <td>${escapeHtml(log.http_method || "-")}</td>
-                        <td>${log.success ? statusBadge("healthy") : statusBadge("unhealthy")}<div class="table-muted">${log.status_code ?? "-"}</div></td>
-                        <td>${formatMetricValue(log.attempt_count)}</td>
-                        <td>${formatMetricValue(log.ttfb_ms, " ms")}</td>
-                        <td>${formatRateValue(log.tps)}</td>
-                        <td>${formatMetricValue(log.duration_ms ?? log.latency_ms, " ms")}</td>
-                        <td>${formatMetricValue(log.prompt_tokens)}</td>
-                        <td>${formatMetricValue(log.completion_tokens)}</td>
-                        <td>${formatMetricValue(log.cache_read_tokens)}</td>
-                        <td>${formatMetricValue(log.cache_write_tokens)}</td>
-                        <td>${formatCostValue(log.total_cost)}</td>
-                        <td>${log.billing_multiplier == null ? "-" : `${Number(log.billing_multiplier).toFixed(2)}x`}</td>
+                        <td>
+                            ${log.success ? statusBadge("healthy") : statusBadge("unhealthy")}
+                            <div class="table-muted">HTTP ${log.status_code ?? "-"} · 尝试 ${formatMetricValue(log.attempt_count)}</div>
+                        </td>
+                        <td>
+                            <strong>${formatMetricValue(log.total_tokens)}</strong>
+                            <div class="table-muted">输入 ${formatMetricValue(log.prompt_tokens)} / 输出 ${formatMetricValue(log.completion_tokens)}</div>
+                            <div class="table-muted">成本 ${formatCostValue(log.total_cost)}</div>
+                        </td>
+                        <td>
+                            <strong>${formatMetricValue(log.duration_ms ?? log.latency_ms, " ms")}</strong>
+                            <div class="table-muted">TTFB ${formatMetricValue(log.ttfb_ms, " ms")} · TPS ${formatRateValue(log.tps)}</div>
+                        </td>
                         <td>
                             <div class="table-actions">
                                 <button class="table-action-btn" data-action="show-trace" data-log-id="${log.id}">详情</button>
@@ -3431,7 +4373,7 @@
                             </div>
                         </td>
                     </tr>
-                `).join("") || '<tr><td colspan="20"><div class="empty-state">暂无日志</div></td></tr>';
+                `).join("") || '<tr><td colspan="10"><div class="empty-state">暂无日志</div></td></tr>';
                 tableBody.querySelectorAll('button[data-action="show-trace"]').forEach((button, index) => {
                     button.dataset.log = JSON.stringify(data.items[index] || {});
                 });
@@ -3528,7 +4470,31 @@
         const refreshBtn = document.getElementById("conversation-refresh-btn");
         const openLogsLink = document.getElementById("conversation-open-logs");
         const title = document.getElementById("conversation-detail-title");
+        const totalCountPrimary = document.getElementById("conversation-total-count");
+        const totalCountSecondary = document.getElementById("conversation-total-count-secondary");
+        const totalRequestsNode = document.getElementById("conversation-total-requests");
+        const totalTokensNode = document.getElementById("conversation-total-tokens");
+        const activeQueryNode = document.getElementById("conversation-active-query");
+        const resultCountNode = document.getElementById("conversation-result-count");
+        const lastUpdatedNode = document.getElementById("conversation-last-updated");
+        const selectedProviderNode = document.getElementById("conversation-selected-provider");
+        const selectedUpdatedNode = document.getElementById("conversation-selected-updated");
         const state = { items: [], activeKey: null };
+
+        function renderConversationOverview() {
+            const totalCount = state.items.length;
+            const totalRequests = state.items.reduce((sum, item) => sum + Number(item.request_count || 0), 0);
+            const totalTokens = state.items.reduce((sum, item) => sum + Number(item.total_tokens || 0), 0);
+            const latestUpdatedAt = state.items[0]?.updated_at || null;
+            const queryText = searchInput.value.trim();
+            if (totalCountPrimary) totalCountPrimary.textContent = formatNumber(totalCount);
+            if (totalCountSecondary) totalCountSecondary.textContent = formatNumber(totalCount);
+            if (totalRequestsNode) totalRequestsNode.textContent = formatNumber(totalRequests);
+            if (totalTokensNode) totalTokensNode.textContent = formatNumber(totalTokens);
+            if (activeQueryNode) activeQueryNode.textContent = queryText ? `当前检索：${queryText}` : "当前展示全部会话";
+            if (resultCountNode) resultCountNode.textContent = `${formatNumber(totalCount)} 条结果`;
+            if (lastUpdatedNode) lastUpdatedNode.textContent = `最近更新 ${formatDate(latestUpdatedAt)}`;
+        }
 
         async function loadConversations(preferredKey = null) {
             try {
@@ -3538,6 +4504,7 @@
                 if (query) params.set("query", query);
                 const data = await api.get(`/api/conversations?${params.toString()}`);
                 state.items = data.items;
+                renderConversationOverview();
                 renderConversationList();
                 const urlKey = new URLSearchParams(window.location.search).get("conversation_key");
                 const nextKey = preferredKey || urlKey || state.activeKey || data.items[0]?.conversation_key || null;
@@ -3580,6 +4547,8 @@
             summary.innerHTML = '<div class="empty-state">选择一个会话后，可查看完整回放、命中线路与 token 使用。</div>';
             timeline.innerHTML = "";
             openLogsLink.classList.add("hidden");
+            if (selectedProviderNode) selectedProviderNode.textContent = "-";
+            if (selectedUpdatedNode) selectedUpdatedNode.textContent = "-";
             renderConversationList();
         }
 
@@ -3632,6 +4601,12 @@
                 `).join("") || '<div class="empty-state">该会话暂无可回放内容</div>';
                 openLogsLink.href = `/logs?conversation_key=${encodeURIComponent(detail.conversation_key)}`;
                 openLogsLink.classList.remove("hidden");
+                if (selectedProviderNode) {
+                    selectedProviderNode.textContent = detail.latest_provider_name || "-";
+                }
+                if (selectedUpdatedNode) {
+                    selectedUpdatedNode.textContent = formatDate(detail.updated_at);
+                }
                 renderConversationList();
                 const url = `/conversations?conversation_key=${encodeURIComponent(detail.conversation_key)}`;
                 if (replace) {
@@ -3684,11 +4659,18 @@
         try {
             page = document.body.dataset.page;
             enhanceInteractiveButtons(document);
+            scheduleResponsiveTableSync(document);
             if (page === "dashboard") await initDashboard();
             if (page === "providers") await initProviders();
             if (page === "models") await initModels();
             if (page === "settings") await initSettings();
             if (page === "playground") await initPlayground();
+            if (page === "users") await initUsersPage();
+            if (page === "alerts") await initAlertsPage();
+            if (page === "user-home") await initUserHome();
+            if (page === "user-billing") await initUserBilling();
+            if (page === "user-logs") await initUserLogs();
+            if (page === "user-self-test") await initUserSelfTest();
             if (page === "user-models") await initUserModels();
             if (page === "api-keys") await initApiKeys();
             if (page === "api-key-detail") await initApiKeyDetail();
@@ -3727,6 +4709,7 @@
         document.getElementById("app-content").innerHTML = nextContent.innerHTML;
         document.getElementById("topbar-title").textContent = nextTitle.textContent;
         document.body.dataset.page = doc.body.dataset.page || "";
+        document.body.dataset.pageRole = doc.body.dataset.pageRole || "";
         document.title = doc.title;
         updateActiveNavigation(target.pathname);
         if (replace) {
@@ -3734,10 +4717,19 @@
         } else {
             window.history.pushState({ path: targetPath }, "", targetPath);
         }
+        scheduleResponsiveTableSync(document);
         await initializePage();
     }
 
     function initShellNavigation() {
+        const appContent = document.getElementById("app-content");
+        if (appContent) {
+            const observer = new MutationObserver(() => {
+                scheduleResponsiveTableSync(appContent);
+            });
+            observer.observe(appContent, { childList: true, subtree: true });
+        }
+
         document.addEventListener("click", async (event) => {
             const copyButton = event.target.closest("[data-copy-text]");
             if (copyButton) {

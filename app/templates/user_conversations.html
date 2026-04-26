@@ -2,15 +2,15 @@
 {% block content %}
 <section class="hero-panel hero-panel-compact cockpit-hero">
     <div class="cockpit-hero-copy">
-        <div class="eyebrow">Conversations</div>
+        <div class="eyebrow">会话记录</div>
         <h2>我的会话回放</h2>
-        <p>查看当前账号下产生的会话，并按会话号、模型、回复摘要快速定位。</p>
+        <p>右侧回放区改成更接近聊天界面的消息流展示。先用左侧列表缩小范围，再按消息流看用户输入、模型输出和渠道轨迹。</p>
     </div>
     <div class="cockpit-hero-aside">
         <div class="cockpit-aside-label">会话概览</div>
         <div class="cockpit-aside-value">{{ pagination.total }}</div>
         <div class="cockpit-aside-copy">当前筛选命中的会话数</div>
-        <div class="cockpit-health-bar"><span style="width: 100%"></span></div>
+        <div class="cockpit-health-bar"><span class="cockpit-health-fill-full"></span></div>
         <div class="cockpit-aside-meta">
             <span>当前页 {{ pagination.page }}</span>
             <span>总页数 {{ pagination.total_pages }}</span>
@@ -21,7 +21,7 @@
 <section class="panel-card section-shell conversation-toolbar">
     <div class="section-subhead">
         <div>
-            <div class="panel-kicker">Search</div>
+            <div class="panel-kicker">搜索筛选</div>
             <h3>搜索会话</h3>
         </div>
     </div>
@@ -51,7 +51,7 @@
     <div class="panel-card section-shell conversation-list-panel">
         <div class="section-subhead">
             <div>
-                <div class="panel-kicker">List</div>
+                <div class="panel-kicker">会话列表</div>
                 <h3>会话列表</h3>
             </div>
         </div>
@@ -94,7 +94,7 @@
     <div class="panel-card section-shell conversation-detail-panel">
         <div class="section-subhead">
             <div>
-                <div class="panel-kicker">Replay</div>
+                <div class="panel-kicker">会话消息流</div>
                 <h3>{{ replay.conversation_key if replay else '选择左侧会话' }}</h3>
             </div>
         </div>
@@ -124,27 +124,39 @@
                 <span>最近命中线路 {{ replay.latest_provider_name or '-' }}</span>
             </div>
         </div>
-        <div class="conversation-timeline">
+        <div class="conversation-message-stream">
             {% for turn in replay.turns %}
-            <article class="conversation-turn conversation-turn-{{ turn.role }}">
-                <div class="conversation-turn-head">
-                    <div>
-                        <span class="conversation-role">{{ turn.role }}</span>
-                        <strong>{{ turn.provider_name or turn.requested_model or '-' }}</strong>
+            <article class="conversation-message conversation-message-{{ turn.role }}">
+                <div class="conversation-message-avatar">
+                    {% if turn.role == 'user' %}你
+                    {% elif turn.role == 'assistant' %}AI
+                    {% elif turn.role == 'system' %}系统
+                    {% elif turn.role == 'developer' %}开发
+                    {% else %}{{ turn.role[:2] }}
+                    {% endif %}
+                </div>
+                <div class="conversation-message-main">
+                    <div class="conversation-turn-head">
+                        <div>
+                            <span class="conversation-role">{{ turn.role }}</span>
+                            <strong>{{ turn.provider_name or turn.requested_model or '-' }}</strong>
+                        </div>
+                        <div class="conversation-turn-meta">
+                            <span>{{ turn.created_at }}</span>
+                            <span>{{ turn.total_tokens or 0 }} tokens</span>
+                            <span>{{ 'stream' if turn.is_stream else 'json' }}</span>
+                            <span>{{ 'vision' if turn.has_image else 'text' }}</span>
+                        </div>
                     </div>
-                    <div class="conversation-turn-meta">
-                        <span>{{ turn.created_at }}</span>
-                        <span>{{ turn.total_tokens or 0 }} tokens</span>
-                        <span>{{ 'stream' if turn.is_stream else 'json' }}</span>
-                        <span>{{ 'vision' if turn.has_image else 'text' }}</span>
+                    <div class="conversation-message-bubble">
+                        <div class="conversation-message-copy">{{ turn.content }}</div>
                     </div>
                 </div>
-                <pre class="conversation-turn-body">{{ turn.content }}</pre>
             </article>
             {% endfor %}
         </div>
         {% else %}
-        <div class="empty-state">选择一个会话后，可查看完整回放内容。</div>
+        <div class="empty-state">选择一个会话后，可查看完整消息流。</div>
         {% endif %}
     </div>
 </section>

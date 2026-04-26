@@ -2,7 +2,7 @@
 {% block content %}
 <section class="page-heading">
     <div>
-        <div class="eyebrow">Routing</div>
+        <div class="eyebrow">路由设置</div>
         <h2>路由设置</h2>
         <p>统一配置默认路由模式、重试策略、熔断阈值与自动健康检查参数。</p>
     </div>
@@ -11,7 +11,7 @@
 <section class="panel-card section-shell">
     <div class="section-subhead">
         <div>
-            <div class="panel-kicker">Route Policy</div>
+            <div class="panel-kicker">路由策略</div>
             <h3>全局路由策略</h3>
         </div>
     </div>
@@ -33,7 +33,7 @@
             <section class="route-guide-panel">
                 <div class="route-guide-head">
                     <div>
-                        <div class="panel-kicker">Mode Guide</div>
+                        <div class="panel-kicker">模式说明</div>
                         <h4>四种路由模式说明</h4>
                     </div>
                     <span class="route-guide-badge">按当前实现说明</span>
@@ -43,7 +43,7 @@
             <section class="route-guide-panel route-guide-panel-accent">
                 <div class="route-guide-head">
                     <div>
-                        <div class="panel-kicker">Live Logic</div>
+                        <div class="panel-kicker">实时逻辑</div>
                         <h4>当前实际命中逻辑说明</h4>
                     </div>
                 </div>
@@ -77,6 +77,18 @@
         <label>
             <span>日志正文最大字节数</span>
             <input class="field-input" id="setting-max-logged-body-bytes" type="number">
+        </label>
+        <div class="form-span-2 settings-note">
+            <strong>日志保留策略</strong>
+            <span>按天数定时清理历史请求日志与管理端审计日志；填写 0 表示不自动清理该类日志。</span>
+        </div>
+        <label>
+            <span>请求日志保留天数</span>
+            <input class="field-input" id="setting-request-log-retention-days" type="number" min="0">
+        </label>
+        <label>
+            <span>审计日志保留天数</span>
+            <input class="field-input" id="setting-admin-audit-log-retention-days" type="number" min="0">
         </label>
         <div class="form-dual-check form-span-2">
             <label class="toggle-row">

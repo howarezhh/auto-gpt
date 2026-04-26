@@ -2,15 +2,9 @@
 {% block content %}
 <section class="page-heading">
     <div>
-        <div class="eyebrow">Logs</div>
+        <div class="eyebrow">日志中心</div>
         <h2>日志中心</h2>
         <p>筛选代理调用与健康检查日志，快速定位命中线路、错误状态和耗时。</p>
-    </div>
-    <div class="hero-actions">
-        <span class="table-muted" id="logs-last-refresh">最近刷新: -</span>
-        <button class="btn btn-ghost interactive-btn" id="logs-export-btn" type="button">导出 CSV</button>
-        <button class="btn btn-ghost interactive-btn" id="logs-refresh-btn" type="button">刷新</button>
-        <button class="btn btn-danger-soft interactive-btn" id="logs-clear-btn" type="button">清空日志</button>
     </div>
 </section>
 
@@ -24,72 +18,105 @@
     <article class="metric-card"><span>总 Token</span><strong data-log-summary="total_tokens">0</strong></article>
 </section>
 
+<section class="dashboard-command-grid">
+    <div class="panel-card section-shell">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">筛选视图</div>
+                <h3>筛选条件</h3>
+            </div>
+        </div>
+        <div class="filter-grid">
+            <label>
+                <span>日志类型</span>
+                <select class="field-input" id="logs-log-type">
+                    <option value="">全部</option>
+                    <option value="chat">对话请求</option>
+                    <option value="responses">响应请求</option>
+                    <option value="health_check_provider">渠道健康检查</option>
+                    <option value="health_check_model">模型健康检查</option>
+                    <option value="proxy_generic">通用代理日志</option>
+                    <option value="api_client_auth">密钥鉴权失败日志</option>
+                </select>
+            </label>
+            <label>
+                <span>中转站 ID</span>
+                <select class="field-input" id="logs-provider-id">
+                    <option value="">全部</option>
+                </select>
+            </label>
+            <label>
+                <span>模型名</span>
+                <select class="field-input" id="logs-model-name">
+                    <option value="">全部</option>
+                </select>
+            </label>
+            <label>
+                <span>所属用户</span>
+                <select class="field-input" id="logs-user-account-id">
+                    <option value="">全部</option>
+                </select>
+            </label>
+            <label>
+                <span>密钥 ID</span>
+                <select class="field-input" id="logs-api-client-key-id">
+                    <option value="">全部</option>
+                </select>
+            </label>
+            <label>
+                <span>密钥标识</span>
+                <select class="field-input" id="logs-api-client-key-query">
+                    <option value="">全部</option>
+                </select>
+            </label>
+            <label>
+                <span>成功状态</span>
+                <select class="field-input" id="logs-success">
+                    <option value="">全部</option>
+                    <option value="true">成功</option>
+                    <option value="false">失败</option>
+                </select>
+            </label>
+            <label>
+                <span>会话键</span>
+                <input class="field-input" id="logs-conversation-key" type="text" placeholder="例如 user-001 或 request_id">
+            </label>
+            <label class="toggle-row">
+                <input id="logs-exclude-health-checks" type="checkbox" checked>
+                <span>隐藏健康检查日志</span>
+            </label>
+        </div>
+    </div>
+
+    <div class="dashboard-command-side">
+        <div class="panel-card section-shell">
+            <div class="section-subhead">
+                <div>
+                    <div class="panel-kicker">默认视图</div>
+                    <h3>阅读规则</h3>
+                </div>
+            </div>
+            <div class="dashboard-signal-list">
+                <div><span>默认列</span><strong>只保留关键列，减少横向阅读压力</strong></div>
+                <div><span>详情入口</span><strong>按钮内集中查看 Trace、缓存、倍率和成本字段</strong></div>
+                <div><span>回放入口</span><strong>存在会话键时可直接跳到会话回放页</strong></div>
+                <div><span>刷新策略</span><strong id="logs-last-refresh">最近刷新: -</strong></div>
+            </div>
+        </div>
+    </div>
+</section>
+
 <section class="panel-card section-shell">
     <div class="section-subhead">
         <div>
-            <div class="panel-kicker">Log Filters</div>
-            <h3>日志筛选与列表</h3>
+            <div class="panel-kicker">结果列表</div>
+            <h3>关键列日志列表</h3>
         </div>
-    </div>
-    <div class="filter-grid">
-        <label>
-            <span>日志类型</span>
-            <select class="field-input" id="logs-log-type">
-                <option value="">全部</option>
-                <option value="chat">对话请求</option>
-                <option value="responses">响应请求</option>
-                <option value="health_check_provider">渠道健康检查</option>
-                <option value="health_check_model">模型健康检查</option>
-                <option value="proxy_generic">通用代理日志</option>
-                <option value="api_client_auth">密钥鉴权失败日志</option>
-            </select>
-        </label>
-        <label>
-            <span>中转站 ID</span>
-            <select class="field-input" id="logs-provider-id">
-                <option value="">全部</option>
-            </select>
-        </label>
-        <label>
-            <span>模型名</span>
-            <select class="field-input" id="logs-model-name">
-                <option value="">全部</option>
-            </select>
-        </label>
-        <label>
-            <span>所属用户</span>
-            <select class="field-input" id="logs-user-account-id">
-                <option value="">全部</option>
-            </select>
-        </label>
-        <label>
-            <span>密钥 ID</span>
-            <select class="field-input" id="logs-api-client-key-id">
-                <option value="">全部</option>
-            </select>
-        </label>
-        <label>
-            <span>密钥标识</span>
-            <select class="field-input" id="logs-api-client-key-query">
-                <option value="">全部</option>
-            </select>
-        </label>
-        <label>
-            <span>成功状态</span>
-            <select class="field-input" id="logs-success">
-                <option value="">全部</option>
-                <option value="true">成功</option>
-                <option value="false">失败</option>
-            </select>
-        </label>
-        <label>
-            <span>会话键</span>
-            <input class="field-input" id="logs-conversation-key" type="text" placeholder="例如 user-001 或 request_id">
-        </label>
-        <label class="toggle-row">
-            <input id="logs-exclude-health-checks" type="checkbox" checked>
-            <span>隐藏健康检查日志</span>
-        </label>
+        <div class="hero-actions">
+            <button class="btn btn-ghost interactive-btn" id="logs-export-btn" type="button">导出 CSV</button>
+            <button class="btn btn-ghost interactive-btn" id="logs-refresh-btn" type="button">刷新</button>
+            <button class="btn btn-danger-soft interactive-btn" id="logs-clear-btn" type="button">清空日志</button>
+        </div>
     </div>
     <div class="table-shell">
         <table class="data-table">
@@ -97,23 +124,13 @@
                 <tr>
                     <th>时间</th>
                     <th>类型</th>
-                    <th>Key</th>
+                    <th>用户 / 密钥</th>
                     <th>Session</th>
                     <th>模型</th>
                     <th>渠道</th>
-                    <th>思维等级</th>
-                    <th>方法</th>
-                    <th>成功</th>
-                    <th>尝试</th>
-                    <th>TTFB</th>
-                    <th>TPS</th>
+                    <th>结果</th>
+                    <th>Token / 成本</th>
                     <th>用时</th>
-                    <th>输入</th>
-                    <th>输出</th>
-                    <th>缓存读</th>
-                    <th>缓存写</th>
-                    <th>成本</th>
-                    <th>倍率</th>
                     <th>详情</th>
                 </tr>
             </thead>
@@ -140,7 +157,7 @@
 <div class="modal-shell hidden" id="log-trace-modal">
     <div class="modal-card modal-lg">
         <div class="modal-head">
-            <h3>请求链路 Trace</h3>
+            <h3>请求详情与 Trace</h3>
             <button class="icon-btn interactive-btn" id="log-trace-close" type="button">×</button>
         </div>
         <pre class="code-block" id="log-trace-content">暂无 Trace</pre>

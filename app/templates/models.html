@@ -2,7 +2,7 @@
 {% block content %}
 <section class="hero-panel hero-panel-compact cockpit-hero">
     <div class="cockpit-hero-copy">
-        <div class="eyebrow">Model Registry</div>
+        <div class="eyebrow">模型管理</div>
         <h2>模型配置</h2>
         <p>统一维护模型基础价格、速度标签、全局启用状态，并控制各个中转站对同一模型的可用性与价格倍率。</p>
         <div class="hero-actions">
@@ -14,7 +14,7 @@
         <div class="cockpit-aside-label">配置口径</div>
         <div class="cockpit-aside-value">每百万</div>
         <div class="cockpit-aside-copy">界面按每百万 token 录入，系统自动换算为底层每千 token 计费字段</div>
-        <div class="cockpit-health-bar"><span style="width: 100%"></span></div>
+        <div class="cockpit-health-bar"><span class="cockpit-health-fill-full"></span></div>
         <div class="cockpit-aside-meta">
             <span>基础价 × 渠道倍率</span>
             <span>统一管理</span>
@@ -32,7 +32,35 @@
 <section class="panel-card section-shell">
     <div class="section-subhead">
         <div>
-            <div class="panel-kicker">Model Matrix</div>
+            <div class="panel-kicker">对象管理流程</div>
+            <h3>模型从定价到投放的四个步骤</h3>
+        </div>
+    </div>
+    <div class="stage-grid">
+        <article class="stage-card">
+            <strong>1. 定义模型对象</strong>
+            <span>确定模型名、展示名、速度标签和基础价格，先把模型当成统一对象来维护。</span>
+        </article>
+        <article class="stage-card">
+            <strong>2. 绑定渠道倍率</strong>
+            <span>按“基础价 × 渠道倍率”建立不同渠道下的最终价格和优先级，不把价格分散到多个页面。</span>
+        </article>
+        <article class="stage-card">
+            <strong>3. 控制启用状态</strong>
+            <span>模型全局启用后，仍需结合具体渠道绑定状态判断能否被路由命中。</span>
+        </article>
+        <article class="stage-card">
+            <strong>4. 统一对外暴露</strong>
+            <span>用户端只读取授权后可访问的模型对象，避免把后台全量模型池直接外露。</span>
+        </article>
+    </div>
+</section>
+
+<section class="dashboard-command-grid">
+    <div class="panel-card section-shell">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">对象目录</div>
             <h3>模型聚合列表</h3>
         </div>
     </div>
@@ -54,6 +82,24 @@
             </thead>
             <tbody id="models-table-body"></tbody>
         </table>
+    </div>
+    </div>
+
+    <div class="dashboard-command-side">
+        <div class="panel-card section-shell">
+            <div class="section-subhead">
+                <div>
+                    <div class="panel-kicker">管理规则</div>
+                    <h3>价格与绑定口径</h3>
+                </div>
+            </div>
+            <div class="dashboard-signal-list">
+                <div><span>价格单位</span><strong>界面统一按每百万 token 录入与展示</strong></div>
+                <div><span>换算规则</span><strong>底层继续复用每千 token 字段，由适配层双向换算</strong></div>
+                <div><span>倍率含义</span><strong>同一模型在不同渠道的价格差异，只通过倍率维护</strong></div>
+                <div><span>对象视角</span><strong>先维护模型对象，再决定它被哪些渠道挂载和对外暴露</strong></div>
+            </div>
+        </div>
     </div>
 </section>
 

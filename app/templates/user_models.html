@@ -2,35 +2,41 @@
 {% block content %}
 <section class="hero-panel hero-panel-compact cockpit-hero">
     <div class="cockpit-hero-copy">
-        <div class="eyebrow">Available Models</div>
-        <h2>可用模型</h2>
-        <p>查看当前账号下已授权可用模型的基础价格、速度标签与可命中渠道，便于外部接入时选型。</p>
+        <div class="eyebrow">可用模型</div>
+        <h2>模型选择与价格理解</h2>
+        <p>这里专门回答三件事：该选哪个模型、价格怎么看、你的账号能命中哪些渠道。图片上传工具已经从模型页剥离，不再干扰选型。</p>
     </div>
     <div class="cockpit-hero-aside">
-        <div class="cockpit-aside-label">展示口径</div>
+        <div class="cockpit-aside-label">价格口径</div>
         <div class="cockpit-aside-value">/1M</div>
-        <div class="cockpit-aside-copy">价格统一按每百万 token 展示</div>
-        <div class="cockpit-health-bar"><span style="width: 100%"></span></div>
+        <div class="cockpit-aside-copy">所有价格统一按每百万 token 展示</div>
+        <div class="cockpit-health-bar"><span class="cockpit-health-fill-full"></span></div>
         <div class="cockpit-aside-meta">
-            <span>仅显示当前账号可用模型</span>
-            <span>{{ models|length }} 个</span>
+            <span>可用模型 {{ models|length }}</span>
+            <span>仅显示当前账号授权范围</span>
         </div>
     </div>
 </section>
 
-<section class="stats-grid">
+<nav class="page-anchor-bar">
+    <a class="page-anchor-link" href="#user-models-understand">先理解</a>
+    <a class="page-anchor-link" href="#user-models-directory">模型目录</a>
+    <a class="page-anchor-link" href="#user-models-rules">选择规则</a>
+</nav>
+
+<section class="stats-grid anchor-section-offset" id="user-models-understand">
     <article class="metric-card"><span>可用模型数</span><strong>{{ models|length }}</strong></article>
     <article class="metric-card"><span>有价格模型</span><strong>{{ models | selectattr('input_price_per_1k') | list | length }}</strong></article>
     <article class="metric-card"><span>可命中渠道总数</span><strong>{{ models | sum(attribute='enabled_provider_count') }}</strong></article>
-    <article class="metric-card"><span>接入建议</span><strong>优先先测后上量</strong></article>
+    <article class="metric-card"><span>默认建议</span><strong>先小流量测试</strong></article>
 </section>
 
-<section class="dashboard-command-grid">
-    <div class="panel-card section-shell">
+<section class="dashboard-command-grid anchor-section-offset">
+    <div class="panel-card section-shell" id="user-models-directory">
         <div class="section-subhead">
             <div>
-                <div class="panel-kicker">Model List</div>
-                <h3>模型清单</h3>
+                <div class="panel-kicker">模型目录</div>
+                <h3>模型、价格与覆盖范围</h3>
             </div>
         </div>
         <div class="table-shell">
@@ -71,40 +77,40 @@
         </div>
     </div>
 
-    <div class="dashboard-command-side">
+    <div class="dashboard-command-side" id="user-models-rules">
         <div class="panel-card">
             <div class="panel-head">
                 <div>
-                    <div class="panel-kicker">Multimodal</div>
-                    <h3>图片上传工具</h3>
+                    <div class="panel-kicker">选择规则</div>
+                    <h3>怎么选模型</h3>
                 </div>
             </div>
-            <form id="user-asset-upload-form" class="form-grid">
-                <label class="form-span-2">
-                    <span>选择图片</span>
-                    <input class="field-input" id="user-asset-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif">
-                </label>
-                <div class="form-actions form-span-2">
-                    <button class="btn btn-accent interactive-btn" id="user-asset-upload-btn" type="submit">上传并生成图片地址</button>
-                </div>
-            </form>
-            <div class="result-meta" id="user-asset-upload-meta">可上传图片并生成当前服务可访问的地址，便于拼装多模态请求。</div>
-            <div class="dashboard-signal-list" id="user-asset-upload-result">
-                <div><span>状态</span><strong>等待上传</strong></div>
+            <div class="stage-grid stage-grid-single">
+                <article class="stage-card">
+                    <strong>先看模型名</strong>
+                    <span>请求参数要使用这里展示的模型名，而不是自己猜一个近似名称。</span>
+                </article>
+                <article class="stage-card">
+                    <strong>再看输入 / 输出价格</strong>
+                    <span>价格统一按每百万 token 展示，便于直接横向对比，不要再自己换算 `/1K`。</span>
+                </article>
+                <article class="stage-card">
+                    <strong>最后看可用渠道数</strong>
+                    <span>可命中渠道越多，容灾空间越大；若只有一个渠道，建议先做小流量验证。</span>
+                </article>
             </div>
         </div>
         <div class="panel-card">
             <div class="panel-head">
                 <div>
-                    <div class="panel-kicker">How To Use</div>
-                    <h3>使用提醒</h3>
+                    <div class="panel-kicker">继续动作</div>
+                    <h3>下一步</h3>
                 </div>
             </div>
             <div class="dashboard-signal-list">
-                <div><span>模型名</span><strong>以这里的模型名作为请求参数</strong></div>
-                <div><span>价格口径</span><strong>统一按每百万 token 展示</strong></div>
-                <div><span>可用渠道</span><strong>只统计当前账号已授权范围</strong></div>
-                <div><span>接入前</span><strong>建议先用小流量请求测试返回质量和速度</strong></div>
+                <div><span>复制接入地址</span><strong><a href="/user" data-shell-link>回到首页主路径</a></strong></div>
+                <div><span>指定模型自检</span><strong><a href="/user/self-test" data-shell-link>去接入自检页</a></strong></div>
+                <div><span>密钥控制台</span><strong><a href="/user/api-keys" data-shell-link>看我的 API Key</a></strong></div>
             </div>
         </div>
     </div>

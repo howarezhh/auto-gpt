@@ -1,0 +1,259 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero-panel hero-panel-compact cockpit-hero">
+    <div class="cockpit-hero-copy">
+        <div class="eyebrow">告警中心</div>
+        <h2>告警中心</h2>
+        <p>汇总渠道健康异常、密钥异常状态、账户额度预警和最近 24 小时失败率，便于管理员集中处理。</p>
+    </div>
+    <div class="cockpit-hero-aside">
+        <div class="cockpit-aside-label">24h 失败率</div>
+        <div class="cockpit-aside-value">{{ '%.2f'|format(failure_rate) }}%</div>
+        <div class="cockpit-aside-copy">{{ failure_count }} / {{ request_count }} 次请求失败</div>
+        <div class="cockpit-health-bar"><span style="width: {{ failure_rate if failure_rate <= 100 else 100 }}%"></span></div>
+        <div class="cockpit-aside-meta">
+            <span>渠道异常 {{ unhealthy_providers|length }}</span>
+            <span>密钥异常 {{ abnormal_api_keys|length }}</span>
+        </div>
+    </div>
+</section>
+
+<section class="stats-grid">
+    <article class="metric-card"><span>渠道异常</span><strong>{{ unhealthy_providers|length }}</strong></article>
+    <article class="metric-card"><span>密钥异常</span><strong>{{ abnormal_api_keys|length }}</strong></article>
+    <article class="metric-card"><span>账户预警</span><strong>{{ alert_users|length }}</strong></article>
+    <article class="metric-card"><span>24h 失败数</span><strong>{{ failure_count }}</strong></article>
+</section>
+
+<section class="panel-card section-shell">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">处理优先级</div>
+            <h3>先看严重级别，再决定动作</h3>
+        </div>
+    </div>
+    <div class="risk-grid">
+        <article class="risk-card" data-level="danger">
+            <strong>高优先级</strong>
+            <span>失败率持续升高、熔断打开、余额耗尽或额度耗尽时，优先处理，会直接影响对外可用性。</span>
+        </article>
+        <article class="risk-card" data-level="warning">
+            <strong>中优先级</strong>
+            <span>渠道降级、最近延迟显著升高、异常次数持续增加时，尽快复核健康检查和路由策略。</span>
+        </article>
+        <article class="risk-card" data-level="default">
+            <strong>低优先级</strong>
+            <span>已确认的历史事件和短暂抖动可先观察，但仍要保留可执行动作，避免停留在纯数据展示。</span>
+        </article>
+    </div>
+</section>
+
+<section class="panel-card section-shell">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">订阅配置</div>
+            <h3>订阅式告警</h3>
+        </div>
+    </div>
+    <form class="form-grid" id="alerts-subscription-form">
+        <label class="toggle-row">
+            <input id="alerts-subscription-enabled" type="checkbox" {% if subscription.enabled %}checked{% endif %}>
+            <span>启用订阅</span>
+        </label>
+        <label class="toggle-row">
+            <input id="alerts-subscription-provider" type="checkbox" {% if subscription.notify_provider_alerts %}checked{% endif %}>
+            <span>订阅渠道异常</span>
+        </label>
+        <label class="toggle-row">
+            <input id="alerts-subscription-api-key" type="checkbox" {% if subscription.notify_api_key_alerts %}checked{% endif %}>
+            <span>订阅 API 密钥异常</span>
+        </label>
+        <label class="toggle-row">
+            <input id="alerts-subscription-account" type="checkbox" {% if subscription.notify_account_alerts %}checked{% endif %}>
+            <span>订阅账户预警</span>
+        </label>
+        <label class="toggle-row">
+            <input id="alerts-subscription-failure-rate" type="checkbox" {% if subscription.notify_failure_rate_alerts %}checked{% endif %}>
+            <span>订阅失败率异常</span>
+        </label>
+        <label class="toggle-row">
+            <input id="alerts-subscription-browser" type="checkbox" {% if subscription.browser_notifications_enabled %}checked{% endif %}>
+            <span>启用浏览器提醒</span>
+        </label>
+        <label>
+            <span>轮询间隔(秒)</span>
+            <input class="field-input" id="alerts-subscription-poll" type="number" min="10" max="300" value="{{ subscription.poll_interval_seconds }}">
+        </label>
+        <div class="form-actions">
+            <button class="btn btn-accent interactive-btn" id="alerts-subscription-save-btn" type="submit">保存订阅</button>
+        </div>
+    </form>
+</section>
+
+<section class="panel-card section-shell">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">事件流</div>
+            <h3>实时告警事件流</h3>
+        </div>
+        <div class="topbar-actions">
+            <button class="topbar-btn interactive-btn" id="alerts-feed-refresh-btn" type="button">立即刷新</button>
+        </div>
+    </div>
+    <div class="table-shell">
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>类型</th>
+                    <th>级别</th>
+                    <th>标题</th>
+                    <th>处理建议</th>
+                    <th>最近出现</th>
+                    <th>动作</th>
+                </tr>
+            </thead>
+            <tbody id="alerts-event-table-body">
+                {% for item in events %}
+                <tr>
+                    <td>{{ item.alert_type }}</td>
+                    <td>{{ item.severity }}</td>
+                    <td>{{ item.title }}</td>
+                    <td>
+                        {% if item.alert_type == 'provider' %}
+                        先检查中转站健康、熔断和最近延迟，再决定是否临时下线。
+                        {% elif item.alert_type == 'api_key' %}
+                        优先核对密钥状态、余额和授权渠道，再决定是否轮换或恢复。
+                        {% elif item.alert_type == 'account' %}
+                        先确认账户额度、冻结金额和最近消费，再决定调账或提升配额。
+                        {% else %}
+                        结合失败率、消息内容和相关日志，优先处理影响正式流量的问题。
+                        {% endif %}
+                    </td>
+                    <td>{{ item.last_seen_at or '-' }}</td>
+                    <td>
+                        <div class="table-actions">
+                            <button class="table-action-btn" type="button" data-alert-ack-id="{{ item.id }}">确认</button>
+                            {% if item.alert_type == 'provider' %}
+                            <a class="table-action-btn" href="/providers" data-shell-link>查渠道</a>
+                            {% elif item.alert_type == 'api_key' %}
+                            <a class="table-action-btn" href="/api-keys" data-shell-link>查密钥</a>
+                            {% elif item.alert_type == 'account' %}
+                            <a class="table-action-btn" href="/users" data-shell-link>查账户</a>
+                            {% endif %}
+                        </div>
+                    </td>
+                </tr>
+                {% else %}
+                <tr><td colspan="6"><div class="empty-state">当前没有活跃告警事件。</div></td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<section class="dashboard-command-grid">
+    <div class="panel-card section-shell">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">中转站</div>
+                <h3>渠道异常</h3>
+            </div>
+        </div>
+        <div class="table-shell">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>名称</th>
+                        <th>健康状态</th>
+                        <th>熔断状态</th>
+                        <th>最近延迟</th>
+                        <th>建议动作</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for item in unhealthy_providers %}
+                    <tr>
+                        <td>{{ item.name }}</td>
+                        <td>{{ item.health_status }}</td>
+                        <td>{{ item.circuit_state }}</td>
+                        <td>{{ item.last_latency_ms if item.last_latency_ms is not none else '-' }}</td>
+                        <td>{% if item.circuit_state == 'open' %}优先下线或切流，再排查上游连通性{% else %}复查健康检查与模型可用性{% endif %}</td>
+                        <td><a href="/providers" data-shell-link>进入渠道管理</a></td>
+                    </tr>
+                    {% else %}
+                    <tr><td colspan="6"><div class="empty-state">当前没有渠道级异常。</div></td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="dashboard-command-side">
+        <div class="panel-card section-shell">
+            <div class="section-subhead">
+                <div>
+                    <div class="panel-kicker">用户账号</div>
+                    <h3>账户预警</h3>
+                </div>
+            </div>
+                <div class="dashboard-signal-list">
+                {% for item in alert_users %}
+                <div><span><a href="/users/{{ item.id }}" data-shell-link>{{ item.username }}</a></span><strong>{{ item.warnings[0].message }}，建议优先核对余额与日/月配额。</strong></div>
+                {% else %}
+                <div><span>暂无预警</span><strong>-</strong></div>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="panel-card section-shell">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">API 密钥</div>
+            <h3>密钥异常状态</h3>
+        </div>
+    </div>
+    <div class="table-shell">
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>名称</th>
+                    <th>归属用户</th>
+                    <th>状态</th>
+                    <th>余额</th>
+                    <th>最近使用</th>
+                    <th>建议动作</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for item in abnormal_api_keys %}
+                <tr>
+                    <td>{{ item.name }}</td>
+                    <td>{{ item.owner_user_name or '-' }}</td>
+                    <td>{{ item.status }}</td>
+                    <td>{{ '%.6f'|format(item.balance_amount) if item.balance_amount is not none else '不限' }}</td>
+                    <td>{{ item.last_used_at or '-' }}</td>
+                    <td>
+                        {% if item.status in ['quota_exhausted', 'cost_quota_exhausted', 'balance_exhausted'] %}
+                        优先补充额度或余额，再评估是否恢复。
+                        {% elif item.status == 'disabled' %}
+                        确认是否需要恢复启用。
+                        {% elif item.status == 'unbound' %}
+                        补齐授权中转站。
+                        {% else %}
+                        检查状态与最近日志。
+                        {% endif %}
+                    </td>
+                    <td><a href="/api-keys/{{ item.id }}" data-shell-link>查看详情</a></td>
+                </tr>
+                {% else %}
+                <tr><td colspan="7"><div class="empty-state">当前没有密钥级异常。</div></td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

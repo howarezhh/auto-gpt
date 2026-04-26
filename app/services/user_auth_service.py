@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from fastapi import Depends, HTTPException, Request, status
 
 from app.database import get_db
+from app.models.api_client_key import ApiClientKey
 from app.models.user_account import UserAccount
 
 
@@ -191,6 +192,27 @@ class UserAuthService:
         db.commit()
         db.refresh(user)
         return user
+
+    @staticmethod
+    def delete_user(db: Session, user: UserAccount) -> None:
+        owned_api_keys = list(
+            db.scalars(
+                select(ApiClientKey).where(ApiClientKey.owner_user_id == user.id)
+            )
+        )
+        for item in owned_api_keys:
+            db.delete(item)
+
+        created_users = list(
+            db.scalars(
+                select(UserAccount).where(UserAccount.created_by_user_id == user.id)
+            )
+        )
+        for item in created_users:
+            item.created_by_user_id = None
+
+        db.delete(user)
+        db.commit()
 
     @staticmethod
     def list_users(db: Session) -> list[UserAccount]:

@@ -3,14 +3,16 @@ from datetime import datetime, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from fastapi import APIRouter, Depends, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import APIRouter, Depends, Form, Request
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from app.config import get_settings
 from app.database import get_db
 from app.models.provider_model import ProviderModel
 from app.models.request_log import RequestLog
+from app.services.admin_audit_service import AdminAuditService
+from app.services.alert_service import AlertService
 from app.services.api_key_admin_service import ApiKeyAdminService
 from app.services.provider_service import ProviderService
 from app.services.setting_service import SettingService
@@ -188,3 +190,171 @@ def conversations_page(request: Request, db: Session = Depends(get_db)) -> HTMLR
     if isinstance(current_user, RedirectResponse):
         return current_user
     return templates.TemplateResponse("conversations.html", {"request": request, "page_name": "conversations", "portal_type": "admin", "current_user": current_user})
+
+
+@router.get("/alerts", response_class=HTMLResponse)
+def alerts_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
+    current_user = require_admin_html(request, db)
+    if isinstance(current_user, RedirectResponse):
+        return current_user
+    payload = AlertService.build_dashboard_payload(db)
+    subscription = AlertService.get_or_create_subscription(db, user=current_user)
+    return templates.TemplateResponse(
+        "alerts.html",
+        {
+            "request": request,
+            "title": "告警中心",
+            "page_name": "alerts",
+            "portal_type": "admin",
+            "current_user": current_user,
+            "subscription": subscription,
+            **payload,
+        },
+    )
+
+
+@router.get("/api/alerts/feed")
+def alerts_feed(request: Request, db: Session = Depends(get_db)):
+    current_user = require_admin_html(request, db)
+    if isinstance(current_user, RedirectResponse):
+        return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    payload = AlertService.build_dashboard_payload(db)
+    subscription = AlertService.get_or_create_subscription(db, user=current_user)
+    return JSONResponse(
+        {
+            **payload,
+            "subscription": {
+                "enabled": subscription.enabled,
+                "delivery_channel": subscription.delivery_channel,
+                "notify_provider_alerts": subscription.notify_provider_alerts,
+                "notify_api_key_alerts": subscription.notify_api_key_alerts,
+                "notify_account_alerts": subscription.notify_account_alerts,
+                "notify_failure_rate_alerts": subscription.notify_failure_rate_alerts,
+                "browser_notifications_enabled": subscription.browser_notifications_enabled,
+                "poll_interval_seconds": subscription.poll_interval_seconds,
+            },
+        }
+    )
+
+
+@router.post("/api/alerts/subscription")
+def update_alert_subscription(
+    request: Request,
+    enabled: str = Form(default="true"),
+    notify_provider_alerts: str = Form(default="true"),
+    notify_api_key_alerts: str = Form(default="true"),
+    notify_account_alerts: str = Form(default="true"),
+    notify_failure_rate_alerts: str = Form(default="true"),
+    browser_notifications_enabled: str = Form(default="false"),
+    poll_interval_seconds: int = Form(default=30),
+    db: Session = Depends(get_db),
+):
+    current_user = require_admin_html(request, db)
+    if isinstance(current_user, RedirectResponse):
+        return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    subscription = AlertService.update_subscription(
+        db,
+        user=current_user,
+        enabled=enabled == "true",
+        notify_provider_alerts=notify_provider_alerts == "true",
+        notify_api_key_alerts=notify_api_key_alerts == "true",
+        notify_account_alerts=notify_account_alerts == "true",
+        notify_failure_rate_alerts=notify_failure_rate_alerts == "true",
+        browser_notifications_enabled=browser_notifications_enabled == "true",
+        poll_interval_seconds=poll_interval_seconds,
+    )
+    AdminAuditService.create_log(
+        db,
+        actor_user_id=current_user.id,
+        actor_username=current_user.username,
+        action="update_alert_subscription",
+        entity_type="alert",
+        entity_id=subscription.id,
+        entity_name="alert_subscription",
+        summary=f"更新告警订阅设置 {current_user.username}",
+        detail={
+            "enabled": subscription.enabled,
+            "notify_provider_alerts": subscription.notify_provider_alerts,
+            "notify_api_key_alerts": subscription.notify_api_key_alerts,
+            "notify_account_alerts": subscription.notify_account_alerts,
+            "notify_failure_rate_alerts": subscription.notify_failure_rate_alerts,
+            "browser_notifications_enabled": subscription.browser_notifications_enabled,
+            "poll_interval_seconds": subscription.poll_interval_seconds,
+        },
+    )
+    return JSONResponse({"success": True})
+
+
+@router.post("/api/alerts/{event_id}/ack")
+def acknowledge_alert_event(
+    event_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    current_user = require_admin_html(request, db)
+    if isinstance(current_user, RedirectResponse):
+        return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    event = AlertService.acknowledge_event(db, event_id=event_id)
+    if event is None:
+        return JSONResponse({"detail": "not_found"}, status_code=404)
+    AdminAuditService.create_log(
+        db,
+        actor_user_id=current_user.id,
+        actor_username=current_user.username,
+        action="acknowledge_alert",
+        entity_type="alert",
+        entity_id=event.id,
+        entity_name=event.alert_key,
+        summary=f"确认告警 {event.alert_key}",
+    )
+    return JSONResponse({"success": True})
+
+
+@router.get("/audit-logs", response_class=HTMLResponse)
+def audit_logs_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
+    current_user = require_admin_html(request, db)
+    if isinstance(current_user, RedirectResponse):
+        return current_user
+    keyword = (request.query_params.get("keyword") or "").strip()
+    action = request.query_params.get("action") or ""
+    entity_type = request.query_params.get("entity_type") or ""
+    page = max(1, int(request.query_params.get("page") or 1))
+    page_size = min(100, max(10, int(request.query_params.get("page_size") or 20)))
+    total, items = AdminAuditService.list_logs(
+        db,
+        keyword=keyword or None,
+        action=action or None,
+        entity_type=entity_type or None,
+        page=page,
+        page_size=page_size,
+    )
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    filter_options = AdminAuditService.get_filter_options(db)
+    return templates.TemplateResponse(
+        "audit_logs.html",
+        {
+            "request": request,
+            "title": "操作审计日志",
+            "page_name": "audit-logs",
+            "portal_type": "admin",
+            "current_user": current_user,
+            "logs": items,
+            "filters": {
+                "keyword": keyword,
+                "action": action,
+                "entity_type": entity_type,
+            },
+            "filter_options": filter_options,
+            "pagination": {
+                "page": page,
+                "page_size": page_size,
+                "total": total,
+                "total_pages": total_pages,
+                "has_prev": page > 1,
+                "has_next": page < total_pages,
+                "prev_page": max(1, page - 1),
+                "next_page": min(total_pages, page + 1),
+            },
+            "serialize_audit_detail": AdminAuditService.serialize_detail,
+        },
+    )

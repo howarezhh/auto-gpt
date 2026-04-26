@@ -8,12 +8,13 @@ from decimal import Decimal
 
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import Depends, Header, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.config import get_settings
 from app.database import get_db
 from app.models.api_client_key import ApiClientKey
+from app.models.request_log import RequestLog
 from app.models.user_account import UserAccount
 from app.services.router_service import RoutePolicyContext
 from app.services.user_quota_service import UserQuotaService
@@ -164,9 +165,6 @@ class ApiKeyService:
         remaining_tokens = None
         if api_client_key.token_limit_total is not None:
             remaining_tokens = max(0, api_client_key.token_limit_total - api_client_key.total_tokens_used)
-        remaining_balance = None
-        if api_client_key.balance_amount is not None:
-            remaining_balance = float(api_client_key.balance_amount)
         allowed_provider_ids = [binding.provider_id for binding in api_client_key.provider_bindings]
         default_provider_id = api_client_key.default_provider_id
         if default_provider_id not in allowed_provider_ids:
@@ -175,6 +173,11 @@ class ApiKeyService:
         owner_user_id = owner_user.id if owner_user is not None else None
         owner_user_name = owner_user.username if owner_user is not None else None
         user_quota_snapshot = UserQuotaService.get_usage_snapshot(db, user=owner_user) if owner_user is not None else None
+        remaining_balance = None
+        if user_quota_snapshot is not None and user_quota_snapshot.available_balance is not None:
+            remaining_balance = float(user_quota_snapshot.available_balance)
+        elif api_client_key.balance_amount is not None:
+            remaining_balance = float(api_client_key.balance_amount)
         policy_snapshot = {
             "route_mode": api_client_key.route_mode,
             "default_provider_id": default_provider_id,
@@ -243,7 +246,7 @@ class ApiKeyService:
                 remaining_balance=remaining_balance,
                 policy_snapshot_json=policy_snapshot_json,
             )
-        if api_client_key.balance_amount is not None and Decimal(str(api_client_key.balance_amount)) <= Decimal("0"):
+        if owner_user is None and api_client_key.balance_amount is not None and Decimal(str(api_client_key.balance_amount)) <= Decimal("0"):
             raise ApiClientAuthError(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 code="insufficient_balance",
@@ -341,6 +344,37 @@ class ApiKeyService:
             target.last_used_at = datetime.utcnow()
             if auto_commit:
                 db.commit()
+
+    @staticmethod
+    def reconcile_usage_counters(
+        db: Session,
+        *,
+        api_client_key: ApiClientKey | None = None,
+        api_client_key_id: int | None = None,
+        auto_commit: bool = False,
+    ) -> ApiClientKey | None:
+        target_id = api_client_key_id or (api_client_key.id if api_client_key is not None else None)
+        if target_id is None:
+            return None
+        target = db.get(ApiClientKey, target_id)
+        if target is None:
+            return None
+        totals = db.execute(
+            select(
+                func.coalesce(func.sum(RequestLog.prompt_tokens), 0).label("prompt_tokens_used"),
+                func.coalesce(func.sum(RequestLog.completion_tokens), 0).label("completion_tokens_used"),
+                func.coalesce(func.sum(RequestLog.total_tokens), 0).label("total_tokens_used"),
+            )
+            .where(RequestLog.api_client_key_id == target_id)
+            .where(RequestLog.success.is_(True))
+            .where(RequestLog.request_path != "/v1/models")
+        ).one()
+        target.prompt_tokens_used = int(totals.prompt_tokens_used or 0)
+        target.completion_tokens_used = int(totals.completion_tokens_used or 0)
+        target.total_tokens_used = int(totals.total_tokens_used or 0)
+        if auto_commit:
+            db.commit()
+        return target
 
 
 def require_api_client_auth(

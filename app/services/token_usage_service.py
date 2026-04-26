@@ -15,8 +15,8 @@ except Exception:  # pragma: no cover - optional dependency during bootstrap
 from sqlalchemy import or_, select
 
 from app.database import SessionLocal
-from app.models.api_client_key import ApiClientKey
 from app.models.request_log import RequestLog
+from app.services.api_key_service import ApiKeyService
 from app.scheduler import scheduler
 from app.services.billing_service import BillingService
 from app.services.log_service import LogService
@@ -189,18 +189,13 @@ class TokenUsageService:
     ) -> None:
         if log.api_client_key_id is None:
             return
-        api_client_key = db.get(ApiClientKey, log.api_client_key_id)
-        if api_client_key is None:
+        if (
+            log.prompt_tokens == original_prompt_tokens
+            and log.completion_tokens == original_completion_tokens
+            and log.total_tokens == original_total_tokens
+        ):
             return
-        prompt_delta = (log.prompt_tokens or 0) - (original_prompt_tokens or 0)
-        completion_delta = (log.completion_tokens or 0) - (original_completion_tokens or 0)
-        total_delta = (log.total_tokens or 0) - (original_total_tokens or 0)
-        if prompt_delta:
-            api_client_key.prompt_tokens_used += prompt_delta
-        if completion_delta:
-            api_client_key.completion_tokens_used += completion_delta
-        if total_delta:
-            api_client_key.total_tokens_used += total_delta
+        ApiKeyService.reconcile_usage_counters(db, api_client_key_id=log.api_client_key_id)
 
     @staticmethod
     def _parse_json_object(value: str | None) -> dict[str, Any] | None:

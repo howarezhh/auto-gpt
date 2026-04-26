@@ -1,5 +1,6 @@
 from app.database import SessionLocal
 from app.scheduler import scheduler
+from app.services.data_retention_service import DataRetentionService
 from app.services.health_service import HealthService
 from app.services.setting_service import SettingService
 from app.services.token_usage_service import TokenUsageService
@@ -23,6 +24,19 @@ def scheduled_token_usage_backfill() -> None:
         db.close()
 
 
+def scheduled_data_retention_cleanup() -> None:
+    db = SessionLocal()
+    try:
+        setting = SettingService.get_or_create(db)
+        DataRetentionService.cleanup(
+            db,
+            request_log_retention_days=setting.request_log_retention_days,
+            admin_audit_log_retention_days=setting.admin_audit_log_retention_days,
+        )
+    finally:
+        db.close()
+
+
 def configure_scheduler() -> None:
     db = SessionLocal()
     try:
@@ -41,5 +55,12 @@ def configure_scheduler() -> None:
         "interval",
         seconds=15,
         id="token_usage_backfill",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        scheduled_data_retention_cleanup,
+        "interval",
+        hours=6,
+        id="data_retention_cleanup",
         replace_existing=True,
     )

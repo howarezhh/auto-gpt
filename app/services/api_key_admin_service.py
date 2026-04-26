@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 from decimal import Decimal
 
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.api_client_billing_record import ApiClientBillingRecord
@@ -13,10 +13,15 @@ from app.models.user_account import UserAccount
 from app.schemas.api_key import (
     ApiKeyAnalyticsOut,
     ApiKeyBalanceAdjustmentIn,
+    ApiKeyBatchActionIn,
+    ApiKeyBatchActionResultOut,
+    ApiKeyBatchProviderUpdateIn,
     ApiKeyBillingSummaryOut,
     ApiKeyCreate,
     ApiKeyDetailOut,
+    ApiKeyListResponse,
     ApiKeyModelDistributionItemOut,
+    ApiKeyOut,
     ApiKeyRecentErrorOut,
     ApiKeyRecentUsageOut,
     ApiKeyStatsOut,
@@ -58,8 +63,19 @@ class ApiKeyAdminService:
                 func.sum(RequestLog.total_cost).label("total_cost_used"),
             ).where(RequestLog.api_client_key_id.is_not(None))
         ).one()
-        total_balance_amount = sum(float(item.balance_amount or 0) for item in api_keys)
-        total_recharge_amount = sum(float(item.total_recharge_amount or 0) for item in api_keys)
+        total_balance_amount = 0.0
+        total_recharge_amount = 0.0
+        counted_user_ids: set[int] = set()
+        for item in api_keys:
+            if item.owner_user_id is not None and item.owner_user is not None:
+                if item.owner_user_id in counted_user_ids:
+                    continue
+                counted_user_ids.add(item.owner_user_id)
+                total_balance_amount += BillingService.to_float(item.owner_user.balance_amount) or 0
+                total_recharge_amount += BillingService.to_float(item.owner_user.total_recharge_amount) or 0
+                continue
+            total_balance_amount += float(item.balance_amount or 0)
+            total_recharge_amount += float(item.total_recharge_amount or 0)
 
         return ApiKeySummaryOut(
             total_keys=len(api_keys),
@@ -91,6 +107,55 @@ class ApiKeyAdminService:
         )
 
     @staticmethod
+    def list_api_keys_paginated(
+        db: Session,
+        *,
+        keyword: str | None,
+        status: str | None,
+        enabled: bool | None,
+        owner_user_id: int | None,
+        page: int,
+        page_size: int,
+    ) -> ApiKeyListResponse:
+        normalized_keyword = keyword.strip().lower() if keyword and keyword.strip() else None
+        stmt = (
+            select(ApiClientKey)
+            .options(
+                selectinload(ApiClientKey.provider_bindings).selectinload(ApiClientKeyProviderBinding.provider),
+                selectinload(ApiClientKey.owner_user),
+            )
+            .outerjoin(UserAccount, ApiClientKey.owner_user_id == UserAccount.id)
+            .distinct()
+            .order_by(ApiClientKey.id.desc())
+        )
+        if normalized_keyword:
+            like_value = f"%{normalized_keyword}%"
+            keyword_filter = or_(
+                func.lower(ApiClientKey.name).like(like_value),
+                func.lower(ApiClientKey.remark).like(like_value),
+                func.lower(ApiClientKey.key_prefix).like(like_value),
+                func.lower(UserAccount.username).like(like_value),
+            )
+            stmt = stmt.where(keyword_filter)
+        if enabled is not None:
+            stmt = stmt.where(ApiClientKey.enabled == enabled)
+        if owner_user_id is not None:
+            stmt = stmt.where(ApiClientKey.owner_user_id == owner_user_id)
+        serialized_items = [ApiKeyAdminService.serialize_api_key(item) for item in db.scalars(stmt).unique()]
+        if status:
+            serialized_items = [item for item in serialized_items if item["status"] == status]
+        total = len(serialized_items)
+        start = max(0, (page - 1) * page_size)
+        end = start + page_size
+        page_items = serialized_items[start:end]
+        return ApiKeyListResponse(
+            total=total,
+            page=page,
+            page_size=page_size,
+            items=[ApiKeyOut(**item) for item in page_items],
+        )
+
+    @staticmethod
     def get_api_key(db: Session, api_key_id: int) -> ApiClientKey | None:
         return db.scalar(
             select(ApiClientKey)
@@ -112,6 +177,7 @@ class ApiKeyAdminService:
         ApiKeyAdminService._validate_owner_user(db, payload.owner_user_id)
         raw_api_key = ApiKeyService.build_raw_api_key(payload.raw_api_key)
         ApiKeyAdminService._validate_raw_api_key_uniqueness(db, raw_api_key)
+        use_shared_wallet = payload.owner_user_id is not None
         api_key = ApiClientKey(
             name=payload.name,
             remark=payload.remark,
@@ -122,9 +188,9 @@ class ApiKeyAdminService:
             expires_at=payload.expires_at,
             token_limit_total=payload.token_limit_total,
             cost_limit_total=BillingService.to_decimal(payload.cost_limit_total) if payload.cost_limit_total is not None else None,
-            balance_amount=BillingService.to_decimal(payload.balance_amount) if payload.balance_amount is not None else None,
+            balance_amount=None if use_shared_wallet else (BillingService.to_decimal(payload.balance_amount) if payload.balance_amount is not None else None),
             total_cost_used=BillingService.to_decimal(0),
-            total_recharge_amount=BillingService.to_decimal(payload.balance_amount) if payload.balance_amount is not None else BillingService.to_decimal(0),
+            total_recharge_amount=BillingService.to_decimal(0) if use_shared_wallet else (BillingService.to_decimal(payload.balance_amount) if payload.balance_amount is not None else BillingService.to_decimal(0)),
             route_mode=payload.route_mode,
             default_provider_id=payload.default_provider_id,
             owner_user_id=payload.owner_user_id,
@@ -132,7 +198,7 @@ class ApiKeyAdminService:
         )
         db.add(api_key)
         db.flush()
-        if payload.balance_amount is not None and payload.balance_amount > 0:
+        if not use_shared_wallet and payload.balance_amount is not None and payload.balance_amount > 0:
             db.add(
                 ApiClientBillingRecord(
                     api_client_key_id=api_key.id,
@@ -164,6 +230,7 @@ class ApiKeyAdminService:
             default_provider_id=default_provider_id,
         )
         ApiKeyAdminService._validate_owner_user(db, owner_user_id)
+        use_shared_wallet = owner_user_id is not None
         raw_api_key = data.get("raw_api_key")
         if raw_api_key is not None:
             normalized_raw_api_key = ApiKeyService.build_raw_api_key(raw_api_key)
@@ -176,7 +243,12 @@ class ApiKeyAdminService:
                 continue
             if field in {"cost_limit_total", "balance_amount"} and value is not None:
                 value = BillingService.to_decimal(value)
+            if field == "balance_amount" and use_shared_wallet:
+                value = None
             setattr(api_key, field, value)
+        if use_shared_wallet:
+            api_key.balance_amount = None
+            api_key.total_recharge_amount = BillingService.to_decimal(0)
         if "allowed_provider_ids" in data:
             ApiKeyAdminService._replace_provider_bindings(db, api_key, allowed_provider_ids)
         db.commit()
@@ -194,6 +266,93 @@ class ApiKeyAdminService:
     def delete_api_key(db: Session, api_key: ApiClientKey) -> None:
         db.delete(api_key)
         db.commit()
+
+    @staticmethod
+    def rotate_api_key(db: Session, api_key: ApiClientKey) -> tuple[ApiClientKey, str]:
+        raw_api_key = ApiKeyService.build_raw_api_key(None)
+        ApiKeyAdminService._validate_raw_api_key_uniqueness(db, raw_api_key, exclude_api_key_id=api_key.id)
+        api_key.key_prefix = ApiKeyService.extract_key_prefix(raw_api_key)
+        api_key.key_hash = ApiKeyService.hash_api_key(raw_api_key)
+        api_key.raw_key_encrypted = ApiKeyService.encrypt_raw_api_key(raw_api_key)
+        db.commit()
+        db.refresh(api_key)
+        return ApiKeyAdminService.get_api_key(db, api_key.id), raw_api_key
+
+    @staticmethod
+    def batch_enable(db: Session, payload: ApiKeyBatchActionIn) -> ApiKeyBatchActionResultOut:
+        items = list(
+            db.scalars(
+                select(ApiClientKey).where(ApiClientKey.id.in_(payload.api_key_ids))
+            )
+        )
+        for item in items:
+            item.enabled = True
+        db.commit()
+        return ApiKeyBatchActionResultOut(
+            requested_count=len(payload.api_key_ids),
+            affected_count=len(items),
+            api_key_ids=[item.id for item in items],
+        )
+
+    @staticmethod
+    def batch_disable(db: Session, payload: ApiKeyBatchActionIn) -> ApiKeyBatchActionResultOut:
+        items = list(
+            db.scalars(
+                select(ApiClientKey).where(ApiClientKey.id.in_(payload.api_key_ids))
+            )
+        )
+        for item in items:
+            item.enabled = False
+        db.commit()
+        return ApiKeyBatchActionResultOut(
+            requested_count=len(payload.api_key_ids),
+            affected_count=len(items),
+            api_key_ids=[item.id for item in items],
+        )
+
+    @staticmethod
+    def batch_delete(db: Session, payload: ApiKeyBatchActionIn) -> ApiKeyBatchActionResultOut:
+        items = list(
+            db.scalars(
+                select(ApiClientKey).where(ApiClientKey.id.in_(payload.api_key_ids))
+            )
+        )
+        deleted_ids = [item.id for item in items]
+        for item in items:
+            db.delete(item)
+        db.commit()
+        return ApiKeyBatchActionResultOut(
+            requested_count=len(payload.api_key_ids),
+            affected_count=len(deleted_ids),
+            api_key_ids=deleted_ids,
+        )
+
+    @staticmethod
+    def batch_update_providers(db: Session, payload: ApiKeyBatchProviderUpdateIn) -> ApiKeyBatchActionResultOut:
+        ApiKeyAdminService._validate_provider_configuration(
+            db,
+            route_mode=payload.route_mode,
+            allowed_provider_ids=payload.allowed_provider_ids,
+            default_provider_id=payload.default_provider_id,
+        )
+        items = list(
+            db.scalars(
+                select(ApiClientKey)
+                .options(selectinload(ApiClientKey.provider_bindings))
+                .where(ApiClientKey.id.in_(payload.api_key_ids))
+            )
+        )
+        for item in items:
+            item.route_mode = payload.route_mode
+            item.default_provider_id = payload.default_provider_id
+            item.manual_allow_fallback = payload.manual_allow_fallback
+            ApiKeyAdminService._replace_provider_bindings(db, item, payload.allowed_provider_ids)
+        db.commit()
+        return ApiKeyBatchActionResultOut(
+            requested_count=len(payload.api_key_ids),
+            affected_count=len(items),
+            api_key_ids=[item.id for item in items],
+        )
 
     @staticmethod
     def get_logs(
@@ -315,6 +474,8 @@ class ApiKeyAdminService:
     @staticmethod
     def serialize_api_key(api_key: ApiClientKey) -> dict:
         raw_api_key = ApiKeyService.decrypt_raw_api_key(api_key.raw_key_encrypted)
+        owner_balance_amount = BillingService.to_decimal(api_key.owner_user.balance_amount) if api_key.owner_user is not None else None
+        owner_total_recharge_amount = BillingService.to_decimal(api_key.owner_user.total_recharge_amount) if api_key.owner_user is not None else None
         allowed_providers = [
             {
                 "id": binding.provider.id,
@@ -334,6 +495,8 @@ class ApiKeyAdminService:
                 Decimal("0"),
                 BillingService.to_decimal(api_key.cost_limit_total) - BillingService.to_decimal(api_key.total_cost_used),
             )
+        balance_amount = BillingService.to_float(owner_balance_amount) if owner_balance_amount is not None else BillingService.to_float(api_key.balance_amount)
+        total_recharge_amount = BillingService.to_float(owner_total_recharge_amount) if owner_total_recharge_amount is not None else (BillingService.to_float(api_key.total_recharge_amount) or 0)
         status = "active"
         if not api_key.enabled:
             status = "disabled"
@@ -343,7 +506,9 @@ class ApiKeyAdminService:
             status = "quota_exhausted"
         elif api_key.cost_limit_total is not None and BillingService.to_decimal(api_key.total_cost_used) >= BillingService.to_decimal(api_key.cost_limit_total):
             status = "cost_quota_exhausted"
-        elif api_key.balance_amount is not None and BillingService.to_decimal(api_key.balance_amount) <= Decimal("0"):
+        elif owner_balance_amount is not None and owner_balance_amount <= Decimal("0"):
+            status = "balance_exhausted"
+        elif owner_balance_amount is None and api_key.balance_amount is not None and BillingService.to_decimal(api_key.balance_amount) <= Decimal("0"):
             status = "balance_exhausted"
         elif not allowed_providers:
             status = "unbound"
@@ -365,8 +530,8 @@ class ApiKeyAdminService:
             "remaining_tokens": remaining_tokens,
             "cost_limit_total": BillingService.to_float(api_key.cost_limit_total),
             "total_cost_used": BillingService.to_float(api_key.total_cost_used) or 0,
-            "balance_amount": BillingService.to_float(api_key.balance_amount),
-            "total_recharge_amount": BillingService.to_float(api_key.total_recharge_amount) or 0,
+            "balance_amount": balance_amount,
+            "total_recharge_amount": total_recharge_amount,
             "remaining_cost_quota": BillingService.to_float(remaining_cost_quota),
             "route_mode": api_key.route_mode,
             "default_provider_id": api_key.default_provider_id,

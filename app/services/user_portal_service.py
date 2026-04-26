@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import io
 from datetime import datetime, timedelta
 from decimal import Decimal
 
@@ -10,12 +12,14 @@ from app.models.api_client_billing_record import ApiClientBillingRecord
 from app.models.api_client_key import ApiClientKey
 from app.models.request_log import RequestLog
 from app.models.user_account import UserAccount
+from app.models.user_account_billing_record import UserAccountBillingRecord
 from app.schemas.conversation import ConversationReplay, ConversationSummaryItem
 from app.schemas.log import RequestLogOut
 from app.services.api_key_admin_service import ApiKeyAdminService
 from app.services.billing_service import BillingService
 from app.services.conversation_service import ConversationService
 from app.services.log_service import LogService
+from app.services.router_service import RoutePolicyContext, RouterService
 from app.services.user_quota_service import UserQuotaService
 
 
@@ -47,6 +51,10 @@ class UserPortalService:
         key_ids = [item.id for item in owned_keys]
         quota_snapshot = UserQuotaService.get_usage_snapshot(db, user=user)
         account_summary = UserQuotaService.serialize_policy(user=user, snapshot=quota_snapshot)
+        quota_warnings = UserPortalService._build_quota_warnings(
+            account_summary=account_summary,
+            owned_api_keys=serialized_keys,
+        )
         totals = {
             "total_requests": quota_snapshot.total_requests,
             "total_tokens": quota_snapshot.total_tokens,
@@ -72,6 +80,9 @@ class UserPortalService:
             "owned_api_keys": serialized_keys,
             "totals": totals,
             "account_summary": account_summary,
+            "quota_warnings": quota_warnings,
+            "usage_trend": UserPortalService.get_usage_trend(db, user=user, days=7),
+            "integration_profiles": UserPortalService.build_integration_profiles(serialized_keys),
         }
 
     @staticmethod
@@ -123,55 +134,38 @@ class UserPortalService:
         key_ids = [item.id for item in owned_keys]
         quota_snapshot = UserQuotaService.get_usage_snapshot(db, user=user)
         account_summary = UserQuotaService.serialize_policy(user=user, snapshot=quota_snapshot)
-        if not key_ids:
-            return {
-                "summary": {
-                    "total_keys": 0,
-                    "balance_amount": account_summary["balance_amount"],
-                    "frozen_amount": account_summary["frozen_amount"],
-                    "available_balance": account_summary["available_balance"],
-                    "total_cost_used": account_summary["total_cost_used"],
-                    "total_recharge_amount": account_summary["total_recharge_amount"],
-                    "recent_billed_cost": 0.0,
-                    "total_billing_records": 0,
-                },
-                "key_summaries": [],
-                "records": [],
-                "account_summary": account_summary,
-            }
-
         recent_since = datetime.utcnow() - timedelta(hours=24)
         summary_row = db.execute(
             select(
-                func.count(ApiClientBillingRecord.id).label("total_billing_records"),
+                func.count(UserAccountBillingRecord.id).label("total_billing_records"),
                 func.sum(
                     case(
-                        (ApiClientBillingRecord.record_type == "request_charge", func.abs(ApiClientBillingRecord.amount)),
+                        (UserAccountBillingRecord.record_type == "request_charge", func.abs(UserAccountBillingRecord.amount)),
                         else_=0,
                     )
                 ).label("total_request_charge"),
-            ).where(ApiClientBillingRecord.api_client_key_id.in_(key_ids))
+            ).where(UserAccountBillingRecord.user_account_id == user.id)
         ).one()
         recent_billed_cost = db.scalar(
-            select(func.sum(func.abs(ApiClientBillingRecord.amount))).where(
-                ApiClientBillingRecord.api_client_key_id.in_(key_ids),
-                ApiClientBillingRecord.record_type == "request_charge",
-                ApiClientBillingRecord.created_at >= recent_since,
+            select(func.sum(func.abs(UserAccountBillingRecord.amount))).where(
+                UserAccountBillingRecord.user_account_id == user.id,
+                UserAccountBillingRecord.record_type == "request_charge",
+                UserAccountBillingRecord.created_at >= recent_since,
             )
         ) or 0
 
         records = list(
             db.scalars(
-                select(ApiClientBillingRecord)
-                .where(ApiClientBillingRecord.api_client_key_id.in_(key_ids))
-                .order_by(ApiClientBillingRecord.created_at.desc(), ApiClientBillingRecord.id.desc())
+                select(UserAccountBillingRecord)
+                .where(UserAccountBillingRecord.user_account_id == user.id)
+                .order_by(UserAccountBillingRecord.created_at.desc(), UserAccountBillingRecord.id.desc())
                 .limit(max(1, limit))
             )
         )
         key_name_map = {item.id: item.name for item in owned_keys}
         serialized_records = []
         for item in records:
-            serialized = BillingService.serialize_billing_record(item).model_dump()
+            serialized = BillingService.serialize_user_billing_record(item)
             serialized["api_client_key_name"] = key_name_map.get(item.api_client_key_id)
             serialized_records.append(serialized)
         key_summaries = [ApiKeyAdminService.serialize_api_key(item) for item in owned_keys]
@@ -189,6 +183,7 @@ class UserPortalService:
             "key_summaries": key_summaries,
             "records": serialized_records,
             "account_summary": account_summary,
+            "usage_trend": UserPortalService.get_usage_trend(db, user=user, days=7),
         }
 
     @staticmethod
@@ -245,9 +240,9 @@ class UserPortalService:
             )
             recent_billing = list(
                 db.scalars(
-                    select(ApiClientBillingRecord)
-                    .where(ApiClientBillingRecord.api_client_key_id.in_(key_ids))
-                    .order_by(ApiClientBillingRecord.created_at.desc(), ApiClientBillingRecord.id.desc())
+                    select(UserAccountBillingRecord)
+                    .where(UserAccountBillingRecord.user_account_id == user.id)
+                    .order_by(UserAccountBillingRecord.created_at.desc(), UserAccountBillingRecord.id.desc())
                     .limit(20)
                 )
             )
@@ -258,7 +253,7 @@ class UserPortalService:
             "account_summary": overview["account_summary"],
             "conversation_count": conversation_count,
             "recent_logs": [RequestLogOut.model_validate(item) for item in recent_logs],
-            "recent_billing": [BillingService.serialize_billing_record(item) for item in recent_billing],
+            "recent_billing": [BillingService.serialize_user_billing_record(item) for item in recent_billing],
         }
 
     @staticmethod
@@ -309,3 +304,268 @@ class UserPortalService:
     @staticmethod
     def format_billing_amount(value: Decimal | float | None) -> float:
         return float(value or 0)
+
+    @staticmethod
+    def get_api_key_detail_payload(
+        db: Session,
+        *,
+        user: UserAccount,
+        api_key_id: int,
+        window_hours: int = 24,
+        billing_limit: int = 20,
+        log_limit: int = 20,
+    ) -> dict | None:
+        api_key = ApiKeyAdminService.get_api_key(db, api_key_id)
+        if api_key is None or api_key.owner_user_id != user.id:
+            return None
+        detail = ApiKeyAdminService.serialize_api_key_detail(db, api_key, window_hours=window_hours)
+        analytics = ApiKeyAdminService.get_analytics(db, api_key_id=api_key.id, recent_error_limit=8, model_limit=12)
+        billing_summary = ApiKeyAdminService.get_billing_summary(db, api_key_id=api_key.id, limit=billing_limit)
+        recent_logs = list(
+            db.scalars(
+                select(RequestLog)
+                .where(RequestLog.api_client_key_id == api_key.id)
+                .order_by(RequestLog.created_at.desc(), RequestLog.id.desc())
+                .limit(max(1, log_limit))
+            )
+        )
+        return {
+            "api_key": detail,
+            "analytics": analytics,
+            "billing_summary": billing_summary,
+            "recent_logs": [RequestLogOut.model_validate(item) for item in recent_logs],
+        }
+
+    @staticmethod
+    def get_log_detail(db: Session, *, user: UserAccount, log_id: int) -> RequestLogOut | None:
+        key_ids = UserPortalService.list_owned_api_key_ids(db, user_id=user.id)
+        if not key_ids:
+            return None
+        log = db.scalar(
+            select(RequestLog).where(
+                RequestLog.id == log_id,
+                RequestLog.api_client_key_id.in_(key_ids),
+            )
+        )
+        if log is None:
+            return None
+        return RequestLogOut.model_validate(log)
+
+    @staticmethod
+    def export_billing_csv(
+        db: Session,
+        *,
+        user: UserAccount,
+        limit: int = 5000,
+    ) -> str:
+        key_ids = UserPortalService.list_owned_api_key_ids(db, user_id=user.id)
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow([
+            "created_at",
+            "record_type",
+            "api_client_key_id",
+            "api_client_key_name",
+            "amount",
+            "balance_after",
+            "provider_name",
+            "model_name",
+            "total_tokens",
+            "remark",
+        ])
+        if not key_ids:
+            return buffer.getvalue()
+        key_name_map = {item.id: item.name for item in UserPortalService.list_owned_api_keys(db, user_id=user.id)}
+        items = list(
+            db.scalars(
+                select(UserAccountBillingRecord)
+                .where(UserAccountBillingRecord.user_account_id == user.id)
+                .order_by(UserAccountBillingRecord.created_at.desc(), UserAccountBillingRecord.id.desc())
+                .limit(max(1, min(limit, 10000)))
+            )
+        )
+        for item in items:
+            writer.writerow([
+                item.created_at.isoformat() if item.created_at else "",
+                item.record_type,
+                item.api_client_key_id,
+                key_name_map.get(item.api_client_key_id, ""),
+                BillingService.to_float(item.amount) or 0,
+                BillingService.to_float(item.balance_after),
+                item.provider_name or "",
+                item.model_name or "",
+                item.total_tokens or "",
+                item.remark or "",
+            ])
+        return buffer.getvalue()
+
+    @staticmethod
+    def get_usage_trend(
+        db: Session,
+        *,
+        user: UserAccount,
+        days: int = 7,
+    ) -> list[dict]:
+        key_ids = UserPortalService.list_owned_api_key_ids(db, user_id=user.id)
+        normalized_days = max(1, min(days, 30))
+        day_map: dict[str, dict] = {}
+        for offset in range(normalized_days - 1, -1, -1):
+            current = datetime.utcnow() - timedelta(days=offset)
+            label = current.strftime("%m-%d")
+            day_map[label] = {
+                "label": label,
+                "requests": 0,
+                "tokens": 0,
+                "cost": 0.0,
+            }
+        if not key_ids:
+            return list(day_map.values())
+
+        since = (datetime.utcnow() - timedelta(days=normalized_days - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        rows = db.execute(
+            select(
+                func.date(RequestLog.created_at).label("day"),
+                func.count(RequestLog.id).label("total_requests"),
+                func.sum(RequestLog.total_tokens).label("total_tokens"),
+                func.sum(RequestLog.total_cost).label("total_cost"),
+            ).where(
+                RequestLog.api_client_key_id.in_(key_ids),
+                LogService._route_traffic_expr(),
+                RequestLog.request_path != "/v1/models",
+                RequestLog.created_at >= since,
+            ).group_by(func.date(RequestLog.created_at))
+        ).all()
+        for row in rows:
+            if not row.day:
+                continue
+            label = datetime.strptime(str(row.day), "%Y-%m-%d").strftime("%m-%d")
+            if label not in day_map:
+                continue
+            day_map[label]["requests"] = int(row.total_requests or 0)
+            day_map[label]["tokens"] = int(row.total_tokens or 0)
+            day_map[label]["cost"] = float(row.total_cost or 0)
+        return list(day_map.values())
+
+    @staticmethod
+    def get_self_test_payload(
+        db: Session,
+        *,
+        user: UserAccount,
+        selected_api_key_id: int | None,
+        selected_model_name: str | None,
+    ) -> dict:
+        owned_api_keys = UserPortalService.list_owned_api_keys(db, user_id=user.id)
+        serialized_keys = [ApiKeyAdminService.serialize_api_key(item) for item in owned_api_keys]
+        models = []
+        for item in serialized_keys:
+            provider_ids = set(item["allowed_provider_ids"])
+            for model in RouterService.get_available_candidates(
+                db,
+                route_context=RoutePolicyContext(
+                    route_mode=item["route_mode"],
+                    default_provider_id=item["default_provider_id"],
+                    manual_allow_fallback=item["manual_allow_fallback"],
+                    allowed_provider_ids=item["allowed_provider_ids"],
+                ),
+            ):
+                if model.provider.id not in provider_ids:
+                    continue
+                if model.provider_model.model_name not in models:
+                    models.append(model.provider_model.model_name)
+        models = sorted(models)
+        selected_key = next((item for item in owned_api_keys if item.id == selected_api_key_id), None) or (owned_api_keys[0] if owned_api_keys else None)
+        selected_model = selected_model_name or (models[0] if models else None)
+        checks: list[dict] = []
+        candidates_payload: list[dict] = []
+        if selected_key is not None:
+            serialized_key = ApiKeyAdminService.serialize_api_key(selected_key)
+            checks.append({"label": "密钥状态", "value": serialized_key["status"]})
+            checks.append({"label": "授权中转站", "value": len(serialized_key["allowed_provider_ids"])})
+            checks.append({"label": "可回显明文", "value": "是" if serialized_key["has_stored_raw_key"] else "否"})
+            if selected_model:
+                route_context = RoutePolicyContext(
+                    route_mode=selected_key.route_mode,
+                    default_provider_id=selected_key.default_provider_id,
+                    manual_allow_fallback=selected_key.manual_allow_fallback,
+                    allowed_provider_ids=[binding.provider_id for binding in selected_key.provider_bindings],
+                )
+                candidates = RouterService.order_candidates(
+                    db,
+                    model_name=selected_model,
+                    route_context=route_context,
+                )
+                candidates_payload = [
+                    {
+                        "provider_id": item.provider.id,
+                        "provider_name": item.provider.name,
+                        "model_name": item.provider_model.model_name,
+                        "health_status": item.provider_model.health_status,
+                        "circuit_state": item.provider_model.circuit_state,
+                        "route_score": round(item.route_score, 2),
+                        "recent_success_rate": round(item.recent_success_rate * 100, 2),
+                        "recent_avg_latency_ms": item.recent_avg_latency_ms,
+                        "is_default": selected_key.default_provider_id == item.provider.id,
+                    }
+                    for item in candidates[:8]
+                ]
+                checks.append({"label": "命中候选数", "value": len(candidates_payload)})
+        return {
+            "owned_api_keys": serialized_keys,
+            "model_options": models,
+            "selected_api_key_id": selected_key.id if selected_key else None,
+            "selected_model_name": selected_model,
+            "checks": checks,
+            "candidates": candidates_payload,
+            "selected_api_key": ApiKeyAdminService.serialize_api_key(selected_key) if selected_key is not None else None,
+            "integration_profiles": UserPortalService.build_integration_profiles(serialized_keys),
+        }
+
+    @staticmethod
+    def build_integration_profiles(serialized_keys: list[dict]) -> list[dict]:
+        profiles: list[dict] = []
+        for item in serialized_keys:
+            if not item.get("raw_api_key"):
+                continue
+            profiles.append(
+                {
+                    "api_key_id": item["id"],
+                    "name": item["name"],
+                    "key_masked": item["key_masked"],
+                    "raw_api_key": item["raw_api_key"],
+                    "allowed_provider_names": [provider["name"] for provider in item.get("allowed_providers", [])],
+                }
+            )
+        return profiles
+
+    @staticmethod
+    def _build_quota_warnings(*, account_summary: dict, owned_api_keys: list[dict]) -> list[dict]:
+        warnings: list[dict] = []
+        available_balance = account_summary.get("available_balance")
+        balance_amount = account_summary.get("balance_amount")
+        if available_balance is not None and available_balance <= 0:
+            warnings.append({"level": "danger", "message": "账户可用余额已耗尽，新请求会被拦截。"})
+        elif (
+            available_balance is not None
+            and balance_amount not in (None, 0)
+            and balance_amount
+            and available_balance / balance_amount <= 0.2
+        ):
+            warnings.append({"level": "warning", "message": "账户可用余额已低于 20%，建议尽快补充额度。"})
+
+        for current_field, limit_field, label in (
+            ("day_requests", "request_limit_daily", "日调用次数"),
+            ("month_requests", "request_limit_monthly", "月调用次数"),
+            ("day_tokens", "token_limit_daily", "日 Token"),
+            ("month_tokens", "token_limit_monthly", "月 Token"),
+        ):
+            limit = account_summary.get(limit_field)
+            current = account_summary.get(current_field) or 0
+            if limit is not None and limit > 0 and current / limit >= 0.8:
+                warnings.append({"level": "warning", "message": f"{label}已使用 {current}/{limit}，接近上限。"})
+
+        abnormal_keys = [
+            item for item in owned_api_keys if item.get("status") not in {"active"}
+        ]
+        if abnormal_keys:
+            warnings.append({"level": "warning", "message": f"当前有 {len(abnormal_keys)} 个 API Key 处于非正常状态，建议及时处理。"})
+        return warnings

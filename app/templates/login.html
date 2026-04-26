@@ -1,28 +1,53 @@
 {% extends "auth_base.html" %}
 {% block content %}
-<section class="auth-card">
+<section class="auth-card auth-card-wide">
     <div class="auth-brand">aotu-gpt</div>
-    <h1>账号登录</h1>
-    <p>登录后会按角色自动进入管理后台端或用户端。</p>
-    {% if error_message %}
-    <div class="auth-alert">{{ error_message }}</div>
-    {% endif %}
-    <form class="auth-form" method="post" action="/login">
-        {% if next_path %}
-        <input name="next_path" type="hidden" value="{{ next_path }}">
-        {% endif %}
-        <label>
-            <span>用户名或邮箱</span>
-            <input class="field-input" name="identifier" required>
-        </label>
-        <label>
-            <span>密码</span>
-            <input class="field-input" name="password" type="password" required>
-        </label>
-        <button class="btn btn-accent" type="submit">登录</button>
-    </form>
-    <div class="auth-links">
-        <a href="/register">去注册</a>
+    <div class="auth-layout">
+        <div class="auth-primary">
+            <h1>账号登录</h1>
+            <p>登录后会按角色自动进入管理后台端或用户端。管理员用于渠道、模型、日志和账户治理；普通用户用于获取 API Key、查看账单、做接入自检和排查调用问题。</p>
+            {% if error_message %}
+            <div class="auth-alert">{{ error_message }}</div>
+            {% endif %}
+            <form class="auth-form" method="post" action="/login">
+                {% if next_path %}
+                <input name="next_path" type="hidden" value="{{ next_path }}">
+                {% endif %}
+                <label>
+                    <span>用户名或邮箱</span>
+                    <input class="field-input" name="identifier" required>
+                </label>
+                <label>
+                    <span>密码</span>
+                    <input class="field-input" name="password" type="password" required>
+                </label>
+                <button class="btn btn-accent" type="submit">登录</button>
+            </form>
+            <div class="auth-links">
+                <a href="/register">去注册</a>
+            </div>
+        </div>
+
+        <aside class="auth-side">
+            <div class="auth-side-card">
+                <div class="panel-kicker">产品用途</div>
+                <h3>登录后可以做什么</h3>
+                <div class="auth-note-list">
+                    <div><span>管理端</span><strong>配置中转站、模型、路由规则，查看告警、审计和日志中心</strong></div>
+                    <div><span>用户端</span><strong>拿到 API Key、复制接入地址、先做自检、再正式接入业务系统</strong></div>
+                    <div><span>文档入口</span><strong>统一使用标准 OpenAI 兼容 <code>/v1/*</code> 路径</strong></div>
+                </div>
+            </div>
+            <div class="auth-side-card">
+                <div class="panel-kicker">安全说明</div>
+                <h3>登录态与 API Key 分离</h3>
+                <div class="auth-note-list">
+                    <div><span>浏览器登录</span><strong>后台和用户端都使用服务端 Session 登录态</strong></div>
+                    <div><span>外部调用</span><strong>生产接入必须使用 Bearer API Key，不使用人类登录态替代</strong></div>
+                    <div><span>下一步</span><strong>如果你是普通用户，登录后先去 API Key 管理页和接入自检页</strong></div>
+                </div>
+            </div>
+        </aside>
     </div>
 </section>
 {% endblock %}

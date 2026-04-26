@@ -23,6 +23,8 @@ DEFAULT_SETTING = {
     "mask_sensitive_fields": True,
     "max_logged_body_bytes": 16384,
     "allow_public_user_registration": False,
+    "request_log_retention_days": 90,
+    "admin_audit_log_retention_days": 180,
 }
 
 
@@ -46,6 +48,10 @@ class SettingService:
             route_mode=payload.route_mode,
             default_provider_id=payload.default_provider_id,
         )
+        SettingService._validate_retention_configuration(
+            request_log_retention_days=payload.request_log_retention_days,
+            admin_audit_log_retention_days=payload.admin_audit_log_retention_days,
+        )
         for field, value in payload.model_dump().items():
             setattr(setting, field, value)
         db.commit()
@@ -68,3 +74,14 @@ class SettingService:
         )
         if provider_exists is None:
             raise ValueError("default_provider_id does not exist")
+
+    @staticmethod
+    def _validate_retention_configuration(
+        *,
+        request_log_retention_days: int,
+        admin_audit_log_retention_days: int,
+    ) -> None:
+        if request_log_retention_days < 0:
+            raise ValueError("request_log_retention_days must be >= 0")
+        if admin_audit_log_retention_days < 0:
+            raise ValueError("admin_audit_log_retention_days must be >= 0")

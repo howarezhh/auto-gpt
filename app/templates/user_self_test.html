@@ -1,0 +1,208 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero-panel hero-panel-compact cockpit-hero">
+    <div class="cockpit-hero-copy">
+        <div class="eyebrow">接入自检</div>
+        <h2>先验证，再上线</h2>
+        <p>这里不是只看候选线路，而是要先选择你准备上线的 API Key 和模型，再发起一次最短真实调用。失败时会给出摘要、修复建议和下一步动作。</p>
+    </div>
+    <div class="cockpit-hero-aside">
+        <div class="cockpit-aside-label">外部入口</div>
+        <div class="cockpit-aside-value">/v1</div>
+        <div class="cockpit-aside-copy">{{ external_base_url }}/v1</div>
+        <div class="cockpit-health-bar"><span class="cockpit-health-fill-full"></span></div>
+        <div class="cockpit-aside-meta">
+            <span>密钥 {{ owned_api_keys|length }}</span>
+            <span>模型 {{ model_options|length }}</span>
+        </div>
+    </div>
+</section>
+
+<nav class="page-anchor-bar">
+    <a class="page-anchor-link" href="#user-self-test-target">选择对象</a>
+    <a class="page-anchor-link" href="#user-self-test-checks">预检查</a>
+    <a class="page-anchor-link" href="#user-self-test-run">真实测试</a>
+    <a class="page-anchor-link" href="#user-self-test-candidates">候选线路</a>
+</nav>
+
+<section class="panel-card section-shell anchor-section-offset" id="user-self-test-target">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">测试目标</div>
+            <h3>选择你真正准备上线的组合</h3>
+        </div>
+    </div>
+    <form class="filter-grid" method="get" action="/user/self-test">
+        <label>
+            <span>API Key</span>
+            <select class="field-input" name="api_key_id">
+                {% for item in owned_api_keys %}
+                <option value="{{ item.id }}" {% if selected_api_key_id == item.id %}selected{% endif %}>{{ item.name }} · {{ item.key_masked }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <label>
+            <span>模型</span>
+            <select class="field-input" name="model_name">
+                {% for item in model_options %}
+                <option value="{{ item }}" {% if selected_model_name == item %}selected{% endif %}>{{ item }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <div class="form-actions">
+            <button class="btn btn-accent" type="submit">更新检查对象</button>
+            <button class="btn btn-ghost interactive-btn" id="user-self-test-run-btn" type="button" {% if not selected_api_key_id or not selected_model_name %}disabled{% endif %}>发起真实测试</button>
+        </div>
+    </form>
+</section>
+
+<section class="dashboard-command-grid anchor-section-offset" id="user-self-test-checks">
+    <div class="panel-card section-shell">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">预检查</div>
+                <h3>在发请求前先看这些条件</h3>
+            </div>
+        </div>
+        <div class="api-key-chip-grid">
+            {% for item in checks %}
+            <article class="api-key-chip-card">
+                <strong>{{ item.label }}</strong>
+                <span>{{ item.value }}</span>
+            </article>
+            {% else %}
+            <div class="empty-state">当前账号还没有可自检的 API Key 或模型。</div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <div class="dashboard-command-side">
+        <div class="panel-card">
+            <div class="panel-head">
+                <div>
+                    <div class="panel-kicker">快速复制</div>
+                    <h3>立即可用的接入材料</h3>
+                </div>
+            </div>
+            <div class="dashboard-signal-list">
+                <div><span>/v1 入口</span><strong><button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="{{ external_base_url }}/v1">复制 /v1</button></strong></div>
+                {% if selected_api_key and selected_api_key.raw_api_key %}
+                <div><span>当前密钥</span><strong><button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="{{ selected_api_key.raw_api_key }}">复制明文</button></strong></div>
+                <div><span>请求头</span><strong><button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="Authorization: Bearer {{ selected_api_key.raw_api_key }}">复制 Header</button></strong></div>
+                {% endif %}
+                <div><span>密钥控制台</span><strong><a href="/user/api-keys" data-shell-link>回到密钥页</a></strong></div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="dashboard-command-grid anchor-section-offset" id="user-self-test-run">
+    <div class="panel-card section-shell">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">真实测试</div>
+                <h3>测试结果、失败摘要和修复建议</h3>
+            </div>
+        </div>
+        <div class="dashboard-signal-list" id="user-self-test-result-summary">
+            <div><span>状态</span><strong>尚未执行</strong></div>
+        </div>
+        <div class="section-split-2">
+            <div class="summary-list-card">
+                <div class="panel-kicker">失败原因摘要</div>
+                <h4>为什么失败</h4>
+                <div class="detail-list" id="user-self-test-failure">
+                    <div><span>状态</span><strong>等待测试</strong></div>
+                    <div><span>摘要</span><strong>执行真实测试后生成</strong></div>
+                </div>
+            </div>
+            <div class="summary-list-card">
+                <div class="panel-kicker">修复建议</div>
+                <h4>下一步怎么改</h4>
+                <div class="detail-list" id="user-self-test-fixes">
+                    <div><span>建议</span><strong>执行真实测试后生成</strong></div>
+                </div>
+            </div>
+        </div>
+        <div class="summary-list-card">
+            <div class="panel-kicker">下一步动作</div>
+            <h4>别停在原始报错</h4>
+            <div class="detail-list" id="user-self-test-next">
+                <div><span>动作</span><strong>如果成功，就把同一组参数写入业务服务；如果失败，就按建议跳转到密钥页、模型页或日志页。</strong></div>
+            </div>
+        </div>
+        <div class="api-key-chip-grid">
+            <article class="api-key-chip-card form-span-2">
+                <strong>输出预览</strong>
+                <pre class="code-block" id="user-self-test-output">等待测试...</pre>
+            </article>
+            <article class="api-key-chip-card form-span-2">
+                <strong>调度链路</strong>
+                <pre class="code-block" id="user-self-test-trace">等待测试...</pre>
+            </article>
+        </div>
+    </div>
+
+    <div class="dashboard-command-side">
+        <div class="panel-card">
+            <div class="panel-head">
+                <div>
+                    <div class="panel-kicker">判断原则</div>
+                    <h3>如何判定可以上线</h3>
+                </div>
+            </div>
+            <div class="risk-grid">
+                <article class="risk-card" data-level="default">
+                    <strong>成功不等于全量上线</strong>
+                    <span>测试通过后，建议先小流量接入，再观察日志和账单变化。</span>
+                </article>
+                <article class="risk-card" data-level="warning">
+                    <strong>失败先看授权与模型</strong>
+                    <span>最常见问题是密钥无明文、未绑定中转站、模型未授权或渠道健康异常。</span>
+                </article>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="panel-card section-shell anchor-section-offset" id="user-self-test-candidates">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">候选线路</div>
+            <h3>路由候选预览</h3>
+        </div>
+    </div>
+    <div class="table-shell">
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>渠道</th>
+                    <th>模型</th>
+                    <th>健康</th>
+                    <th>熔断</th>
+                    <th>得分</th>
+                    <th>近期成功率</th>
+                    <th>平均延迟</th>
+                    <th>默认</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for item in candidates %}
+                <tr>
+                    <td>{{ item.provider_name }}</td>
+                    <td>{{ item.model_name }}</td>
+                    <td>{{ item.health_status }}</td>
+                    <td>{{ item.circuit_state }}</td>
+                    <td>{{ item.route_score }}</td>
+                    <td>{{ '%.2f'|format(item.recent_success_rate) }}%</td>
+                    <td>{{ item.recent_avg_latency_ms if item.recent_avg_latency_ms is not none else '-' }}</td>
+                    <td>{{ '是' if item.is_default else '否' }}</td>
+                </tr>
+                {% else %}
+                <tr><td colspan="8"><div class="empty-state">当前没有命中的路由候选，请检查密钥授权范围、模型状态或渠道健康状态。</div></td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

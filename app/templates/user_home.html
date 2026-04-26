@@ -2,79 +2,127 @@
 {% block content %}
 <section class="hero-panel hero-panel-compact cockpit-hero">
     <div class="cockpit-hero-copy">
-        <div class="eyebrow">User Portal</div>
-        <h2>用户中心</h2>
-        <p>查看当前账号、名下 API Key、调用统计，并进入个人资料、日志、账单与会话回放。</p>
+        <div class="eyebrow">用户首页</div>
+        <h2>接入主路径</h2>
+        <p>这里不再只是看概览，而是按“拿到密钥、复制接入地址、先做自检、再正式接入”的顺序完成接入。需要排障时，再回到日志、账单和会话回放。</p>
+        <div class="hero-actions">
+            <a class="btn btn-accent interactive-btn" href="/user/api-keys" data-shell-link>先拿到 API Key</a>
+            <a class="btn btn-ghost interactive-btn" href="/user/self-test" data-shell-link>直接做接入自检</a>
+        </div>
     </div>
     <div class="cockpit-hero-aside">
         <div class="cockpit-aside-label">当前账号</div>
         <div class="cockpit-aside-value">{{ current_user.username }}</div>
         <div class="cockpit-aside-copy">{{ current_user.email }}</div>
-        <div class="cockpit-health-bar"><span style="width: 100%"></span></div>
+        <div class="cockpit-health-bar"><span class="cockpit-health-fill-full"></span></div>
         <div class="cockpit-aside-meta">
-            <span>普通用户端</span>
-            <span>已登录</span>
+            <span>API Key {{ owned_api_keys|length }}</span>
+            <span>会话 {{ totals.conversation_count }}</span>
         </div>
     </div>
 </section>
 
-<section class="stats-grid">
+<nav class="page-anchor-bar">
+    <a class="page-anchor-link" href="#user-home-path">连续路径</a>
+    <a class="page-anchor-link" href="#user-home-keys">拿到密钥</a>
+    <a class="page-anchor-link" href="#user-home-connect">复制接入信息</a>
+    <a class="page-anchor-link" href="#user-home-verify">先做自检</a>
+</nav>
+
+<section class="stats-grid anchor-section-offset">
     <article class="metric-card"><span>我的 API Key</span><strong>{{ owned_api_keys|length }}</strong></article>
-    <article class="metric-card"><span>总请求量</span><strong>{{ totals.total_requests }}</strong></article>
-    <article class="metric-card"><span>总 Token</span><strong>{{ totals.total_tokens }}</strong></article>
-    <article class="metric-card"><span>账户总余额</span><strong>{{ '%.6f'|format(totals.balance_amount) if totals.balance_amount is not none else '不限' }}</strong></article>
-    <article class="metric-card"><span>冻结金额</span><strong>{{ '%.6f'|format(totals.frozen_amount or 0) }}</strong></article>
     <article class="metric-card"><span>可用余额</span><strong>{{ '%.6f'|format(totals.available_balance) if totals.available_balance is not none else '不限' }}</strong></article>
+    <article class="metric-card"><span>今日请求</span><strong>{{ account_summary.day_requests }}</strong></article>
+    <article class="metric-card"><span>本月请求</span><strong>{{ account_summary.month_requests }}</strong></article>
+    <article class="metric-card"><span>总 Token</span><strong>{{ totals.total_tokens }}</strong></article>
     <article class="metric-card"><span>累计费用</span><strong>{{ '%.6f'|format(totals.total_cost) }}</strong></article>
 </section>
 
-<section class="dashboard-command-grid">
-    <div class="panel-card section-shell">
+<section class="panel-card section-shell anchor-section-offset" id="user-home-path">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">连续路径</div>
+            <h3>把接入流程做成一条线</h3>
+        </div>
+    </div>
+    <div class="stage-grid">
+        <article class="stage-card">
+            <strong>1. 拿到 API Key</strong>
+            <span>先确认当前账号名下已有可用密钥；没有的话就在独立密钥页创建一把新的接入密钥。</span>
+            <a class="btn btn-ghost btn-sm interactive-btn" href="/user/api-keys" data-shell-link>打开密钥页</a>
+        </article>
+        <article class="stage-card">
+            <strong>2. 复制接入地址</strong>
+            <span>在下方直接复制 `/v1` Base URL、Bearer Header 和 SDK 示例，不要手工拼写。</span>
+            <a class="btn btn-ghost btn-sm interactive-btn" href="#user-home-connect">跳到接入信息</a>
+        </article>
+        <article class="stage-card">
+            <strong>3. 先做接入自检</strong>
+            <span>用同一把密钥和目标模型跑一次最短真实调用，确认候选线路、延迟和返回结果。</span>
+            <a class="btn btn-ghost btn-sm interactive-btn" href="/user/self-test" data-shell-link>打开自检页</a>
+        </article>
+        <article class="stage-card">
+            <strong>4. 再正式接入</strong>
+            <span>自检成功后再写入你的业务服务；如果上线后报错，优先查日志和会话回放，不要直接猜配置。</span>
+            <a class="btn btn-ghost btn-sm interactive-btn" href="/user/logs" data-shell-link>查看我的日志</a>
+        </article>
+    </div>
+</section>
+
+{% if quota_warnings %}
+<section class="panel-card section-shell">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">提醒事项</div>
+            <h3>当前账户预警</h3>
+        </div>
+    </div>
+    <div class="risk-grid">
+        {% for item in quota_warnings %}
+        <article class="risk-card" data-level="{{ item.level }}">
+            <strong>{% if item.level == 'danger' %}高优先级{% else %}提醒{% endif %}</strong>
+            <span>{{ item.message }}</span>
+        </article>
+        {% endfor %}
+    </div>
+</section>
+{% endif %}
+
+<section class="dashboard-command-grid anchor-section-offset" id="user-home-keys">
+    <div class="panel-card section-shell" id="user-home-helper-shell" data-integration-profiles='{{ integration_profiles | tojson }}'>
         <div class="section-subhead">
             <div>
-                <div class="panel-kicker">My Keys</div>
-                <h3>我的 API Key</h3>
+                <div class="panel-kicker">拿到密钥</div>
+                <h3>我的密钥与接入准备</h3>
             </div>
         </div>
-        <div class="table-shell">
-            <table class="data-table">
-                <thead>
-                    <tr>
-                        <th>名称</th>
-                        <th>前缀</th>
-                        <th>状态</th>
-                        <th>累计 Token</th>
-                        <th>余额</th>
-                        <th>最近使用</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% if owned_api_keys %}
-                        {% for item in owned_api_keys %}
-                        <tr>
-                            <td>{{ item.name }}</td>
-                            <td>{{ item.key_masked }}</td>
-                            <td>
-                                {% if item.status == 'active' %}正常可用
-                                {% elif item.status == 'disabled' %}已禁用
-                                {% elif item.status == 'expired' %}已过期
-                                {% elif item.status == 'quota_exhausted' %}额度耗尽
-                                {% elif item.status == 'cost_quota_exhausted' %}金额额度耗尽
-                                {% elif item.status == 'balance_exhausted' %}余额耗尽
-                                {% elif item.status == 'unbound' %}未绑定渠道
-                                {% else %}{{ item.status }}
-                                {% endif %}
-                            </td>
-                            <td>{{ item.total_tokens_used }}</td>
-                            <td>{{ item.balance_amount if item.balance_amount is not none else '不限' }}</td>
-                            <td>{{ item.last_used_at or '-' }}</td>
-                        </tr>
-                        {% endfor %}
-                    {% else %}
-                        <tr><td colspan="6"><div class="empty-state">当前账号还没有绑定 API Key，请联系管理员分配。</div></td></tr>
-                    {% endif %}
-                </tbody>
-            </table>
+        <div class="user-key-pick-grid">
+            {% if owned_api_keys %}
+                {% for item in owned_api_keys %}
+                <article class="api-key-chip-card user-key-pick-card">
+                    <strong>{{ item.name }}</strong>
+                    <span>{{ item.key_masked }}</span>
+                    <span>
+                        {% if item.status == 'active' %}正常可用
+                        {% elif item.status == 'disabled' %}已禁用
+                        {% elif item.status == 'expired' %}已过期
+                        {% elif item.status == 'quota_exhausted' %}额度耗尽
+                        {% elif item.status == 'cost_quota_exhausted' %}金额额度耗尽
+                        {% elif item.status == 'balance_exhausted' %}余额耗尽
+                        {% elif item.status == 'unbound' %}未绑定渠道
+                        {% else %}{{ item.status }}
+                        {% endif %}
+                    </span>
+                    <span>最近使用 {{ item.last_used_at or '-' }}</span>
+                    <div class="action-palette">
+                        <a class="btn btn-ghost btn-sm interactive-btn" href="/user/api-keys/{{ item.id }}" data-shell-link>打开控制台</a>
+                        <a class="btn btn-ghost btn-sm interactive-btn" href="/user/self-test?api_key_id={{ item.id }}" data-shell-link>用这把密钥自检</a>
+                    </div>
+                </article>
+                {% endfor %}
+            {% else %}
+                <div class="empty-state">当前账号还没有 API Key。先去独立密钥页创建，再回来复制接入信息。</div>
+            {% endif %}
         </div>
     </div>
 
@@ -82,34 +130,142 @@
         <div class="panel-card">
             <div class="panel-head">
                 <div>
-                    <div class="panel-kicker">Quick Access</div>
-                    <h3>常用入口</h3>
+                    <div class="panel-kicker">继续动作</div>
+                    <h3>不要跳步</h3>
                 </div>
             </div>
             <div class="dashboard-signal-list">
-                <div><span>个人资料</span><strong><a href="/user/profile" data-shell-link>修改资料 / 修改密码</a></strong></div>
-                <div><span>可用模型</span><strong><a href="/user/models" data-shell-link>查看价格、速度与可用渠道</a></strong></div>
-                <div><span>图片上传</span><strong><a href="/user/models" data-shell-link>上传图片并生成多模态可用地址</a></strong></div>
-                <div><span>我的日志</span><strong><a href="/user/logs" data-shell-link>查看调用明细与状态</a></strong></div>
-                <div><span>我的账单</span><strong><a href="/user/billing" data-shell-link>查看余额、充值与扣费记录</a></strong></div>
-                <div><span>我的会话</span><strong><a href="/user/conversations" data-shell-link>查看会话回放</a></strong></div>
+                <div><span>账号安全</span><strong><a href="/user/profile" data-shell-link>修改资料 / 密码</a></strong></div>
+                <div><span>密钥管理</span><strong><a href="/user/api-keys" data-shell-link>创建、轮换、调整授权</a></strong></div>
+                <div><span>可用模型</span><strong><a href="/user/models" data-shell-link>先理解价格与覆盖</a></strong></div>
+                <div><span>账单余额</span><strong><a href="/user/billing" data-shell-link>看余额和累计消费</a></strong></div>
             </div>
         </div>
+    </div>
+</section>
+
+<section class="dashboard-command-grid anchor-section-offset" id="user-home-connect">
+    <div class="panel-card section-shell">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">复制接入信息</div>
+                <h3>当前最适合直接复制的接入材料</h3>
+            </div>
+        </div>
+        <div class="filter-grid">
+            <label>
+                <span>选择 API Key</span>
+                <select class="field-input" id="user-helper-key-select">
+                    {% for item in integration_profiles %}
+                    <option value="{{ item.api_key_id }}">{{ item.name }} · {{ item.key_masked }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label>
+                <span>示例模型</span>
+                <select class="field-input" id="user-helper-model-select">
+                    <option value="gpt-4.1-mini">gpt-4.1-mini</option>
+                    <option value="gpt-4o-mini">gpt-4o-mini</option>
+                    <option value="gpt-5-mini">gpt-5-mini</option>
+                </select>
+            </label>
+        </div>
+        <div class="api-key-chip-grid">
+            <article class="api-key-chip-card">
+                <strong>基础地址</strong>
+                <span><code id="user-helper-base-url-value">{{ external_base_url }}</code></span>
+                <span><button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="{{ external_base_url }}">复制基础地址</button></span>
+            </article>
+            <article class="api-key-chip-card">
+                <strong>OpenAI 兼容入口</strong>
+                <span><code id="user-helper-endpoint-value">{{ external_base_url }}/v1</code></span>
+                <span><button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="{{ external_base_url }}/v1">复制 /v1 入口</button></span>
+            </article>
+            <article class="api-key-chip-card">
+                <strong>示例 Bearer Header</strong>
+                <span><code id="user-helper-header-value">等待选择密钥</code></span>
+                <span><button class="btn btn-ghost btn-sm interactive-btn" id="user-helper-copy-header-btn" type="button">复制头信息</button></span>
+            </article>
+            <article class="api-key-chip-card">
+                <strong>授权渠道</strong>
+                <span id="user-helper-provider-value">-</span>
+                <span class="table-muted">按当前选中 API Key 动态生成</span>
+            </article>
+        </div>
+        <div class="api-key-chip-grid">
+            <article class="api-key-chip-card form-span-2">
+                <strong>curl 示例</strong>
+                <pre class="code-block" id="user-helper-curl-block"></pre>
+            </article>
+            <article class="api-key-chip-card form-span-2">
+                <strong>Python(OpenAI SDK)</strong>
+                <pre class="code-block" id="user-helper-python-block"></pre>
+            </article>
+        </div>
+    </div>
+
+    <div class="dashboard-command-side">
         <div class="panel-card">
             <div class="panel-head">
                 <div>
-                    <div class="panel-kicker">Access</div>
-                    <h3>接入提醒</h3>
+                    <div class="panel-kicker">路径确认</div>
+                    <h3>复制完后做什么</h3>
                 </div>
             </div>
-            <div class="dashboard-signal-list">
-                <div><span>正式入口</span><strong>统一走 <code>/v1/*</code></strong></div>
-                <div><span>鉴权方式</span><strong><code>Authorization: Bearer ...</code></strong></div>
-                <div><span>会话数</span><strong>{{ totals.conversation_count }}</strong></div>
-                <div><span>今日请求 / 本月请求</span><strong>{{ account_summary.day_requests }} / {{ account_summary.month_requests }}</strong></div>
-                <div><span>今日 Token / 本月 Token</span><strong>{{ account_summary.day_tokens }} / {{ account_summary.month_tokens }}</strong></div>
-                <div><span>今日费用 / 本月费用</span><strong>{{ '%.6f'|format(account_summary.day_cost_used or 0) }} / {{ '%.6f'|format(account_summary.month_cost_used or 0) }}</strong></div>
+            <div class="risk-grid">
+                <article class="risk-card" data-level="default">
+                    <strong>先别直接上线</strong>
+                    <span>复制完 Base URL 和 Header 后，下一步不是写生产代码，而是去自检页跑真实请求。</span>
+                </article>
+                <article class="risk-card" data-level="warning">
+                    <strong>不要混用旧密钥</strong>
+                    <span>若刚刚轮换过密钥，必须重新复制明文，不要继续使用旧环境变量。</span>
+                </article>
             </div>
+        </div>
+    </div>
+</section>
+
+<section class="dashboard-command-grid anchor-section-offset" id="user-home-verify">
+    <div class="panel-card section-shell">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">先做自检</div>
+                <h3>正式接入前的最后一步</h3>
+            </div>
+        </div>
+        <div class="stage-grid">
+            <article class="stage-card">
+                <strong>选择同一把密钥</strong>
+                <span>在自检页选择你刚刚复制的 API Key，而不是随便找一把测试密钥。</span>
+            </article>
+            <article class="stage-card">
+                <strong>选择目标模型</strong>
+                <span>用你真正准备上线的模型做自检，才能验证路由候选和授权范围是否一致。</span>
+            </article>
+            <article class="stage-card">
+                <strong>看失败摘要与修复建议</strong>
+                <span>如果测试失败，不要只看报错文本，要看页面生成的修复建议和下一步动作。</span>
+            </article>
+            <article class="stage-card">
+                <strong>成功后再接入业务</strong>
+                <span>自检成功后，再把 Base URL 和密钥写入你的后端或第三方客户端。</span>
+            </article>
+        </div>
+        <div class="form-actions">
+            <a class="btn btn-accent interactive-btn" href="/user/self-test" data-shell-link>立即去自检</a>
+        </div>
+    </div>
+
+    <div class="dashboard-command-side">
+        <div class="panel-card">
+            <div class="panel-head">
+                <div>
+                    <div class="panel-kicker">趋势变化</div>
+                    <h3>最近 7 天使用趋势</h3>
+                </div>
+            </div>
+            <div class="trend-chart-shell" id="user-home-trend-chart" data-trend='{{ usage_trend | tojson }}'></div>
         </div>
     </div>
 </section>

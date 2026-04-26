@@ -166,6 +166,8 @@ def _migrate_request_log_columns(db) -> None:
         "mask_sensitive_fields": "ALTER TABLE app_settings ADD COLUMN mask_sensitive_fields BOOLEAN NOT NULL DEFAULT 1",
         "max_logged_body_bytes": "ALTER TABLE app_settings ADD COLUMN max_logged_body_bytes INTEGER NOT NULL DEFAULT 16384",
         "allow_public_user_registration": "ALTER TABLE app_settings ADD COLUMN allow_public_user_registration BOOLEAN NOT NULL DEFAULT 0",
+        "request_log_retention_days": "ALTER TABLE app_settings ADD COLUMN request_log_retention_days INTEGER NOT NULL DEFAULT 90",
+        "admin_audit_log_retention_days": "ALTER TABLE app_settings ADD COLUMN admin_audit_log_retention_days INTEGER NOT NULL DEFAULT 180",
     }
     changed_settings = False
     for column, ddl in app_setting_additions.items():
@@ -205,7 +207,9 @@ def _migrate_request_log_columns(db) -> None:
     }
     user_additions = {
         "last_login_at": "ALTER TABLE user_accounts ADD COLUMN last_login_at DATETIME",
+        "balance_amount": "ALTER TABLE user_accounts ADD COLUMN balance_amount NUMERIC NOT NULL DEFAULT 0",
         "frozen_amount": "ALTER TABLE user_accounts ADD COLUMN frozen_amount NUMERIC NOT NULL DEFAULT 0",
+        "total_recharge_amount": "ALTER TABLE user_accounts ADD COLUMN total_recharge_amount NUMERIC NOT NULL DEFAULT 0",
         "request_limit_total": "ALTER TABLE user_accounts ADD COLUMN request_limit_total INTEGER",
         "request_limit_daily": "ALTER TABLE user_accounts ADD COLUMN request_limit_daily INTEGER",
         "request_limit_monthly": "ALTER TABLE user_accounts ADD COLUMN request_limit_monthly INTEGER",
@@ -223,6 +227,55 @@ def _migrate_request_log_columns(db) -> None:
         db.execute(text(ddl))
         changed_users = True
     if changed_users:
+        db.commit()
+    _backfill_user_shared_wallet(db)
+
+
+def _backfill_user_shared_wallet(db) -> None:
+    user_columns = {
+        row[1]
+        for row in db.execute(text("PRAGMA table_info(user_accounts)")).fetchall()
+    }
+    if "balance_amount" not in user_columns or "total_recharge_amount" not in user_columns:
+        return
+    rows = db.execute(
+        text(
+            """
+            SELECT owner_user_id,
+                   COALESCE(SUM(COALESCE(balance_amount, 0)), 0) AS total_balance_amount,
+                   COALESCE(SUM(COALESCE(total_recharge_amount, 0)), 0) AS total_recharge_amount
+            FROM api_client_keys
+            WHERE owner_user_id IS NOT NULL
+            GROUP BY owner_user_id
+            """
+        )
+    ).fetchall()
+    changed = False
+    for owner_user_id, total_balance_amount, total_recharge_amount in rows:
+        result = db.execute(
+            text(
+                """
+                UPDATE user_accounts
+                SET balance_amount = CASE
+                        WHEN COALESCE(balance_amount, 0) = 0 THEN :total_balance_amount
+                        ELSE balance_amount
+                    END,
+                    total_recharge_amount = CASE
+                        WHEN COALESCE(total_recharge_amount, 0) = 0 THEN :total_recharge_amount
+                        ELSE total_recharge_amount
+                    END
+                WHERE id = :owner_user_id
+                """
+            ),
+            {
+                "owner_user_id": owner_user_id,
+                "total_balance_amount": total_balance_amount,
+                "total_recharge_amount": total_recharge_amount,
+            },
+        )
+        if result.rowcount:
+            changed = True
+    if changed:
         db.commit()
 
 

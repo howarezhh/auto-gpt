@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.services.asset_service import AssetService
 from app.services.proxy_service import ProxyService
+from app.utils.http_headers import build_proxy_response_headers
 
 
 router = APIRouter(prefix="/api/playground", tags=["playground"])
@@ -42,12 +43,12 @@ async def playground_chat_completions(
             log_type="chat",
             forced_provider_id=x_aotu_provider_id,
         )
-        headers = {
-            "X-Proxy-Provider-Id": str(provider.id),
-            "X-Proxy-Provider-Name": provider.name,
-            "X-Proxy-Latency-Ms": str(latency_ms),
-            "X-Proxy-Trace-Length": str(len(trace)),
-        }
+        headers = build_proxy_response_headers(
+            provider_id=provider.id,
+            provider_name=provider.name,
+            latency_ms=latency_ms,
+            trace_length=len(trace),
+        )
         return StreamingResponse(stream, media_type="text/event-stream", headers=headers)
 
     result, provider, trace, latency_ms = await ProxyService.forward_json_request(
@@ -57,10 +58,13 @@ async def playground_chat_completions(
         log_type="chat",
         forced_provider_id=x_aotu_provider_id,
     )
-    response.headers["X-Proxy-Provider-Id"] = str(provider.id)
-    response.headers["X-Proxy-Provider-Name"] = provider.name
-    response.headers["X-Proxy-Latency-Ms"] = str(latency_ms)
-    response.headers["X-Proxy-Trace-Length"] = str(len(trace))
+    for key, value in build_proxy_response_headers(
+        provider_id=provider.id,
+        provider_name=provider.name,
+        latency_ms=latency_ms,
+        trace_length=len(trace),
+    ).items():
+        response.headers[key] = value
     return result
 
 
@@ -79,12 +83,12 @@ async def playground_responses(
             log_type="responses",
             forced_provider_id=x_aotu_provider_id,
         )
-        headers = {
-            "X-Proxy-Provider-Id": str(provider.id),
-            "X-Proxy-Provider-Name": provider.name,
-            "X-Proxy-Latency-Ms": str(latency_ms),
-            "X-Proxy-Trace-Length": str(len(trace)),
-        }
+        headers = build_proxy_response_headers(
+            provider_id=provider.id,
+            provider_name=provider.name,
+            latency_ms=latency_ms,
+            trace_length=len(trace),
+        )
         return StreamingResponse(stream, media_type="text/event-stream", headers=headers)
 
     result, provider, trace, latency_ms = await ProxyService.forward_json_request(
@@ -94,8 +98,11 @@ async def playground_responses(
         log_type="responses",
         forced_provider_id=x_aotu_provider_id,
     )
-    response.headers["X-Proxy-Provider-Id"] = str(provider.id)
-    response.headers["X-Proxy-Provider-Name"] = provider.name
-    response.headers["X-Proxy-Latency-Ms"] = str(latency_ms)
-    response.headers["X-Proxy-Trace-Length"] = str(len(trace))
+    for key, value in build_proxy_response_headers(
+        provider_id=provider.id,
+        provider_name=provider.name,
+        latency_ms=latency_ms,
+        trace_length=len(trace),
+    ).items():
+        response.headers[key] = value
     return result

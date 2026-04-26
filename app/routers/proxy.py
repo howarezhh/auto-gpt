@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.services.api_key_service import ApiClientAuthContext, require_api_client_auth
 from app.services.proxy_service import ProxyService
+from app.utils.http_headers import build_proxy_response_headers
 
 
 router = APIRouter(tags=["proxy"])
@@ -26,12 +27,12 @@ async def chat_completions(
             route_context=api_client_auth.route_context,
             api_client_auth=api_client_auth,
         )
-        headers = {
-            "X-Proxy-Provider-Id": str(provider.id),
-            "X-Proxy-Provider-Name": provider.name,
-            "X-Proxy-Latency-Ms": str(latency_ms),
-            "X-Proxy-Trace-Length": str(len(trace)),
-        }
+        headers = build_proxy_response_headers(
+            provider_id=provider.id,
+            provider_name=provider.name,
+            latency_ms=latency_ms,
+            trace_length=len(trace),
+        )
         return StreamingResponse(stream, media_type="text/event-stream", headers=headers)
 
     result, provider, trace, latency_ms = await ProxyService.forward_json_request(
@@ -42,10 +43,13 @@ async def chat_completions(
         route_context=api_client_auth.route_context,
         api_client_auth=api_client_auth,
     )
-    response.headers["X-Proxy-Provider-Id"] = str(provider.id)
-    response.headers["X-Proxy-Provider-Name"] = provider.name
-    response.headers["X-Proxy-Latency-Ms"] = str(latency_ms)
-    response.headers["X-Proxy-Trace-Length"] = str(len(trace))
+    for key, value in build_proxy_response_headers(
+        provider_id=provider.id,
+        provider_name=provider.name,
+        latency_ms=latency_ms,
+        trace_length=len(trace),
+    ).items():
+        response.headers[key] = value
     return result
 
 
@@ -65,12 +69,12 @@ async def responses(
             route_context=api_client_auth.route_context,
             api_client_auth=api_client_auth,
         )
-        headers = {
-            "X-Proxy-Provider-Id": str(provider.id),
-            "X-Proxy-Provider-Name": provider.name,
-            "X-Proxy-Latency-Ms": str(latency_ms),
-            "X-Proxy-Trace-Length": str(len(trace)),
-        }
+        headers = build_proxy_response_headers(
+            provider_id=provider.id,
+            provider_name=provider.name,
+            latency_ms=latency_ms,
+            trace_length=len(trace),
+        )
         return StreamingResponse(stream, media_type="text/event-stream", headers=headers)
 
     result, provider, trace, latency_ms = await ProxyService.forward_json_request(
@@ -81,10 +85,13 @@ async def responses(
         route_context=api_client_auth.route_context,
         api_client_auth=api_client_auth,
     )
-    response.headers["X-Proxy-Provider-Id"] = str(provider.id)
-    response.headers["X-Proxy-Provider-Name"] = provider.name
-    response.headers["X-Proxy-Latency-Ms"] = str(latency_ms)
-    response.headers["X-Proxy-Trace-Length"] = str(len(trace))
+    for key, value in build_proxy_response_headers(
+        provider_id=provider.id,
+        provider_name=provider.name,
+        latency_ms=latency_ms,
+        trace_length=len(trace),
+    ).items():
+        response.headers[key] = value
     return result
 
 

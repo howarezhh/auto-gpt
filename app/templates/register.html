@@ -1,40 +1,65 @@
 {% extends "auth_base.html" %}
 {% block content %}
-<section class="auth-card">
+<section class="auth-card auth-card-wide">
     <div class="auth-brand">aotu-gpt</div>
-    <h1>用户注册</h1>
-    <p>默认关闭公开注册。若管理员已开放，你可以直接注册普通用户账号。</p>
-    {% if error_message %}
-    <div class="auth-alert">{{ error_message }}</div>
-    {% endif %}
-    {% if public_registration_enabled %}
-    <form class="auth-form" method="post" action="/register">
-        {% if next_path %}
-        <input name="next_path" type="hidden" value="{{ next_path }}">
-        {% endif %}
-        <label>
-            <span>用户名</span>
-            <input class="field-input" name="username" required>
-        </label>
-        <label>
-            <span>邮箱</span>
-            <input class="field-input" name="email" type="email" required>
-        </label>
-        <label>
-            <span>密码</span>
-            <input class="field-input" name="password" type="password" required>
-        </label>
-        <label>
-            <span>确认密码</span>
-            <input class="field-input" name="password_confirm" type="password" required>
-        </label>
-        <button class="btn btn-accent" type="submit">注册并进入用户端</button>
-    </form>
-    {% else %}
-    <div class="auth-alert">当前未开放公开注册，请联系管理员在后台创建账号，或等待管理员开放注册。</div>
-    {% endif %}
-    <div class="auth-links">
-        <a href="/login">返回登录</a>
+    <div class="auth-layout">
+        <div class="auth-primary">
+            <h1>用户注册</h1>
+            <p>默认关闭公开注册。若管理员已开放，你可以直接注册普通用户账号，随后进入用户端获取 API Key、查看模型、做接入自检和管理自己的账单与日志。</p>
+            {% if error_message %}
+            <div class="auth-alert">{{ error_message }}</div>
+            {% endif %}
+            {% if public_registration_enabled %}
+            <form class="auth-form" method="post" action="/register">
+                {% if next_path %}
+                <input name="next_path" type="hidden" value="{{ next_path }}">
+                {% endif %}
+                <label>
+                    <span>用户名</span>
+                    <input class="field-input" name="username" required>
+                </label>
+                <label>
+                    <span>邮箱</span>
+                    <input class="field-input" name="email" type="email" required>
+                </label>
+                <label>
+                    <span>密码</span>
+                    <input class="field-input" name="password" type="password" required>
+                </label>
+                <label>
+                    <span>确认密码</span>
+                    <input class="field-input" name="password_confirm" type="password" required>
+                </label>
+                <button class="btn btn-accent" type="submit">注册并进入用户端</button>
+            </form>
+            {% else %}
+            <div class="auth-alert">当前未开放公开注册，请联系管理员在后台创建账号，或等待管理员开放注册。</div>
+            {% endif %}
+            <div class="auth-links">
+                <a href="/login">返回登录</a>
+            </div>
+        </div>
+
+        <aside class="auth-side">
+            <div class="auth-side-card">
+                <div class="panel-kicker">注册后路径</div>
+                <h3>你会进入什么页面</h3>
+                <div class="auth-note-list">
+                    <div><span>第一步</span><strong>进入用户首页，看接入主路径</strong></div>
+                    <div><span>第二步</span><strong>打开 API Key 管理，获取或创建密钥</strong></div>
+                    <div><span>第三步</span><strong>在接入自检页跑一条真实请求，再正式接入业务</strong></div>
+                </div>
+            </div>
+            <div class="auth-side-card">
+                <div class="panel-kicker">安全说明</div>
+                <h3>普通用户注册不等于直接外部调用</h3>
+                <div class="auth-note-list">
+                    <div><span>登录态</span><strong>浏览器登录只用于访问用户端页面</strong></div>
+                    <div><span>正式调用</span><strong>外部系统仍然必须使用 Bearer API Key</strong></div>
+                    <div><span>建议</span><strong>注册完成后先去文档页复制标准 <code>/v1/*</code> 接入信息</strong></div>
+                </div>
+            </div>
+        </aside>
     </div>
 </section>
 {% endblock %}

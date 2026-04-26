@@ -2,19 +2,20 @@
 {% block content %}
 <section class="hero-panel hero-panel-compact cockpit-hero api-key-hero">
     <div class="cockpit-hero-copy">
-        <div class="eyebrow">API Access</div>
+        <div class="eyebrow">API 接入</div>
         <h2>API 密钥管理</h2>
         <p>集中维护外部调用密钥、授权中转范围、额度约束与调用状态，直接完成日常授权和风控操作。</p>
         <div class="hero-actions">
             <button class="btn btn-accent interactive-btn" id="add-api-key-btn" type="button">新增 API 密钥</button>
             <a class="btn btn-ghost interactive-btn" href="/logs" data-shell-link>查看全局日志</a>
+            <a class="btn btn-ghost interactive-btn" href="/api/api-keys/export" target="_blank">导出密钥 CSV</a>
         </div>
     </div>
-    <div class="cockpit-hero-aside api-key-hero-aside" id="api-key-summary-signal">
+    <div class="cockpit-hero-aside api-key-hero-aside" id="api-key-summary-signal" data-api-key-summary-signal>
         <div class="cockpit-aside-label">密钥总览</div>
         <div class="cockpit-aside-value">0</div>
         <div class="cockpit-aside-copy">当前可运维的 API 密钥总数</div>
-        <div class="cockpit-health-bar"><span style="width:0%"></span></div>
+        <div class="cockpit-health-bar"><span class="cockpit-health-fill-empty"></span></div>
         <div class="cockpit-aside-meta">
             <span>启用 0</span>
             <span>禁用 0</span>
@@ -22,52 +23,171 @@
     </div>
 </section>
 
-<section class="stats-grid api-key-stats-grid" id="api-key-summary-grid">
-    <article class="metric-card"><span>总密钥数</span><strong data-api-key-summary="total_keys">0</strong></article>
-    <article class="metric-card"><span>启用中</span><strong data-api-key-summary="enabled_keys">0</strong></article>
-    <article class="metric-card"><span>禁用中</span><strong data-api-key-summary="disabled_keys">0</strong></article>
-    <article class="metric-card"><span>已过期</span><strong data-api-key-summary="expired_keys">0</strong></article>
-    <article class="metric-card metric-card-alert"><span>额度耗尽</span><strong data-api-key-summary="quota_exhausted_keys">0</strong></article>
-    <article class="metric-card"><span>总请求量</span><strong data-api-key-summary="total_requests">0</strong></article>
-    <article class="metric-card"><span>输入 Token</span><strong data-api-key-summary="total_prompt_tokens">0</strong></article>
-    <article class="metric-card"><span>输出 Token</span><strong data-api-key-summary="total_completion_tokens">0</strong></article>
-    <article class="metric-card"><span>总 Token</span><strong data-api-key-summary="total_tokens">0</strong></article>
-    <article class="metric-card"><span>累计消费</span><strong data-api-key-summary="total_cost_used">0</strong></article>
-    <article class="metric-card"><span>账户总余额</span><strong data-api-key-summary="total_balance_amount">0</strong></article>
-    <article class="metric-card"><span>累计充值</span><strong data-api-key-summary="total_recharge_amount">0</strong></article>
-</section>
+<nav class="page-anchor-bar">
+    <a class="page-anchor-link" href="#api-keys-overview">概览指标</a>
+    <a class="page-anchor-link" href="#api-keys-registry">筛选列表</a>
+    <a class="page-anchor-link" href="#api-keys-batch">批量操作</a>
+    <a class="page-anchor-link" href="#api-keys-risk">风险提示</a>
+</nav>
 
-<section class="dashboard-command-grid api-key-command-grid">
-    <div class="panel-card section-shell api-key-main-panel">
-        <div class="section-subhead">
-            <div>
-                <div class="panel-kicker">Registry</div>
-                <h3>密钥列表</h3>
-            </div>
-            <div class="table-toolbar">
-                <input class="field-input search-input" id="api-key-search" type="search" placeholder="搜索名称、备注、前缀、状态">
+<section class="panel-card section-shell anchor-section-offset" id="api-keys-overview">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">概览指标</div>
+            <h3>授权与消耗概览</h3>
+        </div>
+        <div class="topbar-actions">
+            <a class="topbar-btn" href="/logs" data-shell-link>查看全局日志</a>
+            <a class="topbar-btn" href="/api/api-keys/export" target="_blank">导出密钥 CSV</a>
+        </div>
+    </div>
+    <div class="stats-grid api-key-stats-grid" id="api-key-summary-grid">
+        <article class="metric-card"><span>总密钥数</span><strong data-api-key-summary="total_keys">0</strong></article>
+        <article class="metric-card"><span>启用中</span><strong data-api-key-summary="enabled_keys">0</strong></article>
+        <article class="metric-card"><span>禁用中</span><strong data-api-key-summary="disabled_keys">0</strong></article>
+        <article class="metric-card"><span>已过期</span><strong data-api-key-summary="expired_keys">0</strong></article>
+        <article class="metric-card metric-card-alert"><span>额度耗尽</span><strong data-api-key-summary="quota_exhausted_keys">0</strong></article>
+        <article class="metric-card"><span>总请求量</span><strong data-api-key-summary="total_requests">0</strong></article>
+        <article class="metric-card"><span>总 Token</span><strong data-api-key-summary="total_tokens">0</strong></article>
+        <article class="metric-card"><span>累计消费</span><strong data-api-key-summary="total_cost_used">0</strong></article>
+    </div>
+    <div class="section-split-2">
+        <div class="summary-list-card">
+            <div class="panel-kicker">余额视图</div>
+            <h4>账单与充值口径</h4>
+            <div class="detail-list">
+                <div><span>输入 Token</span><strong data-api-key-summary="total_prompt_tokens">0</strong></div>
+                <div><span>输出 Token</span><strong data-api-key-summary="total_completion_tokens">0</strong></div>
+                <div><span>账户总余额</span><strong data-api-key-summary="total_balance_amount">0</strong></div>
+                <div><span>累计充值</span><strong data-api-key-summary="total_recharge_amount">0</strong></div>
             </div>
         </div>
-        <div class="table-shell">
-            <table class="data-table">
-                <thead>
-                    <tr>
-                        <th>名称</th>
-                        <th>归属用户</th>
-                        <th>密钥</th>
-                        <th>状态</th>
-                        <th>路由策略</th>
-                        <th>授权渠道</th>
-                        <th>额度</th>
-                        <th>账单 / 余额</th>
-                        <th>最近使用</th>
-                        <th>操作</th>
-                    </tr>
-                </thead>
-                <tbody id="api-key-table-body">
-                    <tr><td colspan="10"><div class="empty-state">正在加载 API 密钥...</div></td></tr>
-                </tbody>
-            </table>
+        <div class="summary-list-card" data-api-key-summary-signal>
+            <div class="cockpit-aside-label">密钥总览</div>
+            <div class="cockpit-aside-value">0</div>
+            <div class="cockpit-aside-copy">当前可运维的 API 密钥总数</div>
+            <div class="cockpit-health-bar"><span class="cockpit-health-fill-empty"></span></div>
+            <div class="cockpit-aside-meta">
+                <span>启用 0</span>
+                <span>禁用 0</span>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="panel-card section-shell anchor-section-offset" id="api-keys-registry">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">筛选列表</div>
+            <h3>服务端筛选与密钥列表</h3>
+        </div>
+        <button class="btn btn-ghost interactive-btn" id="api-key-refresh-btn" type="button">刷新</button>
+    </div>
+    <div class="table-toolbar-block">
+        <div class="table-toolbar">
+            <input class="field-input search-input" id="api-key-search" type="search" placeholder="搜索名称、备注、前缀、归属用户">
+            <select class="field-input" id="api-key-status-filter">
+                <option value="">全部状态</option>
+                <option value="active">正常可用</option>
+                <option value="disabled">已禁用</option>
+                <option value="expired">已过期</option>
+                <option value="quota_exhausted">额度耗尽</option>
+                <option value="cost_quota_exhausted">金额额度耗尽</option>
+                <option value="balance_exhausted">余额耗尽</option>
+                <option value="unbound">未绑定渠道</option>
+            </select>
+            <select class="field-input" id="api-key-enabled-filter">
+                <option value="">全部启用状态</option>
+                <option value="true">仅启用</option>
+                <option value="false">仅禁用</option>
+            </select>
+            <select class="field-input" id="api-key-owner-filter">
+                <option value="">全部归属用户</option>
+            </select>
+            <select class="field-input" id="api-key-page-size">
+                <option value="20">20 条 / 页</option>
+                <option value="50">50 条 / 页</option>
+                <option value="100">100 条 / 页</option>
+            </select>
+        </div>
+        <div class="settings-note">
+            <strong>列表说明</strong>
+            <span>密钥列表统一走服务端筛选与分页，筛选范围覆盖状态、启用状态、归属用户和关键字。详情、编辑、启停和删除都从结果表内进入。</span>
+        </div>
+    </div>
+    <div class="table-shell">
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th><input id="api-key-check-all-visible" type="checkbox" aria-label="选择本页"></th>
+                    <th>名称</th>
+                    <th>归属用户</th>
+                    <th>密钥</th>
+                    <th>状态</th>
+                    <th>路由策略</th>
+                    <th>授权渠道</th>
+                    <th>额度</th>
+                    <th>账单 / 余额</th>
+                    <th>最近使用</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody id="api-key-table-body">
+                <tr><td colspan="11"><div class="empty-state">正在加载 API 密钥...</div></td></tr>
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<section class="panel-card section-shell anchor-section-offset" id="api-keys-batch">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">批量操作</div>
+            <h3>选择、翻页与统一治理</h3>
+        </div>
+        <div class="table-muted" id="api-key-page-meta">正在加载...</div>
+    </div>
+    <div class="action-palette">
+        <button class="btn btn-ghost interactive-btn" id="api-key-select-page" type="button">选择本页</button>
+        <button class="btn btn-ghost interactive-btn" id="api-key-clear-selection-btn" type="button">清空选择</button>
+        <button class="btn btn-ghost interactive-btn" id="api-key-batch-enable-btn" type="button">批量启用</button>
+        <button class="btn btn-ghost interactive-btn" id="api-key-batch-disable-btn" type="button">批量禁用</button>
+        <button class="btn btn-ghost interactive-btn" id="api-key-batch-delete-btn" type="button">批量删除</button>
+        <button class="btn btn-ghost interactive-btn" id="api-key-batch-providers-btn" type="button">批量改渠道授权</button>
+        <button class="btn btn-ghost interactive-btn" id="api-key-prev-page-btn" type="button">上一页</button>
+        <button class="btn btn-ghost interactive-btn" id="api-key-next-page-btn" type="button">下一页</button>
+    </div>
+    <div class="settings-note">
+        <strong>批量规则</strong>
+        <span>批量操作仅作用于已勾选的 API 密钥，可跨页累积选择。统一授权时会覆盖所选密钥的路由模式、默认中转站、回退策略和渠道授权集合。</span>
+    </div>
+</section>
+
+<section class="dashboard-command-grid anchor-section-offset" id="api-keys-risk">
+    <div class="panel-card section-shell">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">风险提示</div>
+                <h3>高频治理风险</h3>
+            </div>
+        </div>
+        <div class="risk-grid">
+            <article class="risk-card" data-level="warning">
+                <strong>明文回显依赖新存档</strong>
+                <span>历史密钥若没有明文存档，必须通过编辑后重置一次，才能重新提供复制能力。</span>
+            </article>
+            <article class="risk-card" data-level="danger">
+                <strong>授权渠道为空将直接拦截</strong>
+                <span>即使模型本身可用，只要密钥没有绑定中转站，外部请求也会在鉴权后被拒绝。</span>
+            </article>
+            <article class="risk-card" data-level="warning">
+                <strong>手动优先并非自动容灾</strong>
+                <span>关闭“失败后回退”后，默认中转站失败不会切到候选中转站，适合严格定向测试而非生产兜底。</span>
+            </article>
+            <article class="risk-card" data-level="default">
+                <strong>额度口径以 request_logs 为准</strong>
+                <span>总额度、剩余额度、消费金额和导出报表统一追溯到请求日志，不再由前端本地拼装。</span>
+            </article>
         </div>
     </div>
 
@@ -75,27 +195,12 @@
         <div class="panel-card">
             <div class="panel-head">
                 <div>
-                    <div class="panel-kicker">Ops Notes</div>
-                    <h3>运维提醒</h3>
-                </div>
-            </div>
-            <div class="dashboard-signal-list">
-                <div><span>密钥展示</span><strong>新密钥与可回显密钥都支持一键复制</strong></div>
-                <div><span>历史兼容</span><strong>旧密钥若没有明文存档，需编辑后重置一次才能长期回显</strong></div>
-                <div><span>授权范围</span><strong>授权渠道为空时，对外调用会被直接拦截</strong></div>
-                <div><span>手动优先模式</span><strong>若关闭失败后回退，默认渠道失败后不会切换</strong></div>
-                <div><span>额度口径</span><strong>总额度、剩余额度与日志统计统一按 request_logs 追溯</strong></div>
-            </div>
-        </div>
-
-        <div class="panel-card">
-            <div class="panel-head">
-                <div>
-                    <div class="panel-kicker">Quick Drill</div>
-                    <h3>快捷入口</h3>
+                    <div class="panel-kicker">快捷入口</div>
+                    <h3>运维跳转</h3>
                 </div>
             </div>
             <div class="action-stack">
+                <a class="quick-link" href="#api-keys-overview">返回概览与新增入口</a>
                 <a class="quick-link" href="/playground" data-shell-link>打开内部 playground</a>
                 <a class="quick-link" href="/settings" data-shell-link>查看全局路由设置</a>
                 <a class="quick-link" href="/logs" data-shell-link>核对平台请求日志</a>
@@ -186,7 +291,7 @@
                 <section class="route-guide-panel">
                     <div class="route-guide-head">
                         <div>
-                            <div class="panel-kicker">Per-Key Policy</div>
+                            <div class="panel-kicker">单密钥策略</div>
                             <h4>单密钥专属路由策略</h4>
                         </div>
                     </div>
@@ -195,7 +300,7 @@
                 <section class="route-guide-panel route-guide-panel-accent">
                     <div class="route-guide-head">
                         <div>
-                            <div class="panel-kicker">Live Preview</div>
+                            <div class="panel-kicker">实时预览</div>
                             <h4>当前策略执行预览</h4>
                         </div>
                     </div>
@@ -219,7 +324,7 @@
         </form>
         <div class="api-key-raw-panel hidden" id="api-key-raw-panel">
             <div class="settings-note">
-                <strong>原始 API Key</strong>
+                <strong>原始 API 密钥</strong>
                 <span>该明文只会返回一次。请立即保存到你的外部业务系统。</span>
             </div>
             <div class="api-key-raw-box">
@@ -227,6 +332,44 @@
                 <button class="btn btn-ghost btn-sm interactive-btn" id="api-key-copy-raw-btn" type="button">复制明文</button>
             </div>
         </div>
+    </div>
+</div>
+
+<div class="modal-shell hidden" id="api-key-batch-provider-modal">
+    <div class="modal-card modal-lg">
+        <div class="modal-head">
+            <h3>批量更新渠道授权</h3>
+            <button class="icon-btn interactive-btn" id="api-key-batch-provider-close" type="button">×</button>
+        </div>
+        <form id="api-key-batch-provider-form" class="form-grid">
+            <label>
+                <span>路由模式</span>
+                <select class="field-input" id="api-key-batch-provider-route-mode">
+                    <option value="manual">手动优先</option>
+                    <option value="failover">故障切换</option>
+                    <option value="weighted">权重分流</option>
+                    <option value="sticky">会话粘滞</option>
+                </select>
+            </label>
+            <label>
+                <span>默认中转站</span>
+                <select class="field-input" id="api-key-batch-provider-default">
+                    <option value="">未设置</option>
+                </select>
+            </label>
+            <label class="toggle-row">
+                <input id="api-key-batch-provider-fallback" type="checkbox" checked>
+                <span>手动优先模式允许失败后回退</span>
+            </label>
+            <div class="form-span-2">
+                <span>授权中转站</span>
+                <div class="api-key-provider-selector" id="api-key-batch-provider-selector"></div>
+            </div>
+            <div class="form-actions form-span-2">
+                <button class="btn btn-ghost interactive-btn" id="api-key-batch-provider-cancel" type="button">取消</button>
+                <button class="btn btn-accent interactive-btn" id="api-key-batch-provider-submit" type="submit">应用到已选 API 密钥</button>
+            </div>
+        </form>
     </div>
 </div>
 {% endblock %}

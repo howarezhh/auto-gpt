@@ -58,8 +58,8 @@ class ModelCatalogService:
 
     @staticmethod
     def update_model(db: Session, catalog: ModelCatalog, payload: ModelCatalogUpdate) -> ModelCatalog:
-        data = payload.model_dump(exclude_unset=True)
-        provider_bindings = data.pop("provider_bindings", None)
+        data = payload.model_dump(exclude_unset=True, exclude={"provider_bindings"})
+        provider_bindings = payload.provider_bindings if "provider_bindings" in payload.model_fields_set else None
         for field, value in data.items():
             setattr(catalog, field, value)
         if data:
@@ -69,6 +69,17 @@ class ModelCatalogService:
         db.commit()
         db.refresh(catalog)
         return catalog
+
+    @staticmethod
+    def delete_model(db: Session, catalog: ModelCatalog) -> None:
+        providers = ProviderService.list_providers(db)
+        for provider in providers:
+            for provider_model in list(provider.provider_models):
+                if provider_model.model_name == catalog.model_name:
+                    provider.provider_models.remove(provider_model)
+            ProviderService.refresh_provider_state(provider)
+        db.delete(catalog)
+        db.commit()
 
     @staticmethod
     def sync_model_catalogs(db: Session) -> None:

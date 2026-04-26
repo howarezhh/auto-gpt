@@ -2,7 +2,7 @@
 {% block content %}
 <section class="hero-panel hero-panel-compact cockpit-hero api-key-detail-hero" data-api-key-id="{{ api_key_id }}">
     <div class="cockpit-hero-copy">
-        <div class="eyebrow">API Key Detail</div>
+        <div class="eyebrow">API 密钥详情</div>
         <h2 id="api-key-detail-title">API 密钥详情</h2>
         <p id="api-key-detail-subtitle">正在加载密钥状态、额度、授权策略和调用留痕...</p>
         <div class="hero-actions">
@@ -14,7 +14,7 @@
         <div class="cockpit-aside-label">额度脉冲</div>
         <div class="cockpit-aside-value">-</div>
         <div class="cockpit-aside-copy">剩余额度与最近调用强度</div>
-        <div class="cockpit-health-bar"><span style="width:0%"></span></div>
+        <div class="cockpit-health-bar"><span class="cockpit-health-fill-empty"></span></div>
         <div class="cockpit-aside-meta">
             <span>状态 -</span>
             <span>请求 -</span>
@@ -33,11 +33,19 @@
     <article class="metric-card metric-card-alert"><span>24h 失败数</span><strong id="api-key-detail-recent-failures">0</strong></article>
 </section>
 
-<section class="dashboard-command-grid api-key-detail-grid">
+<nav class="page-anchor-bar">
+    <a class="page-anchor-link" href="#api-key-section-core">状态与配额</a>
+    <a class="page-anchor-link" href="#api-key-section-analytics">调用分析</a>
+    <a class="page-anchor-link" href="#api-key-section-billing">账单台账</a>
+    <a class="page-anchor-link" href="#api-key-section-logs">请求日志</a>
+    <a class="page-anchor-link" href="#api-key-section-trace">Trace 与排查</a>
+</nav>
+
+<section class="dashboard-command-grid api-key-detail-grid anchor-section-offset" id="api-key-section-core">
     <div class="panel-card section-shell api-key-detail-main">
         <div class="section-subhead">
             <div>
-                <div class="panel-kicker">Core State</div>
+                <div class="panel-kicker">核心状态</div>
                 <h3>基础信息与额度进度</h3>
             </div>
         </div>
@@ -45,7 +53,7 @@
             <div class="panel-card api-key-inline-card">
                 <div class="panel-head">
                     <div>
-                        <div class="panel-kicker">Identity</div>
+                        <div class="panel-kicker">身份信息</div>
                         <h3>基础信息</h3>
                     </div>
                 </div>
@@ -54,7 +62,7 @@
             <div class="panel-card api-key-inline-card">
                 <div class="panel-head">
                     <div>
-                        <div class="panel-kicker">Quota</div>
+                        <div class="panel-kicker">额度进度</div>
                         <h3>额度进度</h3>
                     </div>
                 </div>
@@ -68,7 +76,7 @@
             <div class="panel-card api-key-inline-card">
                 <div class="panel-head">
                     <div>
-                        <div class="panel-kicker">Bindings</div>
+                        <div class="panel-kicker">绑定关系</div>
                         <h3>授权中转站</h3>
                     </div>
                 </div>
@@ -77,7 +85,7 @@
             <div class="panel-card api-key-inline-card">
                 <div class="panel-head">
                     <div>
-                        <div class="panel-kicker">Routing</div>
+                        <div class="panel-kicker">路由配置</div>
                         <h3>专属路由策略</h3>
                     </div>
                 </div>
@@ -88,25 +96,37 @@
     </div>
 
     <div class="dashboard-command-side api-key-detail-side">
-        <div class="panel-card">
-            <div class="panel-head">
-                <div>
-                    <div class="panel-kicker">Model Mix</div>
-                    <h3>模型调用分布</h3>
-                </div>
+        <div class="summary-list-card">
+            <div class="panel-kicker">排查提示</div>
+            <h4>建议阅读顺序</h4>
+            <div class="dashboard-signal-list">
+                <div><span>先看</span><strong>状态、额度、绑定关系</strong></div>
+                <div><span>再看</span><strong>模型分布与最近错误</strong></div>
+                <div><span>然后看</span><strong>账单流水与余额调整</strong></div>
+                <div><span>最后看</span><strong>日志详情和 Trace 明细</strong></div>
             </div>
+        </div>
+    </div>
+</section>
+
+<section class="panel-card section-shell anchor-section-offset" id="api-key-section-analytics">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">调用分析</div>
+            <h3>模型分布与异常收敛</h3>
+        </div>
+    </div>
+    <div class="section-split-2">
+        <div class="summary-list-card">
+            <div class="panel-kicker">模型分布</div>
+            <h4>模型调用分布</h4>
             <div class="api-key-model-distribution" id="api-key-detail-model-distribution">
                 <div class="empty-state">暂无模型调用记录</div>
             </div>
         </div>
-
-        <div class="panel-card">
-            <div class="panel-head">
-                <div>
-                    <div class="panel-kicker">Recent Errors</div>
-                    <h3>最近错误</h3>
-                </div>
-            </div>
+        <div class="summary-list-card">
+            <div class="panel-kicker">错误信号</div>
+            <h4>最近错误</h4>
             <div class="api-key-error-list" id="api-key-detail-errors">
                 <div class="empty-state">暂无错误记录</div>
             </div>
@@ -114,10 +134,10 @@
     </div>
 </section>
 
-<section class="panel-card section-shell">
+<section class="panel-card section-shell anchor-section-offset" id="api-key-section-billing">
     <div class="section-subhead">
         <div>
-            <div class="panel-kicker">Billing Ledger</div>
+            <div class="panel-kicker">计费台账</div>
             <h3>账单流水与余额调整</h3>
         </div>
     </div>
@@ -125,7 +145,7 @@
         <div class="panel-card api-key-inline-card">
             <div class="panel-head">
                 <div>
-                    <div class="panel-kicker">Billing Summary</div>
+                    <div class="panel-kicker">计费汇总</div>
                     <h3>账单概览</h3>
                 </div>
             </div>
@@ -134,7 +154,7 @@
         <div class="panel-card api-key-inline-card">
             <div class="panel-head">
                 <div>
-                    <div class="panel-kicker">Balance Ops</div>
+                    <div class="panel-kicker">余额调整</div>
                     <h3>余额调整</h3>
                 </div>
             </div>
@@ -173,10 +193,10 @@
     </div>
 </section>
 
-<section class="panel-card section-shell">
+<section class="panel-card section-shell anchor-section-offset" id="api-key-section-logs">
     <div class="section-subhead">
         <div>
-            <div class="panel-kicker">Trace Log</div>
+            <div class="panel-kicker">请求追踪</div>
             <h3>历史请求日志</h3>
         </div>
         <div class="hero-actions">
@@ -206,10 +226,51 @@
     </div>
 </section>
 
+<section class="dashboard-command-grid anchor-section-offset" id="api-key-section-trace">
+    <div class="panel-card section-shell">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">Trace 与排查</div>
+                <h3>查看路径与字段说明</h3>
+            </div>
+        </div>
+        <div class="risk-grid">
+            <article class="risk-card" data-level="default">
+                <strong>查看方式</strong>
+                <span>在上方“历史请求日志”中点击“详情”，可打开该次请求的完整 Trace、请求体、响应体和计费字段。</span>
+            </article>
+            <article class="risk-card" data-level="warning">
+                <strong>优先核对</strong>
+                <span>先确认状态码、尝试次数、最近命中中转站，再结合 TTFB、总耗时与配额进度判断是线路问题还是额度问题。</span>
+            </article>
+            <article class="risk-card" data-level="danger">
+                <strong>余额异常</strong>
+                <span>若余额、冻结金额或金额额度异常，先回到“计费台账”核对余额调整记录，再查看对应请求日志的 total_cost 与倍率字段。</span>
+            </article>
+            <article class="risk-card" data-level="default">
+                <strong>模型异常</strong>
+                <span>若特定模型持续失败，先看“模型调用分布”和“最近错误”，再回查该模型在中转站中的启用状态、价格和健康状态。</span>
+            </article>
+        </div>
+    </div>
+
+    <div class="dashboard-command-side">
+        <div class="summary-list-card">
+            <div class="panel-kicker">快速跳转</div>
+            <h4>排查常用入口</h4>
+            <div class="action-stack">
+                <a class="quick-link" href="#api-key-section-core">回到状态与配额</a>
+                <a class="quick-link" href="#api-key-section-logs">跳到历史请求日志</a>
+                <a class="quick-link" href="/api-keys" data-shell-link>返回密钥列表</a>
+            </div>
+        </div>
+    </div>
+</section>
+
 <div class="modal-shell hidden" id="api-key-log-modal">
     <div class="modal-card modal-lg">
         <div class="modal-head">
-            <h3>API Key 请求详情</h3>
+            <h3>API 密钥请求详情</h3>
             <button class="icon-btn interactive-btn" id="api-key-log-modal-close" type="button">×</button>
         </div>
         <pre class="code-block" id="api-key-log-modal-content">暂无详情</pre>

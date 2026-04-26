@@ -11,8 +11,8 @@ def loads_json(value: str | None, default: Any) -> Any:
         return default
 
 
-def dumps_json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False)
+def dumps_json(value: Any, **kwargs) -> str:
+    return json.dumps(value, ensure_ascii=False, **kwargs)
 
 
 def safeJsonParse(value: str) -> Any:

@@ -293,13 +293,36 @@ reload_and_start_services() {
   systemctl restart nginx
 }
 
+wait_for_http_success() {
+  local url="$1"
+  local attempts="$2"
+  local sleep_seconds="$3"
+  local label="$4"
+  local attempt=1
+
+  while (( attempt <= attempts )); do
+    if curl -fsS --max-time 10 "$url" >/dev/null; then
+      log "${label} passed: ${url}"
+      return 0
+    fi
+
+    if (( attempt < attempts )); then
+      log "${label} pending (${attempt}/${attempts}), retrying in ${sleep_seconds}s..."
+      sleep "$sleep_seconds"
+    fi
+    attempt=$((attempt + 1))
+  done
+
+  return 1
+}
+
 run_health_checks() {
   local local_url="http://${APP_HOST}:${APP_PORT}/login"
   local external_base_url=""
   local external_url=""
 
-  if curl -fsS --max-time 10 "$local_url" >/dev/null; then
-    log "Local health check passed: ${local_url}"
+  if wait_for_http_success "$local_url" 15 1 "Local health check"; then
+    :
   else
     log "Local health check failed: ${local_url}"
     systemctl --no-pager --full status "$SERVICE_NAME" || true
@@ -312,8 +335,8 @@ run_health_checks() {
   fi
 
   external_url="${external_base_url%/}/login"
-  if curl -fsS --max-time 10 "$external_url" >/dev/null; then
-    log "External health check passed: ${external_url}"
+  if wait_for_http_success "$external_url" 10 1 "External health check"; then
+    :
   else
     log "External health check failed: ${external_url}"
     log "This usually means the ECS security group, firewall, or public network mapping is still blocking port 80."

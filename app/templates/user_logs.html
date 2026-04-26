@@ -2,15 +2,15 @@
 {% block content %}
 <section class="hero-panel hero-panel-compact cockpit-hero">
     <div class="cockpit-hero-copy">
-        <div class="eyebrow">My Logs</div>
-        <h2>我的日志</h2>
-        <p>仅展示当前账号名下 API Key 的请求记录，可按状态、会话号和密钥筛选。</p>
+        <div class="eyebrow">我的日志</div>
+        <h2>请求记录与排障入口</h2>
+        <p>这里只展示当前账号名下 API Key 的请求记录。默认先看关键列，想读原始请求和响应，再进入详情弹层或单条日志页。</p>
     </div>
     <div class="cockpit-hero-aside">
         <div class="cockpit-aside-label">日志汇总</div>
         <div class="cockpit-aside-value">{{ summary.total_requests }}</div>
         <div class="cockpit-aside-copy">当前筛选命中的请求数</div>
-        <div class="cockpit-health-bar"><span style="width: 100%"></span></div>
+        <div class="cockpit-health-bar"><span class="cockpit-health-fill-full"></span></div>
         <div class="cockpit-aside-meta">
             <span>成功 {{ summary.success_requests }}</span>
             <span>失败 {{ summary.failed_requests }}</span>
@@ -18,62 +18,99 @@
     </div>
 </section>
 
-<section class="panel-card section-shell">
-    <div class="section-subhead">
-        <div>
-            <div class="panel-kicker">Filters</div>
-            <h3>筛选条件</h3>
+<section class="stats-grid">
+    <article class="metric-card"><span>成功请求</span><strong>{{ summary.success_requests }}</strong></article>
+    <article class="metric-card"><span>失败请求</span><strong>{{ summary.failed_requests }}</strong></article>
+    <article class="metric-card"><span>输入 Token</span><strong>{{ summary.prompt_tokens or 0 }}</strong></article>
+    <article class="metric-card"><span>输出 Token</span><strong>{{ summary.completion_tokens or 0 }}</strong></article>
+    <article class="metric-card"><span>总 Token</span><strong>{{ summary.total_tokens or 0 }}</strong></article>
+    <article class="metric-card"><span>总费用</span><strong>{{ '%.6f'|format(summary.total_cost or 0) }}</strong></article>
+</section>
+
+<section class="dashboard-command-grid">
+    <div class="panel-card section-shell">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">快捷筛选</div>
+                <h3>先缩小问题范围</h3>
+            </div>
+        </div>
+        <div class="action-palette">
+            <a class="btn btn-ghost btn-sm interactive-btn" href="/user/logs" data-shell-link>全部日志</a>
+            <a class="btn btn-ghost btn-sm interactive-btn" href="/user/logs?success=false" data-shell-link>仅失败</a>
+            <a class="btn btn-ghost btn-sm interactive-btn" href="/user/logs?log_type=responses" data-shell-link>仅 Responses</a>
+            <a class="btn btn-ghost btn-sm interactive-btn" href="/user/logs?log_type=chat" data-shell-link>仅 Chat</a>
+            <a class="btn btn-ghost btn-sm interactive-btn" href="/user/conversations" data-shell-link>去会话回放</a>
+        </div>
+        <form class="filter-grid" method="get" action="/user/logs">
+            <label>
+                <span>日志类型</span>
+                <select class="field-input" name="log_type">
+                    <option value="">全部</option>
+                    <option value="chat" {% if filters.log_type == 'chat' %}selected{% endif %}>对话请求</option>
+                    <option value="responses" {% if filters.log_type == 'responses' %}selected{% endif %}>响应请求</option>
+                </select>
+            </label>
+            <label>
+                <span>结果</span>
+                <select class="field-input" name="success">
+                    <option value="">全部</option>
+                    <option value="true" {% if filters.success == 'true' %}selected{% endif %}>成功</option>
+                    <option value="false" {% if filters.success == 'false' %}selected{% endif %}>失败</option>
+                </select>
+            </label>
+            <label>
+                <span>API Key</span>
+                <select class="field-input" name="api_client_key_id">
+                    <option value="">全部</option>
+                    {% for item in owned_api_keys %}
+                    <option value="{{ item.id }}" {% if filters.api_client_key_id == item.id %}selected{% endif %}>{{ item.name }} · {{ item.key_masked }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label>
+                <span>会话号</span>
+                <input class="field-input" name="conversation_key" value="{{ filters.conversation_key }}" placeholder="输入 conversation_key / session_id">
+            </label>
+            <label>
+                <span>每页数量</span>
+                <select class="field-input" name="page_size">
+                    {% for size in [10,20,50,100] %}
+                    <option value="{{ size }}" {% if pagination.page_size == size %}selected{% endif %}>{{ size }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <div class="form-actions">
+                <button class="btn btn-accent" type="submit">应用筛选</button>
+            </div>
+        </form>
+    </div>
+
+    <div class="dashboard-command-side">
+        <div class="panel-card">
+            <div class="panel-head">
+                <div>
+                    <div class="panel-kicker">阅读顺序</div>
+                    <h3>排障时先看什么</h3>
+                </div>
+            </div>
+            <div class="dashboard-signal-list">
+                <div><span>第一步</span><strong>先看状态、模型、渠道、费用，不要直接展开原始 JSON</strong></div>
+                <div><span>第二步</span><strong>失败请求优先打开详情弹层，核对请求体和响应体</strong></div>
+                <div><span>第三步</span><strong>若有关联会话号，再去会话回放页看整段上下文</strong></div>
+            </div>
         </div>
     </div>
-    <form class="filter-grid" method="get" action="/user/logs">
-        <label>
-            <span>日志类型</span>
-            <select class="field-input" name="log_type">
-                <option value="">全部</option>
-                <option value="chat" {% if filters.log_type == 'chat' %}selected{% endif %}>对话请求</option>
-                <option value="responses" {% if filters.log_type == 'responses' %}selected{% endif %}>响应请求</option>
-            </select>
-        </label>
-        <label>
-            <span>结果</span>
-            <select class="field-input" name="success">
-                <option value="">全部</option>
-                <option value="true" {% if filters.success == 'true' %}selected{% endif %}>成功</option>
-                <option value="false" {% if filters.success == 'false' %}selected{% endif %}>失败</option>
-            </select>
-        </label>
-        <label>
-            <span>API Key</span>
-            <select class="field-input" name="api_client_key_id">
-                <option value="">全部</option>
-                {% for item in owned_api_keys %}
-                <option value="{{ item.id }}" {% if filters.api_client_key_id == item.id %}selected{% endif %}>{{ item.name }} · {{ item.key_masked }}</option>
-                {% endfor %}
-            </select>
-        </label>
-        <label>
-            <span>会话号</span>
-            <input class="field-input" name="conversation_key" value="{{ filters.conversation_key }}">
-        </label>
-        <label>
-            <span>每页数量</span>
-            <select class="field-input" name="page_size">
-                {% for size in [10,20,50,100] %}
-                <option value="{{ size }}" {% if pagination.page_size == size %}selected{% endif %}>{{ size }}</option>
-                {% endfor %}
-            </select>
-        </label>
-        <div class="form-actions">
-            <button class="btn btn-accent" type="submit">查询</button>
-        </div>
-    </form>
 </section>
 
 <section class="panel-card section-shell">
     <div class="section-subhead">
         <div>
-            <div class="panel-kicker">Logs</div>
-            <h3>请求记录</h3>
+            <div class="panel-kicker">结果列表</div>
+            <h3>关键列请求记录</h3>
+        </div>
+        <div class="topbar-actions">
+            <a class="topbar-btn" href="/user/logs/export?{% for k, v in request.query_params.multi_items() %}{{ k }}={{ v | urlencode }}&{% endfor %}" target="_blank">导出 CSV</a>
         </div>
     </div>
     <div class="table-shell">
@@ -81,19 +118,12 @@
             <thead>
                 <tr>
                     <th>时间</th>
-                    <th>模型</th>
+                    <th>API Key / 模型</th>
                     <th>渠道</th>
-                    <th>方法</th>
-                    <th>状态</th>
-                    <th>TTFB</th>
-                    <th>TPS</th>
-                    <th>用时</th>
-                    <th>输入</th>
-                    <th>输出</th>
-                    <th>缓存读</th>
-                    <th>缓存写</th>
-                    <th>费用</th>
+                    <th>结果</th>
+                    <th>Token / 费用</th>
                     <th>会话号</th>
+                    <th>详情</th>
                 </tr>
             </thead>
             <tbody>
@@ -102,20 +132,12 @@
                     <tr>
                         <td>{{ log.created_at }}</td>
                         <td>
-                            <div>{{ log.requested_model or log.model_name or '-' }}</div>
-                            <div class="table-muted">{{ log.api_client_key_name or '-' }}</div>
+                            <div><strong>{{ log.api_client_key_name or '-' }}</strong></div>
+                            <div class="table-muted">{{ log.requested_model or log.model_name or '-' }}</div>
                         </td>
                         <td>{{ log.provider_name or '-' }}</td>
-                        <td>{{ log.http_method or '-' }}</td>
                         <td>{{ '成功' if log.success else '失败' }}{% if log.status_code %} · {{ log.status_code }}{% endif %}</td>
-                        <td>{{ log.ttfb_ms if log.ttfb_ms is not none else '-' }}</td>
-                        <td>{{ '%.2f'|format(log.tps) if log.tps is not none else '-' }}</td>
-                        <td>{{ log.duration_ms if log.duration_ms is not none else (log.latency_ms if log.latency_ms is not none else '-') }}</td>
-                        <td>{{ log.prompt_tokens if log.prompt_tokens is not none else '-' }}</td>
-                        <td>{{ log.completion_tokens if log.completion_tokens is not none else '-' }}</td>
-                        <td>{{ log.cache_read_tokens if log.cache_read_tokens is not none else '-' }}</td>
-                        <td>{{ log.cache_write_tokens if log.cache_write_tokens is not none else '-' }}</td>
-                        <td>{{ '%.6f'|format(log.total_cost or 0) }}</td>
+                        <td>{{ log.total_tokens or 0 }} / {{ '%.6f'|format(log.total_cost or 0) }}</td>
                         <td>
                             {% set session_value = log.session_id or log.conversation_key %}
                             {% if log.conversation_key %}
@@ -124,10 +146,11 @@
                             {{ session_value or '-' }}
                             {% endif %}
                         </td>
+                        <td><button class="btn btn-ghost btn-sm interactive-btn" type="button" data-user-log-detail-id="{{ log.id }}">查看</button></td>
                     </tr>
                     {% endfor %}
                 {% else %}
-                    <tr><td colspan="14"><div class="empty-state">暂无符合条件的日志。</div></td></tr>
+                    <tr><td colspan="7"><div class="empty-state">暂无符合条件的日志。</div></td></tr>
                 {% endif %}
             </tbody>
         </table>
@@ -144,4 +167,31 @@
         </div>
     </div>
 </section>
+
+<div class="modal-shell hidden" id="user-log-detail-modal">
+    <div class="modal-card modal-lg">
+        <div class="modal-head">
+            <h3 id="user-log-detail-title">日志详情</h3>
+            <button class="icon-btn interactive-btn" id="user-log-detail-close" type="button">×</button>
+        </div>
+        <div class="dashboard-signal-list" id="user-log-detail-summary"></div>
+        <div class="api-key-chip-grid">
+            <article class="api-key-chip-card form-span-2">
+                <strong>请求体</strong>
+                <span>这里优先看传给模型的请求负载和关键参数。</span>
+                <pre class="code-block" id="user-log-detail-request"></pre>
+            </article>
+            <article class="api-key-chip-card form-span-2">
+                <strong>响应体</strong>
+                <span>这里显示模型返回内容、错误响应或代理响应预览。</span>
+                <pre class="code-block" id="user-log-detail-response"></pre>
+            </article>
+            <article class="api-key-chip-card form-span-2">
+                <strong>链路追踪 / 错误详情</strong>
+                <span>这里读 Trace、错误消息和代理调度留痕。</span>
+                <pre class="code-block" id="user-log-detail-trace"></pre>
+            </article>
+        </div>
+    </div>
+</div>
 {% endblock %}

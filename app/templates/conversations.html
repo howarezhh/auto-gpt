@@ -1,40 +1,74 @@
 {% extends "base.html" %}
 {% block content %}
-<section class="page-heading">
-    <div>
-        <div class="eyebrow">Replay</div>
+<section class="hero-panel hero-panel-compact cockpit-hero">
+    <div class="cockpit-hero-copy">
+        <div class="eyebrow">会话回放</div>
         <h2>会话回放</h2>
         <p>按 conversation_key 聚合代理请求，回看用户输入、模型输出、线路命中与 token 消耗。</p>
     </div>
+    <div class="cockpit-hero-aside">
+        <div class="cockpit-aside-label">结果集</div>
+        <div class="cockpit-aside-value" id="conversation-total-count">0</div>
+        <div class="cockpit-aside-copy" id="conversation-active-query">当前展示全部会话</div>
+        <div class="cockpit-health-bar"><span class="cockpit-health-fill-full"></span></div>
+        <div class="cockpit-aside-meta">
+            <span id="conversation-last-updated">最近更新 -</span>
+            <span id="conversation-result-count">0 条结果</span>
+        </div>
+    </div>
 </section>
 
-<section class="conversation-shell">
+<section class="stats-grid">
+    <article class="metric-card"><span>会话数</span><strong id="conversation-total-count-secondary">0</strong></article>
+    <article class="metric-card"><span>命中请求量</span><strong id="conversation-total-requests">0</strong></article>
+    <article class="metric-card"><span>总 Token</span><strong id="conversation-total-tokens">0</strong></article>
+    <article class="metric-card"><span>最近线路</span><strong id="conversation-selected-provider">-</strong></article>
+</section>
+
+<section class="dashboard-command-grid">
     <div class="panel-card conversation-list-panel">
         <div class="section-subhead">
             <div>
-                <div class="panel-kicker">Conversation Index</div>
+                <div class="panel-kicker">筛选结果</div>
                 <h3>会话列表</h3>
             </div>
         </div>
         <div class="table-toolbar conversation-toolbar">
-            <input class="field-input" id="conversation-search" type="search" placeholder="搜索 conversation_key、模型、provider、回复内容">
+            <input class="field-input" id="conversation-search" type="search" placeholder="搜索 conversation_key、模型、中转站、回复内容">
             <button class="btn btn-ghost interactive-btn" id="conversation-refresh-btn" type="button">刷新</button>
         </div>
         <div class="conversation-list" id="conversation-list"></div>
     </div>
 
-    <div class="panel-card conversation-detail-panel">
-        <div class="panel-head">
-            <div>
-                <div class="panel-kicker">Conversation Replay</div>
-                <h3 id="conversation-detail-title">选择左侧会话</h3>
+    <div class="dashboard-command-side">
+        <div class="panel-card section-shell">
+            <div class="section-subhead">
+                <div>
+                    <div class="panel-kicker">结果层级</div>
+                    <h3>阅读顺序</h3>
+                </div>
             </div>
-            <a class="btn btn-ghost btn-sm interactive-btn hidden" id="conversation-open-logs" href="/logs" data-shell-link>查看相关日志</a>
+            <div class="dashboard-signal-list">
+                <div><span>第一层</span><strong>先按关键字筛出目标会话</strong></div>
+                <div><span>第二层</span><strong>查看会话概览、请求量和最近线路</strong></div>
+                <div><span>第三层</span><strong>展开完整时间线，定位具体用户输入和模型输出</strong></div>
+                <div><span>最近更新时间</span><strong id="conversation-selected-updated">-</strong></div>
+            </div>
         </div>
-        <div class="conversation-summary" id="conversation-summary">
-            <div class="empty-state">选择一个会话后，可查看完整回放、命中线路与 token 使用。</div>
-        </div>
-        <div class="conversation-timeline" id="conversation-timeline"></div>
     </div>
+</section>
+
+<section class="panel-card conversation-detail-panel">
+    <div class="panel-head">
+        <div>
+            <div class="panel-kicker">回放详情</div>
+            <h3 id="conversation-detail-title">选择左侧会话</h3>
+        </div>
+        <a class="btn btn-ghost btn-sm interactive-btn hidden" id="conversation-open-logs" href="/logs" data-shell-link>查看相关日志</a>
+    </div>
+    <div class="conversation-summary" id="conversation-summary">
+        <div class="empty-state">选择一个会话后，可查看完整回放、命中线路与 token 使用。</div>
+    </div>
+    <div class="conversation-timeline" id="conversation-timeline"></div>
 </section>
 {% endblock %}

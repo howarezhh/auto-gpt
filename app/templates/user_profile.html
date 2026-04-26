@@ -2,39 +2,61 @@
 {% block content %}
 <section class="hero-panel hero-panel-compact cockpit-hero">
     <div class="cockpit-hero-copy">
-        <div class="eyebrow">Profile</div>
-        <h2>个人资料</h2>
-        <p>维护当前账号资料，并在同一处完成密码修改。</p>
+        <div class="eyebrow">账号安全</div>
+        <h2>个人资料与安全</h2>
+        <p>当前页面只处理账号资料、登录密码和安全提醒。API Key 的创建、轮换和授权策略已经拆到独立的密钥管理页。</p>
     </div>
     <div class="cockpit-hero-aside">
-        <div class="cockpit-aside-label">账号摘要</div>
+        <div class="cockpit-aside-label">当前账号</div>
         <div class="cockpit-aside-value">{{ current_user.username }}</div>
-        <div class="cockpit-aside-copy">创建于 {{ current_user.created_at or '-' }}</div>
-        <div class="cockpit-health-bar"><span style="width: 100%"></span></div>
+        <div class="cockpit-aside-copy">{{ current_user.email }}</div>
+        <div class="cockpit-health-bar"><span class="cockpit-health-fill-full"></span></div>
         <div class="cockpit-aside-meta">
-            <span>{{ owned_api_keys|length }} 个 API Key</span>
-            <span>{{ totals.total_requests }} 次请求</span>
+            <span>创建于 {{ current_user.created_at or '-' }}</span>
+            <span>最近登录 {{ current_user.last_login_at or '-' }}</span>
         </div>
     </div>
 </section>
 
 {% if error_message %}
 <section class="panel-card"><div class="auth-alert">
-    {% if error_message == 'current_password_invalid' %}当前密码错误{% elif error_message == 'password_not_match' %}两次输入的新密码不一致{% else %}{{ error_message }}{% endif %}
+    {% if error_message == 'current_password_invalid' %}当前密码错误
+    {% elif error_message == 'password_not_match' %}两次输入的新密码不一致
+    {% else %}{{ error_message }}
+    {% endif %}
 </div></section>
 {% endif %}
 {% if success_message %}
 <section class="panel-card"><div class="auth-success">
-    {% if success_message == 'profile_updated' %}个人资料已更新{% elif success_message == 'password_updated' %}密码已更新{% else %}操作已完成{% endif %}
+    {% if success_message == 'profile_updated' %}个人资料已更新
+    {% elif success_message == 'password_updated' %}密码已更新
+    {% else %}操作已完成
+    {% endif %}
 </div></section>
 {% endif %}
 
-<section class="dashboard-command-grid">
+<nav class="page-anchor-bar">
+    <a class="page-anchor-link" href="#user-profile-overview">账号概览</a>
+    <a class="page-anchor-link" href="#user-profile-basic">基础资料</a>
+    <a class="page-anchor-link" href="#user-profile-security">密码与安全</a>
+    <a class="page-anchor-link" href="#user-profile-actions">下一步动作</a>
+</nav>
+
+<section class="stats-grid anchor-section-offset" id="user-profile-overview">
+    <article class="metric-card"><span>我的 API 密钥</span><strong>{{ owned_api_keys|length }}</strong></article>
+    <article class="metric-card"><span>总请求量</span><strong>{{ totals.total_requests }}</strong></article>
+    <article class="metric-card"><span>总 Token</span><strong>{{ totals.total_tokens }}</strong></article>
+    <article class="metric-card"><span>可用余额</span><strong>{{ '%.6f'|format(totals.available_balance) if totals.available_balance is not none else '不限' }}</strong></article>
+    <article class="metric-card"><span>累计费用</span><strong>{{ '%.6f'|format(totals.total_cost) }}</strong></article>
+    <article class="metric-card"><span>会话数</span><strong>{{ totals.conversation_count }}</strong></article>
+</section>
+
+<section class="dashboard-command-grid anchor-section-offset" id="user-profile-basic">
     <div class="panel-card section-shell">
         <div class="section-subhead">
             <div>
-                <div class="panel-kicker">Profile</div>
-                <h3>基础资料</h3>
+                <div class="panel-kicker">基础资料</div>
+                <h3>更新个人资料</h3>
             </div>
         </div>
         <form class="form-grid" method="post" action="/user/profile">
@@ -46,6 +68,10 @@
                 <span>邮箱</span>
                 <input class="field-input" name="email" type="email" value="{{ current_user.email }}" required>
             </label>
+            <div class="settings-note form-span-2">
+                <strong>资料同步范围</strong>
+                <span>这里修改的是登录账号本身，不会改动 API Key、路由授权和外部接入配置。</span>
+            </div>
             <div class="form-actions form-span-2">
                 <button class="btn btn-accent" type="submit">保存资料</button>
             </div>
@@ -56,43 +82,104 @@
         <div class="panel-card">
             <div class="panel-head">
                 <div>
-                    <div class="panel-kicker">Security</div>
-                    <h3>账号信息</h3>
+                    <div class="panel-kicker">账号状态</div>
+                    <h3>当前状态</h3>
                 </div>
             </div>
             <div class="dashboard-signal-list">
                 <div><span>账号角色</span><strong>普通用户</strong></div>
-                <div><span>最近登录</span><strong>{{ current_user.last_login_at or '-' }}</strong></div>
                 <div><span>当前余额</span><strong>{{ '%.6f'|format(totals.available_balance) if totals.available_balance is not none else '不限' }}</strong></div>
                 <div><span>累计费用</span><strong>{{ '%.6f'|format(totals.total_cost) }}</strong></div>
+                <div><span>今日请求</span><strong>{{ account_summary.day_requests }}</strong></div>
+                <div><span>本月请求</span><strong>{{ account_summary.month_requests }}</strong></div>
+                <div><span>密钥管理</span><strong><a href="/user/api-keys" data-shell-link>前往独立页面</a></strong></div>
             </div>
         </div>
     </div>
 </section>
 
-<section class="panel-card section-shell">
-    <div class="section-subhead">
-        <div>
-            <div class="panel-kicker">Password</div>
-            <h3>修改密码</h3>
+<section class="dashboard-command-grid anchor-section-offset" id="user-profile-security">
+    <div class="panel-card section-shell">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">密码管理</div>
+                <h3>修改登录密码</h3>
+            </div>
+        </div>
+        <form class="form-grid" method="post" action="/user/password">
+            <label>
+                <span>当前密码</span>
+                <input class="field-input" name="current_password" type="password" required>
+            </label>
+            <label>
+                <span>新密码</span>
+                <input class="field-input" name="new_password" type="password" required>
+            </label>
+            <label class="form-span-2">
+                <span>确认新密码</span>
+                <input class="field-input" name="confirm_password" type="password" required>
+            </label>
+            <div class="settings-note form-span-2">
+                <strong>安全提醒</strong>
+                <span>修改的是浏览器登录密码，不会自动轮换你已经发放给外部系统的 API Key。若怀疑密钥泄露，请到独立密钥页执行轮换。</span>
+            </div>
+            <div class="form-actions form-span-2">
+                <button class="btn btn-accent" type="submit">更新密码</button>
+            </div>
+        </form>
+    </div>
+
+    <div class="dashboard-command-side">
+        <div class="panel-card">
+            <div class="panel-head">
+                <div>
+                    <div class="panel-kicker">安全建议</div>
+                    <h3>建议动作</h3>
+                </div>
+            </div>
+            <div class="risk-grid">
+                <article class="risk-card" data-level="warning">
+                    <strong>定期改密</strong>
+                    <span>建议在账号多人协作或设备变更后立即更新登录密码。</span>
+                </article>
+                <article class="risk-card" data-level="danger">
+                    <strong>密钥泄露不靠改密解决</strong>
+                    <span>若外部 API Key 已暴露，必须去密钥页执行轮换，单独修改登录密码不能让旧密钥失效。</span>
+                </article>
+                <article class="risk-card" data-level="default">
+                    <strong>先自检再上线</strong>
+                    <span>资料或密码调整后，如需继续接入，建议回到自检页用当前密钥真实跑一次最短请求。</span>
+                </article>
+            </div>
         </div>
     </div>
-    <form class="form-grid" method="post" action="/user/password">
-        <label>
-            <span>当前密码</span>
-            <input class="field-input" name="current_password" type="password" required>
-        </label>
-        <label>
-            <span>新密码</span>
-            <input class="field-input" name="new_password" type="password" required>
-        </label>
-        <label class="form-span-2">
-            <span>确认新密码</span>
-            <input class="field-input" name="confirm_password" type="password" required>
-        </label>
-        <div class="form-actions form-span-2">
-            <button class="btn btn-accent" type="submit">更新密码</button>
+</section>
+
+<section class="dashboard-command-grid anchor-section-offset" id="user-profile-actions">
+    <div class="panel-card section-shell">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">下一步动作</div>
+                <h3>从账号安全跳转到接入主路径</h3>
+            </div>
         </div>
-    </form>
+        <div class="stage-grid">
+            <article class="stage-card">
+                <strong>1. 管理 API Key</strong>
+                <span>创建、编辑、轮换和删除用户侧 API Key，集中处理授权中转站和路由模式。</span>
+                <a class="btn btn-ghost btn-sm interactive-btn" href="/user/api-keys" data-shell-link>打开密钥管理</a>
+            </article>
+            <article class="stage-card">
+                <strong>2. 做接入自检</strong>
+                <span>选择你准备上线的密钥和模型，先跑一次真实测试，确认路由候选和返回质量。</span>
+                <a class="btn btn-ghost btn-sm interactive-btn" href="/user/self-test" data-shell-link>打开接入自检</a>
+            </article>
+            <article class="stage-card">
+                <strong>3. 排查请求问题</strong>
+                <span>若线上调用失败，直接去日志页或会话回放页定位状态码、模型、渠道和原始返回。</span>
+                <a class="btn btn-ghost btn-sm interactive-btn" href="/user/logs" data-shell-link>查看我的日志</a>
+            </article>
+        </div>
+    </div>
 </section>
 {% endblock %}

@@ -50,19 +50,11 @@ class UserQuotaService:
             )
         )
         key_ids = [item.id for item in owned_keys if item.id is not None]
-        has_balance_limit = bool(owned_keys) and all(item.balance_amount is not None for item in owned_keys)
-        balance_amount = None
-        if has_balance_limit:
-            balance_amount = sum((BillingService.to_decimal(item.balance_amount) for item in owned_keys), start=Decimal("0"))
+        has_balance_limit = True
+        balance_amount = BillingService.to_decimal(user.balance_amount)
         frozen_amount = BillingService.to_decimal(user.frozen_amount)
-        available_balance = None
-        if balance_amount is not None:
-            available_balance = balance_amount - frozen_amount
-
-        total_recharge_amount = sum(
-            (BillingService.to_decimal(item.total_recharge_amount) for item in owned_keys),
-            start=Decimal("0"),
-        )
+        available_balance = balance_amount - frozen_amount
+        total_recharge_amount = BillingService.to_decimal(user.total_recharge_amount)
         total_cost_used = sum(
             (BillingService.to_decimal(item.total_cost_used) for item in owned_keys),
             start=Decimal("0"),

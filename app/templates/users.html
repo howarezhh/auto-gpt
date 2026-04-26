@@ -2,15 +2,19 @@
 {% block content %}
 <section class="hero-panel hero-panel-compact cockpit-hero">
     <div class="cockpit-hero-copy">
-        <div class="eyebrow">Users</div>
+        <div class="eyebrow">用户管理</div>
         <h2>用户管理</h2>
         <p>支持管理员创建、搜索、分页查看和进入用户详情。公开注册默认关闭，可在路由设置页切换。</p>
+        <div class="hero-actions">
+            <a class="btn btn-ghost interactive-btn" href="/users/export" target="_blank">导出用户 CSV</a>
+            <a class="btn btn-ghost interactive-btn" href="/users/billing-export" target="_blank">导出账单 CSV</a>
+        </div>
     </div>
     <div class="cockpit-hero-aside">
         <div class="cockpit-aside-label">检索结果</div>
         <div class="cockpit-aside-value">{{ pagination.total }}</div>
         <div class="cockpit-aside-copy">当前筛选命中的账号数</div>
-        <div class="cockpit-health-bar"><span style="width: 100%"></span></div>
+        <div class="cockpit-health-bar"><span class="cockpit-health-fill-full"></span></div>
         <div class="cockpit-aside-meta">
             <span>管理员 {{ admin_count }}</span>
             <span>启用中 {{ enabled_count }}</span>
@@ -23,6 +27,8 @@
     {% if error_message == 'not_found' %}目标用户不存在
     {% elif error_message == 'self_disable' %}不能禁用当前登录管理员自己
     {% elif error_message == 'self_downgrade' %}不能把当前登录管理员自己降为普通用户
+    {% elif error_message == 'self_delete' %}不能删除当前登录管理员自己
+    {% elif error_message == 'last_admin' %}当前只剩最后一个管理员，不能删除
     {% else %}{{ error_message }}
     {% endif %}
 </div></section>
@@ -31,6 +37,7 @@
 <section class="panel-card"><div class="auth-success">
     {% if success_message == 'created' %}账号已创建
     {% elif success_message == 'updated' %}账号已更新
+    {% elif success_message == 'deleted' %}账号已删除
     {% else %}操作已完成
     {% endif %}
 </div></section>
@@ -40,7 +47,7 @@
     <div class="panel-card section-shell">
         <div class="section-subhead">
             <div>
-                <div class="panel-kicker">Create User</div>
+                <div class="panel-kicker">创建用户</div>
                 <h3>新增账号</h3>
             </div>
         </div>
@@ -78,7 +85,7 @@
         <div class="panel-card">
             <div class="panel-head">
                 <div>
-                    <div class="panel-kicker">Registration</div>
+                    <div class="panel-kicker">注册方式</div>
                     <h3>注册方式</h3>
                 </div>
             </div>
@@ -95,7 +102,7 @@
 <section class="panel-card section-shell">
     <div class="section-subhead">
         <div>
-            <div class="panel-kicker">Search</div>
+            <div class="panel-kicker">搜索筛选</div>
             <h3>搜索与筛选</h3>
         </div>
     </div>
@@ -137,7 +144,66 @@
 <section class="panel-card section-shell">
     <div class="section-subhead">
         <div>
-            <div class="panel-kicker">Account Registry</div>
+            <div class="panel-kicker">批量操作</div>
+            <h3>批量用户额度调整</h3>
+        </div>
+    </div>
+    <form class="form-grid" method="post" action="/users/batch/quota-policy" id="users-batch-quota-form">
+        <input type="hidden" name="user_ids_text" id="users-batch-user-ids">
+        <label>
+            <span>已选用户 ID</span>
+            <input class="field-input" id="users-batch-user-ids-preview" value="" placeholder="通过下方勾选自动填充" disabled>
+        </label>
+        <label>
+            <span>冻结金额</span>
+            <input class="field-input" name="frozen_amount" type="number" step="0.000001" value="0">
+        </label>
+        <label>
+            <span>总调用次数上限</span>
+            <input class="field-input" name="request_limit_total" type="number" min="0">
+        </label>
+        <label>
+            <span>日调用次数上限</span>
+            <input class="field-input" name="request_limit_daily" type="number" min="0">
+        </label>
+        <label>
+            <span>月调用次数上限</span>
+            <input class="field-input" name="request_limit_monthly" type="number" min="0">
+        </label>
+        <label>
+            <span>总 Token 上限</span>
+            <input class="field-input" name="token_limit_total" type="number" min="0">
+        </label>
+        <label>
+            <span>日 Token 上限</span>
+            <input class="field-input" name="token_limit_daily" type="number" min="0">
+        </label>
+        <label>
+            <span>月 Token 上限</span>
+            <input class="field-input" name="token_limit_monthly" type="number" min="0">
+        </label>
+        <label>
+            <span>总金额上限</span>
+            <input class="field-input" name="cost_limit_total" type="number" step="0.000001" min="0">
+        </label>
+        <label>
+            <span>日金额上限</span>
+            <input class="field-input" name="cost_limit_daily" type="number" step="0.000001" min="0">
+        </label>
+        <label>
+            <span>月金额上限</span>
+            <input class="field-input" name="cost_limit_monthly" type="number" step="0.000001" min="0">
+        </label>
+        <div class="form-actions form-span-2">
+            <button class="btn btn-accent interactive-btn" id="users-batch-apply-btn" type="submit">批量应用额度</button>
+        </div>
+    </form>
+</section>
+
+<section class="panel-card section-shell">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">账号列表</div>
             <h3>账号列表</h3>
         </div>
     </div>
@@ -145,12 +211,13 @@
         <table class="data-table">
             <thead>
                 <tr>
+                    <th><input id="users-check-all-visible" type="checkbox" aria-label="选择本页"></th>
                     <th>ID</th>
                     <th>用户名</th>
                     <th>邮箱</th>
                     <th>角色</th>
                     <th>状态</th>
-                    <th>关联 API Key</th>
+                    <th>关联 API 密钥</th>
                     <th>最近登录</th>
                     <th>详情</th>
                     <th>操作</th>
@@ -160,6 +227,7 @@
                 {% if users %}
                     {% for user in users %}
                     <tr>
+                        <td><input type="checkbox" data-user-batch-id="{{ user.id }}"></td>
                         <td>{{ user.id }}</td>
                         <td>{{ user.username }}</td>
                         <td>{{ user.email }}</td>
@@ -179,17 +247,21 @@
                                     <input name="role" type="hidden" value="{{ 'user' if user.role == 'admin' else 'admin' }}">
                                     <button class="table-action-btn" type="submit">{{ '降为用户' if user.role == 'admin' else '升为管理员' }}</button>
                                 </form>
-                                <form method="post" action="/users/{{ user.id }}/password">
+                                <form class="table-inline-form" method="post" action="/users/{{ user.id }}/password">
                                     <input type="hidden" name="return_to" value="{{ current_query }}">
-                                    <input class="field-input" name="password" type="password" placeholder="新密码" style="min-height:34px;width:140px;" required>
+                                    <input class="field-input table-inline-input" name="password" type="password" placeholder="新密码" required>
                                     <button class="table-action-btn" type="submit">重置密码</button>
+                                </form>
+                                <form method="post" action="/users/{{ user.id }}/delete" onsubmit="return window.confirm('确认删除该用户及其名下 API 密钥吗？');">
+                                    <input type="hidden" name="return_to" value="{{ current_query }}">
+                                    <button class="table-action-btn" type="submit">删除</button>
                                 </form>
                             </div>
                         </td>
                     </tr>
                     {% endfor %}
                 {% else %}
-                    <tr><td colspan="9"><div class="empty-state">暂无符合条件的账号。</div></td></tr>
+                    <tr><td colspan="10"><div class="empty-state">暂无符合条件的账号。</div></td></tr>
                 {% endif %}
             </tbody>
         </table>

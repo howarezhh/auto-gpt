@@ -202,6 +202,56 @@ class ApiKeySummaryOut(BaseModel):
     total_recharge_amount: float = 0
 
 
+class ApiKeyListResponse(BaseModel):
+    total: int
+    page: int
+    page_size: int
+    items: list[ApiKeyOut]
+
+
+class ApiKeyBatchActionIn(BaseModel):
+    api_key_ids: list[int] = Field(default_factory=list)
+
+    @field_validator("api_key_ids")
+    @classmethod
+    def normalize_api_key_ids(cls, value: list[int]) -> list[int]:
+        seen: set[int] = set()
+        normalized: list[int] = []
+        for item in value:
+            if item in seen:
+                continue
+            seen.add(item)
+            normalized.append(item)
+        if not normalized:
+            raise ValueError("至少选择一个 API Key")
+        return normalized
+
+
+class ApiKeyBatchActionResultOut(BaseModel):
+    requested_count: int
+    affected_count: int
+    api_key_ids: list[int] = Field(default_factory=list)
+
+
+class ApiKeyBatchProviderUpdateIn(ApiKeyBatchActionIn):
+    route_mode: RouteMode
+    default_provider_id: int | None = None
+    manual_allow_fallback: bool = True
+    allowed_provider_ids: list[int] = Field(default_factory=list)
+
+    @field_validator("allowed_provider_ids")
+    @classmethod
+    def normalize_batch_allowed_provider_ids(cls, value: list[int]) -> list[int]:
+        seen: set[int] = set()
+        normalized: list[int] = []
+        for item in value:
+            if item in seen:
+                continue
+            seen.add(item)
+            normalized.append(item)
+        return normalized
+
+
 class ApiKeyModelDistributionItemOut(BaseModel):
     model_name: str
     total_requests: int

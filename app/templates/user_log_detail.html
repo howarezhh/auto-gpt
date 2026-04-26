@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero-panel hero-panel-compact cockpit-hero">
+    <div class="cockpit-hero-copy">
+        <div class="eyebrow">日志详情</div>
+        <h2>请求详情 · #{{ log.id }}</h2>
+        <p>这里按“结果概要 → 请求与响应 → 链路追踪 → 后续动作”的顺序阅读，避免一上来就面对整段原始 JSON。</p>
+        <div class="hero-actions">
+            <a class="btn btn-ghost interactive-btn" href="/user/logs" data-shell-link>返回日志列表</a>
+            {% if log.conversation_key %}
+            <a class="btn btn-accent interactive-btn" href="/user/conversations?conversation_key={{ log.conversation_key | urlencode }}" data-shell-link>打开会话回放</a>
+            {% endif %}
+        </div>
+    </div>
+    <div class="cockpit-hero-aside">
+        <div class="cockpit-aside-label">请求结果</div>
+        <div class="cockpit-aside-value">{{ '成功' if log.success else '失败' }}</div>
+        <div class="cockpit-aside-copy">{{ log.status_code or '-' }} · {{ log.requested_model or log.model_name or '-' }}</div>
+        <div class="cockpit-health-bar"><span class="{% if log.success %}cockpit-health-fill-full{% else %}cockpit-health-fill-empty{% endif %}"></span></div>
+        <div class="cockpit-aside-meta">
+            <span>TTFB {{ log.ttfb_ms if log.ttfb_ms is not none else '-' }}</span>
+            <span>耗时 {{ log.duration_ms if log.duration_ms is not none else (log.latency_ms if log.latency_ms is not none else '-') }}</span>
+        </div>
+    </div>
+</section>
+
+<section class="stats-grid">
+    <article class="metric-card"><span>输入 Tokens</span><strong>{{ log.prompt_tokens if log.prompt_tokens is not none else '-' }}</strong></article>
+    <article class="metric-card"><span>输出 Tokens</span><strong>{{ log.completion_tokens if log.completion_tokens is not none else '-' }}</strong></article>
+    <article class="metric-card"><span>总 Tokens</span><strong>{{ log.total_tokens if log.total_tokens is not none else '-' }}</strong></article>
+    <article class="metric-card"><span>总费用</span><strong>{{ '%.6f'|format(log.total_cost or 0) }}</strong></article>
+    <article class="metric-card"><span>缓存读</span><strong>{{ log.cache_read_tokens if log.cache_read_tokens is not none else '-' }}</strong></article>
+    <article class="metric-card"><span>缓存写</span><strong>{{ log.cache_write_tokens if log.cache_write_tokens is not none else '-' }}</strong></article>
+</section>
+
+<section class="dashboard-command-grid">
+    <div class="panel-card section-shell">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">结果概要</div>
+                <h3>这一条请求发生了什么</h3>
+            </div>
+        </div>
+        <div class="api-key-chip-grid">
+            <article class="api-key-chip-card"><strong>时间</strong><span>{{ log.created_at }}</span></article>
+            <article class="api-key-chip-card"><strong>API Key</strong><span>{{ log.api_client_key_name or '-' }}</span></article>
+            <article class="api-key-chip-card"><strong>渠道</strong><span>{{ log.provider_name or '-' }}</span></article>
+            <article class="api-key-chip-card"><strong>路径</strong><span>{{ log.request_path or '-' }}</span></article>
+            <article class="api-key-chip-card"><strong>方法</strong><span>{{ log.http_method or '-' }}</span></article>
+            <article class="api-key-chip-card"><strong>会话号</strong><span>{{ log.session_id or log.conversation_key or '-' }}</span></article>
+            <article class="api-key-chip-card"><strong>状态</strong><span>{{ '成功' if log.success else '失败' }}{% if log.status_code %} · {{ log.status_code }}{% endif %}</span></article>
+            <article class="api-key-chip-card"><strong>错误 / 消息</strong><span>{{ log.message or '无' }}</span></article>
+        </div>
+    </div>
+
+    <div class="dashboard-command-side">
+        <div class="panel-card">
+            <div class="panel-head">
+                <div>
+                    <div class="panel-kicker">排障建议</div>
+                    <h3>先看哪一块</h3>
+                </div>
+            </div>
+            <div class="dashboard-signal-list">
+                <div><span>状态失败时</span><strong>先看响应体和 Trace，确认是上游错误、鉴权问题还是路由选择问题</strong></div>
+                <div><span>状态成功但结果异常</span><strong>先看请求体模型名、输入内容和命中渠道是否符合预期</strong></div>
+                <div><span>费用异常时</span><strong>对照总 Tokens、缓存读写和账单页确认是否为预期消耗</strong></div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="dashboard-command-grid">
+    <div class="panel-card section-shell">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">请求体</div>
+                <h3>发给模型的内容</h3>
+            </div>
+        </div>
+        <pre class="code-block">{{ log.request_body_json or '-' }}</pre>
+    </div>
+    <div class="dashboard-command-side">
+        <div class="panel-card section-shell">
+            <div class="section-subhead">
+                <div>
+                    <div class="panel-kicker">响应体</div>
+                    <h3>模型或代理的返回</h3>
+                </div>
+            </div>
+            <pre class="code-block">{{ log.response_body_json or log.response_text or '-' }}</pre>
+        </div>
+    </div>
+</section>
+
+<section class="panel-card section-shell">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">链路追踪</div>
+            <h3>路由轨迹与错误留痕</h3>
+        </div>
+    </div>
+    <pre class="code-block">{{ log.trace_json or '-' }}</pre>
+</section>
+{% endblock %}

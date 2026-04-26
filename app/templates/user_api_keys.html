@@ -1,0 +1,317 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero-panel hero-panel-compact cockpit-hero">
+    <div class="cockpit-hero-copy">
+        <div class="eyebrow">API Key 管理</div>
+        <h2>我的 API Key</h2>
+        <p>集中处理 API Key 的创建、轮换、授权中转站和路由模式。账号资料与登录密码已经拆分到账号安全页。</p>
+        <div class="hero-actions">
+            <a class="btn btn-ghost interactive-btn" href="/user/profile" data-shell-link>账号安全</a>
+            <a class="btn btn-accent interactive-btn" href="/user/self-test" data-shell-link>先做接入自检</a>
+        </div>
+    </div>
+    <div class="cockpit-hero-aside">
+        <div class="cockpit-aside-label">密钥总览</div>
+        <div class="cockpit-aside-value">{{ owned_api_keys|length }}</div>
+        <div class="cockpit-aside-copy">当前账号名下 API Key 数量</div>
+        <div class="cockpit-health-bar"><span class="cockpit-health-fill-full"></span></div>
+        <div class="cockpit-aside-meta">
+            <span>总请求 {{ totals.total_requests }}</span>
+            <span>总 Token {{ totals.total_tokens }}</span>
+        </div>
+    </div>
+</section>
+
+{% if error_message %}
+<section class="panel-card"><div class="auth-alert">
+    {% if error_message == 'api_key_not_found' %}未找到当前账号下的 API Key
+    {% else %}{{ error_message }}
+    {% endif %}
+</div></section>
+{% endif %}
+{% if success_message %}
+<section class="panel-card"><div class="auth-success">
+    {% if success_message == 'api_key_created' %}API Key 已创建
+    {% elif success_message == 'api_key_updated' %}API Key 已更新
+    {% elif success_message == 'api_key_status_updated' %}API Key 状态已更新
+    {% elif success_message == 'api_key_deleted' %}API Key 已删除
+    {% elif success_message == 'api_key_rotated' %}API Key 已轮换，请尽快同步新的明文密钥
+    {% else %}操作已完成
+    {% endif %}
+</div></section>
+{% endif %}
+
+<nav class="page-anchor-bar">
+    <a class="page-anchor-link" href="#user-api-keys-overview">概览</a>
+    <a class="page-anchor-link" href="#user-api-keys-create">新增密钥</a>
+    <a class="page-anchor-link" href="#user-api-keys-manage">管理现有密钥</a>
+    <a class="page-anchor-link" href="#user-api-keys-guide">接入建议</a>
+</nav>
+
+<section class="stats-grid anchor-section-offset" id="user-api-keys-overview">
+    <article class="metric-card"><span>API Key 数量</span><strong>{{ owned_api_keys|length }}</strong></article>
+    <article class="metric-card"><span>共享余额</span><strong>{{ '%.6f'|format(totals.balance_amount) if totals.balance_amount is not none else '不限' }}</strong></article>
+    <article class="metric-card"><span>可用余额</span><strong>{{ '%.6f'|format(totals.available_balance) if totals.available_balance is not none else '不限' }}</strong></article>
+    <article class="metric-card"><span>冻结金额</span><strong>{{ '%.6f'|format(totals.frozen_amount or 0) }}</strong></article>
+    <article class="metric-card"><span>总请求量</span><strong>{{ totals.total_requests }}</strong></article>
+    <article class="metric-card"><span>累计费用</span><strong>{{ '%.6f'|format(totals.total_cost) }}</strong></article>
+</section>
+
+<section class="dashboard-command-grid anchor-section-offset" id="user-api-keys-create">
+    <div class="panel-card section-shell">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">新增密钥</div>
+                <h3>创建新的接入密钥</h3>
+            </div>
+        </div>
+        <form class="form-grid" method="post" action="/user/api-keys/create">
+            <label>
+                <span>名称</span>
+                <input class="field-input" name="name" placeholder="例如：生产环境主密钥" required>
+            </label>
+            <label>
+                <span>自定义密钥</span>
+                <input class="field-input" name="raw_api_key" placeholder="留空则自动生成，以 sk-aotu- 开头">
+            </label>
+            <label class="form-span-2">
+                <span>备注</span>
+                <input class="field-input" name="remark" placeholder="例如：Web 生产、测试回放、移动端灰度">
+            </label>
+            <label>
+                <span>路由模式</span>
+                <select class="field-input" name="route_mode">
+                    <option value="failover">故障切换</option>
+                    <option value="manual">手动指定</option>
+                    <option value="weighted">按权重</option>
+                    <option value="sticky">粘性路由</option>
+                </select>
+            </label>
+            <label>
+                <span>默认中转站</span>
+                <select class="field-input" name="default_provider_id">
+                    <option value="">不指定</option>
+                    {% for provider in providers %}
+                    <option value="{{ provider.id }}">{{ provider.name }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label>
+                <span>启用状态</span>
+                <div class="field-checkbox">
+                    <input id="user-api-key-create-enabled" name="enabled" type="checkbox" checked>
+                    <label for="user-api-key-create-enabled">创建后立即启用</label>
+                </div>
+            </label>
+            <label>
+                <span>手动模式允许回退</span>
+                <div class="field-checkbox">
+                    <input id="user-api-key-create-fallback" name="manual_allow_fallback" type="checkbox" checked>
+                    <label for="user-api-key-create-fallback">开启</label>
+                </div>
+            </label>
+            <div class="form-span-2">
+                <span>可用中转站</span>
+                <div class="api-key-provider-selector">
+                    {% for provider in providers %}
+                    <label class="api-key-provider-option">
+                        <input name="allowed_provider_ids" type="checkbox" value="{{ provider.id }}">
+                        <span>{{ provider.name }}</span>
+                        <span class="table-muted">已启用</span>
+                    </label>
+                    {% endfor %}
+                </div>
+            </div>
+            <div class="settings-note form-span-2">
+                <strong>创建后建议动作</strong>
+                <span>创建完成后，先进入密钥详情复制明文和 `/v1` 入口，再到接入自检页用同一把密钥真实调用一次。</span>
+            </div>
+            <div class="form-actions form-span-2">
+                <button class="btn btn-accent" type="submit">新增 API Key</button>
+            </div>
+        </form>
+    </div>
+
+    <div class="dashboard-command-side">
+        <div class="panel-card">
+            <div class="panel-head">
+                <div>
+                    <div class="panel-kicker">创建原则</div>
+                    <h3>如何拆分密钥</h3>
+                </div>
+            </div>
+            <div class="risk-grid">
+                <article class="risk-card" data-level="default">
+                    <strong>按环境拆分</strong>
+                    <span>建议至少区分生产、测试、临时排查三类密钥，减少误操作影响面。</span>
+                </article>
+                <article class="risk-card" data-level="warning">
+                    <strong>默认中转站不等于唯一中转站</strong>
+                    <span>如果需要更稳的生产路由，记得同步勾选候选中转站，不要只留一个默认线路。</span>
+                </article>
+                <article class="risk-card" data-level="danger">
+                    <strong>历史明文不可回溯</strong>
+                    <span>旧密钥若没有明文存档，必须通过轮换生成新密钥，不能伪造回显。</span>
+                </article>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="panel-card section-shell anchor-section-offset" id="user-api-keys-manage">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">管理现有密钥</div>
+            <h3>查看详情、复制、轮换和授权调整</h3>
+        </div>
+    </div>
+    {% if owned_api_keys %}
+        <div class="api-key-chip-grid api-key-chip-grid-wide">
+            {% for item in owned_api_keys %}
+            <article class="api-key-chip-card user-key-manage-card">
+                <strong>{{ item.name }}</strong>
+                <span>{{ item.key_masked }}</span>
+                <span>
+                    {% if item.status == 'active' %}正常可用
+                    {% elif item.status == 'disabled' %}已禁用
+                    {% elif item.status == 'expired' %}已过期
+                    {% elif item.status == 'quota_exhausted' %}额度耗尽
+                    {% elif item.status == 'cost_quota_exhausted' %}金额额度耗尽
+                    {% elif item.status == 'balance_exhausted' %}余额耗尽
+                    {% elif item.status == 'unbound' %}未绑定渠道
+                    {% else %}{{ item.status }}
+                    {% endif %}
+                </span>
+                <span>累计 Token {{ item.total_tokens_used }}</span>
+                <span>共享余额 {{ item.balance_amount if item.balance_amount is not none else '不限' }}</span>
+                <div class="action-palette">
+                    {% if item.raw_api_key %}
+                    <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="{{ item.raw_api_key }}">复制密钥</button>
+                    {% endif %}
+                    <a class="btn btn-ghost btn-sm interactive-btn" href="/user/api-keys/{{ item.id }}" data-shell-link>打开控制台</a>
+                </div>
+                <details {% if editing_api_key_id == item.id %}open{% endif %}>
+                    <summary>编辑此密钥</summary>
+                    <form class="form-grid form-grid-inset" method="post" action="/user/api-keys/{{ item.id }}/update">
+                        <label>
+                            <span>名称</span>
+                            <input class="field-input" name="name" value="{{ item.name }}" required>
+                        </label>
+                        <label>
+                            <span>替换密钥</span>
+                            <input class="field-input" name="raw_api_key" placeholder="留空表示保留当前密钥">
+                        </label>
+                        <label class="form-span-2">
+                            <span>备注</span>
+                            <input class="field-input" name="remark" value="{{ item.remark or '' }}">
+                        </label>
+                        <label>
+                            <span>路由模式</span>
+                            <select class="field-input" name="route_mode">
+                                <option value="failover" {% if item.route_mode == 'failover' %}selected{% endif %}>故障切换</option>
+                                <option value="manual" {% if item.route_mode == 'manual' %}selected{% endif %}>手动指定</option>
+                                <option value="weighted" {% if item.route_mode == 'weighted' %}selected{% endif %}>按权重</option>
+                                <option value="sticky" {% if item.route_mode == 'sticky' %}selected{% endif %}>粘性路由</option>
+                            </select>
+                        </label>
+                        <label>
+                            <span>默认中转站</span>
+                            <select class="field-input" name="default_provider_id">
+                                <option value="">不指定</option>
+                                {% for provider in providers %}
+                                <option value="{{ provider.id }}" {% if item.default_provider_id == provider.id %}selected{% endif %}>{{ provider.name }}</option>
+                                {% endfor %}
+                            </select>
+                        </label>
+                        <label>
+                            <span>启用状态</span>
+                            <div class="field-checkbox">
+                                <input id="user-api-key-enabled-{{ item.id }}" name="enabled" type="checkbox" {% if item.enabled %}checked{% endif %}>
+                                <label for="user-api-key-enabled-{{ item.id }}">启用此密钥</label>
+                            </div>
+                        </label>
+                        <label>
+                            <span>手动模式允许回退</span>
+                            <div class="field-checkbox">
+                                <input id="user-api-key-fallback-{{ item.id }}" name="manual_allow_fallback" type="checkbox" {% if item.manual_allow_fallback %}checked{% endif %}>
+                                <label for="user-api-key-fallback-{{ item.id }}">开启</label>
+                            </div>
+                        </label>
+                        <div class="form-span-2">
+                            <span>可用中转站</span>
+                            <div class="api-key-provider-selector">
+                                {% for provider in providers %}
+                                <label class="api-key-provider-option">
+                                    <input name="allowed_provider_ids" type="checkbox" value="{{ provider.id }}" {% if provider.id in item.allowed_provider_ids %}checked{% endif %}>
+                                    <span>{{ provider.name }}</span>
+                                    <span class="table-muted">已启用</span>
+                                </label>
+                                {% endfor %}
+                            </div>
+                        </div>
+                        <div class="form-actions form-span-2">
+                            <button class="btn btn-accent" type="submit">保存修改</button>
+                        </div>
+                    </form>
+                    <div class="form-actions form-actions-spaced">
+                        <form method="post" action="/user/api-keys/{{ item.id }}/rotate" onsubmit="return window.confirm('确认轮换该 API Key 吗？轮换后旧密钥会立即失效。');">
+                            <button class="btn btn-ghost" type="submit">一键轮换</button>
+                        </form>
+                        <form method="post" action="/user/api-keys/{{ item.id }}/toggle">
+                            <button class="btn btn-ghost" type="submit">{% if item.enabled %}停用{% else %}启用{% endif %}</button>
+                        </form>
+                        <form method="post" action="/user/api-keys/{{ item.id }}/delete" onsubmit="return window.confirm('确认删除该 API Key 吗？');">
+                            <button class="btn btn-danger" type="submit">删除</button>
+                        </form>
+                    </div>
+                </details>
+            </article>
+            {% endfor %}
+        </div>
+    {% else %}
+        <div class="empty-state">当前账号还没有 API Key，可以直接在上方新增。</div>
+    {% endif %}
+</section>
+
+<section class="dashboard-command-grid anchor-section-offset" id="user-api-keys-guide">
+    <div class="panel-card section-shell">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">接入建议</div>
+                <h3>创建后怎么继续</h3>
+            </div>
+        </div>
+        <div class="stage-grid">
+            <article class="stage-card">
+                <strong>1. 打开密钥详情页</strong>
+                <span>复制明文密钥、Base URL、Authorization Header 和示例请求，不要手动拼接。</span>
+            </article>
+            <article class="stage-card">
+                <strong>2. 运行接入自检</strong>
+                <span>在上线前用同一把密钥做一次最短真实调用，确认模型、渠道和延迟都正常。</span>
+            </article>
+            <article class="stage-card">
+                <strong>3. 上线后看日志</strong>
+                <span>若外部系统接入失败，优先查看用户日志和会话回放，而不是盲目重复改配置。</span>
+            </article>
+        </div>
+    </div>
+
+    <div class="dashboard-command-side">
+        <div class="panel-card">
+            <div class="panel-head">
+                <div>
+                    <div class="panel-kicker">快捷入口</div>
+                    <h3>继续动作</h3>
+                </div>
+            </div>
+            <div class="dashboard-signal-list">
+                <div><span>账号安全</span><strong><a href="/user/profile" data-shell-link>修改资料 / 密码</a></strong></div>
+                <div><span>接入自检</span><strong><a href="/user/self-test" data-shell-link>真实发起一次测试</a></strong></div>
+                <div><span>可用模型</span><strong><a href="/user/models" data-shell-link>理解模型价格与覆盖范围</a></strong></div>
+                <div><span>我的日志</span><strong><a href="/user/logs" data-shell-link>排查实际调用问题</a></strong></div>
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock %}
