@@ -5,7 +5,7 @@
         userRole: document.body.dataset.userRole || "",
     };
     const PUBLIC_ROUTE_PREFIXES = ["/login", "/register", "/setup-admin"];
-    const ADMIN_ROUTE_PREFIXES = ["/providers", "/settings", "/playground", "/docs", "/api-keys", "/logs", "/alerts", "/conversations", "/users", "/audit-logs"];
+    const ADMIN_ROUTE_PREFIXES = ["/providers", "/models", "/settings", "/playground", "/docs", "/api-keys", "/logs", "/alerts", "/conversations", "/users", "/audit-logs"];
 
     const ROUTE_MODE_LABELS = {
         manual: "手动优先",
@@ -1031,7 +1031,51 @@
             .filter((value) => Number.isFinite(value));
     }
 
-    function renderBatchConnectivityResults(results = []) {
+    function summarizeBatchConnectivityResults(results = []) {
+        const providerTotal = results.length;
+        const providerSuccess = results.filter((item) => item.success).length;
+        const providerFailed = Math.max(providerTotal - providerSuccess, 0);
+        const modelTotal = results.reduce((sum, item) => sum + Number(item.models_total ?? 0), 0);
+        const modelSuccess = results.reduce((sum, item) => sum + Number(item.models_success ?? 0), 0);
+        const modelFailed = Math.max(modelTotal - modelSuccess, 0);
+        const totalLatency = results.reduce((sum, item) => sum + Number(item.latency_ms ?? 0), 0);
+        const averageLatency = providerTotal ? Math.round(totalLatency / providerTotal) : 0;
+        return {
+            providerTotal,
+            providerSuccess,
+            providerFailed,
+            modelTotal,
+            modelSuccess,
+            modelFailed,
+            averageLatency,
+        };
+    }
+
+    function buildBatchConnectivitySearchText(item) {
+        const modelText = (item.model_results || []).map((model) => [
+            model.model_name || "",
+            model.message || "",
+            (model.endpoint_results || []).map((endpoint) => endpoint.endpoint_label || endpoint.endpoint_path || "").join(" "),
+        ].join(" ")).join(" ");
+        return [
+            item.provider_name || "",
+            item.message || "",
+            item.status_code ?? "",
+            item.health_status || "",
+            modelText,
+        ].join(" ").toLowerCase();
+    }
+
+    function summarizeEndpointResults(endpointResults = []) {
+        if (!Array.isArray(endpointResults) || !endpointResults.length) {
+            return "-";
+        }
+        return endpointResults
+            .map((item) => `${item.endpoint_label || item.endpoint_path || "-"}${item.success ? "成功" : "失败"}`)
+            .join(" / ");
+    }
+
+    function renderBatchConnectivityResults(results = [], options = {}) {
         if (!results.length) {
             return `
                 <section class="playground-result-card playground-result-error">
@@ -1041,73 +1085,145 @@
             `;
         }
 
-        const providerTotal = results.length;
-        const providerSuccess = results.filter((item) => item.success).length;
-        const modelTotal = results.reduce((sum, item) => sum + (item.models_total ?? 0), 0);
-        const modelSuccess = results.reduce((sum, item) => sum + (item.models_success ?? 0), 0);
+        const keyword = String(options.keyword || "").trim().toLowerCase();
+        const health = String(options.health || "");
+        const pageSize = Math.max(1, Number(options.pageSize || 10));
+        const summary = summarizeBatchConnectivityResults(results);
+        const filteredResults = results.filter((item) => {
+            const keywordMatched = !keyword || buildBatchConnectivitySearchText(item).includes(keyword);
+            if (!keywordMatched) {
+                return false;
+            }
+            if (!health) {
+                return true;
+            }
+            if (health === "healthy") {
+                return item.success && (item.health_status || "healthy") === "healthy";
+            }
+            if (health === "abnormal") {
+                return !item.success || (item.health_status || "unknown") !== "healthy";
+            }
+            return (item.health_status || "unknown") === health;
+        });
+        const totalPages = Math.max(1, Math.ceil(filteredResults.length / pageSize));
+        const currentPage = Math.min(Math.max(1, Number(options.page || 1)), totalPages);
+        const pageStart = (currentPage - 1) * pageSize;
+        const pageItems = filteredResults.slice(pageStart, pageStart + pageSize);
 
         return `
             <section class="playground-result-card">
-                <div class="playground-card-title">批量测试概览</div>
-                <div class="playground-token-grid">
-                    <div class="playground-token-item">
-                        <div class="playground-token-label">渠道数</div>
-                        <div class="playground-token-value">${providerSuccess}/${providerTotal}</div>
+                <div class="playground-batch-card-head">
+                    <div>
+                        <div class="playground-card-title">批量测试概览</div>
+                        <div class="table-muted">本次共测试 ${summary.providerTotal} 个渠道、${summary.modelTotal} 个模型；当前筛选命中 ${filteredResults.length} 个渠道。</div>
                     </div>
-                    <div class="playground-token-item">
-                        <div class="playground-token-label">模型数</div>
-                        <div class="playground-token-value">${modelSuccess}/${modelTotal}</div>
+                    <div>${statusBadge(summary.providerFailed ? "warning" : "healthy")}</div>
+                </div>
+                <div class="playground-batch-summary-grid">
+                    <article class="playground-batch-summary-item">
+                        <span>渠道总数</span>
+                        <strong>${summary.providerTotal}</strong>
+                    </article>
+                    <article class="playground-batch-summary-item">
+                        <span>结果正常</span>
+                        <strong>${summary.providerSuccess}</strong>
+                    </article>
+                    <article class="playground-batch-summary-item">
+                        <span>结果异常</span>
+                        <strong>${summary.providerFailed}</strong>
+                    </article>
+                    <article class="playground-batch-summary-item">
+                        <span>模型总数</span>
+                        <strong>${summary.modelTotal}</strong>
+                    </article>
+                    <article class="playground-batch-summary-item">
+                        <span>模型成功</span>
+                        <strong>${summary.modelSuccess}</strong>
+                    </article>
+                    <article class="playground-batch-summary-item">
+                        <span>平均耗时</span>
+                        <strong>${summary.averageLatency} ms</strong>
+                    </article>
+                </div>
+            </section>
+            <section class="playground-result-card">
+                <div class="playground-batch-card-head">
+                    <div>
+                        <div class="playground-card-title">批量测试具体结果</div>
+                        <div class="table-muted">按渠道列表分页查看，并支持关键词与健康状态筛选。</div>
                     </div>
-                    <div class="playground-token-item">
-                        <div class="playground-token-label">渠道成功</div>
-                        <div class="playground-token-value">${providerSuccess}</div>
-                    </div>
-                    <div class="playground-token-item">
-                        <div class="playground-token-label">模型成功</div>
-                        <div class="playground-token-value">${modelSuccess}</div>
+                </div>
+                <div class="filter-toolbar playground-batch-filter-toolbar">
+                    <label>
+                        <span>关键词</span>
+                        <input class="field-input search-input" id="playground-batch-search" type="text" value="${escapeHtml(options.keyword || "")}" placeholder="搜索渠道名、模型名、结果说明">
+                    </label>
+                    <label>
+                        <span>健康状态</span>
+                        <select class="field-input" id="playground-batch-health">
+                            <option value="" ${health === "" ? "selected" : ""}>全部</option>
+                            <option value="healthy" ${health === "healthy" ? "selected" : ""}>健康</option>
+                            <option value="abnormal" ${health === "abnormal" ? "selected" : ""}>异常</option>
+                        </select>
+                    </label>
+                </div>
+                <div class="playground-batch-result-list">
+                    ${pageItems.length ? pageItems.map((item) => `
+                        <article class="playground-batch-list-item">
+                            <div class="playground-batch-card-head">
+                                <div>
+                                    <div class="playground-card-title">${escapeHtml(item.provider_name || `渠道 ${item.provider_id}`)}</div>
+                                    <div class="table-muted">${item.provider_enabled ? "已启用" : "已停用"} · 模型 ${item.models_success ?? 0}/${item.models_total ?? 0} 正常</div>
+                                </div>
+                                <div>${statusBadge(item.health_status || "unknown")}</div>
+                            </div>
+                            <div class="playground-batch-provider-grid">
+                                <div><span>渠道连通</span><strong class="${item.provider_success ? "playground-status-success" : "playground-status-danger"}">${item.provider_success ? "成功" : "失败"}</strong></div>
+                                <div><span>状态码</span><strong>${item.status_code ?? "-"}</strong></div>
+                                <div><span>耗时</span><strong>${item.latency_ms ?? "-"} ms</strong></div>
+                                <div><span>模型健康</span><strong>${item.models_success ?? 0}/${item.models_total ?? 0}</strong></div>
+                            </div>
+                            <div class="playground-batch-provider-note">${escapeHtml(item.message || "-")}</div>
+                            <div class="playground-batch-model-table">
+                                <div class="playground-batch-model-table-head">
+                                    <span>模型</span>
+                                    <span>健康</span>
+                                    <span>状态 / 耗时</span>
+                                    <span>端点探测</span>
+                                    <span>结果说明</span>
+                                </div>
+                                ${(item.model_results || []).length ? item.model_results.map((model) => `
+                                    <div class="playground-batch-model-row">
+                                        <strong>${escapeHtml(model.model_name || "-")}</strong>
+                                        <div>${statusBadge(model.health_status || "unknown")}</div>
+                                        <span>状态码 ${model.status_code ?? "-"} · ${model.latency_ms ?? "-"} ms</span>
+                                        <span>${escapeHtml(summarizeEndpointResults(model.endpoint_results))}</span>
+                                        <span>${escapeHtml(model.message || "-")}</span>
+                                    </div>
+                                `).join("") : '<div class="playground-provider-list-empty">当前渠道没有可测试模型</div>'}
+                            </div>
+                        </article>
+                    `).join("") : `
+                        <div class="playground-provider-list-empty">当前筛选条件下没有命中的测试结果，请调整关键词或健康状态。</div>
+                    `}
+                </div>
+                <div class="table-toolbar logs-pagination-bar playground-batch-pagination-bar">
+                    <label class="logs-page-size">
+                        <span>每页数量</span>
+                        <select class="field-input" id="playground-batch-page-size">
+                            <option value="5" ${pageSize === 5 ? "selected" : ""}>5</option>
+                            <option value="10" ${pageSize === 10 ? "selected" : ""}>10</option>
+                            <option value="20" ${pageSize === 20 ? "selected" : ""}>20</option>
+                            <option value="50" ${pageSize === 50 ? "selected" : ""}>50</option>
+                        </select>
+                    </label>
+                    <div class="logs-page-meta">第 ${currentPage} / ${totalPages} 页，共 ${filteredResults.length} 条</div>
+                    <div class="logs-page-actions">
+                        <button class="btn btn-ghost interactive-btn" id="playground-batch-prev-page" type="button" ${currentPage <= 1 ? "disabled" : ""}>上一页</button>
+                        <button class="btn btn-ghost interactive-btn" id="playground-batch-next-page" type="button" ${currentPage >= totalPages ? "disabled" : ""}>下一页</button>
                     </div>
                 </div>
             </section>
-            ${results.map((item) => `
-                <section class="playground-result-card">
-                    <div class="playground-batch-card-head">
-                        <div>
-                            <div class="playground-card-title">${escapeHtml(item.provider_name || `渠道 ${item.provider_id}`)}</div>
-                            <div class="table-muted">${item.provider_enabled ? "已启用" : "已停用"} · 模型 ${item.models_success ?? 0}/${item.models_total ?? 0} 正常</div>
-                        </div>
-                        <div>${statusBadge(item.health_status || "unknown")}</div>
-                    </div>
-                    <div class="playground-info-row">
-                        <div class="playground-info-label">渠道连通</div>
-                        <div class="playground-info-value">${item.provider_success ? '<span class="playground-status-success">成功</span>' : '失败'}</div>
-                    </div>
-                    <div class="playground-info-row">
-                        <div class="playground-info-label">耗时</div>
-                        <div class="playground-info-value">${item.latency_ms ?? "-"} ms</div>
-                    </div>
-                    <div class="playground-info-row">
-                        <div class="playground-info-label">状态码</div>
-                        <div class="playground-info-value">${item.status_code ?? "-"}</div>
-                    </div>
-                    <div class="playground-info-row">
-                        <div class="playground-info-label">结果说明</div>
-                        <div class="playground-info-value">${escapeHtml(item.message || "-")}</div>
-                    </div>
-                    <div class="playground-batch-model-list">
-                        ${(item.model_results || []).length ? item.model_results.map((model) => `
-                            <article class="playground-batch-model-item">
-                                <div class="playground-batch-model-top">
-                                    <strong>${escapeHtml(model.model_name || "-")}</strong>
-                                    <div>${statusBadge(model.health_status || "unknown")}</div>
-                                </div>
-                                <div class="table-muted">状态码 ${model.status_code ?? "-"} · 耗时 ${model.latency_ms ?? "-"} ms</div>
-                                <div class="playground-batch-model-message">${escapeHtml(model.message || "-")}</div>
-                                <div class="playground-batch-model-message">${renderEndpointProbeHtml(model.endpoint_results)}</div>
-                            </article>
-                        `).join("") : '<div class="playground-provider-list-empty">当前渠道没有可测试模型</div>'}
-                    </div>
-                </section>
-            `).join("")}
         `;
     }
 
@@ -2755,67 +2871,6 @@
             }
         });
 
-        templateForm?.addEventListener("submit", async (event) => {
-            event.preventDefault();
-            const allowedProviderIds = getTemplateSelectedProviderIds();
-            const defaultProviderId = templateDefaultProviderSelect.value ? Number(templateDefaultProviderSelect.value) : null;
-            if (defaultProviderId && !allowedProviderIds.includes(defaultProviderId)) {
-                showToast("默认中转站必须包含在授权中转站里", "error");
-                return;
-            }
-            const payload = {
-                name: templateNameInput.value.trim(),
-                remark: templateRemarkInput.value.trim() || null,
-                enabled: templateEnabledInput.checked,
-                route_mode: templateRouteModeInput.value,
-                default_provider_id: defaultProviderId,
-                manual_allow_fallback: templateManualFallbackInput.checked,
-                token_limit_total: templateTokenLimitInput.value === "" ? null : Number(templateTokenLimitInput.value),
-                cost_limit_total: templateCostLimitInput.value === "" ? null : Number(templateCostLimitInput.value),
-                expires_in_days: templateExpiresInDaysInput.value === "" ? null : Number(templateExpiresInDaysInput.value),
-                allowed_provider_ids: allowedProviderIds,
-            };
-            try {
-                setButtonLoading(templateSubmitBtn, true);
-                if (templateEditIdInput.value) {
-                    await api.put(`/api/api-key-policy-templates/${templateEditIdInput.value}`, payload);
-                    showToast("策略模板已更新");
-                } else {
-                    await api.post("/api/api-key-policy-templates", payload);
-                    showToast("策略模板已创建");
-                }
-                closeTemplateModal();
-                await loadData({ silent: true, reloadReference: true });
-            } catch (error) {
-                showToast(error.message, "error");
-            } finally {
-                setButtonLoading(templateSubmitBtn, false);
-            }
-        });
-
-        batchTemplateForm?.addEventListener("submit", async (event) => {
-            event.preventDefault();
-            const templateId = Number(batchTemplateSelect.value);
-            if (!Number.isFinite(templateId)) {
-                showToast("请选择一个策略模板", "error");
-                return;
-            }
-            try {
-                setButtonLoading(batchTemplateSubmitBtn, true);
-                const result = await api.post("/api/api-keys/batch/template", {
-                    api_key_ids: Array.from(state.selectedIds),
-                    template_id: templateId,
-                });
-                showToast(`已批量套用模板 ${formatNumber(result.affected_count || 0)} 个`);
-                closeBatchTemplateModal();
-                await loadTableData({ silent: true });
-            } catch (error) {
-                showToast(error.message, "error");
-            } finally {
-                setButtonLoading(batchTemplateSubmitBtn, false);
-            }
-        });
-
         addBtn.addEventListener("click", () => openModal());
         refreshBtn.addEventListener("click", async () => {
             try {
@@ -2929,12 +2984,29 @@
         const imageNote = document.getElementById("playground-image-note");
         const batchForm = document.getElementById("playground-batch-form");
         const batchMeta = document.getElementById("playground-batch-meta");
+        const batchOutput = document.getElementById("playground-batch-output");
         const batchSubmitBtn = document.getElementById("playground-batch-submit-btn");
         const batchSelectEnabledBtn = document.getElementById("playground-batch-select-enabled");
         const batchSelectAllBtn = document.getElementById("playground-batch-select-all");
         const batchClearBtn = document.getElementById("playground-batch-clear");
         let providerOptions = [];
         let modelCatalogOptions = [];
+        const batchResultsState = {
+            results: [],
+            keyword: "",
+            health: "",
+            page: 1,
+            pageSize: 10,
+        };
+
+        function renderBatchResultsView() {
+            if (!batchResultsState.results.length) {
+                setBatchPlaceholder("等待批量测试...");
+                return;
+            }
+            showBatchRendered(renderBatchConnectivityResults(batchResultsState.results, batchResultsState));
+            enhanceInteractiveButtons(batchOutput);
+        }
 
         function updatePlaygroundImageFields() {
             const mode = imageModeSelect.value || "none";
@@ -3221,6 +3293,47 @@
         batchSelectAllBtn.addEventListener("click", () => updateBatchSelection(providerOptions, "all"));
         batchClearBtn.addEventListener("click", () => updateBatchSelection(providerOptions, "none"));
 
+        batchOutput?.addEventListener("input", (event) => {
+            const target = event.target;
+            if (!(target instanceof HTMLInputElement)) return;
+            if (target.id === "playground-batch-search") {
+                batchResultsState.keyword = target.value || "";
+                batchResultsState.page = 1;
+                renderBatchResultsView();
+            }
+        });
+
+        batchOutput?.addEventListener("change", (event) => {
+            const target = event.target;
+            if (!(target instanceof HTMLSelectElement)) return;
+            if (target.id === "playground-batch-health") {
+                batchResultsState.health = target.value || "";
+                batchResultsState.page = 1;
+                renderBatchResultsView();
+                return;
+            }
+            if (target.id === "playground-batch-page-size") {
+                batchResultsState.pageSize = Number(target.value) || 10;
+                batchResultsState.page = 1;
+                renderBatchResultsView();
+            }
+        });
+
+        batchOutput?.addEventListener("click", (event) => {
+            if (!(event.target instanceof Element)) return;
+            const button = event.target.closest("button");
+            if (!button) return;
+            if (button.id === "playground-batch-prev-page" && batchResultsState.page > 1) {
+                batchResultsState.page -= 1;
+                renderBatchResultsView();
+                return;
+            }
+            if (button.id === "playground-batch-next-page") {
+                batchResultsState.page += 1;
+                renderBatchResultsView();
+            }
+        });
+
         batchForm.addEventListener("submit", async (event) => {
             event.preventDefault();
             const providerIds = getSelectedProviderIds();
@@ -3233,10 +3346,15 @@
             try {
                 setButtonLoading(batchSubmitBtn, true);
                 const results = await api.post("/api/providers/test-connectivity", { provider_ids: providerIds });
-                batchMeta.textContent = `批量测试完成，共 ${results.length} 个渠道`;
-                showBatchRendered(renderBatchConnectivityResults(results));
+                batchResultsState.results = Array.isArray(results) ? results : [];
+                batchResultsState.keyword = "";
+                batchResultsState.health = "";
+                batchResultsState.page = 1;
+                batchMeta.textContent = `批量测试完成，共 ${batchResultsState.results.length} 个渠道`;
+                renderBatchResultsView();
                 showToast("批量测试完成");
             } catch (error) {
+                batchResultsState.results = [];
                 batchMeta.textContent = "";
                 showBatchRendered(`
                     <section class="playground-result-card playground-result-error">
@@ -4759,6 +4877,7 @@
         const rawValue = document.getElementById("api-key-raw-value");
         const copyRawBtn = document.getElementById("api-key-copy-raw-btn");
         const providerSelector = document.getElementById("api-key-provider-selector");
+        const modelSelector = document.getElementById("api-key-model-selector");
         const defaultProviderSelect = document.getElementById("api-key-default-provider-id");
         const routeModeInput = document.getElementById("api-key-route-mode");
         const manualFallbackInput = document.getElementById("api-key-manual-allow-fallback");
@@ -4794,6 +4913,7 @@
         const templateManualFallbackInput = document.getElementById("api-key-template-manual-allow-fallback");
         const templateRemarkInput = document.getElementById("api-key-template-remark");
         const templateProviderSelector = document.getElementById("api-key-template-provider-selector");
+        const templateModelSelector = document.getElementById("api-key-template-model-selector");
         const batchTemplateModal = document.getElementById("api-key-batch-template-modal");
         const batchTemplateCloseBtn = document.getElementById("api-key-batch-template-close");
         const batchTemplateCancelBtn = document.getElementById("api-key-batch-template-cancel");
@@ -4822,6 +4942,7 @@
             summary: null,
             apiKeys: [],
             providers: [],
+            models: [],
             users: [],
             templates: [],
             total: 0,
@@ -4950,6 +5071,7 @@
                         <td>
                             <strong>${formatNumber(item.allowed_provider_ids.length)} 个</strong>
                             <div class="table-muted">${escapeHtml(item.allowed_providers.map((provider) => provider.name).join(", ") || "未绑定")}</div>
+                            <div class="table-muted">模型 ${escapeHtml((item.allowed_model_names || []).length ? `${formatNumber(item.allowed_model_names.length)} 个白名单` : "全部可路由")}</div>
                         </td>
                         <td>
                             <strong>${escapeHtml(quota.summary)}</strong>
@@ -5020,6 +5142,37 @@
                 .filter((value) => Number.isFinite(value));
         }
 
+        function renderApiKeyModelSelector(container, models = [], selectedNames = []) {
+            if (!container) return;
+            const selectedSet = new Set((selectedNames || []).map((item) => String(item)));
+            if (!models.length) {
+                container.innerHTML = '<div class="playground-provider-list-empty">当前模型目录为空，请先在模型聚合配置中维护模型。</div>';
+                return;
+            }
+            container.innerHTML = models.map((model) => {
+                const modelName = model.model_name || "";
+                const title = model.display_name || modelName;
+                const providerCount = (model.provider_bindings || []).filter((binding) => binding.bound && binding.enabled && binding.provider_enabled).length;
+                return `
+                    <label class="playground-provider-option api-key-provider-option">
+                        <input type="checkbox" data-api-key-model-name="${escapeHtml(modelName)}" ${selectedSet.has(modelName) ? "checked" : ""}>
+                        <div class="playground-provider-option-copy">
+                            <strong>${escapeHtml(title)}</strong>
+                            <span>${escapeHtml(modelName)} · ${model.enabled ? "已启用" : "已禁用"} · 可用渠道 ${formatNumber(providerCount)}</span>
+                        </div>
+                        <div>${statusBadge(model.enabled ? "healthy" : "disabled")}</div>
+                    </label>
+                `;
+            }).join("");
+        }
+
+        function getSelectedModelNames() {
+            if (!modelSelector) return [];
+            return Array.from(modelSelector.querySelectorAll("[data-api-key-model-name]:checked"))
+                .map((input) => input.dataset.apiKeyModelName)
+                .filter(Boolean);
+        }
+
         function getBatchSelectedProviderIds() {
             return Array.from(batchProviderSelector.querySelectorAll("[data-api-key-provider-id]:checked"))
                 .map((input) => Number(input.dataset.apiKeyProviderId))
@@ -5030,6 +5183,13 @@
             return Array.from(templateProviderSelector.querySelectorAll("[data-api-key-provider-id]:checked"))
                 .map((input) => Number(input.dataset.apiKeyProviderId))
                 .filter((value) => Number.isFinite(value));
+        }
+
+        function getTemplateSelectedModelNames() {
+            if (!templateModelSelector) return [];
+            return Array.from(templateModelSelector.querySelectorAll("[data-api-key-model-name]:checked"))
+                .map((input) => input.dataset.apiKeyModelName)
+                .filter(Boolean);
         }
 
         function populateTemplateSelectOptions(selectedTemplateId = templateSelect?.value || "") {
@@ -5068,6 +5228,7 @@
             expiresAtInput.value = template.expires_in_days ? toDatetimeLocalInputValue(new Date(Date.now() + (Number(template.expires_in_days) * 86400000)).toISOString()) : "";
             populateDefaultProviderOptions(template.default_provider_id || null);
             renderApiKeyProviderSelector(providerSelector, state.providers, template.allowed_provider_ids || []);
+            renderApiKeyModelSelector(modelSelector, state.models, template.allowed_model_names || []);
             refreshRoutePreview();
         }
 
@@ -5090,6 +5251,10 @@
                             <div class="table-muted">${escapeHtml((item.allowed_provider_ids || []).map((providerId) => state.providers.find((provider) => provider.id === providerId)?.name || String(providerId)).join(", ") || "未绑定")}</div>
                         </td>
                         <td>
+                            <strong>${(item.allowed_model_names || []).length ? `${formatNumber(item.allowed_model_names.length)} 个` : "不限制"}</strong>
+                            <div class="table-muted">${escapeHtml((item.allowed_model_names || []).join(", ") || "全部可路由模型")}</div>
+                        </td>
+                        <td>
                             <strong>Token ${item.token_limit_total == null ? "不限" : formatNumber(item.token_limit_total)}</strong>
                             <div class="table-muted">金额 ${item.cost_limit_total == null ? "不限" : formatMoney(item.cost_limit_total)}</div>
                         </td>
@@ -5105,7 +5270,7 @@
                         </td>
                     </tr>
                 `;
-            }).join("") || '<tr><td colspan="7"><div class="empty-state">当前还没有策略模板</div></td></tr>';
+            }).join("") || '<tr><td colspan="8"><div class="empty-state">当前还没有策略模板</div></td></tr>';
             enhanceInteractiveButtons(templateTableBody);
         }
 
@@ -5123,6 +5288,7 @@
             templateRemarkInput.value = template?.remark ?? "";
             populateTemplateDefaultProviderOptions(template?.default_provider_id || null);
             renderApiKeyProviderSelector(templateProviderSelector, state.providers, template?.allowed_provider_ids || []);
+            renderApiKeyModelSelector(templateModelSelector, state.models, template?.allowed_model_names || []);
             templateModal.classList.remove("hidden");
         }
 
@@ -5132,6 +5298,7 @@
             templateForm.reset();
             templateEditIdInput.value = "";
             renderApiKeyProviderSelector(templateProviderSelector, state.providers, []);
+            renderApiKeyModelSelector(templateModelSelector, state.models, []);
             populateTemplateDefaultProviderOptions();
         }
 
@@ -5225,6 +5392,7 @@
             balanceAmountInput.placeholder = isEditing ? "已创建密钥请到详情页做余额调整" : "留空表示不限制";
             populateDefaultProviderOptions(apiKey?.default_provider_id || null);
             renderApiKeyProviderSelector(providerSelector, state.providers, apiKey?.allowed_provider_ids || []);
+            renderApiKeyModelSelector(modelSelector, state.models, apiKey?.allowed_model_names || []);
             refreshRoutePreview();
             refreshRawApiKeyInputState();
             rawPanel.classList.add("hidden");
@@ -5244,6 +5412,7 @@
             balanceAmountInput.disabled = false;
             balanceAmountInput.placeholder = "留空表示不限制";
             renderApiKeyProviderSelector(providerSelector, state.providers, []);
+            renderApiKeyModelSelector(modelSelector, state.models, []);
             populateDefaultProviderOptions();
             populateOwnerUserOptions();
             refreshRoutePreview();
@@ -5277,12 +5446,14 @@
         }
 
         async function loadReferenceData() {
-            const [providers, users] = await Promise.all([
+            const [providers, users, models] = await Promise.all([
                 api.get("/api/providers"),
                 api.get("/api/users/options"),
+                api.get("/api/models"),
             ]);
             state.providers = providers;
             state.users = users;
+            state.models = models;
             populateOwnerFilterOptions(state.filters.ownerUserId);
             populateDefaultProviderOptions(defaultProviderSelect.value ? Number(defaultProviderSelect.value) : null);
             populateTemplateDefaultProviderOptions(templateDefaultProviderSelect?.value ? Number(templateDefaultProviderSelect.value) : null);
@@ -5290,6 +5461,8 @@
             renderApiKeyProviderSelector(providerSelector, state.providers, getSelectedProviderIds());
             renderApiKeyProviderSelector(batchProviderSelector, state.providers, getBatchSelectedProviderIds());
             renderApiKeyProviderSelector(templateProviderSelector, state.providers, getTemplateSelectedProviderIds());
+            renderApiKeyModelSelector(modelSelector, state.models, getSelectedModelNames());
+            renderApiKeyModelSelector(templateModelSelector, state.models, getTemplateSelectedModelNames());
             refreshRoutePreview();
         }
 
@@ -5322,7 +5495,7 @@
         }
 
         async function loadData({ silent = false, reloadReference = false } = {}) {
-            if (reloadReference || !state.providers.length || !state.users.length) {
+            if (reloadReference || !state.providers.length || !state.users.length || !state.models.length) {
                 await loadReferenceData();
             }
             if (reloadReference || !state.templates.length) {
@@ -5388,6 +5561,7 @@
                 owner_user_id: ownerUserSelect.value === "" ? null : Number(ownerUserSelect.value),
                 manual_allow_fallback: manualFallbackInput.checked,
                 allowed_provider_ids: allowedProviderIds,
+                allowed_model_names: getSelectedModelNames(),
             };
             const rawApiKey = rawApiKeyInput.value.trim();
             if (!idInput.value) {
@@ -5637,6 +5811,68 @@
                 showToast(error.message, "error");
             } finally {
                 setButtonLoading(batchProviderSubmitBtn, false);
+            }
+        });
+
+        templateForm?.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            const allowedProviderIds = getTemplateSelectedProviderIds();
+            const defaultProviderId = templateDefaultProviderSelect.value ? Number(templateDefaultProviderSelect.value) : null;
+            if (defaultProviderId && !allowedProviderIds.includes(defaultProviderId)) {
+                showToast("默认中转站必须包含在授权中转站里", "error");
+                return;
+            }
+            const payload = {
+                name: templateNameInput.value.trim(),
+                remark: templateRemarkInput.value.trim() || null,
+                enabled: templateEnabledInput.checked,
+                route_mode: templateRouteModeInput.value,
+                default_provider_id: defaultProviderId,
+                manual_allow_fallback: templateManualFallbackInput.checked,
+                token_limit_total: templateTokenLimitInput.value === "" ? null : Number(templateTokenLimitInput.value),
+                cost_limit_total: templateCostLimitInput.value === "" ? null : Number(templateCostLimitInput.value),
+                expires_in_days: templateExpiresInDaysInput.value === "" ? null : Number(templateExpiresInDaysInput.value),
+                allowed_provider_ids: allowedProviderIds,
+                allowed_model_names: getTemplateSelectedModelNames(),
+            };
+            try {
+                setButtonLoading(templateSubmitBtn, true);
+                if (templateEditIdInput.value) {
+                    await api.put(`/api/api-key-policy-templates/${templateEditIdInput.value}`, payload);
+                    showToast("策略模板已更新");
+                } else {
+                    await api.post("/api/api-key-policy-templates", payload);
+                    showToast("策略模板已创建");
+                }
+                closeTemplateModal();
+                await loadData({ silent: true, reloadReference: true });
+            } catch (error) {
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(templateSubmitBtn, false);
+            }
+        });
+
+        batchTemplateForm?.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            const templateId = Number(batchTemplateSelect.value);
+            if (!Number.isFinite(templateId)) {
+                showToast("请选择一个策略模板", "error");
+                return;
+            }
+            try {
+                setButtonLoading(batchTemplateSubmitBtn, true);
+                const result = await api.post("/api/api-keys/batch/template", {
+                    api_key_ids: Array.from(state.selectedIds),
+                    template_id: templateId,
+                });
+                showToast(`已批量套用模板 ${formatNumber(result.affected_count || 0)} 个`);
+                closeBatchTemplateModal();
+                await loadTableData({ silent: true });
+            } catch (error) {
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(batchTemplateSubmitBtn, false);
             }
         });
 

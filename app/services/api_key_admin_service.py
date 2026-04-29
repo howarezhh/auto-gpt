@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.models.api_client_billing_record import ApiClientBillingRecord
 from app.models.api_client_key import ApiClientKey
 from app.models.api_client_key_provider_binding import ApiClientKeyProviderBinding
+from app.models.model_catalog import ModelCatalog
 from app.models.provider import Provider
 from app.models.request_log import RequestLog
 from app.models.user_account import UserAccount
@@ -181,6 +182,7 @@ class ApiKeyAdminService:
             allowed_provider_ids=payload.allowed_provider_ids,
             default_provider_id=payload.default_provider_id,
         )
+        ApiKeyAdminService._validate_model_names(db, payload.allowed_model_names)
         ApiKeyAdminService._validate_owner_user(db, payload.owner_user_id)
         raw_api_key = ApiKeyService.build_raw_api_key(payload.raw_api_key)
         ApiKeyAdminService._validate_raw_api_key_uniqueness(db, raw_api_key)
@@ -257,6 +259,8 @@ class ApiKeyAdminService:
             allowed_provider_ids=allowed_provider_ids,
             default_provider_id=default_provider_id,
         )
+        if "allowed_model_names" in data:
+            ApiKeyAdminService._validate_model_names(db, data["allowed_model_names"] or [])
         ApiKeyAdminService._validate_owner_user(db, owner_user_id)
         use_shared_wallet = owner_user_id is not None
         if use_shared_wallet and "balance_amount" in data:
@@ -829,6 +833,17 @@ class ApiKeyAdminService:
             raise ValueError(f"Provider not found: {', '.join(str(item) for item in missing_ids)}")
         if default_provider_id is not None and default_provider_id not in existing_ids:
             raise ValueError("default_provider_id must be one of allowed_provider_ids")
+
+    @staticmethod
+    def _validate_model_names(db: Session, allowed_model_names: list[str]) -> None:
+        if not allowed_model_names:
+            return
+        existing_names = set(
+            db.scalars(select(ModelCatalog.model_name).where(ModelCatalog.model_name.in_(allowed_model_names))).all()
+        )
+        missing_names = [model_name for model_name in allowed_model_names if model_name not in existing_names]
+        if missing_names:
+            raise ValueError(f"模型不存在: {', '.join(missing_names)}")
 
     @staticmethod
     def _validate_owner_user(db: Session, owner_user_id: int | None) -> None:

@@ -26,7 +26,10 @@ def create_template(
     db: Session = Depends(get_db),
     current_user=Depends(require_admin_api_user),
 ) -> ApiKeyPolicyTemplateOut:
-    item = ApiKeyPolicyTemplateService.create_template(db, payload)
+    try:
+        item = ApiKeyPolicyTemplateService.create_template(db, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     AdminAuditService.create_log(
         db,
         actor_user_id=current_user.id,
@@ -51,7 +54,10 @@ def update_template(
     item = ApiKeyPolicyTemplateService.get_template(db, template_id)
     if item is None:
         raise HTTPException(status_code=404, detail="策略模板不存在")
-    serialized = ApiKeyPolicyTemplateService.update_template(db, item, payload)
+    try:
+        serialized = ApiKeyPolicyTemplateService.update_template(db, item, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     AdminAuditService.create_log(
         db,
         actor_user_id=current_user.id,

@@ -190,6 +190,22 @@ def _migrate_request_log_columns(db) -> None:
     if changed_api_keys:
         db.commit()
 
+    existing_policy_template_columns = {
+        row[1]
+        for row in db.execute(text("PRAGMA table_info(api_key_policy_templates)")).fetchall()
+    }
+    policy_template_additions = {
+        "allowed_model_names_json": "ALTER TABLE api_key_policy_templates ADD COLUMN allowed_model_names_json TEXT NOT NULL DEFAULT '[]'",
+    }
+    changed_policy_templates = False
+    for column, ddl in policy_template_additions.items():
+        if not existing_policy_template_columns or column in existing_policy_template_columns:
+            continue
+        db.execute(text(ddl))
+        changed_policy_templates = True
+    if changed_policy_templates:
+        db.commit()
+
     existing_provider_columns = {
         row[1]
         for row in db.execute(text("PRAGMA table_info(providers)")).fetchall()

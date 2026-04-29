@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.api_key_policy_template import ApiKeyPolicyTemplate
+from app.models.model_catalog import ModelCatalog
 from app.schemas.api_key import ApiKeyCreate, ApiKeyUpdate
 from app.schemas.api_key_policy_template import (
     ApiKeyPolicyTemplateCreate,
@@ -31,6 +32,7 @@ class ApiKeyPolicyTemplateService:
 
     @staticmethod
     def create_template(db: Session, payload: ApiKeyPolicyTemplateCreate) -> ApiKeyPolicyTemplateOut:
+        ApiKeyPolicyTemplateService._validate_model_names(db, payload.allowed_model_names)
         item = ApiKeyPolicyTemplate(
             name=payload.name,
             remark=payload.remark,
@@ -42,6 +44,7 @@ class ApiKeyPolicyTemplateService:
             cost_limit_total=payload.cost_limit_total,
             expires_in_days=payload.expires_in_days,
             allowed_provider_ids_json=dumps_json(payload.allowed_provider_ids),
+            allowed_model_names_json=dumps_json(payload.allowed_model_names),
         )
         db.add(item)
         db.commit()
@@ -51,9 +54,14 @@ class ApiKeyPolicyTemplateService:
     @staticmethod
     def update_template(db: Session, item: ApiKeyPolicyTemplate, payload: ApiKeyPolicyTemplateUpdate) -> ApiKeyPolicyTemplateOut:
         data = payload.model_dump(exclude_unset=True)
+        if "allowed_model_names" in data:
+            ApiKeyPolicyTemplateService._validate_model_names(db, data["allowed_model_names"] or [])
         for field, value in data.items():
             if field == "allowed_provider_ids":
                 item.allowed_provider_ids_json = dumps_json(value or [])
+                continue
+            if field == "allowed_model_names":
+                item.allowed_model_names_json = dumps_json(value or [])
                 continue
             setattr(item, field, value)
         db.commit()
@@ -79,6 +87,7 @@ class ApiKeyPolicyTemplateService:
             cost_limit_total=float(item.cost_limit_total) if item.cost_limit_total is not None else None,
             expires_in_days=item.expires_in_days,
             allowed_provider_ids=list(loads_json(item.allowed_provider_ids_json, [])),
+            allowed_model_names=list(loads_json(item.allowed_model_names_json, [])),
             created_at=item.created_at,
             updated_at=item.updated_at,
         )
@@ -113,6 +122,7 @@ class ApiKeyPolicyTemplateService:
             owner_user_id=owner_user_id,
             manual_allow_fallback=template.manual_allow_fallback,
             allowed_provider_ids=template.allowed_provider_ids,
+            allowed_model_names=template.allowed_model_names,
         )
 
     @staticmethod
@@ -135,4 +145,16 @@ class ApiKeyPolicyTemplateService:
             default_provider_id=template.default_provider_id,
             manual_allow_fallback=template.manual_allow_fallback,
             allowed_provider_ids=template.allowed_provider_ids,
+            allowed_model_names=template.allowed_model_names,
         )
+
+    @staticmethod
+    def _validate_model_names(db: Session, allowed_model_names: list[str]) -> None:
+        if not allowed_model_names:
+            return
+        existing_names = set(
+            db.scalars(select(ModelCatalog.model_name).where(ModelCatalog.model_name.in_(allowed_model_names))).all()
+        )
+        missing_names = [model_name for model_name in allowed_model_names if model_name not in existing_names]
+        if missing_names:
+            raise ValueError(f"模型不存在: {', '.join(missing_names)}")

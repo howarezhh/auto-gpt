@@ -16,6 +16,7 @@ class ApiKeyPolicyTemplateBase(BaseModel):
     cost_limit_total: float | None = Field(default=None, ge=0)
     expires_in_days: int | None = Field(default=None, ge=0)
     allowed_provider_ids: list[int] = Field(default_factory=list)
+    allowed_model_names: list[str] = Field(default_factory=list)
 
     @field_validator("name")
     @classmethod
@@ -42,6 +43,19 @@ class ApiKeyPolicyTemplateBase(BaseModel):
             normalized.append(item)
         return normalized
 
+    @field_validator("allowed_model_names")
+    @classmethod
+    def normalize_allowed_model_names(cls, value: list[str]) -> list[str]:
+        seen: set[str] = set()
+        normalized: list[str] = []
+        for raw in value:
+            item = str(raw).strip()
+            if not item or item in seen:
+                continue
+            seen.add(item)
+            normalized.append(item)
+        return normalized
+
 
 class ApiKeyPolicyTemplateCreate(ApiKeyPolicyTemplateBase):
     pass
@@ -58,6 +72,21 @@ class ApiKeyPolicyTemplateUpdate(BaseModel):
     cost_limit_total: float | None = Field(default=None, ge=0)
     expires_in_days: int | None = Field(default=None, ge=0)
     allowed_provider_ids: list[int] | None = None
+    allowed_model_names: list[str] | None = None
+
+    @field_validator("allowed_provider_ids")
+    @classmethod
+    def normalize_allowed_provider_ids(cls, value: list[int] | None) -> list[int] | None:
+        if value is None:
+            return None
+        return ApiKeyPolicyTemplateBase.normalize_allowed_provider_ids(value)
+
+    @field_validator("allowed_model_names")
+    @classmethod
+    def normalize_allowed_model_names(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        return ApiKeyPolicyTemplateBase.normalize_allowed_model_names(value)
 
 
 class ApiKeyPolicyTemplateOut(ApiKeyPolicyTemplateBase):

@@ -20,7 +20,10 @@ class ModelProviderBindingOut(ModelProviderBindingBase):
     provider_name: str
     provider_enabled: bool
     provider_health_status: str
+    provider_circuit_state: str | None = None
+    provider_maintenance_mode_enabled: bool = False
     model_health_status: str | None = None
+    model_circuit_state: str | None = None
     effective_input_price_per_1k: float | None = None
     effective_output_price_per_1k: float | None = None
     direct_input_price_per_1k: float | None = None

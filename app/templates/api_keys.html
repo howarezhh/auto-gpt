@@ -176,6 +176,7 @@
                         <th>名称</th>
                         <th>路由策略</th>
                         <th>授权渠道</th>
+                        <th>模型白名单</th>
                         <th>额度</th>
                         <th>到期策略</th>
                         <th>状态</th>
@@ -183,7 +184,7 @@
                     </tr>
                 </thead>
                 <tbody id="api-key-template-table-body">
-                    <tr><td colspan="7"><div class="empty-state">正在加载策略模板...</div></td></tr>
+                    <tr><td colspan="8"><div class="empty-state">正在加载策略模板...</div></td></tr>
                 </tbody>
             </table>
         </div>
@@ -341,6 +342,16 @@
                     <div class="playground-provider-list-empty">正在加载中转站...</div>
                 </div>
             </label>
+            <label class="form-span-2">
+                <span>模型白名单</span>
+                <div class="settings-note">
+                    <strong>白名单规则</strong>
+                    <span>不勾选表示不限制模型；勾选后该 API Key 只能访问所选模型，仍需同时满足中转站授权和路由可用条件。</span>
+                </div>
+                <div class="api-key-provider-selector" id="api-key-model-selector">
+                    <div class="playground-provider-list-empty">正在加载模型...</div>
+                </div>
+            </label>
             <div class="form-actions form-span-2">
                 <button class="btn btn-ghost interactive-btn" id="api-key-form-cancel" type="button">取消</button>
                 <button class="btn btn-accent interactive-btn" id="api-key-submit-btn" type="submit">保存</button>
@@ -451,6 +462,14 @@
             <div class="form-span-2">
                 <span>授权中转站</span>
                 <div class="api-key-provider-selector" id="api-key-template-provider-selector"></div>
+            </div>
+            <div class="form-span-2">
+                <span>模型白名单</span>
+                <div class="settings-note">
+                    <strong>白名单规则</strong>
+                    <span>不勾选表示模板不限制模型；套用模板后会同步覆盖 API Key 的模型白名单。</span>
+                </div>
+                <div class="api-key-provider-selector" id="api-key-template-model-selector"></div>
             </div>
             <div class="form-actions form-span-2">
                 <button class="btn btn-ghost interactive-btn" id="api-key-template-cancel" type="button">取消</button>

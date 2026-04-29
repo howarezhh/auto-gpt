@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.api_client_key import ApiClientKey
+from app.models.api_key_policy_template import ApiKeyPolicyTemplate
 from app.models.model_catalog import ModelCatalog
 from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
@@ -13,6 +14,7 @@ from app.models.user_account import UserAccount
 from app.schemas.model_catalog import ModelCatalogCreate, ModelCatalogUpdate, ModelProviderBindingIn
 from app.services.cache_service import CacheService
 from app.services.provider_service import ProviderService
+from app.utils.json_utils import dumps_json, loads_json
 
 
 class ModelCatalogService:
@@ -75,12 +77,14 @@ class ModelCatalogService:
 
     @staticmethod
     def delete_model(db: Session, catalog: ModelCatalog) -> None:
+        model_name = catalog.model_name
         providers = ProviderService.list_providers(db)
         for provider in providers:
             for provider_model in list(provider.provider_models):
-                if provider_model.model_name == catalog.model_name:
+                if provider_model.model_name == model_name:
                     provider.provider_models.remove(provider_model)
             ProviderService.refresh_provider_state(provider)
+        ModelCatalogService._remove_model_from_authorization_scopes(db, model_name)
         db.delete(catalog)
         db.commit()
         ModelCatalogService.invalidate_model_runtime_cache()
@@ -133,30 +137,38 @@ class ModelCatalogService:
 
     @staticmethod
     def list_user_models(db: Session, *, user: UserAccount) -> list[dict]:
-        provider_ids = ModelCatalogService._collect_user_provider_ids(db, user=user)
-        if not provider_ids:
+        key_scopes = ModelCatalogService._collect_user_route_scopes(db, user=user)
+        if not key_scopes:
             return []
         catalogs, providers = ModelCatalogService._load_catalogs_and_providers(db)
-        allowed_provider_ids = set(provider_ids)
         payloads: list[dict] = []
         for catalog in catalogs:
             if not catalog.enabled:
                 continue
             serialized = ModelCatalogService._serialize_catalog(catalog, providers)
+            allowed_bindings = [
+                binding
+                for binding in serialized["provider_bindings"]
+                if ModelCatalogService._is_binding_routable(binding)
+                and ModelCatalogService._is_model_allowed_for_user_scope(
+                    model_name=catalog.model_name,
+                    provider_id=binding["provider_id"],
+                    key_scopes=key_scopes,
+                )
+            ]
             filtered_names = [
                 binding["provider_name"]
-                for binding in serialized["provider_bindings"]
-                if binding["bound"] and binding["enabled"] and binding["provider_enabled"] and binding["provider_id"] in allowed_provider_ids
+                for binding in allowed_bindings
             ]
             filtered_input_prices = [
                 binding["effective_input_price_per_1k"]
-                for binding in serialized["provider_bindings"]
-                if binding["bound"] and binding["enabled"] and binding["provider_enabled"] and binding["provider_id"] in allowed_provider_ids and binding["effective_input_price_per_1k"] is not None
+                for binding in allowed_bindings
+                if binding["effective_input_price_per_1k"] is not None
             ]
             filtered_output_prices = [
                 binding["effective_output_price_per_1k"]
-                for binding in serialized["provider_bindings"]
-                if binding["bound"] and binding["enabled"] and binding["provider_enabled"] and binding["provider_id"] in allowed_provider_ids and binding["effective_output_price_per_1k"] is not None
+                for binding in allowed_bindings
+                if binding["effective_output_price_per_1k"] is not None
             ]
             if not filtered_names:
                 continue
@@ -216,12 +228,15 @@ class ModelCatalogService:
                     "provider_name": provider.name,
                     "provider_enabled": provider.enabled,
                     "provider_health_status": provider.health_status,
+                    "provider_circuit_state": provider.circuit_state,
+                    "provider_maintenance_mode_enabled": provider.maintenance_mode_enabled,
                     "bound": provider_model is not None,
                     "enabled": provider_model.enabled if provider_model else False,
                     "priority": provider_model.priority if provider_model else 100,
                     "weight": provider_model.weight if provider_model else 100,
                     "price_multiplier": provider_model.price_multiplier if provider_model else 1.0,
                     "model_health_status": provider_model.health_status if provider_model else None,
+                    "model_circuit_state": provider_model.circuit_state if provider_model else None,
                     "effective_input_price_per_1k": effective_input,
                     "effective_output_price_per_1k": effective_output,
                     "direct_input_price_per_1k": provider_model.input_price_per_1k if provider_model else None,
@@ -230,7 +245,7 @@ class ModelCatalogService:
             )
 
         active_bindings = [item for item in bindings if item["bound"]]
-        enabled_bindings = [item for item in active_bindings if item["enabled"] and item["provider_enabled"]]
+        enabled_bindings = [item for item in active_bindings if ModelCatalogService._is_binding_routable(item)]
         input_prices = [item["effective_input_price_per_1k"] for item in enabled_bindings if item["effective_input_price_per_1k"] is not None]
         output_prices = [item["effective_output_price_per_1k"] for item in enabled_bindings if item["effective_output_price_per_1k"] is not None]
         multipliers = [item["price_multiplier"] for item in active_bindings]
@@ -348,7 +363,7 @@ class ModelCatalogService:
         return max(fallback or 1.0, 0.000001)
 
     @staticmethod
-    def _collect_user_provider_ids(db: Session, *, user: UserAccount) -> list[int]:
+    def _collect_user_route_scopes(db: Session, *, user: UserAccount) -> list[dict]:
         owned_keys = list(
             db.scalars(
                 select(ApiClientKey)
@@ -356,9 +371,59 @@ class ModelCatalogService:
                 .where(ApiClientKey.owner_user_id == user.id, ApiClientKey.enabled.is_(True))
             )
         )
-        provider_ids: set[int] = set()
+        scopes = []
         for item in owned_keys:
-            provider_ids.update(binding.provider_id for binding in item.provider_bindings)
+            provider_ids = {binding.provider_id for binding in item.provider_bindings}
             if item.default_provider_id is not None:
                 provider_ids.add(item.default_provider_id)
-        return sorted(provider_ids)
+            if not provider_ids:
+                continue
+            scopes.append(
+                {
+                    "provider_ids": provider_ids,
+                    "allowed_model_names": set(loads_json(item.allowed_model_names_json, [])),
+                }
+            )
+        return scopes
+
+    @staticmethod
+    def _is_model_allowed_for_user_scope(*, model_name: str, provider_id: int, key_scopes: list[dict]) -> bool:
+        for scope in key_scopes:
+            if provider_id not in scope["provider_ids"]:
+                continue
+            allowed_model_names = scope["allowed_model_names"]
+            if not allowed_model_names or model_name in allowed_model_names:
+                return True
+        return False
+
+    @staticmethod
+    def _remove_model_from_authorization_scopes(db: Session, model_name: str) -> None:
+        api_keys = list(db.scalars(select(ApiClientKey)))
+        for api_key in api_keys:
+            allowed_model_names = list(loads_json(api_key.allowed_model_names_json, []))
+            if model_name not in allowed_model_names:
+                continue
+            api_key.allowed_model_names_json = dumps_json(
+                [item for item in allowed_model_names if item != model_name]
+            )
+
+        templates = list(db.scalars(select(ApiKeyPolicyTemplate)))
+        for template in templates:
+            allowed_model_names = list(loads_json(template.allowed_model_names_json, []))
+            if model_name not in allowed_model_names:
+                continue
+            template.allowed_model_names_json = dumps_json(
+                [item for item in allowed_model_names if item != model_name]
+            )
+
+    @staticmethod
+    def _is_binding_routable(binding: dict) -> bool:
+        return (
+            binding["bound"]
+            and binding["enabled"]
+            and binding["provider_enabled"]
+            and not binding.get("provider_maintenance_mode_enabled")
+            and binding.get("provider_circuit_state") != "open"
+            and binding.get("model_circuit_state") != "open"
+            and binding.get("model_health_status") != "unhealthy"
+        )

@@ -16,6 +16,7 @@ from app.models.user_account_billing_record import UserAccountBillingRecord
 from app.schemas.conversation import ConversationReplay, ConversationSummaryItem
 from app.schemas.log import RequestLogOut
 from app.services.api_key_admin_service import ApiKeyAdminService
+from app.services.api_key_service import ApiKeyService
 from app.services.billing_service import BillingService
 from app.services.conversation_service import ConversationService
 from app.services.log_service import LogService
@@ -509,33 +510,60 @@ class UserPortalService:
     ) -> dict:
         owned_api_keys = UserPortalService.list_owned_api_keys(db, user_id=user.id)
         serialized_keys = [ApiKeyAdminService.serialize_api_key(item) for item in owned_api_keys]
-        models = []
-        for item in serialized_keys:
-            provider_ids = set(item["allowed_provider_ids"])
+
+        def collect_models_for_key(api_key: ApiClientKey) -> list[str]:
+            if not api_key.enabled:
+                return []
+            allowed_provider_ids = [binding.provider_id for binding in api_key.provider_bindings]
+            provider_ids = set(allowed_provider_ids)
+            if api_key.default_provider_id is not None:
+                provider_ids.add(api_key.default_provider_id)
+            if not provider_ids:
+                return []
+            names: list[str] = []
             for model in RouterService.get_available_candidates(
                 db,
                 route_context=RoutePolicyContext(
-                    route_mode=item["route_mode"],
-                    default_provider_id=item["default_provider_id"],
-                    manual_allow_fallback=item["manual_allow_fallback"],
-                    allowed_provider_ids=item["allowed_provider_ids"],
+                    route_mode=api_key.route_mode,
+                    default_provider_id=api_key.default_provider_id if api_key.default_provider_id in provider_ids else None,
+                    manual_allow_fallback=api_key.manual_allow_fallback,
+                    allowed_provider_ids=sorted(provider_ids),
                 ),
             ):
                 if model.provider.id not in provider_ids:
                     continue
-                if model.provider_model.model_name not in models:
-                    models.append(model.provider_model.model_name)
-        models = sorted(models)
+                if not ApiKeyService.is_model_allowed(api_key, model.provider_model.model_name):
+                    continue
+                if model.provider_model.model_name not in names:
+                    names.append(model.provider_model.model_name)
+            return sorted(names)
+
+        models = sorted({model_name for api_key in owned_api_keys for model_name in collect_models_for_key(api_key)})
         selected_key = next((item for item in owned_api_keys if item.id == selected_api_key_id), None) or (owned_api_keys[0] if owned_api_keys else None)
-        selected_model = selected_model_name or (models[0] if models else None)
+        if selected_key is not None:
+            models = collect_models_for_key(selected_key)
+        selected_model = selected_model_name if selected_model_name in models else (models[0] if models else None)
         checks: list[dict] = []
         candidates_payload: list[dict] = []
         if selected_key is not None:
             serialized_key = ApiKeyAdminService.serialize_api_key(selected_key)
             checks.append({"label": "密钥状态", "value": serialized_key["status"]})
             checks.append({"label": "授权中转站", "value": len(serialized_key["allowed_provider_ids"])})
+            checks.append({"label": "模型白名单", "value": len(serialized_key["allowed_model_names"]) if serialized_key["allowed_model_names"] else "全部可路由模型"})
             checks.append({"label": "可回显明文", "value": "是" if serialized_key["has_stored_raw_key"] else "否"})
             if selected_model:
+                if not ApiKeyService.is_model_allowed(selected_key, selected_model):
+                    checks.append({"label": "模型白名单", "value": "未授权"})
+                    return {
+                        "owned_api_keys": serialized_keys,
+                        "model_options": models,
+                        "selected_api_key_id": selected_key.id,
+                        "selected_model_name": selected_model,
+                        "checks": checks,
+                        "candidates": [],
+                        "selected_api_key": ApiKeyAdminService.serialize_api_key(selected_key),
+                        "integration_profiles": UserPortalService.build_integration_profiles(serialized_keys),
+                    }
                 route_context = RoutePolicyContext(
                     route_mode=selected_key.route_mode,
                     default_provider_id=selected_key.default_provider_id,

@@ -93,7 +93,7 @@ class RouterService:
             for provider_model in provider.provider_models:
                 if not provider_model.enabled:
                     continue
-                if enabled_model_names and provider_model.model_name not in enabled_model_names:
+                if provider_model.model_name not in enabled_model_names:
                     continue
                 if model_name and provider_model.model_name != model_name:
                     continue

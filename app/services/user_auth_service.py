@@ -26,6 +26,7 @@ USER_ROLE_USER = "user"
 class UserAuthService:
     ADMIN_PORTAL_PREFIXES = (
         "/providers",
+        "/models",
         "/settings",
         "/playground",
         "/docs",

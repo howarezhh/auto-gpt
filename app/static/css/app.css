@@ -2289,6 +2289,23 @@ textarea.field-input {
     gap: 16px;
 }
 
+#playground-single {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: stretch;
+}
+
+#playground-single > .panel-card {
+    min-width: 0;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+}
+
+#playground-single .playground-output-empty,
+#playground-single .playground-output-view {
+    flex: 1 1 auto;
+}
+
 .playground-stack {
     display: grid;
     gap: 16px;
@@ -2568,6 +2585,139 @@ textarea.field-input {
     font-size: 13px;
     line-height: 1.6;
     word-break: break-word;
+}
+
+.playground-batch-summary-grid {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.playground-batch-summary-item {
+    padding: 14px 16px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: linear-gradient(180deg, #fbfcff 0%, #f7faff 100%);
+}
+
+.playground-batch-summary-item span,
+.playground-batch-summary-item strong {
+    display: block;
+}
+
+.playground-batch-summary-item span {
+    color: var(--muted);
+    font-size: 13px;
+}
+
+.playground-batch-summary-item strong {
+    margin-top: 8px;
+    color: var(--text);
+    font-size: 28px;
+    line-height: 1.1;
+}
+
+.playground-batch-filter-toolbar {
+    margin-bottom: 16px;
+}
+
+.playground-batch-filter-toolbar label {
+    display: grid;
+    gap: 8px;
+}
+
+.playground-batch-result-list {
+    display: grid;
+    gap: 14px;
+}
+
+.playground-batch-list-item {
+    padding: 16px 18px;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    background: linear-gradient(180deg, #ffffff 0%, #fbfcff 100%);
+}
+
+.playground-batch-provider-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
+    margin-bottom: 14px;
+}
+
+.playground-batch-provider-grid div {
+    padding: 12px 14px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--surface-soft) 70%, #fff);
+}
+
+.playground-batch-provider-grid span,
+.playground-batch-provider-grid strong {
+    display: block;
+}
+
+.playground-batch-provider-grid span {
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.playground-batch-provider-grid strong {
+    margin-top: 6px;
+    color: var(--text);
+    font-size: 18px;
+    line-height: 1.35;
+}
+
+.playground-batch-provider-note {
+    margin-bottom: 14px;
+    color: var(--muted);
+    font-size: 14px;
+    line-height: 1.7;
+    word-break: break-word;
+}
+
+.playground-batch-model-table {
+    display: grid;
+    gap: 10px;
+}
+
+.playground-batch-model-table-head,
+.playground-batch-model-row {
+    display: grid;
+    grid-template-columns: minmax(140px, 1.1fr) 108px minmax(150px, 1fr) minmax(180px, 1.15fr) minmax(220px, 1.45fr);
+    gap: 12px;
+    align-items: start;
+}
+
+.playground-batch-model-table-head {
+    padding: 0 10px 6px;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.playground-batch-model-row {
+    padding: 12px 14px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: linear-gradient(180deg, #fbfcff 0%, #f7faff 100%);
+    font-size: 13px;
+    line-height: 1.65;
+    color: var(--text);
+}
+
+.playground-batch-model-row strong {
+    font-size: 14px;
+    line-height: 1.5;
+}
+
+.playground-batch-model-row span {
+    word-break: break-word;
+}
+
+.playground-batch-pagination-bar {
+    margin-top: 16px;
 }
 
 .playground-token-label {
@@ -4701,6 +4851,8 @@ html[data-theme="dark"] .users-empty-state p {
     .settings-switch-grid,
     .conversation-summary-grid,
     .playground-token-grid,
+    .playground-batch-summary-grid,
+    .playground-batch-provider-grid,
     .provider-telemetry-grid,
     .api-key-detail-info-grid,
     .api-key-quota-meta,
@@ -4724,6 +4876,14 @@ html[data-theme="dark"] .users-empty-state p {
     }
 
     .provider-model-custom-row {
+        grid-template-columns: 1fr;
+    }
+
+    .playground-batch-model-table-head {
+        display: none;
+    }
+
+    .playground-batch-model-row {
         grid-template-columns: 1fr;
     }
 
@@ -5757,5 +5917,166 @@ html[data-theme="dark"] .nav-link.active {
 @media (max-width: 480px) {
     .app-shell {
         width: calc(100% - 16px);
+    }
+}
+
+/* 2026-04-29 adaptive fill: cards and dense grids should consume available workspace. */
+.content > * {
+    min-width: 0;
+}
+
+.hero-panel,
+.page-heading,
+.panel-card,
+.metric-card,
+.provider-card,
+.summary-list-card,
+.risk-card,
+.stage-card,
+.route-mode-card,
+.settings-switch-card,
+.api-key-chip-card,
+.api-key-telemetry-card,
+.api-key-error-card,
+.conversation-summary-card,
+.user-key-object-card,
+.doc-card {
+    width: 100%;
+    min-width: 0;
+}
+
+.stats-grid,
+.provider-grid,
+.settings-switch-grid,
+.provider-switch-grid,
+.route-mode-cards,
+.conversation-summary-grid,
+.api-key-detail-info-grid,
+.user-key-summary-band,
+.user-key-object-meta,
+.user-key-provider-selector,
+.doc-callout-grid,
+.doc-grid-2,
+.doc-grid-3,
+.docs-scenario-grid,
+.docs-module-grid,
+.docs-ops-grid {
+    width: 100%;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
+}
+
+.stats-grid {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr));
+}
+
+.user-key-summary-band,
+.conversation-summary-grid {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr));
+}
+
+.provider-grid,
+.settings-switch-grid,
+.provider-switch-grid,
+.route-mode-cards,
+.api-key-detail-info-grid,
+.user-key-provider-selector {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
+}
+
+.form-grid,
+.filter-grid,
+.table-toolbar.filter-toolbar {
+    width: 100%;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
+}
+
+.form-grid > *,
+.filter-grid > *,
+.stats-grid > *,
+.provider-grid > *,
+.settings-switch-grid > *,
+.provider-switch-grid > *,
+.route-mode-cards > *,
+.conversation-summary-grid > *,
+.api-key-detail-info-grid > *,
+.user-key-summary-band > *,
+.user-key-object-meta > *,
+.user-key-provider-selector > *,
+.doc-callout-grid > *,
+.doc-grid-2 > *,
+.doc-grid-3 > *,
+.docs-scenario-grid > *,
+.docs-module-grid > *,
+.docs-ops-grid > * {
+    min-width: 0;
+}
+
+.dashboard-layout,
+.dashboard-command-grid,
+.docs-command-grid,
+.docs-command-grid-secondary,
+.user-key-workspace,
+.playground-grid,
+.conversation-shell {
+    width: 100%;
+    grid-template-columns: minmax(0, 1fr) minmax(min(100%, 320px), clamp(320px, 26vw, 440px));
+}
+
+.dashboard-layout > *,
+.dashboard-command-grid > *,
+.docs-command-grid > *,
+.docs-command-grid-secondary > *,
+.user-key-workspace > *,
+.playground-grid > *,
+.conversation-shell > * {
+    min-width: 0;
+}
+
+.form-span-2,
+.form-grid .form-span-2 {
+    grid-column: 1 / -1;
+}
+
+.panel-card,
+.metric-card,
+.provider-card,
+.summary-list-card,
+.settings-switch-card,
+.user-key-object-card,
+.api-key-chip-card,
+.conversation-summary-card,
+.doc-card {
+    overflow-wrap: anywhere;
+}
+
+@media (min-width: 1600px) {
+    .stats-grid {
+        grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+    }
+
+    .provider-grid,
+    .settings-switch-grid,
+    .provider-switch-grid,
+    .route-mode-cards,
+    .api-key-detail-info-grid,
+    .doc-callout-grid,
+    .doc-grid-2,
+    .doc-grid-3,
+    .docs-scenario-grid,
+    .docs-module-grid,
+    .docs-ops-grid {
+        grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
+    }
+}
+
+@media (max-width: 992px) {
+    .dashboard-layout,
+    .dashboard-command-grid,
+    .docs-command-grid,
+    .docs-command-grid-secondary,
+    .user-key-workspace,
+    .playground-grid,
+    .conversation-shell {
+        grid-template-columns: 1fr;
     }
 }
