@@ -1,230 +1,135 @@
 {% extends "base.html" %}
 {% block content %}
-<section class="hero-panel hero-panel-compact cockpit-hero provider-cockpit-hero">
-    <div class="cockpit-hero-copy">
-        <div class="eyebrow">中转站管理</div>
-        <h2>中转站管理</h2>
-        <p>管理上游中转地址、模型、优先级与健康状态，作为统一代理的上游资源池。</p>
+<section class="panel-card section-shell">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">中转站管理</div>
+            <h1>中转站对象目录与治理总览</h1>
+        </div>
         <div class="hero-actions">
             <button class="btn btn-accent interactive-btn" id="add-provider-btn" type="button">新增中转站</button>
             <button class="btn btn-ghost interactive-btn" id="providers-check-all-btn" type="button">检查全部</button>
         </div>
     </div>
-    <div class="cockpit-hero-aside provider-hero-aside" id="providers-summary-card">
-        <div class="cockpit-aside-label">渠道脉冲</div>
-        <div class="cockpit-aside-value">0</div>
-        <div class="cockpit-aside-copy">当前已启用中转站</div>
-        <div class="cockpit-health-bar"><span class="cockpit-health-fill-empty"></span></div>
-        <div class="cockpit-aside-meta">
-            <span>模型 0</span>
-            <span>支持流式 0</span>
-        </div>
-    </div>
+    <section class="provider-telemetry-grid" id="provider-telemetry-grid" aria-label="中转站摘要指标">
+        {% for card in provider_telemetry_cards %}
+        <article class="metric-card">
+            <span>{{ card.label }}</span>
+            <strong data-provider-stat="{{ card.id }}">{{ card.value }}</strong>
+        </article>
+        {% endfor %}
+    </section>
 </section>
 
-<section class="provider-telemetry-grid" id="provider-telemetry-grid">
-    <article class="metric-card">
-        <span>中转站总数</span>
-        <strong data-provider-stat="provider_count">0</strong>
-    </article>
-    <article class="metric-card">
-        <span>已启用中转站</span>
-        <strong data-provider-stat="enabled_provider_count">0</strong>
-    </article>
-    <article class="metric-card">
-        <span>模型总数</span>
-        <strong data-provider-stat="model_count">0</strong>
-    </article>
-    <article class="metric-card">
-        <span>支持 Stream</span>
-        <strong data-provider-stat="stream_model_count">0</strong>
-    </article>
-    <article class="metric-card">
-        <span>支持 Vision</span>
-        <strong data-provider-stat="vision_model_count">0</strong>
-    </article>
-    <article class="metric-card">
-        <span>已配置单价</span>
-        <strong data-provider-stat="priced_model_count">0</strong>
-    </article>
-    <article class="metric-card">
-        <span>平均稳定性</span>
-        <strong data-provider-stat="avg_stability_score">0</strong>
-    </article>
-</section>
+<nav class="page-anchor-bar provider-anchor-bar" aria-label="中转站页面导航">
+    <a class="page-anchor-link" href="#provider-registry-section">对象目录</a>
+    <a class="page-anchor-link" href="#provider-availability-section">可用率曲线</a>
+    <a class="page-anchor-link" href="#provider-model-section">挂载矩阵</a>
+</nav>
 
-<section class="panel-card section-shell">
+<section class="panel-card section-shell provider-registry-panel anchor-section-offset" id="provider-registry-section">
     <div class="section-subhead">
         <div>
-            <div class="panel-kicker">对象管理流程</div>
-            <h3>中转站从录入到上线的四个步骤</h3>
+            <div class="panel-kicker">对象目录</div>
+            <h2>中转站对象目录</h2>
         </div>
     </div>
-    <div class="stage-grid">
-        <article class="stage-card">
-            <strong>1. 录入基础信息</strong>
-            <span>填写名称、Base URL、密钥、优先级、权重和超时，明确这是哪个上游对象。</span>
-        </article>
-        <article class="stage-card">
-            <strong>2. 绑定模型能力</strong>
-            <span>为该对象挂载模型、能力标记与每百万 token 价格，避免能力声明和价格口径漂移。</span>
-        </article>
-        <article class="stage-card">
-            <strong>3. 做健康与单模型验证</strong>
-            <span>先做单对象、单模型测试，再判断是否放进正式路由池，而不是直接对外放量。</span>
-        </article>
-        <article class="stage-card">
-            <strong>4. 上线后持续巡检</strong>
-            <span>通过健康状态、熔断状态和模型矩阵持续观察对象质量，及时处理退化对象。</span>
-        </article>
-    </div>
-</section>
-
-<section class="provider-command-grid">
-    <div class="panel-card section-shell provider-registry-panel">
-        <div class="section-subhead">
-            <div>
-                <div class="panel-kicker">对象目录</div>
-                <h3>中转站对象目录</h3>
-            </div>
-        </div>
-        <div class="table-toolbar provider-toolbar">
-            <input class="field-input search-input" id="provider-search" type="search" placeholder="搜索名称、URL、模型">
-        </div>
-        <div class="table-shell">
-            <table class="data-table">
-                <thead>
-                    <tr>
-                        <th>名称</th>
-                        <th>分组 / 地区</th>
-                        <th>Base URL</th>
-                        <th>模型</th>
-                        <th>状态</th>
-                        <th>熔断</th>
-                        <th>维护 / 策略</th>
-                        <th>成本</th>
-                        <th>质量</th>
-                        <th>优先级</th>
-                        <th>权重</th>
-                        <th>操作</th>
-                    </tr>
-                </thead>
-                <tbody id="provider-table-body"></tbody>
-            </table>
+    <div class="provider-toolbar provider-toolbar-stacked">
+        <div class="table-toolbar filter-toolbar provider-toolbar-actions">
+            <label class="visually-hidden" for="provider-search">搜索中转站对象</label>
+            <input class="field-input search-input provider-search-input" id="provider-search" type="search" placeholder="搜索名称、URL、模型、地区、备注">
         </div>
     </div>
-
-    <div class="provider-command-side">
-        <div class="panel-card">
-            <div class="panel-head">
-                <div>
-                    <div class="panel-kicker">对象画像</div>
-                    <h3>模型能力总览</h3>
-                </div>
-            </div>
-            <div class="dashboard-signal-list" id="provider-capability-list">
-                <div><span>Stream 模型</span><strong>0</strong></div>
-                <div><span>Vision 模型</span><strong>0</strong></div>
-                <div><span>已配置单价</span><strong>0</strong></div>
-                <div><span>健康模型</span><strong>0</strong></div>
-                <div><span>异常模型</span><strong>0</strong></div>
-            </div>
-        </div>
-
-        <div class="panel-card">
-            <div class="panel-head">
-                <div>
-                    <div class="panel-kicker">管理规则</div>
-                    <h3>录入与调度提醒</h3>
-                </div>
-            </div>
-            <div class="dashboard-signal-list">
-                <div><span>模型配置</span><strong>优先使用预设，避免拼写漂移</strong></div>
-                <div><span>权重策略</span><strong>同模型多副本时再拉开差异</strong></div>
-                <div><span>Vision 能力</span><strong>只给确实支持图片的模型开启</strong></div>
-                <div><span>测试建议</span><strong>新增线路后先做单模型测试再启用</strong></div>
-            </div>
-        </div>
+    <div class="table-shell provider-table-shell">
+        <table class="data-table provider-data-table">
+            <thead>
+                <tr>
+                    <th>名称</th>
+                    <th>分组 / 地区</th>
+                    <th>Base URL</th>
+                    <th>模型</th>
+                    <th>状态</th>
+                    <th>熔断</th>
+                    <th>维护 / 策略</th>
+                    <th>成本</th>
+                    <th>质量</th>
+                    <th>优先级</th>
+                    <th>权重</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody id="provider-table-body"></tbody>
+        </table>
     </div>
 </section>
 
-<section class="dashboard-command-grid anchor-section-offset">
-    <div class="panel-card section-shell">
-        <div class="section-subhead">
-            <div>
-                <div class="panel-kicker">历史可用率</div>
-                <h3>对象可用率曲线</h3>
-            </div>
+<section class="panel-card section-shell provider-availability-panel anchor-section-offset" id="provider-availability-section">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">历史可用率</div>
+            <h2>对象可用率曲线</h2>
         </div>
-        <div class="table-toolbar">
+    </div>
+    <div class="table-toolbar filter-toolbar provider-availability-toolbar">
+        <div class="field-stack">
+            <label class="visually-hidden" for="provider-availability-provider">选择中转站</label>
             <select class="field-input" id="provider-availability-provider">
                 <option value="">请选择一个中转站</option>
             </select>
+        </div>
+        <div class="field-stack">
+            <label class="visually-hidden" for="provider-availability-window">选择时间窗口</label>
             <select class="field-input" id="provider-availability-window">
                 <option value="24">最近 24 小时</option>
                 <option value="72">最近 72 小时</option>
                 <option value="168">最近 7 天</option>
             </select>
+        </div>
+        <div class="field-stack">
+            <label class="visually-hidden" for="provider-availability-bucket">选择时间粒度</label>
             <select class="field-input" id="provider-availability-bucket">
                 <option value="30">30 分钟粒度</option>
                 <option value="60" selected>1 小时粒度</option>
                 <option value="180">3 小时粒度</option>
             </select>
-            <button class="btn btn-ghost interactive-btn" id="provider-availability-refresh-btn" type="button">刷新曲线</button>
         </div>
-        <div class="table-shell">
-            <table class="data-table">
-                <thead>
-                    <tr>
-                        <th>时间桶</th>
-                        <th>请求数</th>
-                        <th>成功数</th>
-                        <th>失败数</th>
-                        <th>成功率</th>
-                        <th>平均延迟</th>
-                    </tr>
-                </thead>
-                <tbody id="provider-availability-table-body">
-                    <tr><td colspan="6"><div class="empty-state">请选择中转站后查看历史可用率。</div></td></tr>
-                </tbody>
-            </table>
-        </div>
+        <button class="btn btn-ghost interactive-btn" id="provider-availability-refresh-btn" type="button">刷新曲线</button>
     </div>
-
-    <div class="provider-command-side">
-        <div class="panel-card">
-            <div class="panel-head">
-                <div>
-                    <div class="panel-kicker">治理扩展</div>
-                    <h3>新增治理维度</h3>
-                </div>
-            </div>
-            <div class="dashboard-signal-list">
-                <div><span>渠道分组</span><strong>便于按上游来源或业务线分层</strong></div>
-                <div><span>地区标签</span><strong>便于区分地域、机房或出海线路</strong></div>
-                <div><span>维护窗口</span><strong>提醒当前对象是否处于维护状态</strong></div>
-                <div><span>自动摘除 / 恢复</span><strong>支持按对象覆盖全局阈值与恢复策略</strong></div>
-            </div>
-        </div>
+    <div class="table-shell provider-table-shell">
+        <table class="data-table provider-data-table">
+            <thead>
+                <tr>
+                    <th>时间桶</th>
+                    <th>请求数</th>
+                    <th>成功数</th>
+                    <th>失败数</th>
+                    <th>成功率</th>
+                    <th>平均延迟</th>
+                </tr>
+            </thead>
+            <tbody id="provider-availability-table-body">
+                <tr><td colspan="6"><div class="empty-state">请选择中转站后查看历史可用率。</div></td></tr>
+            </tbody>
+        </table>
     </div>
 </section>
 
-<section class="panel-card section-shell provider-model-panel">
+<section class="panel-card section-shell provider-model-panel anchor-section-offset" id="provider-model-section">
     <div class="section-subhead">
         <div>
             <div class="panel-kicker">对象挂载</div>
-            <h3>中转站模型矩阵</h3>
+            <h2>中转站模型挂载矩阵</h2>
         </div>
     </div>
-    <div class="table-shell">
-        <table class="data-table">
+    <div class="table-shell provider-table-shell">
+        <table class="data-table provider-data-table">
             <thead>
                 <tr>
                     <th>中转站</th>
                     <th>模型</th>
                     <th>健康</th>
                     <th>能力</th>
-                    <th>价格</th>
+                    <th>倍率 / 价格</th>
                     <th>质量</th>
                     <th>优先级</th>
                     <th>权重</th>
@@ -237,67 +142,70 @@
     </div>
 </section>
 
-<div class="modal-shell hidden" id="provider-modal">
-    <div class="modal-card modal-lg">
+<div class="modal-shell hidden" id="provider-modal" aria-hidden="true">
+    <div class="modal-card modal-lg provider-modal-card" role="dialog" aria-modal="true" aria-labelledby="provider-modal-title" tabindex="-1">
         <div class="modal-head">
-            <h3 id="provider-modal-title">新增中转站</h3>
-            <button class="icon-btn interactive-btn" id="provider-modal-close" type="button">×</button>
+            <div>
+                <div class="panel-kicker">对象编辑</div>
+                <h2 id="provider-modal-title">新增中转站</h2>
+            </div>
+            <button class="icon-btn interactive-btn" id="provider-modal-close" type="button" aria-label="关闭中转站表单">×</button>
         </div>
         <form id="provider-form" class="form-grid">
             <input id="provider-id" type="hidden">
-            <label>
+            <label for="provider-name">
                 <span>名称</span>
                 <input class="field-input" id="provider-name" required>
             </label>
-            <label>
+            <label for="provider-base-url">
                 <span>Base URL</span>
-                <input class="field-input" id="provider-base-url" placeholder="https://example.com/v1" required>
+                <input class="field-input" id="provider-base-url" type="url" placeholder="https://example.com/v1" required>
             </label>
-            <label>
+            <label for="provider-api-key">
                 <span>API 密钥</span>
                 <input class="field-input" id="provider-api-key" placeholder="新增时必填；编辑时留空表示不修改">
             </label>
-            <label>
+            <label for="provider-type">
                 <span>类型</span>
                 <input class="field-input" id="provider-type" value="openai_compatible">
             </label>
-            <label>
+            <label for="provider-group-name">
                 <span>渠道分组</span>
                 <input class="field-input" id="provider-group-name" placeholder="例如：OpenAI 官方 / 第三方聚合">
             </label>
-            <label>
+            <label for="provider-region-tag">
                 <span>地区标签</span>
                 <input class="field-input" id="provider-region-tag" placeholder="例如：us-east / hk / sg">
             </label>
-            <label>
+            <label for="provider-priority">
                 <span>优先级</span>
-                <input class="field-input" id="provider-priority" type="number" value="100">
+                <input class="field-input" id="provider-priority" type="number" inputmode="numeric" value="100">
             </label>
-            <label>
+            <label for="provider-weight">
                 <span>权重</span>
-                <input class="field-input" id="provider-weight" type="number" value="100">
+                <input class="field-input" id="provider-weight" type="number" inputmode="numeric" value="100">
             </label>
-            <label>
+            <label for="provider-timeout-ms">
                 <span>超时毫秒</span>
-                <input class="field-input" id="provider-timeout-ms" type="number" value="30000">
+                <input class="field-input" id="provider-timeout-ms" type="number" inputmode="numeric" value="30000">
             </label>
-            <label>
+            <label for="provider-max-retries">
                 <span>最大重试次数</span>
-                <input class="field-input" id="provider-max-retries" type="number" value="1">
+                <input class="field-input" id="provider-max-retries" type="number" inputmode="numeric" value="1">
             </label>
-            <label class="form-span-2">
+            <label class="form-span-2" for="provider-maintenance-window">
                 <span>维护窗口</span>
                 <input class="field-input" id="provider-maintenance-window" placeholder="例如：每周日 02:00-04:00 UTC，或按需维护说明">
             </label>
-            <label class="form-span-2">
-                <span>模型配置</span>
+            <label class="form-span-2" for="provider-models">
+                <span>模型挂载</span>
                 <div class="settings-note provider-model-note">
-                    <strong>填写方式</strong>
-                    <span>每行一个模型，格式：模型名|优先级|权重|stream(y/n)|vision(y/n)|enabled(y/n)|输入单价/1M|输出单价/1M。系统会自动按每百万 token 换算展示并按每千 token 存储。例如：gpt-4o-mini|100|100|y|n|y|0.5|1.5。</span>
+                    <strong>统一管理</strong>
+                    <span>模型基础价格、展示名、速度标签和全局启用状态统一在“模型配置”页面维护；当前页面仅负责把模型挂载到中转站，并设置优先级、权重与能力标记。</span>
                 </div>
                 <div class="settings-note provider-model-note">
-                    <strong>拉取上游模型</strong>
-                    <span>可直接根据当前 Base URL 和 API 密钥请求上游 <code>/models</code>，勾选后把选中的一个、多个或全部模型导入到当前中转站模型配置。</span>
+                    <strong>上游发现</strong>
+                    <span>可直接请求上游 <code>/models</code>，把一个、多个或全部模型导入当前中转站挂载列表；保存后会自动同步到统一模型目录。</span>
                 </div>
                 <div class="provider-model-custom-row">
                     <button class="btn btn-ghost interactive-btn" id="provider-discover-models-btn" type="button">获取可用模型</button>
@@ -305,7 +213,7 @@
                     <button class="btn btn-ghost interactive-btn" id="provider-import-all-models-btn" type="button">添加全部模型</button>
                 </div>
                 <div class="table-shell provider-discovered-model-shell">
-                    <table class="data-table">
+                    <table class="data-table provider-data-table">
                         <thead>
                             <tr>
                                 <th><input id="provider-discovered-models-check-all" type="checkbox" aria-label="选择全部上游模型"></th>
@@ -315,7 +223,7 @@
                             </tr>
                         </thead>
                         <tbody id="provider-discovered-models-body">
-                            <tr><td colspan="4"><div class="empty-state">点击“获取可用模型”后可把上游返回的模型一键导入当前配置。</div></td></tr>
+                            <tr><td colspan="4"><div class="empty-state">点击“获取可用模型”后可把上游返回的模型一键导入当前挂载列表。</div></td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -333,40 +241,65 @@
                     </div>
                 </div>
                 <div class="provider-model-custom-row">
+                    <label class="visually-hidden" for="provider-custom-model-name">输入自定义模型名</label>
                     <input class="field-input" id="provider-custom-model-name" placeholder="输入自定义模型名，例如 gpt-4.1-mini" type="text">
                     <button class="btn btn-ghost interactive-btn" id="provider-add-custom-model" type="button">添加自定义模型</button>
                 </div>
-                <textarea class="field-input" id="provider-models" rows="5" placeholder="每行一个模型，格式：模型名|优先级|权重|stream(y/n)|vision(y/n)|enabled(y/n)|输入单价/1M|输出单价/1M&#10;例如：gpt-4o-mini|100|100|y|n|y|0.5|1.5"></textarea>
+                <textarea class="field-input provider-model-textarea" id="provider-models" rows="5" placeholder="每行一个模型，格式：模型名|优先级|权重|stream(y/n)|vision(y/n)|enabled(y/n)&#10;例如：gpt-4o-mini|100|100|y|n|y"></textarea>
             </label>
-            <label class="form-span-2">
+            <label class="form-span-2" for="provider-remark">
                 <span>备注</span>
                 <textarea class="field-input" id="provider-remark" rows="3"></textarea>
             </label>
-            <label class="toggle-row form-span-2">
-                <input id="provider-enabled" type="checkbox" checked>
-                <span>启用该中转站</span>
-            </label>
-            <div class="form-dual-check form-span-2">
-                <label class="toggle-row">
-                    <input id="provider-maintenance-mode-enabled" type="checkbox">
-                    <span>当前处于维护模式</span>
+            <div class="settings-switch-grid form-span-2 provider-switch-grid">
+                <label class="settings-switch-card" for="provider-enabled">
+                    <span class="settings-switch-copy">
+                        <strong>启用该中转站</strong>
+                        <small>关闭后不会再进入正式路由候选池。</small>
+                    </span>
+                    <span class="settings-switch-control">
+                        <input id="provider-enabled" type="checkbox" checked>
+                        <span class="settings-switch-slider" aria-hidden="true"></span>
+                    </span>
                 </label>
-                <label class="toggle-row">
-                    <input id="provider-auto-circuit-break-enabled" type="checkbox" checked>
-                    <span>启用自动摘除</span>
+                <label class="settings-switch-card" for="provider-maintenance-mode-enabled">
+                    <span class="settings-switch-copy">
+                        <strong>当前处于维护模式</strong>
+                        <small>维护中的对象会显式标记，避免被误判成长期异常。</small>
+                    </span>
+                    <span class="settings-switch-control">
+                        <input id="provider-maintenance-mode-enabled" type="checkbox">
+                        <span class="settings-switch-slider" aria-hidden="true"></span>
+                    </span>
                 </label>
-                <label class="toggle-row">
-                    <input id="provider-auto-recover-enabled" type="checkbox" checked>
-                    <span>启用自动恢复</span>
+                <label class="settings-switch-card" for="provider-auto-circuit-break-enabled">
+                    <span class="settings-switch-copy">
+                        <strong>启用自动摘除</strong>
+                        <small>对象连续失败达到阈值后自动熔断，降低错误放大。</small>
+                    </span>
+                    <span class="settings-switch-control">
+                        <input id="provider-auto-circuit-break-enabled" type="checkbox" checked>
+                        <span class="settings-switch-slider" aria-hidden="true"></span>
+                    </span>
+                </label>
+                <label class="settings-switch-card" for="provider-auto-recover-enabled">
+                    <span class="settings-switch-copy">
+                        <strong>启用自动恢复</strong>
+                        <small>恢复探测成功后自动把对象重新纳入可用候选。</small>
+                    </span>
+                    <span class="settings-switch-control">
+                        <input id="provider-auto-recover-enabled" type="checkbox" checked>
+                        <span class="settings-switch-slider" aria-hidden="true"></span>
+                    </span>
                 </label>
             </div>
-            <label>
+            <label for="provider-circuit-breaker-threshold-override">
                 <span>失败阈值覆盖</span>
-                <input class="field-input" id="provider-circuit-breaker-threshold-override" type="number" min="0" placeholder="留空表示沿用全局阈值">
+                <input class="field-input" id="provider-circuit-breaker-threshold-override" type="number" inputmode="numeric" min="0" placeholder="留空表示沿用全局阈值">
             </label>
-            <label>
+            <label for="provider-recovery-probe-interval-override">
                 <span>恢复探测间隔覆盖</span>
-                <input class="field-input" id="provider-recovery-probe-interval-override" type="number" min="0" placeholder="留空表示沿用全局间隔（秒）">
+                <input class="field-input" id="provider-recovery-probe-interval-override" type="number" inputmode="numeric" min="0" placeholder="留空表示沿用全局间隔（秒）">
             </label>
             <div class="form-actions form-span-2">
                 <button class="btn btn-ghost interactive-btn" id="provider-form-cancel" type="button">取消</button>
@@ -376,19 +309,22 @@
     </div>
 </div>
 
-<div class="modal-shell hidden" id="provider-credential-modal">
-    <div class="modal-card">
+<div class="modal-shell hidden" id="provider-credential-modal" aria-hidden="true">
+    <div class="modal-card provider-modal-card" role="dialog" aria-modal="true" aria-labelledby="provider-credential-modal-title" tabindex="-1">
         <div class="modal-head">
-            <h3 id="provider-credential-modal-title">轮换中转站凭据</h3>
-            <button class="icon-btn interactive-btn" id="provider-credential-modal-close" type="button">×</button>
+            <div>
+                <div class="panel-kicker">凭据轮换</div>
+                <h2 id="provider-credential-modal-title">轮换中转站凭据</h2>
+            </div>
+            <button class="icon-btn interactive-btn" id="provider-credential-modal-close" type="button" aria-label="关闭凭据轮换窗口">×</button>
         </div>
         <form id="provider-credential-form" class="form-grid">
             <input id="provider-credential-provider-id" type="hidden">
-            <label class="form-span-2">
+            <label class="form-span-2" for="provider-credential-api-key">
                 <span>新 API 密钥</span>
                 <input class="field-input" id="provider-credential-api-key" required placeholder="输入新的上游 API Key">
             </label>
-            <label class="form-span-2">
+            <label class="form-span-2" for="provider-credential-hint">
                 <span>凭据备注</span>
                 <input class="field-input" id="provider-credential-hint" placeholder="例如：2026-04-26 轮换到供应商新密钥">
             </label>
@@ -400,11 +336,14 @@
     </div>
 </div>
 
-<div class="modal-shell hidden" id="provider-test-result-modal">
-    <div class="modal-card modal-lg">
+<div class="modal-shell hidden" id="provider-test-result-modal" aria-hidden="true">
+    <div class="modal-card modal-lg provider-modal-card" role="dialog" aria-modal="true" aria-labelledby="provider-test-result-modal-title" tabindex="-1">
         <div class="modal-head">
-            <h3 id="provider-test-result-modal-title">测试结果</h3>
-            <button class="icon-btn interactive-btn" id="provider-test-result-modal-close" type="button">×</button>
+            <div>
+                <div class="panel-kicker">测试回放</div>
+                <h2 id="provider-test-result-modal-title">测试结果</h2>
+            </div>
+            <button class="icon-btn interactive-btn" id="provider-test-result-modal-close" type="button" aria-label="关闭测试结果窗口">×</button>
         </div>
         <div id="provider-test-result-modal-content"></div>
     </div>

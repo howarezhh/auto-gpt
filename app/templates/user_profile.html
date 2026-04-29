@@ -39,7 +39,6 @@
     <a class="page-anchor-link" href="#user-profile-overview">账号概览</a>
     <a class="page-anchor-link" href="#user-profile-basic">基础资料</a>
     <a class="page-anchor-link" href="#user-profile-security">密码与安全</a>
-    <a class="page-anchor-link" href="#user-profile-actions">下一步动作</a>
 </nav>
 
 <section class="stats-grid anchor-section-offset" id="user-profile-overview">
@@ -68,10 +67,6 @@
                 <span>邮箱</span>
                 <input class="field-input" name="email" type="email" value="{{ current_user.email }}" required>
             </label>
-            <div class="settings-note form-span-2">
-                <strong>资料同步范围</strong>
-                <span>这里修改的是登录账号本身，不会改动 API Key、路由授权和外部接入配置。</span>
-            </div>
             <div class="form-actions form-span-2">
                 <button class="btn btn-accent" type="submit">保存资料</button>
             </div>
@@ -119,67 +114,10 @@
                 <span>确认新密码</span>
                 <input class="field-input" name="confirm_password" type="password" required>
             </label>
-            <div class="settings-note form-span-2">
-                <strong>安全提醒</strong>
-                <span>修改的是浏览器登录密码，不会自动轮换你已经发放给外部系统的 API Key。若怀疑密钥泄露，请到独立密钥页执行轮换。</span>
-            </div>
             <div class="form-actions form-span-2">
                 <button class="btn btn-accent" type="submit">更新密码</button>
             </div>
         </form>
-    </div>
-
-    <div class="dashboard-command-side">
-        <div class="panel-card">
-            <div class="panel-head">
-                <div>
-                    <div class="panel-kicker">安全建议</div>
-                    <h3>建议动作</h3>
-                </div>
-            </div>
-            <div class="risk-grid">
-                <article class="risk-card" data-level="warning">
-                    <strong>定期改密</strong>
-                    <span>建议在账号多人协作或设备变更后立即更新登录密码。</span>
-                </article>
-                <article class="risk-card" data-level="danger">
-                    <strong>密钥泄露不靠改密解决</strong>
-                    <span>若外部 API Key 已暴露，必须去密钥页执行轮换，单独修改登录密码不能让旧密钥失效。</span>
-                </article>
-                <article class="risk-card" data-level="default">
-                    <strong>先自检再上线</strong>
-                    <span>资料或密码调整后，如需继续接入，建议回到自检页用当前密钥真实跑一次最短请求。</span>
-                </article>
-            </div>
-        </div>
-    </div>
-</section>
-
-<section class="dashboard-command-grid anchor-section-offset" id="user-profile-actions">
-    <div class="panel-card section-shell">
-        <div class="section-subhead">
-            <div>
-                <div class="panel-kicker">下一步动作</div>
-                <h3>从账号安全跳转到接入主路径</h3>
-            </div>
-        </div>
-        <div class="stage-grid">
-            <article class="stage-card">
-                <strong>1. 管理 API Key</strong>
-                <span>创建、编辑、轮换和删除用户侧 API Key，集中处理授权中转站和路由模式。</span>
-                <a class="btn btn-ghost btn-sm interactive-btn" href="/user/api-keys" data-shell-link>打开密钥管理</a>
-            </article>
-            <article class="stage-card">
-                <strong>2. 做接入自检</strong>
-                <span>选择你准备上线的密钥和模型，先跑一次真实测试，确认路由候选和返回质量。</span>
-                <a class="btn btn-ghost btn-sm interactive-btn" href="/user/self-test" data-shell-link>打开接入自检</a>
-            </article>
-            <article class="stage-card">
-                <strong>3. 排查请求问题</strong>
-                <span>若线上调用失败，直接去日志页或会话回放页定位状态码、模型、渠道和原始返回。</span>
-                <a class="btn btn-ghost btn-sm interactive-btn" href="/user/logs" data-shell-link>查看我的日志</a>
-            </article>
-        </div>
     </div>
 </section>
 {% endblock %}

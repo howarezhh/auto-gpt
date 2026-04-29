@@ -6,7 +6,7 @@
 <section class="hero-panel hero-panel-compact cockpit-hero">
     <div class="cockpit-hero-copy">
         <div class="eyebrow">运行总览</div>
-        <h2>概览</h2>
+        <h1>概览</h1>
         <p>统一查看中转状态、路由配置、健康巡检与最近代理使用概况。</p>
         <div class="hero-actions">
             <a class="btn btn-accent interactive-btn" href="/providers">管理中转站</a>
@@ -28,59 +28,25 @@
 </section>
 
 <section class="stats-grid" id="dashboard-stats">
-    <article class="metric-card">
-        <span>总中转站数</span>
-        <strong data-stat="provider_count">{{ stats.provider_count }}</strong>
+    {% for card in dashboard_stat_cards %}
+    <article class="metric-card{% if card.tone == 'alert' %} metric-card-alert{% endif %}">
+        <span>{{ card.label }}</span>
+        <strong data-stat="{{ card.id }}">{{ card.value }}</strong>
     </article>
-    <article class="metric-card">
-        <span>健康中转站</span>
-        <strong data-stat="healthy_count">{{ stats.healthy_count }}</strong>
-    </article>
-    <article class="metric-card">
-        <span>异常中转站</span>
-        <strong data-stat="unhealthy_count">{{ stats.unhealthy_count or 0 }}</strong>
-    </article>
-    <article class="metric-card">
-        <span>模型总数</span>
-        <strong data-stat="model_count">{{ stats.model_count or 0 }}</strong>
-    </article>
-    <article class="metric-card">
-        <span>24h 请求量</span>
-        <strong data-stat="recent_requests">{{ stats.recent_requests or 0 }}</strong>
-    </article>
-    <article class="metric-card">
-        <span>24h Token 用量</span>
-        <strong data-stat="recent_tokens">{{ stats.recent_tokens or 0 }}</strong>
-    </article>
-    <article class="metric-card">
-        <span>会话数</span>
-        <strong data-stat="conversation_count">{{ stats.conversation_count or 0 }}</strong>
-    </article>
-    <article class="metric-card">
-        <span>API 密钥总数</span>
-        <strong data-stat="api_key_total">{{ stats.api_key_total or 0 }}</strong>
-    </article>
-    <article class="metric-card metric-card-alert">
-        <span>24h 失败率</span>
-        <strong data-stat="recent_failure_rate">{{ stats.recent_failure_rate or 0 }}%</strong>
-    </article>
-    <article class="metric-card metric-card-alert">
-        <span>累计失败数</span>
-        <strong data-stat="total_failures">{{ stats.total_failures }}</strong>
-    </article>
+    {% endfor %}
 </section>
 
 <section class="panel-card section-shell">
     <div class="section-subhead">
         <div>
             <div class="panel-kicker">二级指标</div>
-            <h3>密钥口径与稳定性补充</h3>
+            <h2>密钥口径与稳定性补充</h2>
         </div>
     </div>
     <div class="section-split-2">
         <div class="summary-list-card">
             <div class="panel-kicker">密钥运行</div>
-            <h4>API 密钥运行口径</h4>
+            <h3>API 密钥运行口径</h3>
             <div class="detail-list">
                 <div><span>启用中</span><strong data-stat="api_key_enabled">{{ stats.api_key_enabled or 0 }}</strong></div>
                 <div><span>禁用中</span><strong data-stat="api_key_disabled">{{ stats.api_key_disabled or 0 }}</strong></div>
@@ -92,7 +58,7 @@
         </div>
         <div class="summary-list-card">
             <div class="panel-kicker">稳定性补充</div>
-            <h4>健康与退化补充</h4>
+            <h3>健康与退化补充</h3>
             <div class="detail-list">
                 <div><span>降级中转站</span><strong data-stat="degraded_count">{{ stats.degraded_count or 0 }}</strong></div>
                 <div><span>健康模型</span><strong>{{ stats.healthy_model_count or 0 }}</strong></div>
@@ -108,7 +74,7 @@
         <div class="panel-head">
             <div>
                 <div class="panel-kicker">中转概览</div>
-                <h3>中转状态矩阵</h3>
+                <h2>中转状态矩阵</h2>
             </div>
             <a class="btn btn-ghost btn-sm interactive-btn" href="/providers">查看全部</a>
         </div>
@@ -170,21 +136,6 @@
             </div>
         </div>
 
-        <div class="panel-card">
-            <div class="panel-head">
-                <div>
-                    <div class="panel-kicker">快捷入口</div>
-                    <h3>快捷入口</h3>
-                </div>
-            </div>
-            <div class="action-stack">
-                <a class="quick-link" href="/settings">调整路由策略</a>
-                <a class="quick-link" href="/playground">发起代理测试</a>
-                <a class="quick-link" href="/api-keys">进入 API 密钥管理</a>
-                <a class="quick-link" href="/logs">查看日志中心</a>
-                <a class="quick-link" href="/conversations">打开会话回放</a>
-            </div>
-        </div>
     </div>
 </section>
 
@@ -192,7 +143,7 @@
     <div class="panel-head">
         <div>
             <div class="panel-kicker">流量指标</div>
-            <h3>最近 60 分钟模型流量统计</h3>
+            <h2>最近 60 分钟模型流量统计</h2>
         </div>
     </div>
     <div class="table-responsive">
@@ -212,7 +163,20 @@
                 </tr>
             </thead>
             <tbody id="dashboard-metrics-table-body">
-                <tr><td colspan="10" class="text-muted">正在加载统计数据...</td></tr>
+                {% for _ in range(4) %}
+                <tr class="skeleton-table-row" aria-hidden="true">
+                    <td><span class="skeleton-line skeleton-line-medium"></span></td>
+                    <td><span class="skeleton-line skeleton-line-wide"></span></td>
+                    <td><span class="skeleton-line skeleton-line-short"></span></td>
+                    <td><span class="skeleton-line skeleton-line-short"></span></td>
+                    <td><span class="skeleton-line skeleton-line-short"></span></td>
+                    <td><span class="skeleton-line skeleton-line-medium"></span></td>
+                    <td><span class="skeleton-line skeleton-line-medium"></span></td>
+                    <td><span class="skeleton-line skeleton-line-short"></span></td>
+                    <td><span class="skeleton-line skeleton-line-short"></span></td>
+                    <td><span class="skeleton-line skeleton-line-short"></span></td>
+                </tr>
+                {% endfor %}
             </tbody>
         </table>
     </div>
@@ -222,7 +186,7 @@
     <div class="panel-head">
         <div>
             <div class="panel-kicker">时间序列</div>
-            <h3>最近 3 小时流量时间序列</h3>
+            <h2>最近 3 小时流量时间序列</h2>
         </div>
     </div>
     <div class="table-responsive">
@@ -241,7 +205,19 @@
                 </tr>
             </thead>
             <tbody id="dashboard-timeseries-table-body">
-                <tr><td colspan="9" class="text-muted">正在加载时间序列...</td></tr>
+                {% for _ in range(4) %}
+                <tr class="skeleton-table-row" aria-hidden="true">
+                    <td><span class="skeleton-line skeleton-line-wide"></span></td>
+                    <td><span class="skeleton-line skeleton-line-short"></span></td>
+                    <td><span class="skeleton-line skeleton-line-short"></span></td>
+                    <td><span class="skeleton-line skeleton-line-short"></span></td>
+                    <td><span class="skeleton-line skeleton-line-short"></span></td>
+                    <td><span class="skeleton-line skeleton-line-short"></span></td>
+                    <td><span class="skeleton-line skeleton-line-medium"></span></td>
+                    <td><span class="skeleton-line skeleton-line-medium"></span></td>
+                    <td><span class="skeleton-line skeleton-line-medium"></span></td>
+                </tr>
+                {% endfor %}
             </tbody>
         </table>
     </div>

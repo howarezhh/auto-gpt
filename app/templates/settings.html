@@ -29,18 +29,6 @@
             <span>默认中转站</span>
             <select class="field-input" id="setting-default-provider-id"></select>
         </label>
-        <details class="form-span-2 route-guide-collapse" id="settings-route-guide-collapse">
-            <summary class="route-guide-summary">
-                <div>
-                    <div class="panel-kicker">模式说明</div>
-                    <h4>四种路由模式说明</h4>
-                </div>
-                <span class="route-guide-badge">默认折叠</span>
-            </summary>
-            <div class="route-guide-collapse-body">
-                <div class="route-mode-cards route-mode-cards-single" id="route-mode-cards"></div>
-            </div>
-        </details>
         <label>
             <span>全局超时毫秒</span>
             <input class="field-input" id="setting-global-timeout-ms" type="number">
@@ -61,18 +49,10 @@
             <span>恢复探测间隔秒</span>
             <input class="field-input" id="setting-recovery-probe-interval-sec" type="number">
         </label>
-        <div class="form-span-2 settings-note">
-            <strong>采集策略</strong>
-            <span>下面这些选项控制 token 统计、请求/响应正文保存、流式最终回复留存，以及日志正文大小上限。</span>
-        </div>
         <label>
             <span>日志正文最大字节数</span>
             <input class="field-input" id="setting-max-logged-body-bytes" type="number">
         </label>
-        <div class="form-span-2 settings-note">
-            <strong>日志保留策略</strong>
-            <span>按天数定时清理历史请求日志与管理端审计日志；填写 0 表示不自动清理该类日志。</span>
-        </div>
         <label>
             <span>请求日志保留天数</span>
             <input class="field-input" id="setting-request-log-retention-days" type="number" min="0">

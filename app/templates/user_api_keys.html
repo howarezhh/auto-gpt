@@ -329,7 +329,6 @@
                     <h3>创建新的接入对象</h3>
                 </div>
             </div>
-            <p class="user-key-side-copy">建议按环境或业务来源拆分密钥，例如生产、测试、灰度回放，避免一把密钥承担所有场景。</p>
             <form class="form-grid user-key-create-form" method="post" action="/user/api-keys/create">
                 <label>
                     <span>名称</span>
@@ -389,60 +388,10 @@
                         {% endfor %}
                     </div>
                 </div>
-                <div class="settings-note form-span-2">
-                    <strong>创建后推荐顺序</strong>
-                    <span>打开该密钥的控制台复制明文与 `/v1` 入口，再用同一把密钥发起一次真实自检，确认后再接入业务系统。</span>
-                </div>
                 <div class="form-actions form-span-2">
                     <button class="btn btn-accent interactive-btn" type="submit">新增 API Key</button>
                 </div>
             </form>
-        </section>
-
-        <section class="panel-card user-key-side-panel">
-            <div class="panel-head">
-                <div>
-                    <div class="panel-kicker">继续动作</div>
-                    <h3>拿到密钥后按这个顺序走</h3>
-                </div>
-            </div>
-            <div class="stage-grid stage-grid-single">
-                <article class="stage-card">
-                    <strong>1. 进入密钥控制台</strong>
-                    <span>复制明文密钥、Base URL 和示例请求，不要手动拼接请求头。</span>
-                </article>
-                <article class="stage-card">
-                    <strong>2. 用同一把密钥自检</strong>
-                    <span>先确认模型授权、候选线路和返回延迟，再让正式系统接入。</span>
-                </article>
-                <article class="stage-card">
-                    <strong>3. 失败再回看日志</strong>
-                    <span>出现问题时优先查日志与会话回放，而不是反复修改客户端配置。</span>
-                </article>
-            </div>
-        </section>
-
-        <section class="panel-card user-key-side-panel">
-            <div class="panel-head">
-                <div>
-                    <div class="panel-kicker">风险提示</div>
-                    <h3>最容易返工的三类问题</h3>
-                </div>
-            </div>
-            <div class="risk-grid">
-                <article class="risk-card" data-level="warning">
-                    <strong>只有默认中转站，没有候选中转站</strong>
-                    <span>生产环境建议同时授权候选线路，否则单线路异常时无法自动兜底。</span>
-                </article>
-                <article class="risk-card" data-level="danger">
-                    <strong>历史密钥未留明文</strong>
-                    <span>旧密钥无法回显时不要尝试手工还原，直接轮换生成新的明文密钥。</span>
-                </article>
-                <article class="risk-card" data-level="default">
-                    <strong>备注缺失</strong>
-                    <span>密钥多起来后，未按环境或业务来源命名会显著拉高排障成本。</span>
-                </article>
-            </div>
         </section>
     </aside>
 </section>

@@ -23,7 +23,6 @@
 </section>
 
 <nav class="page-anchor-bar">
-    <a class="page-anchor-link" href="#user-home-path">连续路径</a>
     <a class="page-anchor-link" href="#user-home-keys">拿到密钥</a>
     <a class="page-anchor-link" href="#user-home-connect">复制接入信息</a>
     <a class="page-anchor-link" href="#user-home-verify">先做自检</a>
@@ -36,37 +35,6 @@
     <article class="metric-card"><span>本月请求</span><strong>{{ account_summary.month_requests }}</strong></article>
     <article class="metric-card"><span>总 Token</span><strong>{{ totals.total_tokens }}</strong></article>
     <article class="metric-card"><span>累计费用</span><strong>{{ '%.6f'|format(totals.total_cost) }}</strong></article>
-</section>
-
-<section class="panel-card section-shell anchor-section-offset" id="user-home-path">
-    <div class="section-subhead">
-        <div>
-            <div class="panel-kicker">连续路径</div>
-            <h3>把接入流程做成一条线</h3>
-        </div>
-    </div>
-    <div class="stage-grid">
-        <article class="stage-card">
-            <strong>1. 拿到 API Key</strong>
-            <span>先确认当前账号名下已有可用密钥；没有的话就在独立密钥页创建一把新的接入密钥。</span>
-            <a class="btn btn-ghost btn-sm interactive-btn" href="/user/api-keys" data-shell-link>打开密钥页</a>
-        </article>
-        <article class="stage-card">
-            <strong>2. 复制接入地址</strong>
-            <span>在下方直接复制 `/v1` Base URL、Bearer Header 和 SDK 示例，不要手工拼写。</span>
-            <a class="btn btn-ghost btn-sm interactive-btn" href="#user-home-connect">跳到接入信息</a>
-        </article>
-        <article class="stage-card">
-            <strong>3. 先做接入自检</strong>
-            <span>用同一把密钥和目标模型跑一次最短真实调用，确认候选线路、延迟和返回结果。</span>
-            <a class="btn btn-ghost btn-sm interactive-btn" href="/user/self-test" data-shell-link>打开自检页</a>
-        </article>
-        <article class="stage-card">
-            <strong>4. 再正式接入</strong>
-            <span>自检成功后再写入你的业务服务；如果上线后报错，优先查日志和会话回放，不要直接猜配置。</span>
-            <a class="btn btn-ghost btn-sm interactive-btn" href="/user/logs" data-shell-link>查看我的日志</a>
-        </article>
-    </div>
 </section>
 
 {% if quota_warnings %}
@@ -114,10 +82,6 @@
                         {% endif %}
                     </span>
                     <span>最近使用 {{ item.last_used_at or '-' }}</span>
-                    <div class="action-palette">
-                        <a class="btn btn-ghost btn-sm interactive-btn" href="/user/api-keys/{{ item.id }}" data-shell-link>打开控制台</a>
-                        <a class="btn btn-ghost btn-sm interactive-btn" href="/user/self-test?api_key_id={{ item.id }}" data-shell-link>用这把密钥自检</a>
-                    </div>
                 </article>
                 {% endfor %}
             {% else %}
@@ -126,22 +90,6 @@
         </div>
     </div>
 
-    <div class="dashboard-command-side">
-        <div class="panel-card">
-            <div class="panel-head">
-                <div>
-                    <div class="panel-kicker">继续动作</div>
-                    <h3>不要跳步</h3>
-                </div>
-            </div>
-            <div class="dashboard-signal-list">
-                <div><span>账号安全</span><strong><a href="/user/profile" data-shell-link>修改资料 / 密码</a></strong></div>
-                <div><span>密钥管理</span><strong><a href="/user/api-keys" data-shell-link>创建、轮换、调整授权</a></strong></div>
-                <div><span>可用模型</span><strong><a href="/user/models" data-shell-link>先理解价格与覆盖</a></strong></div>
-                <div><span>账单余额</span><strong><a href="/user/billing" data-shell-link>看余额和累计消费</a></strong></div>
-            </div>
-        </div>
-    </div>
 </section>
 
 <section class="dashboard-command-grid anchor-section-offset" id="user-home-connect">
@@ -204,26 +152,6 @@
         </div>
     </div>
 
-    <div class="dashboard-command-side">
-        <div class="panel-card">
-            <div class="panel-head">
-                <div>
-                    <div class="panel-kicker">路径确认</div>
-                    <h3>复制完后做什么</h3>
-                </div>
-            </div>
-            <div class="risk-grid">
-                <article class="risk-card" data-level="default">
-                    <strong>先别直接上线</strong>
-                    <span>复制完 Base URL 和 Header 后，下一步不是写生产代码，而是去自检页跑真实请求。</span>
-                </article>
-                <article class="risk-card" data-level="warning">
-                    <strong>不要混用旧密钥</strong>
-                    <span>若刚刚轮换过密钥，必须重新复制明文，不要继续使用旧环境变量。</span>
-                </article>
-            </div>
-        </div>
-    </div>
 </section>
 
 <section class="dashboard-command-grid anchor-section-offset" id="user-home-verify">
@@ -231,26 +159,8 @@
         <div class="section-subhead">
             <div>
                 <div class="panel-kicker">先做自检</div>
-                <h3>正式接入前的最后一步</h3>
+                <h3>接入自检</h3>
             </div>
-        </div>
-        <div class="stage-grid">
-            <article class="stage-card">
-                <strong>选择同一把密钥</strong>
-                <span>在自检页选择你刚刚复制的 API Key，而不是随便找一把测试密钥。</span>
-            </article>
-            <article class="stage-card">
-                <strong>选择目标模型</strong>
-                <span>用你真正准备上线的模型做自检，才能验证路由候选和授权范围是否一致。</span>
-            </article>
-            <article class="stage-card">
-                <strong>看失败摘要与修复建议</strong>
-                <span>如果测试失败，不要只看报错文本，要看页面生成的修复建议和下一步动作。</span>
-            </article>
-            <article class="stage-card">
-                <strong>成功后再接入业务</strong>
-                <span>自检成功后，再把 Base URL 和密钥写入你的后端或第三方客户端。</span>
-            </article>
         </div>
         <div class="form-actions">
             <a class="btn btn-accent interactive-btn" href="/user/self-test" data-shell-link>立即去自检</a>

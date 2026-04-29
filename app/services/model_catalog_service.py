@@ -11,6 +11,7 @@ from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
 from app.models.user_account import UserAccount
 from app.schemas.model_catalog import ModelCatalogCreate, ModelCatalogUpdate, ModelProviderBindingIn
+from app.services.cache_service import CacheService
 from app.services.provider_service import ProviderService
 
 
@@ -53,6 +54,7 @@ class ModelCatalogService:
         db.flush()
         ModelCatalogService._apply_provider_bindings(db, catalog, payload.provider_bindings)
         db.commit()
+        ModelCatalogService.invalidate_model_runtime_cache()
         db.refresh(catalog)
         return catalog
 
@@ -67,6 +69,7 @@ class ModelCatalogService:
         if provider_bindings is not None:
             ModelCatalogService._apply_provider_bindings(db, catalog, provider_bindings)
         db.commit()
+        ModelCatalogService.invalidate_model_runtime_cache()
         db.refresh(catalog)
         return catalog
 
@@ -80,6 +83,7 @@ class ModelCatalogService:
             ProviderService.refresh_provider_state(provider)
         db.delete(catalog)
         db.commit()
+        ModelCatalogService.invalidate_model_runtime_cache()
 
     @staticmethod
     def sync_model_catalogs(db: Session) -> None:
@@ -125,6 +129,7 @@ class ModelCatalogService:
 
         if changed:
             db.commit()
+            ModelCatalogService.invalidate_model_runtime_cache()
 
     @staticmethod
     def list_user_models(db: Session, *, user: UserAccount) -> list[dict]:
@@ -172,6 +177,11 @@ class ModelCatalogService:
     @staticmethod
     def enabled_model_name_set(db: Session) -> set[str]:
         return set(db.scalars(select(ModelCatalog.model_name).where(ModelCatalog.enabled.is_(True))))
+
+    @staticmethod
+    def invalidate_model_runtime_cache() -> None:
+        CacheService.invalidate_prefix("route-candidates")
+        CacheService.invalidate_prefix("v1-models")
 
     @staticmethod
     def _load_catalogs_and_providers(db: Session) -> tuple[list[ModelCatalog], list[Provider]]:

@@ -66,6 +66,204 @@
         delete: async (url) => parseResponse(await fetch(url, { method: "DELETE" })),
     };
 
+    function getResolvedTheme() {
+        const storedTheme = window.localStorage.getItem("aotu-theme");
+        if (storedTheme === "light" || storedTheme === "dark") {
+            return storedTheme;
+        }
+        return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    }
+
+    function applyTheme(theme) {
+        document.documentElement.dataset.theme = theme;
+        document.documentElement.style.colorScheme = theme;
+        const label = document.getElementById("theme-toggle-label");
+        const button = document.getElementById("theme-toggle");
+        if (label) {
+            label.textContent = theme === "dark" ? "浅色模式" : "暗黑模式";
+        }
+        if (button) {
+            button.setAttribute("aria-label", theme === "dark" ? "切换到浅色模式" : "切换到暗黑模式");
+            button.dataset.theme = theme;
+        }
+    }
+
+    function initThemeToggle() {
+        applyTheme(getResolvedTheme());
+        const toggle = document.getElementById("theme-toggle");
+        if (!toggle || toggle.dataset.boundThemeToggle === "true") return;
+        toggle.dataset.boundThemeToggle = "true";
+        toggle.addEventListener("click", () => {
+            const nextTheme = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+            window.localStorage.setItem("aotu-theme", nextTheme);
+            applyTheme(nextTheme);
+        });
+        const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+        const syncSystemTheme = (event) => {
+            const storedTheme = window.localStorage.getItem("aotu-theme");
+            if (storedTheme === "light" || storedTheme === "dark") return;
+            applyTheme(event.matches ? "dark" : "light");
+        };
+        if (typeof mediaQuery.addEventListener === "function") {
+            mediaQuery.addEventListener("change", syncSystemTheme);
+        } else if (typeof mediaQuery.addListener === "function") {
+            mediaQuery.addListener(syncSystemTheme);
+        }
+    }
+
+    function initSiteNavigation() {
+        const toggle = document.getElementById("site-nav-toggle");
+        const panel = document.getElementById("site-nav-panel");
+        if (!toggle || !panel || toggle.dataset.boundSiteNav === "true") return;
+
+        const closeNav = () => {
+            panel.classList.remove("is-open");
+            toggle.classList.remove("is-open");
+            toggle.setAttribute("aria-expanded", "false");
+        };
+
+        const openNav = () => {
+            panel.classList.add("is-open");
+            toggle.classList.add("is-open");
+            toggle.setAttribute("aria-expanded", "true");
+        };
+
+        toggle.dataset.boundSiteNav = "true";
+        toggle.addEventListener("click", () => {
+            if (panel.classList.contains("is-open")) {
+                closeNav();
+                return;
+            }
+            openNav();
+        });
+
+        document.addEventListener("click", (event) => {
+            if (!panel.classList.contains("is-open")) return;
+            if (panel.contains(event.target) || toggle.contains(event.target)) return;
+            closeNav();
+        });
+
+        window.addEventListener("resize", () => {
+            if (window.innerWidth > 992) closeNav();
+        });
+    }
+
+    function createModalManager() {
+        let activeController = null;
+
+        function getFocusableElements(container) {
+            if (!container) return [];
+            return Array.from(
+                container.querySelectorAll(
+                    'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
+                )
+            ).filter((element) => !element.hasAttribute("hidden") && element.getAttribute("aria-hidden") !== "true");
+        }
+
+        function lockScroll() {
+            document.body.classList.add("modal-open");
+        }
+
+        function unlockScroll() {
+            if (!activeController) {
+                document.body.classList.remove("modal-open");
+            }
+        }
+
+        document.addEventListener("keydown", (event) => {
+            if (!activeController) return;
+
+            if (event.key === "Escape") {
+                event.preventDefault();
+                activeController.close({ reason: "escape" });
+                return;
+            }
+
+            if (event.key !== "Tab") return;
+            const focusable = getFocusableElements(activeController.dialog);
+            if (!focusable.length) return;
+            const currentIndex = focusable.indexOf(document.activeElement);
+            if (event.shiftKey) {
+                if (currentIndex <= 0) {
+                    event.preventDefault();
+                    focusable[focusable.length - 1].focus();
+                }
+                return;
+            }
+            if (currentIndex === focusable.length - 1) {
+                event.preventDefault();
+                focusable[0].focus();
+            }
+        });
+
+        function register({
+            modal,
+            dialog,
+            closeOnBackdrop = true,
+            getInitialFocus,
+            beforeClose,
+            afterOpen,
+            afterClose,
+        }) {
+            if (!modal || !dialog) {
+                return {
+                    open() {},
+                    close() { return false; },
+                    isOpen() { return false; },
+                };
+            }
+
+            const controller = {
+                modal,
+                dialog,
+                trigger: null,
+                closeOnBackdrop,
+                open(trigger = document.activeElement) {
+                    controller.trigger = trigger instanceof HTMLElement ? trigger : null;
+                    modal.classList.remove("hidden");
+                    modal.setAttribute("aria-hidden", "false");
+                    activeController = controller;
+                    lockScroll();
+                    window.requestAnimationFrame(() => {
+                        const nextFocus = typeof getInitialFocus === "function"
+                            ? getInitialFocus()
+                            : getFocusableElements(dialog)[0] || dialog;
+                        nextFocus?.focus?.();
+                    });
+                    afterOpen?.();
+                },
+                close({ force = false, reason = "programmatic" } = {}) {
+                    if (!force && beforeClose?.({ reason }) === false) {
+                        return false;
+                    }
+                    modal.classList.add("hidden");
+                    modal.setAttribute("aria-hidden", "true");
+                    if (activeController === controller) {
+                        activeController = null;
+                    }
+                    unlockScroll();
+                    afterClose?.({ reason });
+                    controller.trigger?.focus?.();
+                    return true;
+                },
+                isOpen() {
+                    return !modal.classList.contains("hidden");
+                },
+            };
+
+            modal.addEventListener("click", (event) => {
+                if (event.target !== modal || !controller.closeOnBackdrop) return;
+                controller.close({ reason: "backdrop" });
+            });
+
+            return controller;
+        }
+
+        return { register };
+    }
+
+    const modalManager = createModalManager();
+
     function withJson(method, data, extraHeaders = {}) {
         return {
             method,
@@ -169,8 +367,12 @@
     function showToast(message, type = "success") {
         const stack = document.getElementById("toast-stack");
         if (!stack) return;
+        while (stack.children.length >= 3) {
+            stack.firstElementChild?.remove();
+        }
         const node = document.createElement("div");
         node.className = `toast toast-${type}`;
+        node.setAttribute("role", "status");
         node.textContent = message;
         stack.appendChild(node);
         setTimeout(() => node.remove(), 2800);
@@ -309,7 +511,7 @@
             .map((line) => line.trim())
             .filter(Boolean)
             .map((line) => {
-                const [modelName, priority, weight, supportsStream, supportsVision, enabled, inputPrice, outputPrice] = line.split("|").map((item) => item?.trim() ?? "");
+                const [modelName, priority, weight, supportsStream, supportsVision, enabled] = line.split("|").map((item) => item?.trim() ?? "");
                 return {
                     model_name: modelName,
                     priority: priority ? Number(priority) : 100,
@@ -317,21 +519,14 @@
                     supports_stream: !supportsStream || /^(y|yes|true|1)$/i.test(supportsStream),
                     supports_vision: /^(y|yes|true|1)$/i.test(supportsVision),
                     enabled: !enabled || /^(y|yes|true|1)$/i.test(enabled),
-                    input_price_per_1k: inputPrice === "" ? null : toPricePer1K(inputPrice),
-                    output_price_per_1k: outputPrice === "" ? null : toPricePer1K(outputPrice),
                 };
             })
-            .filter((item) => item.model_name)
-            .map((item) => ({
-                ...item,
-                input_price_per_1k: Number.isFinite(item.input_price_per_1k) ? item.input_price_per_1k : null,
-                output_price_per_1k: Number.isFinite(item.output_price_per_1k) ? item.output_price_per_1k : null,
-            }));
+            .filter((item) => item.model_name);
     }
 
     function formatModelConfigs(modelConfigs = []) {
         return modelConfigs.map((item) => (
-            `${item.model_name}|${item.priority}|${item.weight}|${item.supports_stream ? "y" : "n"}|${item.supports_vision ? "y" : "n"}|${item.enabled ? "y" : "n"}|${toPricePer1M(item.input_price_per_1k) ?? ""}|${toPricePer1M(item.output_price_per_1k) ?? ""}`
+            `${item.model_name}|${item.priority}|${item.weight}|${item.supports_stream ? "y" : "n"}|${item.supports_vision ? "y" : "n"}|${item.enabled ? "y" : "n"}`
         )).join("\n");
     }
 
@@ -339,7 +534,7 @@
         const normalized = String(modelName || "").trim();
         if (!normalized) return "";
         const supportsVision = /gpt-4o|gpt-4\.1|gpt-5/i.test(normalized);
-        return `${normalized}|100|100|y|${supportsVision ? "y" : "n"}|y||`;
+        return `${normalized}|100|100|y|${supportsVision ? "y" : "n"}|y`;
     }
 
     function appendModelConfigLine(textarea, modelName) {
@@ -361,6 +556,7 @@
         const {
             requireStream = false,
             requireVision = false,
+            allowedModelNameSet = null,
         } = options;
         const seen = new Set();
         const models = [];
@@ -369,6 +565,7 @@
             .forEach((provider) => {
                 (provider.model_configs || []).forEach((modelConfig) => {
                     if (!modelConfig?.enabled || !modelConfig.model_name) return;
+                    if (allowedModelNameSet && !allowedModelNameSet.has(modelConfig.model_name)) return;
                     if (requireStream && !modelConfig.supports_stream) return;
                     if (requireVision && !modelConfig.supports_vision) return;
                     if (seen.has(modelConfig.model_name)) return;
@@ -383,12 +580,14 @@
         const {
             requireStream = false,
             requireVision = false,
+            allowedModelNameSet = null,
         } = options;
         if (!provider?.enabled) return [];
         return (provider.model_configs || [])
             .filter((modelConfig) => (
                 modelConfig?.enabled
                 && modelConfig.model_name
+                && (!allowedModelNameSet || allowedModelNameSet.has(modelConfig.model_name))
                 && (!requireStream || modelConfig.supports_stream)
                 && (!requireVision || modelConfig.supports_vision)
             ))
@@ -1629,11 +1828,59 @@
         const discoveredModelsBody = document.getElementById("provider-discovered-models-body");
         let providers = [];
         let discoveredModels = [];
+        let providerFormSnapshot = "";
 
         if (!tableBody || !modelTableBody || !modal || !providerForm) return;
 
+        function serializeProviderFormState() {
+            return JSON.stringify(
+                Array.from(providerForm.querySelectorAll("input, textarea, select")).map((field) => [
+                    field.id || field.name || field.type,
+                    field.type === "checkbox" ? field.checked : field.value,
+                ])
+            );
+        }
+
+        function updateProviderFormDirtyState() {
+            providerForm.dataset.dirty = serializeProviderFormState() === providerFormSnapshot ? "false" : "true";
+        }
+
+        const providerModalController = modalManager.register({
+            modal,
+            dialog: modal.querySelector('[role="dialog"]'),
+            closeOnBackdrop: false,
+            getInitialFocus: () => providerNameInput,
+            beforeClose: () => {
+                if (providerForm.dataset.dirty !== "true") return true;
+                return window.confirm("表单内容尚未保存，确认关闭吗？");
+            },
+            afterClose: () => {
+                renderDiscoveredModels([]);
+                providerForm.dataset.dirty = "false";
+            },
+        });
+        const credentialModalController = modalManager.register({
+            modal: credentialModal,
+            dialog: credentialModal?.querySelector('[role="dialog"]'),
+            getInitialFocus: () => credentialApiKeyInput,
+            afterClose: () => {
+                credentialForm?.reset();
+                credentialProviderIdInput.value = "";
+            },
+        });
+        const testResultModalController = modalManager.register({
+            modal: testResultModal,
+            dialog: testResultModal?.querySelector('[role="dialog"]'),
+            getInitialFocus: () => document.getElementById("provider-test-result-modal-close"),
+            afterClose: () => {
+                if (testResultModalContent) {
+                    testResultModalContent.innerHTML = "";
+                }
+            },
+        });
+
         enhanceInteractiveButtons(document);
-        document.getElementById("add-provider-btn").addEventListener("click", () => openProviderModal());
+        document.getElementById("add-provider-btn").addEventListener("click", (event) => openProviderModal(null, event.currentTarget));
         document.getElementById("provider-modal-close").addEventListener("click", closeProviderModal);
         document.getElementById("provider-form-cancel").addEventListener("click", closeProviderModal);
         document.getElementById("provider-test-result-modal-close")?.addEventListener("click", closeTestResultModal);
@@ -1643,6 +1890,7 @@
             button.addEventListener("click", () => {
                 const modelName = button.dataset.modelPreset;
                 if (appendModelConfigLine(providerModelsTextarea, modelName)) {
+                    updateProviderFormDirtyState();
                     showToast(`已添加预设模型 ${modelName}`);
                 }
             });
@@ -1655,6 +1903,7 @@
             }
             if (appendModelConfigLine(providerModelsTextarea, modelName)) {
                 customModelInput.value = "";
+                updateProviderFormDirtyState();
                 showToast(`已添加自定义模型 ${modelName}`);
             }
         });
@@ -1704,16 +1953,6 @@
             }
         });
 
-        modal.addEventListener("click", (event) => {
-            if (event.target === modal) closeProviderModal();
-        });
-        testResultModal?.addEventListener("click", (event) => {
-            if (event.target === testResultModal) closeTestResultModal();
-        });
-        credentialModal?.addEventListener("click", (event) => {
-            if (event.target === credentialModal) closeCredentialModal();
-        });
-
         providerForm.addEventListener("submit", async (event) => {
             event.preventDefault();
             const id = providerIdInput.value;
@@ -1756,7 +1995,7 @@
                     await api.post("/api/providers", payload);
                     showToast("中转站已创建");
                 }
-                closeProviderModal();
+                closeProviderModal({ force: true, reason: "submit" });
                 await loadProviders();
             } catch (error) {
                 showToast(error.message, "error");
@@ -1789,10 +2028,13 @@
             renderProviders(searchInput.value);
             renderProviderModels(searchInput.value);
         });
+        providerForm.addEventListener("input", updateProviderFormDirtyState);
+        providerForm.addEventListener("change", updateProviderFormDirtyState);
         providerModelsTextarea.addEventListener("input", () => {
             if (discoveredModels.length) {
                 renderDiscoveredModels(discoveredModels);
             }
+            updateProviderFormDirtyState();
         });
         availabilityProviderSelect?.addEventListener("change", async () => {
             await loadAvailability({ manual: false });
@@ -1827,24 +2069,19 @@
             document.querySelector('[data-provider-stat="avg_stability_score"]').textContent = formatScore(summary.avgStabilityScore);
 
             const healthyRatio = summary.providerCount ? Math.round((summary.healthyProviderCount / summary.providerCount) * 100) : 0;
-            document.getElementById("providers-summary-card").innerHTML = `
-                <div class="cockpit-aside-label">渠道脉冲</div>
-                <div class="cockpit-aside-value">${summary.enabledProviderCount}</div>
-                <div class="cockpit-aside-copy">当前已启用中转站</div>
-                <div class="cockpit-health-bar"><span style="width:${healthyRatio}%"></span></div>
-                <div class="cockpit-aside-meta">
-                    <span>模型 ${summary.modelCount}</span>
-                    <span>支持流式 ${summary.streamModelCount}</span>
-                </div>
-            `;
-
-            document.getElementById("provider-capability-list").innerHTML = `
-                <div><span>Stream 模型</span><strong>${summary.streamModelCount}</strong></div>
-                <div><span>Vision 模型</span><strong>${summary.visionModelCount}</strong></div>
-                <div><span>已配置单价</span><strong>${summary.pricedModelCount}</strong></div>
-                <div><span>健康模型</span><strong>${summary.healthyModelCount}</strong></div>
-                <div><span>异常模型</span><strong>${summary.unhealthyModelCount}</strong></div>
-            `;
+            const providersSummaryCard = document.getElementById("providers-summary-card");
+            if (providersSummaryCard) {
+                providersSummaryCard.innerHTML = `
+                    <div class="cockpit-aside-label">渠道脉冲</div>
+                    <div class="cockpit-aside-value">${summary.enabledProviderCount}</div>
+                    <div class="cockpit-aside-copy">当前已启用中转站</div>
+                    <div class="cockpit-health-bar"><span style="width:${healthyRatio}%"></span></div>
+                    <div class="cockpit-aside-meta">
+                        <span>挂载 ${summary.modelCount}</span>
+                        <span>支持流式 ${summary.streamModelCount}</span>
+                    </div>
+                `;
+            }
         }
 
         function renderProviderScope(provider) {
@@ -1961,7 +2198,8 @@
             });
             renderDiscoveredModels(discoveredModels);
             if (addedCount > 0) {
-                showToast(`已添加 ${formatNumber(addedCount)} 个模型到当前中转站配置`);
+                updateProviderFormDirtyState();
+                showToast(`已添加 ${formatNumber(addedCount)} 个模型到当前中转站挂载列表`);
             }
         }
 
@@ -2062,8 +2300,9 @@
                     <td>${statusBadge(model.health_status)}</td>
                     <td>${model.supports_stream ? "流式" : "非流式"} / ${model.supports_vision ? "图像" : "文本"}</td>
                     <td>
-                        <input class="field-input" type="number" step="0.0001" value="${toPricePer1M(model.input_price_per_1k) ?? ""}" placeholder="输入 /1M" data-model-field="input_price_per_1k" data-provider-id="${provider.id}" data-model-id="${model.id}">
-                        <input class="field-input mt-2" type="number" step="0.0001" value="${toPricePer1M(model.output_price_per_1k) ?? ""}" placeholder="输出 /1M" data-model-field="output_price_per_1k" data-provider-id="${provider.id}" data-model-id="${model.id}">
+                        <input class="field-input" type="number" min="0.0001" step="0.0001" value="${model.price_multiplier ?? 1}" placeholder="渠道倍率" data-model-field="price_multiplier" data-provider-id="${provider.id}" data-model-id="${model.id}">
+                        <div class="table-muted">输入 ${escapeHtml(formatPrice(model.input_price_per_1k))}</div>
+                        <div class="table-muted">输出 ${escapeHtml(formatPrice(model.output_price_per_1k))}</div>
                     </td>
                     <td>${renderQualitySummary(model)}</td>
                     <td><input class="field-input" type="number" value="${model.priority}" data-model-field="priority" data-provider-id="${provider.id}" data-model-id="${model.id}"></td>
@@ -2095,11 +2334,11 @@
             if (!provider) return;
             try {
                 if (action === "edit") {
-                    openProviderModal(provider);
+                    openProviderModal(provider, button);
                     return;
                 }
                 if (action === "rotate-credential") {
-                    openCredentialModal(provider);
+                    openCredentialModal(provider, button);
                     return;
                 }
                 if (action === "test") {
@@ -2112,6 +2351,7 @@
                     openTestResultModal(
                         `中转站测试结果 · ${provider.name}`,
                         renderProviderTestModalBody(result, { scope: "provider", name: provider.name }),
+                        button,
                     );
                     await loadProviders();
                     return;
@@ -2166,6 +2406,7 @@
                     openTestResultModal(
                         `模型测试结果 · ${modelConfig.model_name}`,
                         renderProviderTestModalBody(result, { scope: "model", name: `${owner.name} / ${modelConfig.model_name}` }),
+                        button,
                     );
                     await loadProviders();
                 } catch (error) {
@@ -2180,14 +2421,12 @@
                 const priorityInput = modelTableBody.querySelector(`input[data-model-field="priority"][data-provider-id="${providerId}"][data-model-id="${modelId}"]`);
                 const weightInput = modelTableBody.querySelector(`input[data-model-field="weight"][data-provider-id="${providerId}"][data-model-id="${modelId}"]`);
                 const enabledInput = modelTableBody.querySelector(`input[data-model-field="enabled"][data-provider-id="${providerId}"][data-model-id="${modelId}"]`);
-                const inputPriceInput = modelTableBody.querySelector(`input[data-model-field="input_price_per_1k"][data-provider-id="${providerId}"][data-model-id="${modelId}"]`);
-                const outputPriceInput = modelTableBody.querySelector(`input[data-model-field="output_price_per_1k"][data-provider-id="${providerId}"][data-model-id="${modelId}"]`);
+                const priceMultiplierInput = modelTableBody.querySelector(`input[data-model-field="price_multiplier"][data-provider-id="${providerId}"][data-model-id="${modelId}"]`);
                 const payload = {
                     priority: Number(priorityInput.value),
                     weight: Number(weightInput.value),
                     enabled: action === "toggle-model" ? !modelConfig.enabled : enabledInput.checked,
-                    input_price_per_1k: inputPriceInput.value === "" ? null : toPricePer1K(inputPriceInput.value),
-                    output_price_per_1k: outputPriceInput.value === "" ? null : toPricePer1K(outputPriceInput.value),
+                    price_multiplier: Number(priceMultiplierInput.value || 1),
                 };
                 try {
                     setButtonLoading(button, true);
@@ -2202,7 +2441,7 @@
             }
         });
 
-        function openProviderModal(provider) {
+        function openProviderModal(provider, trigger = document.activeElement) {
             document.getElementById("provider-modal-title").textContent = provider ? "编辑中转站" : "新增中转站";
             providerIdInput.value = provider?.id ?? "";
             providerNameInput.value = provider?.name ?? "";
@@ -2226,41 +2465,37 @@
             providerRemarkInput.value = provider?.remark ?? "";
             providerEnabledInput.checked = provider?.enabled ?? true;
             renderDiscoveredModels([]);
-            modal.classList.remove("hidden");
+            providerFormSnapshot = serializeProviderFormState();
+            providerForm.dataset.dirty = "false";
+            providerModalController.open(trigger);
         }
 
-        function closeProviderModal() {
-            renderDiscoveredModels([]);
-            modal.classList.add("hidden");
+        function closeProviderModal(options = {}) {
+            providerModalController.close(options);
         }
 
-        function openCredentialModal(provider) {
+        function openCredentialModal(provider, trigger = document.activeElement) {
             if (!credentialModal) return;
             credentialProviderIdInput.value = provider.id;
             credentialApiKeyInput.value = "";
             credentialHintInput.value = provider.credential_hint || "";
             document.getElementById("provider-credential-modal-title").textContent = `轮换凭据 · ${provider.name}`;
-            credentialModal.classList.remove("hidden");
+            credentialModalController.open(trigger);
         }
 
-        function closeCredentialModal() {
-            if (!credentialModal || !credentialForm) return;
-            credentialModal.classList.add("hidden");
-            credentialForm.reset();
-            credentialProviderIdInput.value = "";
+        function closeCredentialModal(options = {}) {
+            credentialModalController.close(options);
         }
 
-        function openTestResultModal(title, html) {
+        function openTestResultModal(title, html, trigger = document.activeElement) {
             if (!testResultModal || !testResultModalTitle || !testResultModalContent) return;
             testResultModalTitle.textContent = title;
             testResultModalContent.innerHTML = html;
-            testResultModal.classList.remove("hidden");
+            testResultModalController.open(trigger);
         }
 
-        function closeTestResultModal() {
-            if (!testResultModal || !testResultModalContent) return;
-            testResultModal.classList.add("hidden");
-            testResultModalContent.innerHTML = "";
+        function closeTestResultModal(options = {}) {
+            testResultModalController.close(options);
         }
 
         await loadProviders();
@@ -2699,6 +2934,7 @@
         const batchSelectAllBtn = document.getElementById("playground-batch-select-all");
         const batchClearBtn = document.getElementById("playground-batch-clear");
         let providerOptions = [];
+        let modelCatalogOptions = [];
 
         function updatePlaygroundImageFields() {
             const mode = imageModeSelect.value || "none";
@@ -2838,9 +3074,14 @@
                 : null;
             const requireStream = document.getElementById("playground-stream").checked;
             const requireVision = (imageModeSelect.value || "none") !== "none";
+            const enabledModelNameSet = new Set(
+                modelCatalogOptions
+                    .filter((model) => model.enabled && (model.enabled_provider_count || 0) > 0)
+                    .map((model) => model.model_name)
+            );
             const models = selectedProvider
-                ? collectProviderConfiguredModels(selectedProvider, { requireStream, requireVision })
-                : collectConfiguredModels(providerOptions, { requireStream, requireVision });
+                ? collectProviderConfiguredModels(selectedProvider, { requireStream, requireVision, allowedModelNameSet: enabledModelNameSet })
+                : collectConfiguredModels(providerOptions, { requireStream, requireVision, allowedModelNameSet: enabledModelNameSet });
             const previousModel = modelSelect.value;
             modelSelect.innerHTML = '<option value="">请先选择一个已配置模型</option>' + models.map((modelName) => (
                 `<option value="${escapeHtml(modelName)}">${escapeHtml(modelName)}</option>`
@@ -2857,13 +3098,16 @@
                 const requirementText = requirementLabels.length ? `（需支持 ${requirementLabels.join(" + ")}）` : "";
                 const message = selectedProvider
                     ? `中转站 ${selectedProvider.name} 当前没有可用于测试的已启用模型${requirementText}`
-                    : `当前没有可用于测试的已启用模型${requirementText}，请先到中转站管理中配置模型`;
+                    : `当前没有可用于测试的已启用模型${requirementText}，请先到模型配置中启用模型并绑定可用中转站`;
                 showToast(message, "error");
             }
         }
 
         async function loadPlaygroundModels() {
-            providerOptions = await api.get("/api/providers");
+            [providerOptions, modelCatalogOptions] = await Promise.all([
+                api.get("/api/providers"),
+                api.get("/api/models"),
+            ]);
             renderPlaygroundProviders(providerOptions);
             renderPlaygroundModels();
             renderBatchProviderPicker(providerOptions);
@@ -6337,6 +6581,9 @@
         document.addEventListener("click", async (event) => {
             const link = event.target.closest("a[data-shell-link]");
             if (!link) return;
+            document.getElementById("site-nav-panel")?.classList.remove("is-open");
+            document.getElementById("site-nav-toggle")?.classList.remove("is-open");
+            document.getElementById("site-nav-toggle")?.setAttribute("aria-expanded", "false");
             const target = new URL(link.href, window.location.origin);
             if (target.origin !== window.location.origin) return;
             event.preventDefault();
@@ -6363,6 +6610,8 @@
             window.location.replace(initialRedirect);
             return;
         }
+        initThemeToggle();
+        initSiteNavigation();
         initShellNavigation();
         updateActiveNavigation(window.location.pathname);
         await initializePage();

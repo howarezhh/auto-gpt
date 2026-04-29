@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
+from app.models.model_catalog import ModelCatalog
 from app.models.request_log import RequestLog
 from app.schemas.provider import (
     ProviderCreate,
@@ -17,6 +18,7 @@ from app.schemas.provider import (
     ProviderModelConfigUpdate,
     ProviderUpdate,
 )
+from app.services.cache_service import CacheService
 from app.services.log_service import LogService
 from app.services.setting_service import SettingService
 from app.services.upstream_client import UpstreamClientService
@@ -113,6 +115,7 @@ class ProviderService:
         ProviderService.refresh_provider_state(provider)
         ModelCatalogService.sync_model_catalogs(db)
         db.commit()
+        ProviderService.invalidate_provider_runtime_cache()
         db.refresh(provider)
         return provider
 
@@ -141,6 +144,7 @@ class ProviderService:
         ProviderService.refresh_provider_state(provider)
         ModelCatalogService.sync_model_catalogs(db)
         db.commit()
+        ProviderService.invalidate_provider_runtime_cache()
         db.refresh(provider)
         return provider
 
@@ -150,6 +154,7 @@ class ProviderService:
 
         db.delete(provider)
         db.commit()
+        ProviderService.invalidate_provider_runtime_cache()
         ModelCatalogService.sync_model_catalogs(db)
 
     @staticmethod
@@ -166,11 +171,17 @@ class ProviderService:
             raise ValueError("Provider model not found")
 
         for field, value in payload.model_dump(exclude_unset=True).items():
+            if field in {"input_price_per_1k", "output_price_per_1k"}:
+                continue
+            if field == "price_multiplier" and value is None:
+                continue
             setattr(provider_model, field, value)
+        ProviderService._sync_provider_model_price_from_catalog(db, provider_model)
 
         ProviderService.refresh_provider_state(provider)
         ModelCatalogService.sync_model_catalogs(db)
         db.commit()
+        ProviderService.invalidate_provider_runtime_cache()
         db.refresh(provider_model)
         return provider_model
 
@@ -260,6 +271,7 @@ class ProviderService:
             provider_model.circuit_opened_at = None
             provider_model.last_error = None
         db.commit()
+        ProviderService.invalidate_provider_runtime_cache()
         db.refresh(provider)
         return provider
 
@@ -403,6 +415,7 @@ class ProviderService:
             "last_error": provider_model.last_error,
             "supports_stream": provider_model.supports_stream,
             "supports_vision": provider_model.supports_vision,
+            "price_multiplier": provider_model.price_multiplier,
             "input_price_per_1k": provider_model.input_price_per_1k,
             "output_price_per_1k": provider_model.output_price_per_1k,
             "recent_request_count": metrics.get("recent_request_count", 0),
@@ -506,6 +519,10 @@ class ProviderService:
     @staticmethod
     def _replace_provider_models(db: Session, provider: Provider, model_configs: list[ProviderModelConfigInput]) -> None:
         existing_by_name = {item.model_name: item for item in provider.provider_models}
+        catalogs_by_name = {
+            item.model_name: item
+            for item in db.scalars(select(ModelCatalog).where(ModelCatalog.model_name.in_([config.model_name for config in model_configs])))
+        } if model_configs else {}
         keep_names: set[str] = set()
 
         for config in model_configs:
@@ -519,10 +536,23 @@ class ProviderService:
             provider_model.weight = config.weight
             provider_model.supports_stream = config.supports_stream
             provider_model.supports_vision = config.supports_vision
-            provider_model.input_price_per_1k = config.input_price_per_1k
-            provider_model.output_price_per_1k = config.output_price_per_1k
             if not provider_model.price_multiplier:
                 provider_model.price_multiplier = 1.0
+            catalog = catalogs_by_name.get(config.model_name)
+            if catalog is None:
+                provider_model.input_price_per_1k = config.input_price_per_1k
+                provider_model.output_price_per_1k = config.output_price_per_1k
+            else:
+                provider_model.input_price_per_1k = (
+                    catalog.input_price_per_1k * provider_model.price_multiplier
+                    if catalog.input_price_per_1k is not None
+                    else None
+                )
+                provider_model.output_price_per_1k = (
+                    catalog.output_price_per_1k * provider_model.price_multiplier
+                    if catalog.output_price_per_1k is not None
+                    else None
+                )
             if provider_model.health_status not in {"healthy", "degraded", "unhealthy"}:
                 provider_model.health_status = "unknown"
             if not provider_model.circuit_state:
@@ -535,8 +565,23 @@ class ProviderService:
         ProviderService._sync_models_json(provider)
 
     @staticmethod
+    def _sync_provider_model_price_from_catalog(db: Session, provider_model: ProviderModel) -> None:
+        catalog = db.scalar(select(ModelCatalog).where(ModelCatalog.model_name == provider_model.model_name))
+        if catalog is None:
+            return
+        if catalog.input_price_per_1k is not None:
+            provider_model.input_price_per_1k = catalog.input_price_per_1k * provider_model.price_multiplier
+        if catalog.output_price_per_1k is not None:
+            provider_model.output_price_per_1k = catalog.output_price_per_1k * provider_model.price_multiplier
+
+    @staticmethod
     def _sync_models_json(provider: Provider) -> None:
         provider.models_json = dumps_json([item.model_name for item in provider.provider_models if item.enabled])
+
+    @staticmethod
+    def invalidate_provider_runtime_cache() -> None:
+        CacheService.invalidate_prefix("route-candidates")
+        CacheService.invalidate_prefix("v1-models")
 
     @staticmethod
     def _build_quality_metrics(db: Session, providers: list[Provider]) -> dict[str, dict]:

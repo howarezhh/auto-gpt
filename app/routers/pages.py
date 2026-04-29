@@ -9,6 +9,7 @@ from fastapi.templating import Jinja2Templates
 
 from app.config import get_settings
 from app.database import get_db
+from app.models.model_catalog import ModelCatalog
 from app.models.provider_model import ProviderModel
 from app.models.request_log import RequestLog
 from app.services.admin_audit_service import AdminAuditService
@@ -21,6 +22,67 @@ from app.services.user_auth_service import USER_ROLE_ADMIN, UserAuthService
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
+
+
+def _build_dashboard_stat_cards(stats: dict) -> list[dict]:
+    return [
+        {"id": "provider_count", "label": "总中转站数", "value": stats["provider_count"]},
+        {"id": "healthy_count", "label": "健康中转站", "value": stats["healthy_count"]},
+        {"id": "unhealthy_count", "label": "异常中转站", "value": stats["unhealthy_count"]},
+        {"id": "model_count", "label": "模型总数", "value": stats["model_count"]},
+        {"id": "recent_requests", "label": "24h 请求量", "value": stats["recent_requests"]},
+        {"id": "recent_tokens", "label": "24h Token 用量", "value": stats["recent_tokens"]},
+        {"id": "conversation_count", "label": "会话数", "value": stats["conversation_count"]},
+        {"id": "api_key_total", "label": "API 密钥总数", "value": stats["api_key_total"]},
+        {
+            "id": "recent_failure_rate",
+            "label": "24h 失败率",
+            "value": f'{stats["recent_failure_rate"]}%',
+            "tone": "alert",
+        },
+        {
+            "id": "total_failures",
+            "label": "累计失败数",
+            "value": stats["total_failures"],
+            "tone": "alert",
+        },
+    ]
+
+
+def _build_provider_page_content(provider_dicts: list[dict]) -> dict:
+    enabled_provider_count = sum(1 for item in provider_dicts if item.get("enabled"))
+    model_configs = [model for item in provider_dicts for model in item.get("model_configs", [])]
+    enabled_models = [item for item in model_configs if item.get("enabled")]
+    stream_model_count = sum(1 for item in enabled_models if item.get("supports_stream"))
+    vision_model_count = sum(1 for item in enabled_models if item.get("supports_vision"))
+    priced_model_count = sum(
+        1
+        for item in enabled_models
+        if (item.get("input_price_per_1k") or 0) > 0 or (item.get("output_price_per_1k") or 0) > 0
+    )
+    stability_scores = [item.get("stability_score") for item in provider_dicts if item.get("stability_score") is not None]
+    average_stability = round(sum(stability_scores) / len(stability_scores), 1) if stability_scores else 0
+
+    return {
+        "summary": {
+            "provider_count": len(provider_dicts),
+            "enabled_provider_count": enabled_provider_count,
+            "model_count": len(enabled_models),
+            "stream_model_count": stream_model_count,
+            "vision_model_count": vision_model_count,
+            "priced_model_count": priced_model_count,
+            "avg_stability_score": average_stability,
+        },
+        "telemetry_cards": [
+            {"id": "provider_count", "label": "中转站总数", "value": len(provider_dicts)},
+            {"id": "enabled_provider_count", "label": "已启用中转站", "value": enabled_provider_count},
+            {"id": "model_count", "label": "挂载模型数", "value": len(enabled_models)},
+            {"id": "stream_model_count", "label": "支持 Stream", "value": stream_model_count},
+            {"id": "vision_model_count", "label": "支持 Vision", "value": vision_model_count},
+            {"id": "priced_model_count", "label": "已同步价格", "value": priced_model_count},
+            {"id": "avg_stability_score", "label": "平均稳定性", "value": average_stability},
+        ],
+    }
 
 
 def _resolve_external_base_url(request: Request) -> str:
@@ -56,7 +118,7 @@ def dashboard_page(request: Request, db: Session = Depends(get_db)) -> HTMLRespo
         "healthy_count": len([item for item in providers if item.health_status == "healthy"]),
         "degraded_count": len([item for item in providers if item.health_status == "degraded"]),
         "unhealthy_count": len([item for item in providers if item.health_status == "unhealthy"]),
-        "model_count": db.scalar(select(func.count()).select_from(ProviderModel)) or 0,
+        "model_count": db.scalar(select(func.count()).select_from(ModelCatalog)) or 0,
         "healthy_model_count": db.scalar(select(func.count()).select_from(ProviderModel).where(ProviderModel.health_status == "healthy")) or 0,
         "degraded_model_count": db.scalar(select(func.count()).select_from(ProviderModel).where(ProviderModel.health_status == "degraded")) or 0,
         "unhealthy_model_count": db.scalar(select(func.count()).select_from(ProviderModel).where(ProviderModel.health_status == "unhealthy")) or 0,
@@ -75,7 +137,20 @@ def dashboard_page(request: Request, db: Session = Depends(get_db)) -> HTMLRespo
         "api_key_total_completion_tokens": api_key_summary.total_completion_tokens,
         "api_key_total_tokens": api_key_summary.total_tokens,
     }
-    return templates.TemplateResponse("dashboard.html", {"request": request, "providers": providers, "settings": SettingService.get_or_create(db), "stats": stats, "page_name": "dashboard", "portal_type": "admin", "current_user": current_user})
+    return templates.TemplateResponse(
+        "dashboard.html",
+        {
+            "request": request,
+            "providers": providers,
+            "settings": SettingService.get_or_create(db),
+            "stats": stats,
+            "dashboard_stat_cards": _build_dashboard_stat_cards(stats),
+            "page_name": "dashboard",
+            "portal_type": "admin",
+            "current_user": current_user,
+            "title": "概览",
+        },
+    )
 
 
 @router.get("/providers", response_class=HTMLResponse)
@@ -83,7 +158,20 @@ def providers_page(request: Request, db: Session = Depends(get_db)) -> HTMLRespo
     current_user = require_admin_html(request, db)
     if isinstance(current_user, RedirectResponse):
         return current_user
-    return templates.TemplateResponse("providers.html", {"request": request, "providers": ProviderService.list_providers(db), "page_name": "providers", "portal_type": "admin", "current_user": current_user})
+    provider_page_content = _build_provider_page_content(ProviderService.list_provider_dicts(db))
+    return templates.TemplateResponse(
+        "providers.html",
+        {
+            "request": request,
+            "providers": ProviderService.list_providers(db),
+            "page_name": "providers",
+            "portal_type": "admin",
+            "current_user": current_user,
+            "title": "中转站管理",
+            "provider_telemetry_cards": provider_page_content["telemetry_cards"],
+            "provider_summary": provider_page_content["summary"],
+        },
+    )
 
 
 @router.get("/models", response_class=HTMLResponse)

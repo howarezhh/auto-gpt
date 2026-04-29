@@ -1,25 +1,37 @@
 {% extends "base.html" %}
 {% block content %}
-<section class="hero-panel hero-panel-compact cockpit-hero">
+{% set ns = namespace(current_enabled=0, current_admin=0, current_key_total=0) %}
+{% for user in users %}
+    {% if user.enabled %}
+        {% set ns.current_enabled = ns.current_enabled + 1 %}
+    {% endif %}
+    {% if user.role == 'admin' %}
+        {% set ns.current_admin = ns.current_admin + 1 %}
+    {% endif %}
+    {% set ns.current_key_total = ns.current_key_total + key_counts.get(user.id, 0) %}
+{% endfor %}
+
+<section class="hero-panel hero-panel-compact cockpit-hero users-hero">
     <div class="cockpit-hero-copy">
         <div class="eyebrow">用户管理</div>
-        <h2>用户管理</h2>
-        <p>支持管理员创建、搜索、分页查看和进入用户详情。公开注册默认关闭，可在路由设置页切换。</p>
+        <h2>账户治理与额度调度</h2>
+        <p>把创建账号、筛选用户、批量额度治理和单用户运维收进同一张控制台，减少在列表、详情和导出之间来回跳转。</p>
         <div class="hero-actions">
+            <a class="btn btn-accent interactive-btn" href="#users-create">新建账号</a>
+            <a class="btn btn-ghost interactive-btn" href="#users-registry">查看账号目录</a>
             <a class="btn btn-ghost interactive-btn" href="/users/export" target="_blank">导出用户 CSV</a>
-            <a class="btn btn-ghost interactive-btn" href="/users/billing-export" target="_blank">导出账单 CSV</a>
         </div>
     </div>
-    <div class="cockpit-hero-aside">
-        <div class="cockpit-aside-label">检索结果</div>
+    <aside class="cockpit-hero-aside users-hero-aside">
+        <div class="cockpit-aside-label">筛选命中</div>
         <div class="cockpit-aside-value">{{ pagination.total }}</div>
-        <div class="cockpit-aside-copy">当前筛选命中的账号数</div>
+        <div class="cockpit-aside-copy">当前条件下可治理的账号总数</div>
         <div class="cockpit-health-bar"><span class="cockpit-health-fill-full"></span></div>
         <div class="cockpit-aside-meta">
-            <span>管理员 {{ admin_count }}</span>
-            <span>启用中 {{ enabled_count }}</span>
+            <span>本页管理员 {{ ns.current_admin }}</span>
+            <span>本页启用 {{ ns.current_enabled }}</span>
         </div>
-    </div>
+    </aside>
 </section>
 
 {% if error_message %}
@@ -44,70 +56,98 @@
 </div></section>
 {% endif %}
 
-<section class="dashboard-command-grid">
-    <div class="panel-card section-shell">
-        <div class="section-subhead">
-            <div>
-                <div class="panel-kicker">创建用户</div>
-                <h3>新增账号</h3>
-            </div>
-        </div>
-        <form class="form-grid" method="post" action="/users/create">
-            <label>
-                <span>用户名</span>
-                <input class="field-input" name="username" required>
-            </label>
-            <label>
-                <span>邮箱</span>
-                <input class="field-input" name="email" type="email" required>
-            </label>
-            <label>
-                <span>初始密码</span>
-                <input class="field-input" name="password" type="password" required>
-            </label>
-            <label>
-                <span>角色</span>
-                <select class="field-input" name="role">
-                    <option value="user">普通用户</option>
-                    <option value="admin">管理员</option>
-                </select>
-            </label>
-            <label class="toggle-row">
-                <input name="enabled" type="checkbox" checked>
-                <span>创建后立即启用</span>
-            </label>
-            <div class="form-actions form-span-2">
-                <button class="btn btn-accent" type="submit">创建账号</button>
-            </div>
-        </form>
-    </div>
+<nav class="page-anchor-bar users-anchor-bar" aria-label="用户管理导航">
+    <a class="page-anchor-link" href="#users-create">创建账号</a>
+    <a class="page-anchor-link" href="#users-filter">搜索筛选</a>
+    <a class="page-anchor-link" href="#users-batch">批量额度</a>
+    <a class="page-anchor-link" href="#users-registry">账号目录</a>
+</nav>
 
-    <div class="dashboard-command-side">
-        <div class="panel-card">
-            <div class="panel-head">
-                <div>
-                    <div class="panel-kicker">注册方式</div>
-                    <h3>注册方式</h3>
-                </div>
-            </div>
-            <div class="dashboard-signal-list">
-                <div><span>管理员创建</span><strong>始终可用</strong></div>
-                <div><span>公开注册</span><strong>{{ '已开启' if allow_public_user_registration else '默认关闭' }}</strong></div>
-                <div><span>当前建议</span><strong>生产环境优先使用管理员后台创建</strong></div>
-                <div><span>切换位置</span><strong>在“路由设置”页统一切换公开注册开关</strong></div>
-            </div>
-        </div>
-    </div>
+<section class="stats-grid users-metric-grid anchor-section-offset">
+    <article class="metric-card"><span>筛选命中</span><strong>{{ pagination.total }}</strong></article>
+    <article class="metric-card"><span>本页账号</span><strong>{{ users|length }}</strong></article>
+    <article class="metric-card"><span>本页管理员</span><strong>{{ ns.current_admin }}</strong></article>
+    <article class="metric-card"><span>本页启用中</span><strong>{{ ns.current_enabled }}</strong></article>
+    <article class="metric-card"><span>本页关联 API Key</span><strong>{{ ns.current_key_total }}</strong></article>
+    <article class="metric-card"><span>公开注册</span><strong>{{ '已开启' if allow_public_user_registration else '已关闭' }}</strong></article>
 </section>
 
-<section class="panel-card section-shell">
+<section class="users-admin-shell anchor-section-offset" id="users-create">
+    <div class="users-admin-main">
+        <section class="panel-card section-shell users-create-panel">
+            <div class="section-subhead">
+                <div>
+                    <div class="panel-kicker">创建账号</div>
+                    <h3>新增用户</h3>
+                </div>
+                <div class="users-panel-badges">
+                    <span class="users-inline-badge">管理员后台创建</span>
+                    <span class="users-inline-badge">即时生效</span>
+                </div>
+            </div>
+            <form class="form-grid users-create-form" method="post" action="/users/create">
+                <label>
+                    <span>用户名</span>
+                    <input class="field-input" name="username" required>
+                </label>
+                <label>
+                    <span>邮箱</span>
+                    <input class="field-input" name="email" type="email" required>
+                </label>
+                <label>
+                    <span>初始密码</span>
+                    <input class="field-input" name="password" type="password" required>
+                </label>
+                <label>
+                    <span>角色</span>
+                    <select class="field-input" name="role">
+                        <option value="user">普通用户</option>
+                        <option value="admin">管理员</option>
+                    </select>
+                </label>
+                <label class="users-switch-row form-span-2" for="users-create-enabled">
+                    <span class="users-switch-copy">
+                        <strong>创建后立即启用</strong>
+                        <small>启用后该账号可直接登录并接收 API Key 授权。</small>
+                    </span>
+                    <span class="settings-switch-control">
+                        <input id="users-create-enabled" name="enabled" type="checkbox" checked>
+                        <span class="settings-switch-slider"></span>
+                    </span>
+                </label>
+                <div class="form-actions form-span-2">
+                    <button class="btn btn-accent interactive-btn" type="submit">创建账号</button>
+                </div>
+            </form>
+        </section>
+    </div>
+
+    <aside class="users-admin-side">
+        <section class="panel-card section-shell users-side-card">
+            <div class="section-subhead">
+                <div>
+                    <div class="panel-kicker">当前策略</div>
+                    <h3>治理状态</h3>
+                </div>
+            </div>
+            <div class="detail-list users-policy-list">
+                <div><span>公开注册</span><strong>{{ '已开启' if allow_public_user_registration else '默认关闭' }}</strong></div>
+                <div><span>当前页容量</span><strong>{{ pagination.page_size }} 条</strong></div>
+                <div><span>当前角色筛选</span><strong>{{ '全部' if not filters.role else ('管理员' if filters.role == 'admin' else '普通用户') }}</strong></div>
+                <div><span>当前状态筛选</span><strong>{{ '全部' if not filters.enabled else ('启用中' if filters.enabled == 'true' else '已禁用') }}</strong></div>
+            </div>
+        </section>
+    </aside>
+</section>
+
+<section class="panel-card section-shell users-filter-panel anchor-section-offset" id="users-filter">
     <div class="section-subhead">
         <div>
             <div class="panel-kicker">搜索筛选</div>
-            <h3>搜索与筛选</h3>
+            <h3>按角色、状态和关键词聚焦目标账号</h3>
         </div>
     </div>
-    <form class="filter-grid" method="get" action="/users">
+    <form class="filter-grid users-filter-form" method="get" action="/users">
         <label>
             <span>关键词</span>
             <input class="field-input" name="keyword" value="{{ filters.keyword }}" placeholder="用户名 / 邮箱">
@@ -137,220 +177,293 @@
             </select>
         </label>
         <div class="form-actions">
-            <button class="btn btn-accent" type="submit">查询</button>
+            <button class="btn btn-accent interactive-btn" type="submit">应用筛选</button>
+            <a class="btn btn-ghost interactive-btn" href="/users" data-shell-link>清空筛选</a>
         </div>
     </form>
+    <div class="users-filter-snapshot">
+        <article class="users-filter-stat">
+            <span>关键词</span>
+            <strong>{{ filters.keyword or '未限定' }}</strong>
+        </article>
+        <article class="users-filter-stat">
+            <span>角色</span>
+            <strong>{{ '全部' if not filters.role else ('管理员' if filters.role == 'admin' else '普通用户') }}</strong>
+        </article>
+        <article class="users-filter-stat">
+            <span>状态</span>
+            <strong>{{ '全部' if not filters.enabled else ('启用中' if filters.enabled == 'true' else '已禁用') }}</strong>
+        </article>
+        <article class="users-filter-stat">
+            <span>分页</span>
+            <strong>第 {{ pagination.page }} / {{ pagination.total_pages }} 页</strong>
+        </article>
+    </div>
 </section>
 
-<section class="panel-card section-shell">
+<section class="panel-card section-shell users-batch-section anchor-section-offset" id="users-batch">
     <div class="section-subhead">
         <div>
-            <div class="panel-kicker">批量操作</div>
-            <h3>批量用户额度调整</h3>
+            <div class="panel-kicker">批量额度</div>
+            <h3>按选中账号批量应用账户策略</h3>
         </div>
     </div>
-    <form class="form-grid" method="post" action="/users/batch/quota-policy" id="users-batch-quota-form">
+    <form class="users-batch-form" method="post" action="/users/batch/quota-policy" id="users-batch-quota-form">
         <input type="hidden" name="user_ids_text" id="users-batch-user-ids">
-        <label>
-            <span>已选用户 ID</span>
-            <input class="field-input" id="users-batch-user-ids-preview" value="" placeholder="通过下方勾选自动填充" disabled>
-        </label>
-        <div class="form-span-2 settings-note">
-            <strong>按项应用</strong>
-            <span>每个额度项需要单独勾选“本次修改”后才会提交；未勾选的项保持原值不变。当前值会根据已选用户实时显示，若显示“多值”代表这些用户该项并不一致。</span>
+        <div class="users-batch-selection-bar">
+            <label class="users-batch-selection">
+                <span>已选用户 ID</span>
+                <input class="field-input users-batch-selection-input" id="users-batch-user-ids-preview" value="" placeholder="在下方账号目录勾选后自动填充" disabled>
+            </label>
+            <div class="users-batch-submit-wrap">
+                <small class="table-muted">只有已打开“本次修改”的额度项才会提交。</small>
+                <button class="btn btn-accent interactive-btn" id="users-batch-apply-btn" type="submit">批量应用额度</button>
+            </div>
         </div>
-        <label class="batch-quota-field" data-batch-quota-field="frozen_amount">
-            <span class="batch-quota-head">
-                <span>冻结金额</span>
-                <span class="batch-quota-toggle">
-                    <input name="apply_fields" type="checkbox" value="frozen_amount" data-batch-quota-toggle="frozen_amount">
-                    <span>本次修改</span>
+        <div class="users-batch-grid">
+            <label class="batch-quota-field users-batch-card" data-batch-quota-field="frozen_amount">
+                <span class="batch-quota-head">
+                    <span class="users-batch-title">冻结金额</span>
+                    <span class="users-batch-toggle-wrap">
+                        <span class="users-batch-toggle-text">本次修改</span>
+                        <span class="settings-switch-control">
+                            <input name="apply_fields" type="checkbox" value="frozen_amount" data-batch-quota-toggle="frozen_amount">
+                            <span class="settings-switch-slider"></span>
+                        </span>
+                    </span>
                 </span>
-            </span>
-            <small class="table-muted" data-batch-quota-current="frozen_amount">当前值：未选择用户</small>
-            <input class="field-input" name="frozen_amount" type="number" step="0.000001" data-batch-quota-input="frozen_amount" disabled>
-        </label>
-        <label class="batch-quota-field" data-batch-quota-field="request_limit_total">
-            <span class="batch-quota-head">
-                <span>总调用次数上限</span>
-                <span class="batch-quota-toggle">
-                    <input name="apply_fields" type="checkbox" value="request_limit_total" data-batch-quota-toggle="request_limit_total">
-                    <span>本次修改</span>
+                <small class="table-muted" data-batch-quota-current="frozen_amount">当前值：未选择用户</small>
+                <input class="field-input" name="frozen_amount" type="number" step="0.000001" data-batch-quota-input="frozen_amount" disabled>
+            </label>
+            <label class="batch-quota-field users-batch-card" data-batch-quota-field="request_limit_total">
+                <span class="batch-quota-head">
+                    <span class="users-batch-title">总调用次数上限</span>
+                    <span class="users-batch-toggle-wrap">
+                        <span class="users-batch-toggle-text">本次修改</span>
+                        <span class="settings-switch-control">
+                            <input name="apply_fields" type="checkbox" value="request_limit_total" data-batch-quota-toggle="request_limit_total">
+                            <span class="settings-switch-slider"></span>
+                        </span>
+                    </span>
                 </span>
-            </span>
-            <small class="table-muted" data-batch-quota-current="request_limit_total">当前值：未选择用户</small>
-            <input class="field-input" name="request_limit_total" type="number" min="0" data-batch-quota-input="request_limit_total" disabled>
-        </label>
-        <label class="batch-quota-field" data-batch-quota-field="request_limit_daily">
-            <span class="batch-quota-head">
-                <span>日调用次数上限</span>
-                <span class="batch-quota-toggle">
-                    <input name="apply_fields" type="checkbox" value="request_limit_daily" data-batch-quota-toggle="request_limit_daily">
-                    <span>本次修改</span>
+                <small class="table-muted" data-batch-quota-current="request_limit_total">当前值：未选择用户</small>
+                <input class="field-input" name="request_limit_total" type="number" min="0" data-batch-quota-input="request_limit_total" disabled>
+            </label>
+            <label class="batch-quota-field users-batch-card" data-batch-quota-field="request_limit_daily">
+                <span class="batch-quota-head">
+                    <span class="users-batch-title">日调用次数上限</span>
+                    <span class="users-batch-toggle-wrap">
+                        <span class="users-batch-toggle-text">本次修改</span>
+                        <span class="settings-switch-control">
+                            <input name="apply_fields" type="checkbox" value="request_limit_daily" data-batch-quota-toggle="request_limit_daily">
+                            <span class="settings-switch-slider"></span>
+                        </span>
+                    </span>
                 </span>
-            </span>
-            <small class="table-muted" data-batch-quota-current="request_limit_daily">当前值：未选择用户</small>
-            <input class="field-input" name="request_limit_daily" type="number" min="0" data-batch-quota-input="request_limit_daily" disabled>
-        </label>
-        <label class="batch-quota-field" data-batch-quota-field="request_limit_monthly">
-            <span class="batch-quota-head">
-                <span>月调用次数上限</span>
-                <span class="batch-quota-toggle">
-                    <input name="apply_fields" type="checkbox" value="request_limit_monthly" data-batch-quota-toggle="request_limit_monthly">
-                    <span>本次修改</span>
+                <small class="table-muted" data-batch-quota-current="request_limit_daily">当前值：未选择用户</small>
+                <input class="field-input" name="request_limit_daily" type="number" min="0" data-batch-quota-input="request_limit_daily" disabled>
+            </label>
+            <label class="batch-quota-field users-batch-card" data-batch-quota-field="request_limit_monthly">
+                <span class="batch-quota-head">
+                    <span class="users-batch-title">月调用次数上限</span>
+                    <span class="users-batch-toggle-wrap">
+                        <span class="users-batch-toggle-text">本次修改</span>
+                        <span class="settings-switch-control">
+                            <input name="apply_fields" type="checkbox" value="request_limit_monthly" data-batch-quota-toggle="request_limit_monthly">
+                            <span class="settings-switch-slider"></span>
+                        </span>
+                    </span>
                 </span>
-            </span>
-            <small class="table-muted" data-batch-quota-current="request_limit_monthly">当前值：未选择用户</small>
-            <input class="field-input" name="request_limit_monthly" type="number" min="0" data-batch-quota-input="request_limit_monthly" disabled>
-        </label>
-        <label class="batch-quota-field" data-batch-quota-field="token_limit_total">
-            <span class="batch-quota-head">
-                <span>总 Token 上限</span>
-                <span class="batch-quota-toggle">
-                    <input name="apply_fields" type="checkbox" value="token_limit_total" data-batch-quota-toggle="token_limit_total">
-                    <span>本次修改</span>
+                <small class="table-muted" data-batch-quota-current="request_limit_monthly">当前值：未选择用户</small>
+                <input class="field-input" name="request_limit_monthly" type="number" min="0" data-batch-quota-input="request_limit_monthly" disabled>
+            </label>
+            <label class="batch-quota-field users-batch-card" data-batch-quota-field="token_limit_total">
+                <span class="batch-quota-head">
+                    <span class="users-batch-title">总 Token 上限</span>
+                    <span class="users-batch-toggle-wrap">
+                        <span class="users-batch-toggle-text">本次修改</span>
+                        <span class="settings-switch-control">
+                            <input name="apply_fields" type="checkbox" value="token_limit_total" data-batch-quota-toggle="token_limit_total">
+                            <span class="settings-switch-slider"></span>
+                        </span>
+                    </span>
                 </span>
-            </span>
-            <small class="table-muted" data-batch-quota-current="token_limit_total">当前值：未选择用户</small>
-            <input class="field-input" name="token_limit_total" type="number" min="0" data-batch-quota-input="token_limit_total" disabled>
-        </label>
-        <label class="batch-quota-field" data-batch-quota-field="token_limit_daily">
-            <span class="batch-quota-head">
-                <span>日 Token 上限</span>
-                <span class="batch-quota-toggle">
-                    <input name="apply_fields" type="checkbox" value="token_limit_daily" data-batch-quota-toggle="token_limit_daily">
-                    <span>本次修改</span>
+                <small class="table-muted" data-batch-quota-current="token_limit_total">当前值：未选择用户</small>
+                <input class="field-input" name="token_limit_total" type="number" min="0" data-batch-quota-input="token_limit_total" disabled>
+            </label>
+            <label class="batch-quota-field users-batch-card" data-batch-quota-field="token_limit_daily">
+                <span class="batch-quota-head">
+                    <span class="users-batch-title">日 Token 上限</span>
+                    <span class="users-batch-toggle-wrap">
+                        <span class="users-batch-toggle-text">本次修改</span>
+                        <span class="settings-switch-control">
+                            <input name="apply_fields" type="checkbox" value="token_limit_daily" data-batch-quota-toggle="token_limit_daily">
+                            <span class="settings-switch-slider"></span>
+                        </span>
+                    </span>
                 </span>
-            </span>
-            <small class="table-muted" data-batch-quota-current="token_limit_daily">当前值：未选择用户</small>
-            <input class="field-input" name="token_limit_daily" type="number" min="0" data-batch-quota-input="token_limit_daily" disabled>
-        </label>
-        <label class="batch-quota-field" data-batch-quota-field="token_limit_monthly">
-            <span class="batch-quota-head">
-                <span>月 Token 上限</span>
-                <span class="batch-quota-toggle">
-                    <input name="apply_fields" type="checkbox" value="token_limit_monthly" data-batch-quota-toggle="token_limit_monthly">
-                    <span>本次修改</span>
+                <small class="table-muted" data-batch-quota-current="token_limit_daily">当前值：未选择用户</small>
+                <input class="field-input" name="token_limit_daily" type="number" min="0" data-batch-quota-input="token_limit_daily" disabled>
+            </label>
+            <label class="batch-quota-field users-batch-card" data-batch-quota-field="token_limit_monthly">
+                <span class="batch-quota-head">
+                    <span class="users-batch-title">月 Token 上限</span>
+                    <span class="users-batch-toggle-wrap">
+                        <span class="users-batch-toggle-text">本次修改</span>
+                        <span class="settings-switch-control">
+                            <input name="apply_fields" type="checkbox" value="token_limit_monthly" data-batch-quota-toggle="token_limit_monthly">
+                            <span class="settings-switch-slider"></span>
+                        </span>
+                    </span>
                 </span>
-            </span>
-            <small class="table-muted" data-batch-quota-current="token_limit_monthly">当前值：未选择用户</small>
-            <input class="field-input" name="token_limit_monthly" type="number" min="0" data-batch-quota-input="token_limit_monthly" disabled>
-        </label>
-        <label class="batch-quota-field" data-batch-quota-field="cost_limit_total">
-            <span class="batch-quota-head">
-                <span>总金额上限</span>
-                <span class="batch-quota-toggle">
-                    <input name="apply_fields" type="checkbox" value="cost_limit_total" data-batch-quota-toggle="cost_limit_total">
-                    <span>本次修改</span>
+                <small class="table-muted" data-batch-quota-current="token_limit_monthly">当前值：未选择用户</small>
+                <input class="field-input" name="token_limit_monthly" type="number" min="0" data-batch-quota-input="token_limit_monthly" disabled>
+            </label>
+            <label class="batch-quota-field users-batch-card" data-batch-quota-field="cost_limit_total">
+                <span class="batch-quota-head">
+                    <span class="users-batch-title">总金额上限</span>
+                    <span class="users-batch-toggle-wrap">
+                        <span class="users-batch-toggle-text">本次修改</span>
+                        <span class="settings-switch-control">
+                            <input name="apply_fields" type="checkbox" value="cost_limit_total" data-batch-quota-toggle="cost_limit_total">
+                            <span class="settings-switch-slider"></span>
+                        </span>
+                    </span>
                 </span>
-            </span>
-            <small class="table-muted" data-batch-quota-current="cost_limit_total">当前值：未选择用户</small>
-            <input class="field-input" name="cost_limit_total" type="number" step="0.000001" min="0" data-batch-quota-input="cost_limit_total" disabled>
-        </label>
-        <label class="batch-quota-field" data-batch-quota-field="cost_limit_daily">
-            <span class="batch-quota-head">
-                <span>日金额上限</span>
-                <span class="batch-quota-toggle">
-                    <input name="apply_fields" type="checkbox" value="cost_limit_daily" data-batch-quota-toggle="cost_limit_daily">
-                    <span>本次修改</span>
+                <small class="table-muted" data-batch-quota-current="cost_limit_total">当前值：未选择用户</small>
+                <input class="field-input" name="cost_limit_total" type="number" step="0.000001" min="0" data-batch-quota-input="cost_limit_total" disabled>
+            </label>
+            <label class="batch-quota-field users-batch-card" data-batch-quota-field="cost_limit_daily">
+                <span class="batch-quota-head">
+                    <span class="users-batch-title">日金额上限</span>
+                    <span class="users-batch-toggle-wrap">
+                        <span class="users-batch-toggle-text">本次修改</span>
+                        <span class="settings-switch-control">
+                            <input name="apply_fields" type="checkbox" value="cost_limit_daily" data-batch-quota-toggle="cost_limit_daily">
+                            <span class="settings-switch-slider"></span>
+                        </span>
+                    </span>
                 </span>
-            </span>
-            <small class="table-muted" data-batch-quota-current="cost_limit_daily">当前值：未选择用户</small>
-            <input class="field-input" name="cost_limit_daily" type="number" step="0.000001" min="0" data-batch-quota-input="cost_limit_daily" disabled>
-        </label>
-        <label class="batch-quota-field" data-batch-quota-field="cost_limit_monthly">
-            <span class="batch-quota-head">
-                <span>月金额上限</span>
-                <span class="batch-quota-toggle">
-                    <input name="apply_fields" type="checkbox" value="cost_limit_monthly" data-batch-quota-toggle="cost_limit_monthly">
-                    <span>本次修改</span>
+                <small class="table-muted" data-batch-quota-current="cost_limit_daily">当前值：未选择用户</small>
+                <input class="field-input" name="cost_limit_daily" type="number" step="0.000001" min="0" data-batch-quota-input="cost_limit_daily" disabled>
+            </label>
+            <label class="batch-quota-field users-batch-card" data-batch-quota-field="cost_limit_monthly">
+                <span class="batch-quota-head">
+                    <span class="users-batch-title">月金额上限</span>
+                    <span class="users-batch-toggle-wrap">
+                        <span class="users-batch-toggle-text">本次修改</span>
+                        <span class="settings-switch-control">
+                            <input name="apply_fields" type="checkbox" value="cost_limit_monthly" data-batch-quota-toggle="cost_limit_monthly">
+                            <span class="settings-switch-slider"></span>
+                        </span>
+                    </span>
                 </span>
-            </span>
-            <small class="table-muted" data-batch-quota-current="cost_limit_monthly">当前值：未选择用户</small>
-            <input class="field-input" name="cost_limit_monthly" type="number" step="0.000001" min="0" data-batch-quota-input="cost_limit_monthly" disabled>
-        </label>
-        <div class="form-actions form-span-2">
-            <button class="btn btn-accent interactive-btn" id="users-batch-apply-btn" type="submit">批量应用额度</button>
+                <small class="table-muted" data-batch-quota-current="cost_limit_monthly">当前值：未选择用户</small>
+                <input class="field-input" name="cost_limit_monthly" type="number" step="0.000001" min="0" data-batch-quota-input="cost_limit_monthly" disabled>
+            </label>
         </div>
     </form>
 </section>
 
-<section class="panel-card section-shell">
-    <div class="section-subhead">
+<section class="panel-card section-shell users-registry-section anchor-section-offset" id="users-registry">
+    <div class="section-subhead users-registry-headline">
         <div>
-            <div class="panel-kicker">账号列表</div>
-            <h3>账号列表</h3>
+            <div class="panel-kicker">账号目录</div>
+            <h3>逐个治理当前页账号</h3>
         </div>
-    </div>
-    <div class="table-shell">
-        <table class="data-table">
-            <thead>
-                <tr>
-                    <th><input id="users-check-all-visible" type="checkbox" aria-label="选择本页"></th>
-                    <th>ID</th>
-                    <th>用户名</th>
-                    <th>邮箱</th>
-                    <th>角色</th>
-                    <th>状态</th>
-                    <th>关联 API 密钥</th>
-                    <th>最近登录</th>
-                    <th>详情</th>
-                    <th>操作</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% if users %}
-                    {% for user in users %}
-                    <tr>
-                        <td><input type="checkbox" data-user-batch-id="{{ user.id }}"></td>
-                        <td>{{ user.id }}</td>
-                        <td>{{ user.username }}</td>
-                        <td>{{ user.email }}</td>
-                        <td>{{ '管理员' if user.role == 'admin' else '普通用户' }}</td>
-                        <td>{{ '启用中' if user.enabled else '已禁用' }}</td>
-                        <td>{{ key_counts.get(user.id, 0) }}</td>
-                        <td>{{ user.last_login_at or '-' }}</td>
-                        <td><a href="/users/{{ user.id }}" data-shell-link>查看详情</a></td>
-                        <td>
-                            <div class="table-actions">
-                                <form method="post" action="/users/{{ user.id }}/toggle">
-                                    <input type="hidden" name="return_to" value="{{ current_query }}">
-                                    <button class="table-action-btn" type="submit">{{ '禁用' if user.enabled else '启用' }}</button>
-                                </form>
-                                <form method="post" action="/users/{{ user.id }}/role">
-                                    <input type="hidden" name="return_to" value="{{ current_query }}">
-                                    <input name="role" type="hidden" value="{{ 'user' if user.role == 'admin' else 'admin' }}">
-                                    <button class="table-action-btn" type="submit">{{ '降为用户' if user.role == 'admin' else '升为管理员' }}</button>
-                                </form>
-                                <form class="table-inline-form" method="post" action="/users/{{ user.id }}/password">
-                                    <input type="hidden" name="return_to" value="{{ current_query }}">
-                                    <input class="field-input table-inline-input" name="password" type="password" placeholder="新密码" required>
-                                    <button class="table-action-btn" type="submit">重置密码</button>
-                                </form>
-                                <form method="post" action="/users/{{ user.id }}/delete" onsubmit="return window.confirm('确认删除该用户及其名下 API 密钥吗？');">
-                                    <input type="hidden" name="return_to" value="{{ current_query }}">
-                                    <button class="table-action-btn" type="submit">删除</button>
-                                </form>
-                            </div>
-                        </td>
-                    </tr>
-                    {% endfor %}
-                {% else %}
-                    <tr><td colspan="10"><div class="empty-state">暂无符合条件的账号。</div></td></tr>
+        <div class="users-registry-toolbar">
+            <label class="users-select-toolbar" for="users-check-all-visible">
+                <input id="users-check-all-visible" type="checkbox" aria-label="选择本页">
+                <span>选择本页</span>
+            </label>
+            <div class="logs-page-meta">第 {{ pagination.page }} / {{ pagination.total_pages }} 页，共 {{ pagination.total }} 条</div>
+            <div class="logs-page-actions">
+                {% if pagination.has_prev %}
+                <a class="topbar-btn" href="/users?keyword={{ filters.keyword | urlencode }}&role={{ filters.role | urlencode }}&enabled={{ filters.enabled | urlencode }}&page_size={{ pagination.page_size }}&page={{ pagination.prev_page }}" data-shell-link>上一页</a>
                 {% endif %}
-            </tbody>
-        </table>
-    </div>
-    <div class="logs-pagination-bar topbar-actions">
-        <div class="logs-page-meta">第 {{ pagination.page }} / {{ pagination.total_pages }} 页，共 {{ pagination.total }} 条</div>
-        <div class="logs-page-actions">
-            {% if pagination.has_prev %}
-            <a class="topbar-btn" href="/users?keyword={{ filters.keyword | urlencode }}&role={{ filters.role | urlencode }}&enabled={{ filters.enabled | urlencode }}&page_size={{ pagination.page_size }}&page={{ pagination.prev_page }}" data-shell-link>上一页</a>
-            {% endif %}
-            {% if pagination.has_next %}
-            <a class="topbar-btn" href="/users?keyword={{ filters.keyword | urlencode }}&role={{ filters.role | urlencode }}&enabled={{ filters.enabled | urlencode }}&page_size={{ pagination.page_size }}&page={{ pagination.next_page }}" data-shell-link>下一页</a>
-            {% endif %}
+                {% if pagination.has_next %}
+                <a class="topbar-btn" href="/users?keyword={{ filters.keyword | urlencode }}&role={{ filters.role | urlencode }}&enabled={{ filters.enabled | urlencode }}&page_size={{ pagination.page_size }}&page={{ pagination.next_page }}" data-shell-link>下一页</a>
+                {% endif %}
+            </div>
         </div>
     </div>
+
+    {% if users %}
+    <div class="users-registry-list">
+        {% for user in users %}
+        <article class="users-registry-card">
+            <div class="users-registry-head">
+                <label class="users-select-card" for="users-batch-{{ user.id }}">
+                    <input id="users-batch-{{ user.id }}" type="checkbox" data-user-batch-id="{{ user.id }}">
+                    <span>纳入批量</span>
+                </label>
+                <div class="users-registry-title">
+                    <div class="users-registry-name-row">
+                        <h4>{{ user.username }}</h4>
+                        <div class="users-registry-pills">
+                            <span class="status-badge status-{{ 'healthy' if user.enabled else 'unhealthy' }}">{{ '启用中' if user.enabled else '已禁用' }}</span>
+                            <span class="users-role-pill users-role-pill-{{ user.role }}">{{ '管理员' if user.role == 'admin' else '普通用户' }}</span>
+                        </div>
+                    </div>
+                    <p>{{ user.email }}</p>
+                </div>
+                <a class="btn btn-ghost btn-sm interactive-btn" href="/users/{{ user.id }}" data-shell-link>查看详情</a>
+            </div>
+
+            <div class="users-registry-meta">
+                <div>
+                    <span>账号 ID</span>
+                    <strong>#{{ user.id }}</strong>
+                </div>
+                <div>
+                    <span>关联 API Key</span>
+                    <strong>{{ key_counts.get(user.id, 0) }}</strong>
+                </div>
+                <div>
+                    <span>最近登录</span>
+                    <strong>{{ user.last_login_at or '未登录' }}</strong>
+                </div>
+                <div>
+                    <span>操作目标</span>
+                    <strong>{{ '管理员治理' if user.role == 'admin' else '普通用户接入' }}</strong>
+                </div>
+            </div>
+
+            <div class="users-card-actions">
+                <form method="post" action="/users/{{ user.id }}/toggle">
+                    <input type="hidden" name="return_to" value="{{ current_query }}">
+                    <button class="table-action-btn" type="submit">{{ '禁用账号' if user.enabled else '启用账号' }}</button>
+                </form>
+                <form method="post" action="/users/{{ user.id }}/role">
+                    <input type="hidden" name="return_to" value="{{ current_query }}">
+                    <input name="role" type="hidden" value="{{ 'user' if user.role == 'admin' else 'admin' }}">
+                    <button class="table-action-btn" type="submit">{{ '降为用户' if user.role == 'admin' else '升为管理员' }}</button>
+                </form>
+                <form method="post" action="/users/{{ user.id }}/delete" onsubmit="return window.confirm('确认删除该用户及其名下 API 密钥吗？');">
+                    <input type="hidden" name="return_to" value="{{ current_query }}">
+                    <button class="table-action-btn" type="submit">删除账号</button>
+                </form>
+            </div>
+
+            <form class="users-password-form" method="post" action="/users/{{ user.id }}/password">
+                <input type="hidden" name="return_to" value="{{ current_query }}">
+                <label class="users-password-field" for="users-password-{{ user.id }}">
+                    <span class="visually-hidden">为 {{ user.username }} 输入新密码</span>
+                    <input class="field-input users-password-input" id="users-password-{{ user.id }}" name="password" type="password" placeholder="输入新密码后立即重置" required>
+                </label>
+                <button class="table-action-btn" type="submit">重置密码</button>
+            </form>
+        </article>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-state users-empty-state">
+        <p>当前筛选条件下没有可治理的账号，可以先放宽筛选或直接创建新账号。</p>
+        <div class="users-empty-actions">
+            <a class="btn btn-ghost interactive-btn" href="/users" data-shell-link>查看全部账号</a>
+            <a class="btn btn-accent interactive-btn" href="#users-create">创建账号</a>
+        </div>
+    </div>
+    {% endif %}
 </section>
 {% endblock %}

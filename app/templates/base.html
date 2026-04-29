@@ -4,11 +4,26 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{ title or "aotu-gpt" }}</title>
+    <script>
+        (function () {
+            try {
+                const storedTheme = localStorage.getItem("aotu-theme");
+                const preferredTheme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+                const initialTheme = storedTheme || preferredTheme;
+                document.documentElement.dataset.theme = initialTheme;
+                document.documentElement.style.colorScheme = initialTheme;
+            } catch (error) {
+                document.documentElement.dataset.theme = "light";
+                document.documentElement.style.colorScheme = "light";
+            }
+        })();
+    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="{{ url_for('static', path='css/app.css') }}?v=20260426-21" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+    <link href="{{ url_for('static', path='css/app.css') }}?v=20260429-02" rel="stylesheet">
 </head>
 {% set page_role = (
     'overview' if page_name in ['dashboard', 'user-home']
@@ -30,201 +45,118 @@
     data-authenticated="{{ 'true' if current_user else 'false' }}"
     data-user-role="{{ current_user.role if current_user else '' }}"
 >
+    <a class="visually-hidden-focusable skip-link" href="#app-content">跳到主要内容</a>
     <div class="app-shell">
-        <aside class="sidebar">
-            <div class="brand-block">
-                <div class="brand-row">
-                    <span class="brand-logo">
-                        <svg viewBox="0 0 24 24" aria-hidden="true">
-                            <path d="M12 2.25a1 1 0 0 1 .89.55l2.03 4.11 4.54.66a1 1 0 0 1 .55 1.7l-3.28 3.2.77 4.52a1 1 0 0 1-1.45 1.06L12 15.93l-4.05 2.13a1 1 0 0 1-1.45-1.06l.77-4.52-3.28-3.2a1 1 0 0 1 .55-1.7l4.54-.66 2.03-4.11a1 1 0 0 1 .89-.55Z" />
-                        </svg>
-                    </span>
-                    <div class="brand-text">
-                        <strong>aotu-gpt</strong>
-                        <small>{{ '用户接入台' if is_user_portal else '管理控制台' }}</small>
-                    </div>
+        <header class="site-header">
+            <nav class="site-nav" aria-label="{{ '用户端主导航' if is_user_portal else '管理端主导航' }}">
+                <div class="site-nav-shell">
+                    <a class="site-brand" href="{{ home_href }}" data-shell-link aria-label="返回{{ home_label }}">
+                        <span class="brand-logo">
+                            <i class="bi bi-diagram-3" aria-hidden="true"></i>
+                        </span>
+                        <span class="brand-text">
+                            <strong>aotu-gpt</strong>
+                            <small>{{ '用户接入台' if is_user_portal else '管理控制台' }}</small>
+                        </span>
+                    </a>
+                    <button
+                        class="site-nav-toggle interactive-btn"
+                        id="site-nav-toggle"
+                        type="button"
+                        aria-expanded="false"
+                        aria-controls="site-nav-panel"
+                        aria-label="切换导航菜单"
+                    >
+                        <span class="site-nav-toggle-bar" aria-hidden="true"></span>
+                        <span class="site-nav-toggle-bar" aria-hidden="true"></span>
+                        <span class="site-nav-toggle-bar" aria-hidden="true"></span>
+                    </button>
                 </div>
-            </div>
-            <nav class="nav-cluster">
-                {% if portal_type == 'user' %}
-                <a class="nav-link {% if request.url.path == '/user' %}active{% endif %}" href="/user" data-shell-link>
-                    <span class="nav-icon">◫</span>
-                    <div class="nav-copy">
-                        <span>用户中心</span>
-                    </div>
-                </a>
-                <a class="nav-link {% if request.url.path.startswith('/user/profile') %}active{% endif %}" href="/user/profile" data-shell-link>
-                    <span class="nav-icon">☻</span>
-                    <div class="nav-copy">
-                        <span>账号安全</span>
-                    </div>
-                </a>
-                <a class="nav-link {% if request.url.path.startswith('/user/api-keys') %}active{% endif %}" href="/user/api-keys" data-shell-link>
-                    <span class="nav-icon">⌘</span>
-                    <div class="nav-copy">
-                        <span>API Key 管理</span>
-                    </div>
-                </a>
-                <a class="nav-link {% if request.url.path.startswith('/user/models') %}active{% endif %}" href="/user/models" data-shell-link>
-                    <span class="nav-icon">◈</span>
-                    <div class="nav-copy">
-                        <span>可用模型</span>
-                    </div>
-                </a>
-                <a class="nav-link {% if request.url.path.startswith('/user/docs') %}active{% endif %}" href="/user/docs" data-shell-link>
-                    <span class="nav-icon">✦</span>
-                    <div class="nav-copy">
-                        <span>使用文档</span>
-                    </div>
-                </a>
-                <a class="nav-link {% if request.url.path.startswith('/user/logs') %}active{% endif %}" href="/user/logs" data-shell-link>
-                    <span class="nav-icon">≣</span>
-                    <div class="nav-copy">
-                        <span>我的日志</span>
-                    </div>
-                </a>
-                <a class="nav-link {% if request.url.path.startswith('/user/billing') %}active{% endif %}" href="/user/billing" data-shell-link>
-                    <span class="nav-icon">¥</span>
-                    <div class="nav-copy">
-                        <span>我的账单</span>
-                    </div>
-                </a>
-                <a class="nav-link {% if request.url.path.startswith('/user/conversations') %}active{% endif %}" href="/user/conversations" data-shell-link>
-                    <span class="nav-icon">◌</span>
-                    <div class="nav-copy">
-                        <span>会话回放</span>
-                    </div>
-                </a>
-                <a class="nav-link {% if request.url.path.startswith('/user/self-test') %}active{% endif %}" href="/user/self-test" data-shell-link>
-                    <span class="nav-icon">⌁</span>
-                    <div class="nav-copy">
-                        <span>接入自检</span>
-                    </div>
-                </a>
-                {% else %}
-                <a class="nav-link {% if request.url.path == '/' %}active{% endif %}" href="/" data-shell-link>
-                    <span class="nav-icon">◫</span>
-                    <div class="nav-copy">
-                        <span>概览</span>
-                    </div>
-                </a>
-                <a class="nav-link {% if request.url.path == '/providers' %}active{% endif %}" href="/providers" data-shell-link>
-                    <span class="nav-icon">◎</span>
-                    <div class="nav-copy">
-                        <span>中转站管理</span>
-                    </div>
-                </a>
-                <a class="nav-link {% if request.url.path == '/models' %}active{% endif %}" href="/models" data-shell-link>
-                    <span class="nav-icon">◈</span>
-                    <div class="nav-copy">
-                        <span>模型配置</span>
-                    </div>
-                </a>
-                <a class="nav-link {% if request.url.path == '/settings' %}active{% endif %}" href="/settings" data-shell-link>
-                    <span class="nav-icon">⚙</span>
-                    <div class="nav-copy">
-                        <span>路由设置</span>
-                    </div>
-                </a>
-                <a class="nav-link {% if request.url.path == '/playground' %}active{% endif %}" href="/playground" data-shell-link>
-                    <span class="nav-icon">↗</span>
-                    <div class="nav-copy">
-                        <span>调用测试</span>
-                    </div>
-                </a>
-                <a class="nav-link {% if request.url.path == '/docs' %}active{% endif %}" href="/docs" data-shell-link>
-                    <span class="nav-icon">✦</span>
-                    <div class="nav-copy">
-                        <span>使用文档</span>
-                    </div>
-                </a>
-                <a class="nav-link {% if request.url.path.startswith('/users') %}active{% endif %}" href="/users" data-shell-link>
-                    <span class="nav-icon">☻</span>
-                    <div class="nav-copy">
-                        <span>用户管理</span>
-                    </div>
-                </a>
-                <a class="nav-link {% if request.url.path.startswith('/api-keys') %}active{% endif %}" href="/api-keys" data-shell-link>
-                    <span class="nav-icon">⌘</span>
-                    <div class="nav-copy">
-                        <span>API 密钥管理</span>
-                    </div>
-                </a>
-                <a class="nav-link {% if request.url.path == '/logs' %}active{% endif %}" href="/logs" data-shell-link>
-                    <span class="nav-icon">≣</span>
-                    <div class="nav-copy">
-                        <span>日志中心</span>
-                    </div>
-                </a>
-                <a class="nav-link {% if request.url.path == '/alerts' %}active{% endif %}" href="/alerts" data-shell-link>
-                    <span class="nav-icon">!</span>
-                    <div class="nav-copy">
-                        <span>告警中心</span>
-                    </div>
-                </a>
-                <a class="nav-link {% if request.url.path == '/conversations' %}active{% endif %}" href="/conversations" data-shell-link>
-                    <span class="nav-icon">◌</span>
-                    <div class="nav-copy">
-                        <span>会话回放</span>
-                    </div>
-                </a>
-                <a class="nav-link {% if request.url.path == '/audit-logs' %}active{% endif %}" href="/audit-logs" data-shell-link>
-                    <span class="nav-icon">⋮</span>
-                    <div class="nav-copy">
-                        <span>审计日志</span>
-                    </div>
-                </a>
-                {% endif %}
-            </nav>
-            <div class="sidebar-footer">
-                {{ '用户端' if is_user_portal else '管理端' }}
-            </div>
-        </aside>
-        <div class="workspace">
-            <header class="topbar">
-                <div class="topbar-title">
-                    <span class="topbar-mark"></span>
-                    <div class="topbar-title-copy">
-                        <span class="topbar-eyebrow">{{ '用户端' if is_user_portal else '管理端' }}</span>
-                        <strong id="topbar-title">{{ title or "控制台" }}</strong>
-                    </div>
-                </div>
-                <div class="topbar-global">
-                    <a class="topbar-btn" href="{{ home_href }}" data-shell-link>{{ home_label }}</a>
-                    <a class="topbar-btn" href="{{ docs_href }}" data-shell-link>使用文档</a>
-                    <a class="topbar-btn topbar-btn-ghost" href="{{ quick_href }}" data-shell-link>{{ quick_label }}</a>
-                    <details class="account-menu">
-                        <summary class="account-menu-trigger">
-                            <span class="topbar-user">{{ (current_user.username[0] if current_user and current_user.username else 'A')|upper }}</span>
-                            <span class="account-menu-meta">
-                                <strong>{{ current_user.username if current_user else '未登录' }}</strong>
-                                <small>{{ '普通用户' if is_user_portal else '管理员' }}</small>
-                            </span>
-                        </summary>
-                        <div class="account-menu-panel">
-                            <div class="account-menu-head">
-                                <strong>{{ current_user.username if current_user else '未登录' }}</strong>
-                                <span>{{ current_user.email if current_user and current_user.email else ('普通用户' if is_user_portal else '管理员') }}</span>
-                            </div>
-                            {% if is_user_portal %}
-                            <a class="account-menu-link" href="/user/profile" data-shell-link>个人资料</a>
-                            <a class="account-menu-link" href="/user/api-keys" data-shell-link>API Key 管理</a>
-                            <a class="account-menu-link" href="/user/billing" data-shell-link>我的账单</a>
-                            {% else %}
-                            <a class="account-menu-link" href="/users" data-shell-link>用户管理</a>
-                            <a class="account-menu-link" href="/audit-logs" data-shell-link>审计日志</a>
-                            {% endif %}
-                            <a class="account-menu-link account-menu-link-danger" href="/logout">退出登录</a>
+                <div class="site-nav-panel" id="site-nav-panel">
+                    <div class="site-nav-primary">
+                        <div class="site-nav-context">
+                            <span class="topbar-eyebrow">{{ '用户端' if is_user_portal else '管理端' }}</span>
+                            <strong id="topbar-title">{{ title or ('用户中心' if is_user_portal else '管理控制台') }}</strong>
                         </div>
-                    </details>
+                        <div class="nav-cluster">
+                            {% if portal_type == 'user' %}
+                            <a class="nav-link {% if request.url.path == '/user' %}active{% endif %}" href="/user" data-shell-link><i class="bi bi-grid" aria-hidden="true"></i><span>用户中心</span></a>
+                            <a class="nav-link {% if request.url.path.startswith('/user/profile') %}active{% endif %}" href="/user/profile" data-shell-link><i class="bi bi-shield-check" aria-hidden="true"></i><span>账号安全</span></a>
+                            <a class="nav-link {% if request.url.path.startswith('/user/api-keys') %}active{% endif %}" href="/user/api-keys" data-shell-link><i class="bi bi-key" aria-hidden="true"></i><span>API Key 管理</span></a>
+                            <a class="nav-link {% if request.url.path.startswith('/user/models') %}active{% endif %}" href="/user/models" data-shell-link><i class="bi bi-boxes" aria-hidden="true"></i><span>可用模型</span></a>
+                            <a class="nav-link {% if request.url.path.startswith('/user/docs') %}active{% endif %}" href="/user/docs" data-shell-link><i class="bi bi-file-text" aria-hidden="true"></i><span>使用文档</span></a>
+                            <a class="nav-link {% if request.url.path.startswith('/user/logs') %}active{% endif %}" href="/user/logs" data-shell-link><i class="bi bi-journal-text" aria-hidden="true"></i><span>我的日志</span></a>
+                            <a class="nav-link {% if request.url.path.startswith('/user/billing') %}active{% endif %}" href="/user/billing" data-shell-link><i class="bi bi-wallet2" aria-hidden="true"></i><span>我的账单</span></a>
+                            <a class="nav-link {% if request.url.path.startswith('/user/conversations') %}active{% endif %}" href="/user/conversations" data-shell-link><i class="bi bi-chat-square-text" aria-hidden="true"></i><span>会话回放</span></a>
+                            <a class="nav-link {% if request.url.path.startswith('/user/self-test') %}active{% endif %}" href="/user/self-test" data-shell-link><i class="bi bi-activity" aria-hidden="true"></i><span>接入自检</span></a>
+                            {% else %}
+                            <a class="nav-link {% if request.url.path == '/' %}active{% endif %}" href="/" data-shell-link><i class="bi bi-speedometer2" aria-hidden="true"></i><span>概览</span></a>
+                            <a class="nav-link {% if request.url.path == '/providers' %}active{% endif %}" href="/providers" data-shell-link><i class="bi bi-hdd-network" aria-hidden="true"></i><span>中转站管理</span></a>
+                            <a class="nav-link {% if request.url.path == '/models' %}active{% endif %}" href="/models" data-shell-link><i class="bi bi-boxes" aria-hidden="true"></i><span>模型配置</span></a>
+                            <a class="nav-link {% if request.url.path == '/settings' %}active{% endif %}" href="/settings" data-shell-link><i class="bi bi-sliders" aria-hidden="true"></i><span>路由设置</span></a>
+                            <a class="nav-link {% if request.url.path == '/playground' %}active{% endif %}" href="/playground" data-shell-link><i class="bi bi-send" aria-hidden="true"></i><span>调用测试</span></a>
+                            <a class="nav-link {% if request.url.path == '/docs' %}active{% endif %}" href="/docs" data-shell-link><i class="bi bi-file-text" aria-hidden="true"></i><span>使用文档</span></a>
+                            <a class="nav-link {% if request.url.path.startswith('/users') %}active{% endif %}" href="/users" data-shell-link><i class="bi bi-people" aria-hidden="true"></i><span>用户管理</span></a>
+                            <a class="nav-link {% if request.url.path.startswith('/api-keys') %}active{% endif %}" href="/api-keys" data-shell-link><i class="bi bi-key" aria-hidden="true"></i><span>API 密钥管理</span></a>
+                            <a class="nav-link {% if request.url.path == '/logs' %}active{% endif %}" href="/logs" data-shell-link><i class="bi bi-journal-text" aria-hidden="true"></i><span>日志中心</span></a>
+                            <a class="nav-link {% if request.url.path == '/alerts' %}active{% endif %}" href="/alerts" data-shell-link><i class="bi bi-bell" aria-hidden="true"></i><span>告警中心</span></a>
+                            <a class="nav-link {% if request.url.path == '/conversations' %}active{% endif %}" href="/conversations" data-shell-link><i class="bi bi-chat-square-text" aria-hidden="true"></i><span>会话回放</span></a>
+                            <a class="nav-link {% if request.url.path == '/audit-logs' %}active{% endif %}" href="/audit-logs" data-shell-link><i class="bi bi-list-check" aria-hidden="true"></i><span>审计日志</span></a>
+                            {% endif %}
+                        </div>
+                    </div>
+                    <div class="site-nav-actions">
+                        <button class="topbar-btn topbar-btn-ghost topbar-theme-btn interactive-btn" id="theme-toggle" type="button" aria-label="切换暗黑模式">
+                            <i class="bi bi-circle-half" aria-hidden="true"></i>
+                            <span id="theme-toggle-label">暗黑模式</span>
+                        </button>
+                        <a class="topbar-btn" href="{{ home_href }}" data-shell-link>{{ home_label }}</a>
+                        <a class="topbar-btn" href="{{ docs_href }}" data-shell-link>使用文档</a>
+                        <a class="topbar-btn topbar-btn-ghost" href="{{ quick_href }}" data-shell-link>{{ quick_label }}</a>
+                        <details class="account-menu">
+                            <summary class="account-menu-trigger">
+                                <span class="topbar-user">{{ (current_user.username[0] if current_user and current_user.username else 'A')|upper }}</span>
+                                <span class="account-menu-meta">
+                                    <strong>{{ current_user.username if current_user else '未登录' }}</strong>
+                                    <small>{{ '普通用户' if is_user_portal else '管理员' }}</small>
+                                </span>
+                            </summary>
+                            <div class="account-menu-panel">
+                                <div class="account-menu-head">
+                                    <strong>{{ current_user.username if current_user else '未登录' }}</strong>
+                                    <span>{{ current_user.email if current_user and current_user.email else ('普通用户' if is_user_portal else '管理员') }}</span>
+                                </div>
+                                {% if is_user_portal %}
+                                <a class="account-menu-link" href="/user/profile" data-shell-link>个人资料</a>
+                                <a class="account-menu-link" href="/user/api-keys" data-shell-link>API Key 管理</a>
+                                <a class="account-menu-link" href="/user/billing" data-shell-link>我的账单</a>
+                                {% else %}
+                                <a class="account-menu-link" href="/users" data-shell-link>用户管理</a>
+                                <a class="account-menu-link" href="/audit-logs" data-shell-link>审计日志</a>
+                                {% endif %}
+                                <a class="account-menu-link account-menu-link-danger" href="/logout">退出登录</a>
+                            </div>
+                        </details>
+                    </div>
                 </div>
-            </header>
-            <main class="content" id="app-content">
-                {% block content %}{% endblock %}
-            </main>
-        </div>
+            </nav>
+        </header>
+        <main class="content site-main" id="app-content">
+            {% block content %}{% endblock %}
+        </main>
+        <footer class="site-footer">
+            <div class="site-footer-copy">
+                <strong>aotu-gpt</strong>
+                <span>统一代理、对象治理与路由运维控制台。</span>
+            </div>
+            <div class="site-footer-links">
+                <a href="{{ home_href }}" data-shell-link>返回首页</a>
+                <a href="{{ docs_href }}" data-shell-link>使用文档</a>
+                <a href="/logout">退出登录</a>
+            </div>
+        </footer>
     </div>
-    <div class="toast-stack" id="toast-stack"></div>
-    <script src="{{ url_for('static', path='js/app.js') }}?v=20260426-21"></script>
+    <div class="toast-stack" id="toast-stack" role="status" aria-live="polite" aria-atomic="false"></div>
+    <script src="{{ url_for('static', path='js/app.js') }}?v=20260429-01"></script>
 </body>
 </html>

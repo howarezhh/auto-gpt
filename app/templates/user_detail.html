@@ -70,23 +70,6 @@
             <article class="api-key-chip-card"><strong>本月费用</strong><span>{{ '%.6f'|format(account_summary.month_cost_used or 0) }}</span></article>
         </div>
     </div>
-    <div class="dashboard-command-side">
-        <div class="panel-card">
-            <div class="panel-head">
-                <div>
-                    <div class="panel-kicker">概览补充</div>
-                    <h3>关键观察点</h3>
-                </div>
-            </div>
-            <div class="dashboard-signal-list">
-                <div><span>返回用户列表</span><strong><a href="/users" data-shell-link>回到用户管理</a></strong></div>
-                <div><span>导出用户列表</span><strong><a href="/users/export" target="_blank">下载 CSV</a></strong></div>
-                <div><span>名下 API 密钥</span><strong>{{ owned_api_keys|length }}</strong></div>
-                <div><span>累计费用</span><strong>{{ '%.6f'|format(totals.total_cost) }}</strong></div>
-                <div><span>累计会话</span><strong>{{ conversation_count }}</strong></div>
-            </div>
-        </div>
-    </div>
 </section>
 
 <section class="dashboard-command-grid anchor-section-offset" id="user-detail-governance">

@@ -19,8 +19,7 @@
     <article class="metric-card"><span>总费用</span><strong data-log-summary-cost="total_cost">0.000000</strong></article>
 </section>
 
-<section class="dashboard-command-grid">
-    <div class="panel-card section-shell">
+<section class="panel-card section-shell">
         <div class="section-subhead">
             <div>
                 <div class="panel-kicker">筛选视图</div>
@@ -77,24 +76,6 @@
                 <span>隐藏健康检查日志</span>
             </label>
         </div>
-    </div>
-
-    <div class="dashboard-command-side">
-        <div class="panel-card section-shell">
-            <div class="section-subhead">
-                <div>
-                    <div class="panel-kicker">阅读规则</div>
-                    <h3>排障顺序</h3>
-                </div>
-            </div>
-            <div class="dashboard-signal-list">
-                <div><span>第一步</span><strong>先看状态、模型、渠道、耗时和费用</strong></div>
-                <div><span>第二步</span><strong>点开详情查看请求体、响应体和 Trace</strong></div>
-                <div><span>第三步</span><strong>存在会话键时直接跳会话回放看完整上下文</strong></div>
-                <div><span>刷新策略</span><strong id="logs-last-refresh">最近刷新: -</strong></div>
-            </div>
-        </div>
-    </div>
 </section>
 
 <section class="panel-card section-shell">
@@ -108,6 +89,7 @@
             <button class="btn btn-ghost interactive-btn" id="logs-refresh-btn" type="button">刷新</button>
         </div>
     </div>
+    <div class="table-muted" id="logs-last-refresh">最近刷新: -</div>
     <div class="table-shell">
         <table class="data-table">
             <thead>

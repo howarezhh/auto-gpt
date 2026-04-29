@@ -56,33 +56,6 @@
     </form>
 </section>
 
-<section class="panel-card section-shell anchor-section-offset">
-    <div class="section-subhead">
-        <div>
-            <div class="panel-kicker">测试范围</div>
-            <h3>从单接口 ping 升级为多场景自检</h3>
-        </div>
-    </div>
-    <div class="stage-grid">
-        <article class="stage-card">
-            <strong>文本 · chat/completions</strong>
-            <span>覆盖非流式和流式两种链路，验证当前模型对标准对话接口的真实可用性。</span>
-        </article>
-        <article class="stage-card">
-            <strong>文本 · responses</strong>
-            <span>覆盖非流式和流式两种链路，确认 `/v1/responses` 是否能按正式口径跑通。</span>
-        </article>
-        <article class="stage-card">
-            <strong>图片链路</strong>
-            <span>若附带图片链接或本地图片，会额外补测视觉请求，确认图片能力不是“看起来支持”。</span>
-        </article>
-        <article class="stage-card">
-            <strong>报告下载</strong>
-            <span>测试结束后可直接下载本次自检报告，方便留档或发给管理员协助排障。</span>
-        </article>
-    </div>
-</section>
-
 <section class="dashboard-command-grid anchor-section-offset" id="user-self-test-checks">
     <div class="panel-card section-shell">
         <div class="section-subhead">
@@ -117,7 +90,6 @@
                 <div><span>当前密钥</span><strong><button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="{{ selected_api_key.raw_api_key }}">复制明文</button></strong></div>
                 <div><span>请求头</span><strong><button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="Authorization: Bearer {{ selected_api_key.raw_api_key }}">复制 Header</button></strong></div>
                 {% endif %}
-                <div><span>密钥控制台</span><strong><a href="/user/api-keys" data-shell-link>回到密钥页</a></strong></div>
             </div>
         </div>
     </div>
@@ -222,26 +194,6 @@
         </div>
     </div>
 
-    <div class="dashboard-command-side">
-        <div class="panel-card">
-            <div class="panel-head">
-                <div>
-                    <div class="panel-kicker">判断原则</div>
-                    <h3>如何判定可以上线</h3>
-                </div>
-            </div>
-            <div class="risk-grid">
-                <article class="risk-card" data-level="default">
-                    <strong>成功不等于全量上线</strong>
-                    <span>测试通过后，建议先小流量接入，再观察日志和账单变化。</span>
-                </article>
-                <article class="risk-card" data-level="warning">
-                    <strong>失败先看授权与模型</strong>
-                    <span>最常见问题是密钥无明文、未绑定中转站、模型未授权或渠道健康异常。</span>
-                </article>
-            </div>
-        </div>
-    </div>
 </section>
 
 <section class="panel-card section-shell anchor-section-offset" id="user-self-test-candidates">

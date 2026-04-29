@@ -27,7 +27,6 @@
     <a class="page-anchor-link" href="#api-keys-overview">概览指标</a>
     <a class="page-anchor-link" href="#api-keys-registry">筛选列表</a>
     <a class="page-anchor-link" href="#api-keys-batch">批量操作</a>
-    <a class="page-anchor-link" href="#api-keys-risk">风险提示</a>
 </nav>
 
 <section class="panel-card section-shell anchor-section-offset" id="api-keys-overview">
@@ -84,7 +83,7 @@
         <button class="btn btn-ghost interactive-btn" id="api-key-refresh-btn" type="button">刷新</button>
     </div>
     <div class="table-toolbar-block">
-        <div class="table-toolbar">
+        <div class="table-toolbar filter-toolbar">
             <input class="field-input search-input" id="api-key-search" type="search" placeholder="搜索名称、备注、前缀、归属用户">
             <select class="field-input" id="api-key-status-filter">
                 <option value="">全部状态</option>
@@ -109,10 +108,6 @@
                 <option value="50">50 条 / 页</option>
                 <option value="100">100 条 / 页</option>
             </select>
-        </div>
-        <div class="settings-note">
-            <strong>列表说明</strong>
-            <span>密钥列表统一走服务端筛选与分页，筛选范围覆盖状态、启用状态、归属用户和关键字。详情、编辑、启停和删除都从结果表内进入。</span>
         </div>
     </div>
     <div class="table-shell">
@@ -166,8 +161,7 @@
     </div>
 </section>
 
-<section class="dashboard-command-grid anchor-section-offset">
-    <div class="panel-card section-shell">
+<section class="panel-card section-shell anchor-section-offset">
         <div class="section-subhead">
             <div>
                 <div class="panel-kicker">策略模板</div>
@@ -193,39 +187,16 @@
                 </tbody>
             </table>
         </div>
-    </div>
-
-    <div class="dashboard-command-side">
-        <div class="panel-card">
-            <div class="panel-head">
-                <div>
-                    <div class="panel-kicker">模板用途</div>
-                    <h3>统一发放标准</h3>
-                </div>
-            </div>
-            <div class="risk-grid">
-                <article class="risk-card" data-level="default">
-                    <strong>新建时套用</strong>
-                    <span>常见场景如“测试 Key”“生产只读 Key”“高配额企业 Key”可以直接复用模板。</span>
-                </article>
-                <article class="risk-card" data-level="warning">
-                    <strong>批量治理</strong>
-                    <span>当需要收紧或统一一批 Key 的路由和额度时，用模板比逐个编辑更稳定。</span>
-                </article>
-            </div>
-        </div>
-    </div>
 </section>
 
-<section class="dashboard-command-grid anchor-section-offset">
-    <div class="panel-card section-shell">
+<section class="panel-card section-shell anchor-section-offset">
         <div class="section-subhead">
             <div>
                 <div class="panel-kicker">成本透视</div>
                 <h3>按用户 / 模型 / 渠道看成本</h3>
             </div>
         </div>
-        <div class="table-toolbar">
+        <div class="table-toolbar filter-toolbar">
             <select class="field-input" id="api-key-insight-group-by">
                 <option value="user">按用户</option>
                 <option value="model">按模型</option>
@@ -254,70 +225,6 @@
                 </tbody>
             </table>
         </div>
-    </div>
-
-    <div class="dashboard-command-side">
-        <div class="panel-card">
-            <div class="panel-head">
-                <div>
-                    <div class="panel-kicker">使用说明</div>
-                    <h3>透视口径</h3>
-                </div>
-            </div>
-            <div class="dashboard-signal-list">
-                <div><span>按用户</span><strong>看哪个账户最耗钱</strong></div>
-                <div><span>按模型</span><strong>看哪个模型最贵</strong></div>
-                <div><span>按渠道</span><strong>看哪个中转站成本最高</strong></div>
-                <div><span>统计来源</span><strong>统一来自 request_logs</strong></div>
-            </div>
-        </div>
-    </div>
-</section>
-
-<section class="dashboard-command-grid anchor-section-offset" id="api-keys-risk">
-    <div class="panel-card section-shell">
-        <div class="section-subhead">
-            <div>
-                <div class="panel-kicker">风险提示</div>
-                <h3>高频治理风险</h3>
-            </div>
-        </div>
-        <div class="risk-grid">
-            <article class="risk-card" data-level="warning">
-                <strong>明文回显依赖新存档</strong>
-                <span>历史密钥若没有明文存档，必须通过编辑后重置一次，才能重新提供复制能力。</span>
-            </article>
-            <article class="risk-card" data-level="danger">
-                <strong>授权渠道为空将直接拦截</strong>
-                <span>即使模型本身可用，只要密钥没有绑定中转站，外部请求也会在鉴权后被拒绝。</span>
-            </article>
-            <article class="risk-card" data-level="warning">
-                <strong>手动优先并非自动容灾</strong>
-                <span>关闭“失败后回退”后，默认中转站失败不会切到候选中转站，适合严格定向测试而非生产兜底。</span>
-            </article>
-            <article class="risk-card" data-level="default">
-                <strong>额度口径以 request_logs 为准</strong>
-                <span>总额度、剩余额度、消费金额和导出报表统一追溯到请求日志，不再由前端本地拼装。</span>
-            </article>
-        </div>
-    </div>
-
-    <div class="dashboard-command-side api-key-side-panel">
-        <div class="panel-card">
-            <div class="panel-head">
-                <div>
-                    <div class="panel-kicker">快捷入口</div>
-                    <h3>运维跳转</h3>
-                </div>
-            </div>
-            <div class="action-stack">
-                <a class="quick-link" href="#api-keys-overview">返回概览与新增入口</a>
-                <a class="quick-link" href="/playground" data-shell-link>打开内部 playground</a>
-                <a class="quick-link" href="/settings" data-shell-link>查看全局路由设置</a>
-                <a class="quick-link" href="/logs" data-shell-link>核对平台请求日志</a>
-            </div>
-        </div>
-    </div>
 </section>
 
 <div class="modal-shell hidden" id="api-key-modal">

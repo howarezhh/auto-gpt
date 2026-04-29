@@ -38,7 +38,6 @@
     <a class="page-anchor-link" href="#api-key-section-analytics">调用分析</a>
     <a class="page-anchor-link" href="#api-key-section-billing">账单台账</a>
     <a class="page-anchor-link" href="#api-key-section-logs">请求日志</a>
-    <a class="page-anchor-link" href="#api-key-section-trace">Trace 与排查</a>
 </nav>
 
 <section class="dashboard-command-grid api-key-detail-grid anchor-section-offset" id="api-key-section-core">
@@ -95,18 +94,6 @@
         </div>
     </div>
 
-    <div class="dashboard-command-side api-key-detail-side">
-        <div class="summary-list-card">
-            <div class="panel-kicker">排查提示</div>
-            <h4>建议阅读顺序</h4>
-            <div class="dashboard-signal-list">
-                <div><span>先看</span><strong>状态、额度、绑定关系</strong></div>
-                <div><span>再看</span><strong>模型分布与最近错误</strong></div>
-                <div><span>然后看</span><strong>账单流水与余额调整</strong></div>
-                <div><span>最后看</span><strong>日志详情和 Trace 明细</strong></div>
-            </div>
-        </div>
-    </div>
 </section>
 
 <section class="panel-card section-shell anchor-section-offset" id="api-key-section-analytics">
@@ -223,47 +210,6 @@
                 <tr><td colspan="10"><div class="empty-state">正在加载请求日志...</div></td></tr>
             </tbody>
         </table>
-    </div>
-</section>
-
-<section class="dashboard-command-grid anchor-section-offset" id="api-key-section-trace">
-    <div class="panel-card section-shell">
-        <div class="section-subhead">
-            <div>
-                <div class="panel-kicker">Trace 与排查</div>
-                <h3>查看路径与字段说明</h3>
-            </div>
-        </div>
-        <div class="risk-grid">
-            <article class="risk-card" data-level="default">
-                <strong>查看方式</strong>
-                <span>在上方“历史请求日志”中点击“详情”，可打开该次请求的完整 Trace、请求体、响应体和计费字段。</span>
-            </article>
-            <article class="risk-card" data-level="warning">
-                <strong>优先核对</strong>
-                <span>先确认状态码、尝试次数、最近命中中转站，再结合 TTFB、总耗时与配额进度判断是线路问题还是额度问题。</span>
-            </article>
-            <article class="risk-card" data-level="danger">
-                <strong>余额异常</strong>
-                <span>若余额、冻结金额或金额额度异常，先回到“计费台账”核对余额调整记录，再查看对应请求日志的 total_cost 与倍率字段。</span>
-            </article>
-            <article class="risk-card" data-level="default">
-                <strong>模型异常</strong>
-                <span>若特定模型持续失败，先看“模型调用分布”和“最近错误”，再回查该模型在中转站中的启用状态、价格和健康状态。</span>
-            </article>
-        </div>
-    </div>
-
-    <div class="dashboard-command-side">
-        <div class="summary-list-card">
-            <div class="panel-kicker">快速跳转</div>
-            <h4>排查常用入口</h4>
-            <div class="action-stack">
-                <a class="quick-link" href="#api-key-section-core">回到状态与配额</a>
-                <a class="quick-link" href="#api-key-section-logs">跳到历史请求日志</a>
-                <a class="quick-link" href="/api-keys" data-shell-link>返回密钥列表</a>
-            </div>
-        </div>
     </div>
 </section>
 

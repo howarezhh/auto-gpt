@@ -25,6 +25,7 @@ class ProviderModelConfigInput(ProviderModelConfigBase):
 
 class ProviderModelConfigOut(ProviderModelConfigBase):
     id: int
+    price_multiplier: float = 1.0
     health_status: str
     circuit_state: str
     circuit_opened_at: datetime | None
@@ -49,6 +50,7 @@ class ProviderModelConfigUpdate(BaseModel):
     weight: int | None = None
     supports_stream: bool | None = None
     supports_vision: bool | None = None
+    price_multiplier: float | None = Field(default=None, gt=0)
     input_price_per_1k: float | None = Field(default=None, ge=0)
     output_price_per_1k: float | None = Field(default=None, ge=0)
 

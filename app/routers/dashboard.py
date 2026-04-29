@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from fastapi import APIRouter, Depends
 
 from app.database import get_db
+from app.models.model_catalog import ModelCatalog
 from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
 from app.models.request_log import RequestLog
@@ -41,7 +42,7 @@ def get_dashboard(db: Session = Depends(get_db)) -> dict:
         "healthy_count": db.scalar(select(func.count()).select_from(Provider).where(Provider.health_status == "healthy")) or 0,
         "degraded_count": db.scalar(select(func.count()).select_from(Provider).where(Provider.health_status == "degraded")) or 0,
         "unhealthy_count": db.scalar(select(func.count()).select_from(Provider).where(Provider.health_status == "unhealthy")) or 0,
-        "model_count": db.scalar(select(func.count()).select_from(ProviderModel)) or 0,
+        "model_count": db.scalar(select(func.count()).select_from(ModelCatalog)) or 0,
         "healthy_model_count": db.scalar(select(func.count()).select_from(ProviderModel).where(ProviderModel.health_status == "healthy")) or 0,
         "degraded_model_count": db.scalar(select(func.count()).select_from(ProviderModel).where(ProviderModel.health_status == "degraded")) or 0,
         "unhealthy_model_count": db.scalar(select(func.count()).select_from(ProviderModel).where(ProviderModel.health_status == "unhealthy")) or 0,

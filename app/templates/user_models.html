@@ -6,29 +6,17 @@
         <h2>模型选择与价格理解</h2>
         <p>这里专门回答三件事：该选哪个模型、价格怎么看、你的账号能命中哪些渠道。图片上传工具已经从模型页剥离，不再干扰选型。</p>
     </div>
-    <div class="cockpit-hero-aside">
-        <div class="cockpit-aside-label">价格口径</div>
-        <div class="cockpit-aside-value">/1M</div>
-        <div class="cockpit-aside-copy">所有价格统一按每百万 token 展示</div>
-        <div class="cockpit-health-bar"><span class="cockpit-health-fill-full"></span></div>
-        <div class="cockpit-aside-meta">
-            <span>可用模型 {{ models|length }}</span>
-            <span>仅显示当前账号授权范围</span>
-        </div>
-    </div>
 </section>
 
 <nav class="page-anchor-bar">
-    <a class="page-anchor-link" href="#user-models-understand">先理解</a>
     <a class="page-anchor-link" href="#user-models-directory">模型目录</a>
-    <a class="page-anchor-link" href="#user-models-rules">选择规则</a>
 </nav>
 
-<section class="stats-grid anchor-section-offset" id="user-models-understand">
+<section class="stats-grid anchor-section-offset">
     <article class="metric-card"><span>可用模型数</span><strong>{{ models|length }}</strong></article>
     <article class="metric-card"><span>有价格模型</span><strong>{{ models | selectattr('input_price_per_1k') | list | length }}</strong></article>
     <article class="metric-card"><span>可命中渠道总数</span><strong>{{ models | sum(attribute='enabled_provider_count') }}</strong></article>
-    <article class="metric-card"><span>默认建议</span><strong>先小流量测试</strong></article>
+    <article class="metric-card"><span>带备注模型</span><strong>{{ models | selectattr('remark') | list | length }}</strong></article>
 </section>
 
 <section class="dashboard-command-grid anchor-section-offset">
@@ -77,42 +65,5 @@
         </div>
     </div>
 
-    <div class="dashboard-command-side" id="user-models-rules">
-        <div class="panel-card">
-            <div class="panel-head">
-                <div>
-                    <div class="panel-kicker">选择规则</div>
-                    <h3>怎么选模型</h3>
-                </div>
-            </div>
-            <div class="stage-grid stage-grid-single">
-                <article class="stage-card">
-                    <strong>先看模型名</strong>
-                    <span>请求参数要使用这里展示的模型名，而不是自己猜一个近似名称。</span>
-                </article>
-                <article class="stage-card">
-                    <strong>再看输入 / 输出价格</strong>
-                    <span>价格统一按每百万 token 展示，便于直接横向对比，不要再自己换算 `/1K`。</span>
-                </article>
-                <article class="stage-card">
-                    <strong>最后看可用渠道数</strong>
-                    <span>可命中渠道越多，容灾空间越大；若只有一个渠道，建议先做小流量验证。</span>
-                </article>
-            </div>
-        </div>
-        <div class="panel-card">
-            <div class="panel-head">
-                <div>
-                    <div class="panel-kicker">继续动作</div>
-                    <h3>下一步</h3>
-                </div>
-            </div>
-            <div class="dashboard-signal-list">
-                <div><span>复制接入地址</span><strong><a href="/user" data-shell-link>回到首页主路径</a></strong></div>
-                <div><span>指定模型自检</span><strong><a href="/user/self-test" data-shell-link>去接入自检页</a></strong></div>
-                <div><span>密钥控制台</span><strong><a href="/user/api-keys" data-shell-link>看我的 API Key</a></strong></div>
-            </div>
-        </div>
-    </div>
 </section>
 {% endblock %}
