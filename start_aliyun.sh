@@ -475,7 +475,7 @@ run_database_initialization() {
 
   backup_database_before_initialization
   log "Running one-shot database initialization..."
-  ENABLE_STARTUP_DB_INIT=false "$PYTHON_BIN" "$PROJECT_ROOT/scripts/run_startup_db_init.py"
+  PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}" ENABLE_STARTUP_DB_INIT=false "$PYTHON_BIN" "$PROJECT_ROOT/scripts/run_startup_db_init.py"
 }
 
 write_systemd_service() {

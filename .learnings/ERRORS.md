@@ -28,6 +28,34 @@ Start Docker Desktop Linux Engine before running compose verification, or verify
 - Related Files: docker-compose.postgres.yml
 
 ---
+## [ERR-20260430-002] github_https_push_connection_reset
+
+**Logged**: 2026-04-30T23:55:00+08:00
+**Priority**: high
+**Status**: pending
+**Area**: infra
+
+### Summary
+Pushing to GitHub over HTTPS failed twice because the connection was reset.
+
+### Error
+```text
+fatal: unable to access 'https://github.com/howarezhh/auto-gpt.git/': Recv failure: Connection was reset
+```
+
+### Context
+- Command attempted: `git push -u origin main`
+- Remote: `https://github.com/howarezhh/auto-gpt.git`
+- Local commit exists and branch is ahead by 1, but remote push did not complete.
+
+### Suggested Fix
+Retry from a network path that can reach GitHub HTTPS, or switch the remote to an available SSH/proxy configuration after confirming credentials.
+
+### Metadata
+- Reproducible: yes
+- Related Files: none
+
+---
 
 ## [ERR-20260429-003] gunicorn_not_runnable_on_windows
 
@@ -153,5 +181,33 @@ Avoid nested `pwsh -Command` for multiline Python. Prefer direct current-shell c
 ### Metadata
 - Reproducible: yes
 - Related Files: none
+
+---
+## [ERR-20260430-001] local_bash_validation_wsl_unavailable
+
+**Logged**: 2026-04-30T23:43:00+08:00
+**Priority**: medium
+**Status**: pending
+**Area**: infra
+
+### Summary
+Local `bash -n start_aliyun.sh` cannot be trusted on this Windows workspace because WSL/Hyper-V is unavailable.
+
+### Error
+```text
+Wsl/Service/CreateInstance/CreateVm/HCS/HCS_E_HYPERV_NOT_INSTALLED
+```
+
+### Context
+- Command attempted: `bash -n start_aliyun.sh`
+- Environment: Windows PowerShell 7 workspace with WSL command present but Hyper-V support unavailable.
+- Impact: shell script syntax checks must be run on the target Linux server or another working Bash environment.
+
+### Suggested Fix
+Validate `start_aliyun.sh` on the Ubuntu ECS host with `bash -n start_aliyun.sh` before rerunning deployment.
+
+### Metadata
+- Reproducible: yes
+- Related Files: start_aliyun.sh
 
 ---

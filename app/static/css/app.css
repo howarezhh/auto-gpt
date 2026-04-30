@@ -2480,8 +2480,9 @@ textarea.field-input {
 
 .provider-model-summary {
     display: grid;
-    gap: 8px;
-    max-width: 260px;
+    gap: 6px;
+    width: min(220px, 100%);
+    max-width: 220px;
 }
 
 .provider-model-summary-head {
@@ -2498,13 +2499,14 @@ textarea.field-input {
     color: var(--muted);
     font-size: 12px;
     font-weight: 700;
+    line-height: 1.35;
 }
 
 .provider-model-preview-list {
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
-    max-height: 64px;
+    max-height: 30px;
     overflow: hidden;
 }
 
@@ -2525,10 +2527,16 @@ textarea.field-input {
 }
 
 .provider-model-preview-chip strong {
-    max-width: 132px;
+    max-width: 122px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+.provider-model-preview-chip span {
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 700;
 }
 
 .provider-model-more-chip {
@@ -2537,10 +2545,12 @@ textarea.field-input {
 
 .provider-model-detail-btn {
     width: fit-content;
+    min-height: 26px;
+    padding-inline: 8px;
 }
 
 .provider-models-detail-card {
-    width: min(1040px, 100%);
+    width: min(1180px, 100%);
     display: grid;
     grid-template-rows: auto minmax(0, 1fr);
     overflow: hidden;
@@ -2554,8 +2564,34 @@ textarea.field-input {
 
 .provider-model-detail-shell {
     display: grid;
-    gap: 16px;
+    gap: 14px;
     min-height: 0;
+}
+
+.provider-model-detail-provider {
+    display: grid;
+    grid-template-columns: minmax(180px, 0.38fr) minmax(0, 1fr);
+    gap: 12px;
+    padding: 12px 14px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: color-mix(in srgb, var(--surface-soft) 76%, transparent);
+}
+
+.provider-model-detail-provider span,
+.provider-model-detail-provider strong {
+    display: block;
+}
+
+.provider-model-detail-provider span {
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.provider-model-detail-provider strong {
+    margin-top: 4px;
+    overflow-wrap: anywhere;
 }
 
 .provider-model-detail-meta {
@@ -2566,9 +2602,9 @@ textarea.field-input {
 
 .provider-model-detail-meta > div {
     min-width: 0;
-    padding: 12px 14px;
+    padding: 10px 12px;
     border: 1px solid var(--line);
-    border-radius: 16px;
+    border-radius: 14px;
     background: color-mix(in srgb, var(--surface-soft) 82%, transparent);
 }
 
@@ -2588,31 +2624,26 @@ textarea.field-input {
     font-size: 18px;
 }
 
-.provider-model-detail-list {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-    gap: 12px;
-}
-
-.provider-model-detail-item {
-    display: grid;
-    gap: 10px;
-    min-width: 0;
-    padding: 14px;
+.provider-model-detail-table-shell {
+    max-height: min(58dvh, 620px);
+    overflow: auto;
     border: 1px solid var(--line);
-    border-radius: 18px;
-    background: color-mix(in srgb, var(--surface) 90%, transparent);
+    border-radius: 16px;
 }
 
-.provider-model-detail-item-head {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: 10px;
+.provider-model-detail-table {
+    min-width: 920px;
 }
 
-.provider-model-detail-item-head > strong {
-    min-width: 0;
+.provider-model-detail-table th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+}
+
+.provider-model-detail-name {
+    display: block;
+    max-width: 280px;
     overflow-wrap: anywhere;
 }
 
@@ -2645,6 +2676,7 @@ textarea.field-input {
 }
 
 .provider-model-detail-error {
+    margin-top: 6px;
     padding: 10px 12px;
     border: 1px solid rgba(220, 95, 104, 0.2);
     border-radius: 14px;
@@ -5379,8 +5411,22 @@ html[data-theme="dark"] .users-empty-state p {
         grid-template-columns: 1fr;
     }
 
+    .provider-models-detail-card {
+        width: 100%;
+        max-height: calc(100dvh - 24px - env(safe-area-inset-bottom));
+        border-radius: 18px;
+    }
+
+    .provider-model-detail-provider {
+        grid-template-columns: 1fr;
+    }
+
     .provider-model-detail-meta {
         grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .provider-model-detail-table-shell {
+        max-height: 58dvh;
     }
 
     .playground-batch-model-table-head {

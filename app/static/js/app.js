@@ -917,28 +917,28 @@
 
     function renderProviderModelHealth(modelConfigs = [], providerId) {
         if (!modelConfigs.length) return '<span class="table-muted">未挂载模型</span>';
-        const visibleModels = modelConfigs.slice(0, 2);
+        const visibleModels = modelConfigs.slice(0, 1);
         const enabledCount = modelConfigs.filter((item) => item.enabled).length;
         const healthyCount = modelConfigs.filter((item) => item.health_status === "healthy").length;
+        const streamCount = modelConfigs.filter((item) => item.supports_stream).length;
+        const visionCount = modelConfigs.filter((item) => item.supports_vision).length;
         const hiddenCount = Math.max(modelConfigs.length - visibleModels.length, 0);
         return `
             <div class="provider-model-summary">
                 <div class="provider-model-summary-head">
                     <strong>${formatNumber(modelConfigs.length)} 个模型</strong>
-                    <span>${formatNumber(enabledCount)} 个启用 · ${formatNumber(healthyCount)} 个健康</span>
+                    <span>${formatNumber(enabledCount)} 启用 · ${formatNumber(healthyCount)} 健康 · ${formatNumber(streamCount)} 流式 · ${formatNumber(visionCount)} 图像</span>
                 </div>
                 <div class="provider-model-preview-list">
                     ${visibleModels.map((item) => `
                         <span class="provider-model-preview-chip">
                             <strong>${escapeHtml(item.model_name)}</strong>
-                            ${statusBadge(item.health_status)}
+                            <span>${formatStatusBadgeLabel(item.health_status)}</span>
                         </span>
                     `).join("")}
                     ${hiddenCount ? `<span class="provider-model-more-chip">+${formatNumber(hiddenCount)}</span>` : ""}
                 </div>
-                ${hiddenCount || modelConfigs.length > 2
-                    ? `<button class="table-action-btn provider-model-detail-btn" data-action="view-models" data-id="${providerId}" type="button">查看全部</button>`
-                    : ""}
+                <button class="table-action-btn provider-model-detail-btn" data-action="view-models" data-id="${providerId}" type="button">查看全部</button>
             </div>
         `;
     }
@@ -2535,37 +2535,66 @@
             const healthyCount = modelConfigs.filter((item) => item.health_status === "healthy").length;
             const streamCount = modelConfigs.filter((item) => item.supports_stream).length;
             const visionCount = modelConfigs.filter((item) => item.supports_vision).length;
+            const rows = modelConfigs.map((item) => `
+                <tr>
+                    <td>
+                        <strong class="provider-model-detail-name">${escapeHtml(item.model_name)}</strong>
+                        ${item.last_error ? `<div class="provider-model-detail-error">${escapeHtml(item.last_error)}</div>` : ""}
+                    </td>
+                    <td>
+                        <div class="provider-model-detail-badges">
+                            ${statusBadge(item.health_status)}
+                            <span class="status-badge ${item.enabled ? "status-healthy" : "status-unknown"}">${item.enabled ? "已启用" : "已停用"}</span>
+                        </div>
+                    </td>
+                    <td>${item.supports_stream ? "流式" : "非流式"} / ${item.supports_vision ? "图像" : "文本"}</td>
+                    <td>P${escapeHtml(item.priority ?? "-")} / W${escapeHtml(item.weight ?? "-")}</td>
+                    <td>
+                        <strong>${escapeHtml(item.price_multiplier ?? 1)}x</strong>
+                        <div class="table-muted">输入 ${escapeHtml(formatPrice(item.input_price_per_1k))}</div>
+                        <div class="table-muted">输出 ${escapeHtml(formatPrice(item.output_price_per_1k))}</div>
+                    </td>
+                    <td>${renderQualitySummary(item)}</td>
+                    <td>
+                        <button class="table-action-btn" data-action="test-model" data-provider-id="${provider.id}" data-model-id="${item.id}" type="button">测试</button>
+                    </td>
+                </tr>
+            `).join("");
             return `
                 <div class="provider-model-detail-shell">
+                    <div class="provider-model-detail-provider">
+                        <div>
+                            <span>中转站</span>
+                            <strong>${escapeHtml(provider.name)}</strong>
+                        </div>
+                        <div>
+                            <span>Base URL</span>
+                            <strong>${escapeHtml(provider.base_url)}</strong>
+                        </div>
+                    </div>
                     <div class="provider-model-detail-meta">
                         <div><span>模型总数</span><strong>${formatNumber(modelConfigs.length)}</strong></div>
                         <div><span>已启用</span><strong>${formatNumber(enabledCount)}</strong></div>
                         <div><span>健康</span><strong>${formatNumber(healthyCount)}</strong></div>
                         <div><span>流式 / 图像</span><strong>${formatNumber(streamCount)} / ${formatNumber(visionCount)}</strong></div>
                     </div>
-                    <div class="provider-model-detail-list">
-                        ${modelConfigs.length ? modelConfigs.map((item) => `
-                            <article class="provider-model-detail-item">
-                                <div class="provider-model-detail-item-head">
-                                    <strong>${escapeHtml(item.model_name)}</strong>
-                                    <div class="provider-model-detail-badges">
-                                        ${statusBadge(item.health_status)}
-                                        <span class="status-badge ${item.enabled ? "status-healthy" : "status-unknown"}">${item.enabled ? "已启用" : "已停用"}</span>
-                                    </div>
-                                </div>
-                                <div class="provider-model-detail-info">
-                                    <span>P${escapeHtml(item.priority ?? "-")} / W${escapeHtml(item.weight ?? "-")}</span>
-                                    <span>${item.supports_stream ? "流式" : "非流式"} · ${item.supports_vision ? "图像" : "文本"}</span>
-                                    <span>倍率 ${escapeHtml(item.price_multiplier ?? 1)}x</span>
-                                    <span>输入 ${escapeHtml(formatPrice(item.input_price_per_1k))} · 输出 ${escapeHtml(formatPrice(item.output_price_per_1k))}</span>
-                                </div>
-                                <div class="provider-model-detail-quality">${renderQualitySummary(item)}</div>
-                                ${item.last_error ? `<div class="provider-model-detail-error">${escapeHtml(item.last_error)}</div>` : ""}
-                                <div class="provider-model-detail-actions">
-                                    <button class="table-action-btn" data-action="test-model" data-provider-id="${provider.id}" data-model-id="${item.id}" type="button">测试</button>
-                                </div>
-                            </article>
-                        `).join("") : '<div class="empty-state">当前中转站尚未挂载模型。</div>'}
+                    <div class="table-shell provider-model-detail-table-shell">
+                        <table class="data-table provider-model-detail-table">
+                            <thead>
+                                <tr>
+                                    <th>模型</th>
+                                    <th>状态</th>
+                                    <th>能力</th>
+                                    <th>优先级 / 权重</th>
+                                    <th>倍率 / 价格</th>
+                                    <th>质量</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${rows || '<tr><td colspan="7"><div class="empty-state">当前中转站尚未挂载模型。</div></td></tr>'}
+                            </tbody>
+                        </table>
                     </div>
                 </div>
             `;
