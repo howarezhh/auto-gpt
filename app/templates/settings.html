@@ -61,6 +61,42 @@
             <span>审计日志保留天数</span>
             <input class="field-input" id="setting-admin-audit-log-retention-days" type="number" min="0">
         </label>
+        <label>
+            <span>全局最大活跃请求</span>
+            <input class="field-input" id="setting-global-max-active-requests" type="number" min="0">
+        </label>
+        <label>
+            <span>全局最大流式请求</span>
+            <input class="field-input" id="setting-global-max-active-streams" type="number" min="0">
+        </label>
+        <label>
+            <span>单密钥最大活跃请求</span>
+            <input class="field-input" id="setting-api-key-max-active-requests" type="number" min="0">
+        </label>
+        <label>
+            <span>单密钥最大流式请求</span>
+            <input class="field-input" id="setting-api-key-max-active-streams" type="number" min="0">
+        </label>
+        <label>
+            <span>单账户最大活跃请求</span>
+            <input class="field-input" id="setting-account-max-active-requests" type="number" min="0">
+        </label>
+        <label>
+            <span>单账户最大流式请求</span>
+            <input class="field-input" id="setting-account-max-active-streams" type="number" min="0">
+        </label>
+        <label>
+            <span>单中转最大活跃请求</span>
+            <input class="field-input" id="setting-provider-max-active-requests" type="number" min="0">
+        </label>
+        <label>
+            <span>单中转最大流式请求</span>
+            <input class="field-input" id="setting-provider-max-active-streams" type="number" min="0">
+        </label>
+        <label>
+            <span>并发租约 TTL 秒</span>
+            <input class="field-input" id="setting-concurrency-lease-ttl-seconds" type="number" min="60">
+        </label>
         <div class="form-span-2 settings-switch-grid">
             <label class="settings-switch-card">
                 <span class="settings-switch-copy">

@@ -19,19 +19,55 @@
     <article class="metric-card"><span>可路由渠道</span><strong data-model-summary="enabledProviders">0</strong></article>
 </section>
 
-<section class="dashboard-command-grid">
-    <div class="panel-card section-shell">
+<section class="dashboard-command-grid models-catalog-grid">
+    <div class="panel-card section-shell models-catalog-panel">
     <div class="section-subhead">
         <div>
             <div class="panel-kicker">对象目录</div>
             <h3>模型聚合列表</h3>
+            <div class="table-muted">平均倍率由当前模型已绑定渠道倍率自动计算；修改单个渠道倍率、绑定或解绑渠道后自动变化，不能单独编辑。</div>
         </div>
     </div>
-    <div class="table-toolbar filter-toolbar">
-        <input class="field-input search-input" id="models-search" type="search" placeholder="搜索模型名、展示名、速度标签、渠道名">
+    <div class="filter-grid models-filter-grid">
+        <label>
+            <span>关键词</span>
+            <input class="field-input search-input" id="models-search" type="search" placeholder="模型名、展示名、速度标签、渠道名">
+        </label>
+        <label>
+            <span>状态</span>
+            <select class="field-input" id="models-enabled">
+                <option value="">全部状态</option>
+                <option value="true">已启用</option>
+                <option value="false">已停用</option>
+            </select>
+        </label>
+        <label>
+            <span>归属中转站</span>
+            <select class="field-input" id="models-provider-id">
+                <option value="">全部中转站</option>
+            </select>
+        </label>
+        <label>
+            <span>每页数量</span>
+            <select class="field-input" id="models-page-size">
+                <option value="10">10</option>
+                <option value="20" selected>20</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
+            </select>
+        </label>
     </div>
-    <div class="table-shell">
-        <table class="data-table">
+    <div class="table-shell models-catalog-table-shell">
+        <table class="data-table models-catalog-table">
+            <colgroup>
+                <col class="models-col-name">
+                <col class="models-col-status">
+                <col class="models-col-price">
+                <col class="models-col-speed">
+                <col class="models-col-providers">
+                <col class="models-col-multiplier">
+                <col class="models-col-actions">
+            </colgroup>
             <thead>
                 <tr>
                     <th>模型</th>
@@ -39,12 +75,19 @@
                     <th>基础价格</th>
                     <th>速度</th>
                     <th>可用中转站</th>
-                    <th>平均倍率</th>
+                    <th title="按已绑定渠道的倍率取算术平均；可路由平均仅统计当前可实际路由的渠道。">绑定平均倍率</th>
                     <th>操作</th>
                 </tr>
             </thead>
             <tbody id="models-table-body"></tbody>
         </table>
+    </div>
+    <div class="table-toolbar logs-pagination-bar models-pagination-bar">
+        <div class="logs-page-meta" id="models-page-meta">第 1 页，共 1 页 · 共 0 条</div>
+        <div class="logs-page-actions">
+            <button class="btn btn-ghost interactive-btn" id="models-prev-page-btn" type="button">上一页</button>
+            <button class="btn btn-ghost interactive-btn" id="models-next-page-btn" type="button">下一页</button>
+        </div>
     </div>
     </div>
 
@@ -88,8 +131,8 @@
             <label class="form-span-2">
                 <span>渠道绑定与倍率</span>
                 <div class="settings-note">
-                    <strong>价格计算</strong>
-                    <span>渠道实际价格 = 模型基础价格 × 该渠道倍率。勾选“绑定”后，这个模型才会出现在对应中转站。</span>
+                    <strong>价格与平均倍率</strong>
+                    <span>渠道实际价格 = 模型基础价格 × 该渠道倍率。平均倍率是系统按已绑定渠道自动汇总的只读指标；当上游成本、商务加价、渠道质量或绑定关系变化时，由管理员调整对应渠道倍率。</span>
                 </div>
                 <div class="table-shell">
                     <table class="data-table">

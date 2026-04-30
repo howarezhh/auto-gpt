@@ -1,9 +1,9 @@
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.schemas.model_catalog import ModelCatalogCreate, ModelCatalogDetailOut, ModelCatalogOut
-from app.schemas.model_catalog import ModelCatalogUpdate, UserModelOut
+from app.schemas.model_catalog import ModelCatalogPageOut, ModelCatalogUpdate, UserModelOut
 from app.services.asset_service import AssetService
 from app.services.admin_audit_service import AdminAuditService
 from app.services.model_catalog_service import ModelCatalogService
@@ -13,8 +13,27 @@ from app.services.user_auth_service import require_admin_api_user, require_sessi
 router = APIRouter(tags=["models"])
 
 
-@router.get("/api/models", response_model=list[ModelCatalogOut], dependencies=[Depends(require_admin_api_user)])
-def list_models(db: Session = Depends(get_db)) -> list[ModelCatalogOut]:
+@router.get("/api/models", dependencies=[Depends(require_admin_api_user)])
+def list_models(
+    paginated: bool = Query(default=False),
+    keyword: str | None = Query(default=None),
+    enabled: bool | None = Query(default=None),
+    provider_id: int | None = Query(default=None, ge=1),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=10, le=100),
+    db: Session = Depends(get_db),
+) -> list[ModelCatalogOut] | ModelCatalogPageOut:
+    if paginated:
+        return ModelCatalogPageOut(
+            **ModelCatalogService.list_model_page(
+                db,
+                keyword=keyword,
+                enabled=enabled,
+                provider_id=provider_id,
+                page=page,
+                page_size=page_size,
+            )
+        )
     return [ModelCatalogOut(**item) for item in ModelCatalogService.list_model_dicts(db)]
 
 

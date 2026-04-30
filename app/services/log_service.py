@@ -17,6 +17,7 @@ class LogService:
     USER_VISIBLE_LOG_TYPES = ("chat", "responses")
     REASONING_LEVEL_NONE = "无"
     REASONING_LEVEL_VALUES = {REASONING_LEVEL_NONE, "low", "medium", "high", "xhigh"}
+    METRIC_ROW_SAMPLE_LIMIT = 10000
 
     @staticmethod
     def create_log(
@@ -707,51 +708,89 @@ class LogService:
         return result.rowcount or 0
 
     @staticmethod
-    def metric_summary(db: Session, *, window_minutes: int) -> list[dict]:
+    def metric_summary(
+        db: Session,
+        *,
+        window_minutes: int,
+        user_account_id: int | None = None,
+        api_client_key_ids: list[int] | None = None,
+    ) -> list[dict]:
         since = datetime.utcnow() - timedelta(minutes=window_minutes)
-        logs = LogService._load_route_metric_logs(db, since=since)
-        grouped: dict[tuple[int | None, str | None, str | None], list[RequestLog]] = {}
-        for item in logs:
-            key = (item.provider_id, item.provider_name, item.requested_model)
-            grouped.setdefault(key, []).append(item)
-
         window_seconds = max(1, window_minutes * 60)
         results: list[dict] = []
-        for (provider_id, provider_name, requested_model), group_logs in sorted(
-            grouped.items(),
-            key=lambda item: len(item[1]),
-            reverse=True,
-        ):
-            total_requests = len(group_logs)
-            success_requests = sum(1 for item in group_logs if item.success)
+        stmt = (
+            select(
+                RequestLog.provider_id,
+                RequestLog.provider_name,
+                RequestLog.requested_model,
+                func.count(RequestLog.id).label("total_requests"),
+                func.sum(case((RequestLog.success.is_(True), 1), else_=0)).label("success_requests"),
+                func.avg(RequestLog.latency_ms).label("avg_latency_ms"),
+                func.avg(RequestLog.ttfb_ms).label("avg_ttfb_ms"),
+                func.avg(RequestLog.duration_ms).label("avg_duration_ms"),
+                func.sum(case((RequestLog.is_stream.is_(True), 1), else_=0)).label("stream_requests"),
+                func.sum(case((RequestLog.has_image.is_(True), 1), else_=0)).label("image_requests"),
+                func.count(func.distinct(RequestLog.user_account_id)).label("unique_users"),
+                func.sum(RequestLog.prompt_tokens).label("prompt_tokens"),
+                func.sum(RequestLog.completion_tokens).label("completion_tokens"),
+                func.sum(RequestLog.total_tokens).label("total_tokens"),
+                func.sum(RequestLog.total_cost).label("total_cost"),
+            )
+            .where(
+                RequestLog.created_at >= since,
+                LogService._route_traffic_expr(),
+            )
+            .group_by(RequestLog.provider_id, RequestLog.provider_name, RequestLog.requested_model)
+            .order_by(func.count(RequestLog.id).desc())
+        )
+        stmt = LogService._apply_metric_scope(
+            stmt,
+            user_account_id=user_account_id,
+            api_client_key_ids=api_client_key_ids,
+        )
+        rows = db.execute(stmt)
+        metric_samples = LogService._load_route_metric_samples(
+            db,
+            since=since,
+            user_account_id=user_account_id,
+            api_client_key_ids=api_client_key_ids,
+        )
+        sample_groups: dict[tuple[int | None, str | None, str | None], list] = {}
+        for sample in metric_samples:
+            key = (sample.provider_id, sample.provider_name, sample.requested_model)
+            sample_groups.setdefault(key, []).append(sample)
+        for row in rows:
+            total_requests = int(row.total_requests or 0)
+            success_requests = int(row.success_requests or 0)
             failed_requests = total_requests - success_requests
-            latency_values = LogService._metric_values(group_logs, "latency_ms")
-            ttfb_values = LogService._metric_values(group_logs, "ttfb_ms")
-            duration_values = LogService._metric_values(group_logs, "duration_ms")
+            sample_logs = sample_groups.get((row.provider_id, row.provider_name, row.requested_model), [])
+            latency_values = LogService._metric_values(sample_logs, "latency_ms")
+            ttfb_values = LogService._metric_values(sample_logs, "ttfb_ms")
             results.append(
                 {
-                    "provider_id": provider_id,
-                    "provider_name": provider_name,
-                    "requested_model": requested_model,
+                    "provider_id": row.provider_id,
+                    "provider_name": row.provider_name,
+                    "requested_model": row.requested_model,
                     "total_requests": total_requests,
                     "success_requests": success_requests,
                     "failed_requests": failed_requests,
                     "failure_rate": round((failed_requests / total_requests) * 100, 2) if total_requests else 0.0,
-                    "avg_latency_ms": LogService._average(latency_values),
-                    "avg_ttfb_ms": LogService._average(ttfb_values),
-                    "avg_duration_ms": LogService._average(duration_values),
+                    "avg_latency_ms": LogService._round_float(row.avg_latency_ms),
+                    "avg_ttfb_ms": LogService._round_float(row.avg_ttfb_ms),
+                    "avg_duration_ms": LogService._round_float(row.avg_duration_ms),
                     "p95_latency_ms": LogService._percentile(latency_values, 95),
                     "p99_latency_ms": LogService._percentile(latency_values, 99),
                     "p95_ttfb_ms": LogService._percentile(ttfb_values, 95),
                     "p99_ttfb_ms": LogService._percentile(ttfb_values, 99),
                     "qps": round(total_requests / window_seconds, 4),
-                    "peak_active_requests": LogService._compute_peak_active_requests(group_logs),
-                    "stream_requests": sum(1 for item in group_logs if item.is_stream),
-                    "image_requests": sum(1 for item in group_logs if item.has_image),
-                    "unique_users": len({item.user_account_id for item in group_logs if item.user_account_id is not None}),
-                    "prompt_tokens": sum(int(item.prompt_tokens or 0) for item in group_logs),
-                    "completion_tokens": sum(int(item.completion_tokens or 0) for item in group_logs),
-                    "total_tokens": sum(int(item.total_tokens or 0) for item in group_logs),
+                    "peak_active_requests": LogService._compute_peak_active_requests(sample_logs),
+                    "stream_requests": int(row.stream_requests or 0),
+                    "image_requests": int(row.image_requests or 0),
+                    "unique_users": int(row.unique_users or 0),
+                    "prompt_tokens": int(row.prompt_tokens or 0),
+                    "completion_tokens": int(row.completion_tokens or 0),
+                    "total_tokens": int(row.total_tokens or 0),
+                    "total_cost": round(float(row.total_cost or 0), 6),
                 }
             )
         return results
@@ -915,18 +954,44 @@ class LogService:
         *,
         window_minutes: int,
         bucket_minutes: int,
+        user_account_id: int | None = None,
+        api_client_key_ids: list[int] | None = None,
     ) -> list[dict]:
         bucket_minutes = max(1, min(bucket_minutes, window_minutes))
         since = datetime.utcnow() - timedelta(minutes=window_minutes)
-        logs = LogService._load_route_metric_logs(db, since=since)
-        buckets: dict[datetime, list[RequestLog]] = {}
-        for item in logs:
-            if item.created_at is None:
+        stmt = (
+            select(
+                RequestLog.created_at,
+                RequestLog.success,
+                RequestLog.is_stream,
+                RequestLog.has_image,
+                RequestLog.latency_ms,
+                RequestLog.ttfb_ms,
+                RequestLog.total_tokens,
+                RequestLog.total_cost,
+                RequestLog.duration_ms,
+            )
+            .where(
+                RequestLog.created_at >= since,
+                LogService._route_traffic_expr(),
+            )
+            .order_by(RequestLog.created_at.desc(), RequestLog.id.desc())
+            .limit(LogService.METRIC_ROW_SAMPLE_LIMIT)
+        )
+        stmt = LogService._apply_metric_scope(
+            stmt,
+            user_account_id=user_account_id,
+            api_client_key_ids=api_client_key_ids,
+        )
+        rows = db.execute(stmt)
+        buckets: dict[datetime, list] = {}
+        for row in rows:
+            if row.created_at is None:
                 continue
-            minute_floor = item.created_at.replace(second=0, microsecond=0)
+            minute_floor = row.created_at.replace(second=0, microsecond=0)
             bucket_minute = minute_floor.minute - (minute_floor.minute % bucket_minutes)
             bucket_start = minute_floor.replace(minute=bucket_minute)
-            buckets.setdefault(bucket_start, []).append(item)
+            buckets.setdefault(bucket_start, []).append(row)
 
         results = []
         bucket_window_seconds = max(1, bucket_minutes * 60)
@@ -952,6 +1017,7 @@ class LogService:
                     "qps": round(total_requests / bucket_window_seconds, 4),
                     "peak_active_requests": LogService._compute_peak_active_requests(bucket_logs),
                     "total_tokens": sum(int(item.total_tokens or 0) for item in bucket_logs),
+                    "total_cost": round(sum(float(item.total_cost or 0) for item in bucket_logs), 6),
                 }
             )
         return results
@@ -967,20 +1033,30 @@ class LogService:
         if normalized_period not in {"day", "week", "month"}:
             raise ValueError("period_type must be one of: day, week, month")
         since = datetime.utcnow() - timedelta(days=window_days)
-        logs = LogService._load_route_metric_logs(db, since=since)
-        grouped: dict[datetime, list[RequestLog]] = {}
-        for item in logs:
-            if item.created_at is None:
-                continue
-            period_start = LogService._period_start(item.created_at, normalized_period)
-            grouped.setdefault(period_start, []).append(item)
+        bucket_expr = LogService._period_bucket_expr(db, normalized_period)
+        rows = db.execute(
+            select(
+                bucket_expr.label("period_bucket"),
+                func.min(RequestLog.created_at).label("period_start"),
+                func.count(RequestLog.id).label("total_requests"),
+                func.sum(case((RequestLog.success.is_(True), 1), else_=0)).label("success_requests"),
+                func.sum(RequestLog.total_tokens).label("total_tokens"),
+                func.sum(RequestLog.total_cost).label("total_cost"),
+            )
+            .where(
+                RequestLog.created_at >= since,
+                LogService._route_traffic_expr(),
+            )
+            .group_by(bucket_expr)
+            .order_by(bucket_expr.asc())
+        )
 
         items: list[dict] = []
-        for period_start in sorted(grouped.keys()):
-            period_logs = grouped[period_start]
-            total_requests = len(period_logs)
-            success_requests = sum(1 for item in period_logs if item.success)
+        for row in rows:
+            total_requests = int(row.total_requests or 0)
+            success_requests = int(row.success_requests or 0)
             failed_requests = total_requests - success_requests
+            period_start = LogService._normalize_period_row_start(row.period_start, normalized_period)
             items.append(
                 {
                     "period_start": period_start,
@@ -988,8 +1064,8 @@ class LogService:
                     "total_requests": total_requests,
                     "success_requests": success_requests,
                     "failed_requests": failed_requests,
-                    "total_tokens": sum(int(item.total_tokens or 0) for item in period_logs),
-                    "total_cost": round(sum(float(item.total_cost or 0) for item in period_logs), 6),
+                    "total_tokens": int(row.total_tokens or 0),
+                    "total_cost": round(float(row.total_cost or 0), 6),
                 }
             )
         return items
@@ -1008,13 +1084,67 @@ class LogService:
         )
 
     @staticmethod
-    def _metric_values(logs: list[RequestLog], field_name: str) -> list[float]:
+    def _load_route_metric_samples(
+        db: Session,
+        *,
+        since: datetime,
+        user_account_id: int | None = None,
+        api_client_key_ids: list[int] | None = None,
+    ) -> list:
+        stmt = (
+            select(
+                RequestLog.provider_id,
+                RequestLog.provider_name,
+                RequestLog.requested_model,
+                RequestLog.created_at,
+                RequestLog.latency_ms,
+                RequestLog.ttfb_ms,
+                RequestLog.duration_ms,
+            )
+            .where(
+                RequestLog.created_at >= since,
+                LogService._route_traffic_expr(),
+            )
+            .order_by(RequestLog.created_at.desc(), RequestLog.id.desc())
+            .limit(LogService.METRIC_ROW_SAMPLE_LIMIT)
+        )
+        stmt = LogService._apply_metric_scope(
+            stmt,
+            user_account_id=user_account_id,
+            api_client_key_ids=api_client_key_ids,
+        )
+        return list(db.execute(stmt))
+
+    @staticmethod
+    def _apply_metric_scope(
+        stmt,
+        *,
+        user_account_id: int | None = None,
+        api_client_key_ids: list[int] | None = None,
+    ):
+        if user_account_id is not None:
+            stmt = stmt.where(RequestLog.user_account_id == user_account_id)
+        if api_client_key_ids is not None:
+            if not api_client_key_ids:
+                stmt = stmt.where(RequestLog.api_client_key_id == -1)
+            else:
+                stmt = stmt.where(RequestLog.api_client_key_id.in_(api_client_key_ids))
+        return stmt
+
+    @staticmethod
+    def _metric_values(logs: list, field_name: str) -> list[float]:
         values: list[float] = []
         for item in logs:
             value = getattr(item, field_name, None)
             if value is not None:
                 values.append(float(value))
         return values
+
+    @staticmethod
+    def _round_float(value) -> float | None:
+        if value is None:
+            return None
+        return round(float(value), 2)
 
     @staticmethod
     def _average(values: list[float]) -> float | None:
@@ -1069,3 +1199,34 @@ class LogService:
             day_start = value.replace(hour=0, minute=0, second=0, microsecond=0)
             return day_start - timedelta(days=day_start.weekday())
         return value.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    @staticmethod
+    def _period_bucket_expr(db: Session, period_type: str):
+        dialect = db.get_bind().dialect.name
+        if dialect == "sqlite":
+            if period_type == "day":
+                return func.strftime("%Y-%m-%d", RequestLog.created_at)
+            if period_type == "week":
+                return func.strftime("%Y-%W", RequestLog.created_at)
+            return func.strftime("%Y-%m", RequestLog.created_at)
+        if dialect == "postgresql":
+            return func.date_trunc(period_type, RequestLog.created_at)
+        if period_type == "day":
+            return func.date(RequestLog.created_at)
+        if period_type == "week":
+            return func.extract("week", RequestLog.created_at)
+        return func.extract("month", RequestLog.created_at)
+
+    @staticmethod
+    def _normalize_period_row_start(value, period_type: str) -> datetime:
+        if isinstance(value, datetime):
+            return LogService._period_start(value, period_type)
+        if isinstance(value, str):
+            try:
+                if period_type == "day":
+                    return datetime.strptime(value[:10], "%Y-%m-%d")
+                if period_type == "month":
+                    return datetime.strptime(value[:7], "%Y-%m")
+            except ValueError:
+                pass
+        return LogService._period_start(datetime.utcnow(), period_type)

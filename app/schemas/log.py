@@ -37,6 +37,12 @@ class RequestLogOut(BaseModel):
     completion_cost: float | None
     total_cost: float | None
     billing_status: str | None
+    billing_finalized_at: datetime | None = None
+    billing_event_id: str | None = None
+    billing_attempt_count: int = 0
+    billing_error: str | None = None
+    token_finalize_attempt_count: int = 0
+    token_finalize_error: str | None = None
     billing_multiplier: float | None
     channel_price_input_per_1k: float | None
     channel_price_output_per_1k: float | None
@@ -124,6 +130,7 @@ class MetricItem(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    total_cost: float = 0
 
 
 class MetricListResponse(BaseModel):
@@ -145,6 +152,7 @@ class MetricTimeSeriesItem(BaseModel):
     qps: float | None = None
     peak_active_requests: int = 0
     total_tokens: int = 0
+    total_cost: float = 0
 
 
 class MetricPeriodItem(BaseModel):

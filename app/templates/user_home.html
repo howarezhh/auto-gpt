@@ -23,6 +23,7 @@
 </section>
 
 <nav class="page-anchor-bar">
+    <a class="page-anchor-link" href="#user-home-monitor">实时监控</a>
     <a class="page-anchor-link" href="#user-home-keys">拿到密钥</a>
     <a class="page-anchor-link" href="#user-home-connect">复制接入信息</a>
     <a class="page-anchor-link" href="#user-home-verify">先做自检</a>
@@ -35,6 +36,51 @@
     <article class="metric-card"><span>本月请求</span><strong>{{ account_summary.month_requests }}</strong></article>
     <article class="metric-card"><span>总 Token</span><strong>{{ totals.total_tokens }}</strong></article>
     <article class="metric-card"><span>累计费用</span><strong>{{ '%.6f'|format(totals.total_cost) }}</strong></article>
+</section>
+
+<section class="panel-card monitor-panel anchor-section-offset" id="user-home-monitor">
+    <div class="panel-head monitor-head">
+        <div>
+            <div class="panel-kicker">实时监控</div>
+            <h2>我的请求与模型使用</h2>
+        </div>
+        <div class="monitor-toolbar">
+            <span id="user-monitor-refresh-label">每 30 秒刷新</span>
+            <button class="btn btn-ghost btn-sm interactive-btn" id="user-monitor-refresh-btn" type="button">手动刷新</button>
+        </div>
+    </div>
+    <div class="monitor-grid monitor-grid-user">
+        <article class="monitor-card monitor-card-wide">
+            <div class="monitor-card-head">
+                <div>
+                    <span>请求趋势</span>
+                    <strong id="user-monitor-request-total">-</strong>
+                </div>
+                <small>仅统计当前账号</small>
+            </div>
+            <div class="monitor-chart" id="user-monitor-traffic-chart"></div>
+        </article>
+        <article class="monitor-card">
+            <div class="monitor-card-head">
+                <div>
+                    <span>费用与 Token</span>
+                    <strong id="user-monitor-cost-value">-</strong>
+                </div>
+                <small>最近 3 小时</small>
+            </div>
+            <div class="monitor-chart monitor-chart-compact" id="user-monitor-cost-chart"></div>
+        </article>
+        <article class="monitor-card">
+            <div class="monitor-card-head">
+                <div>
+                    <span>常用模型</span>
+                    <strong id="user-monitor-model-count">-</strong>
+                </div>
+                <small>最近 60 分钟</small>
+            </div>
+            <div class="monitor-rank-list" id="user-monitor-model-rank"></div>
+        </article>
+    </div>
 </section>
 
 {% if quota_warnings %}

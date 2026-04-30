@@ -51,6 +51,7 @@
                     <th>状态</th>
                     <th>熔断</th>
                     <th>维护 / 策略</th>
+                    <th>容量</th>
                     <th>成本</th>
                     <th>质量</th>
                     <th>优先级</th>
@@ -192,6 +193,26 @@
             <label for="provider-max-retries">
                 <span>最大重试次数</span>
                 <input class="field-input" id="provider-max-retries" type="number" inputmode="numeric" value="1">
+            </label>
+            <label for="provider-max-active-requests">
+                <span>最大活跃请求</span>
+                <input class="field-input" id="provider-max-active-requests" type="number" inputmode="numeric" min="0" placeholder="0 或留空表示不限" value="300">
+            </label>
+            <label for="provider-max-active-streams">
+                <span>最大流式请求</span>
+                <input class="field-input" id="provider-max-active-streams" type="number" inputmode="numeric" min="0" placeholder="0 或留空表示不限" value="150">
+            </label>
+            <label for="provider-max-qps">
+                <span>最大 QPS</span>
+                <input class="field-input" id="provider-max-qps" type="number" inputmode="numeric" min="0" placeholder="0 或留空表示不限">
+            </label>
+            <label for="provider-max-error-rate">
+                <span>最大错误率 %</span>
+                <input class="field-input" id="provider-max-error-rate" type="number" inputmode="decimal" min="0" max="100" step="0.1" value="80">
+            </label>
+            <label for="provider-first-token-timeout-sec">
+                <span>首 Token 超时秒</span>
+                <input class="field-input" id="provider-first-token-timeout-sec" type="number" inputmode="numeric" min="1" value="60">
             </label>
             <label class="form-span-2" for="provider-maintenance-window">
                 <span>维护窗口</span>
@@ -346,6 +367,19 @@
             <button class="icon-btn interactive-btn" id="provider-test-result-modal-close" type="button" aria-label="关闭测试结果窗口">×</button>
         </div>
         <div id="provider-test-result-modal-content"></div>
+    </div>
+</div>
+
+<div class="modal-shell hidden" id="provider-models-detail-modal" aria-hidden="true">
+    <div class="modal-card modal-lg provider-modal-card provider-models-detail-card" role="dialog" aria-modal="true" aria-labelledby="provider-models-detail-modal-title" tabindex="-1">
+        <div class="modal-head">
+            <div>
+                <div class="panel-kicker">模型挂载</div>
+                <h2 id="provider-models-detail-modal-title">中转站模型</h2>
+            </div>
+            <button class="icon-btn interactive-btn" id="provider-models-detail-modal-close" type="button" aria-label="关闭中转站模型详情">×</button>
+        </div>
+        <div id="provider-models-detail-modal-content"></div>
     </div>
 </div>
 {% endblock %}

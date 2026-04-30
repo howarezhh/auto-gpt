@@ -1,11 +1,10 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response, status
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.services.health_service import HealthService
 from app.services.runtime_state_service import RuntimeStateService
-from app.services.setting_service import SettingService
-from app.services.upstream_client import UpstreamClientService
+from app.services.system_metrics_service import SystemMetricsService
 
 
 router = APIRouter(tags=["health"])
@@ -23,18 +22,26 @@ def liveness() -> dict:
 
 
 @router.get("/ready")
-def readiness(db: Session = Depends(get_db)) -> dict:
-    setting = SettingService.get_or_create(db)
-    client = UpstreamClientService.get_client()
+def readiness(response: Response, db: Session = Depends(get_db)) -> dict:
+    metrics = SystemMetricsService.collect(db, window_minutes=5, refresh_alerts=True)
+    if metrics["status"] != "ready":
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
     return {
-        "status": "ready",
+        "status": metrics["status"],
         "checks": {
-            "database": "ok",
+            "database": metrics["database"]["status"],
+            "redis": metrics["redis"]["status"],
             "settings": "ok",
-            "upstream_client": "ok" if client is not None else "missing",
+            "background": "ok" if (metrics["background"].get("pending_finalize_logs") or 0) < SystemMetricsService.BACKGROUND_BACKLOG_WARNING_THRESHOLD else "backlog",
         },
         "active_requests": RuntimeStateService.current_active_requests(),
-        "async_request_logging": setting.async_request_logging,
+        "redis_active_requests": metrics["redis"].get("active_requests"),
+        "redis_active_streams": metrics["redis"].get("active_streams"),
+        "redis_error": metrics["redis"].get("error"),
+        "database_error": metrics["database"].get("error"),
+        "database_pool": metrics["database"].get("pool"),
+        "background": metrics["background"],
+        "alerts": metrics["alerts"],
     }
 
 
@@ -47,3 +54,8 @@ def health(db: Session = Depends(get_db)) -> dict:
         "active_requests": RuntimeStateService.current_active_requests(),
         "peak_active_requests": RuntimeStateService.peak_active_requests(),
     }
+
+
+@router.get("/metrics")
+def public_metrics(db: Session = Depends(get_db)) -> dict:
+    return SystemMetricsService.collect(db, window_minutes=5, refresh_alerts=False)

@@ -13,6 +13,7 @@ from app.services.api_key_admin_service import ApiKeyAdminService
 from app.services.provider_service import ProviderService
 from app.services.user_auth_service import UserAuthService
 from app.services.user_portal_service import UserPortalService
+from app.services.system_metrics_service import SystemMetricsService
 from app.utils.json_utils import dumps_json, safeJsonParse
 
 
@@ -157,6 +158,9 @@ class AlertService:
                     "failure_rate": failure_rate,
                 },
             }
+        system_metrics = SystemMetricsService.collect(db, window_minutes=5, refresh_alerts=False)
+        for item in system_metrics.get("alerts", []):
+            active_events[item["alert_key"]] = item
 
         AlertService._upsert_events(db, active_events)
         return {
@@ -166,6 +170,7 @@ class AlertService:
             "failure_count": failure_count,
             "request_count": request_count,
             "failure_rate": failure_rate,
+            "system_metrics": system_metrics,
         }
 
     @staticmethod

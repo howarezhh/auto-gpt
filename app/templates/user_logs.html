@@ -3,7 +3,7 @@
 <section class="page-heading">
     <div>
         <div class="eyebrow">我的日志</div>
-        <h2>我的日志</h2>
+        <h2>请求记录与排障入口</h2>
         <p>只展示当前账号名下 API Key 的模型调用记录，用同一套交互页完成筛选、详情查看、CSV 导出和会话跳转。</p>
     </div>
 </section>
@@ -82,7 +82,7 @@
     <div class="section-subhead">
         <div>
             <div class="panel-kicker">结果列表</div>
-            <h3>关键列日志列表</h3>
+            <h3>关键列请求记录</h3>
         </div>
         <div class="hero-actions">
             <button class="btn btn-ghost interactive-btn" id="logs-export-btn" type="button">导出 CSV</button>
@@ -106,7 +106,22 @@
                     <th>详情</th>
                 </tr>
             </thead>
-            <tbody id="logs-table-body"></tbody>
+            <tbody id="logs-table-body">
+                {% for log in recent_logs %}
+                <tr>
+                    <td>{{ log.created_at }}</td>
+                    <td>{{ log.log_type }}</td>
+                    <td>{{ log.api_client_key_name or log.api_client_key_prefix or '-' }}</td>
+                    <td>{{ log.session_id or log.conversation_key or log.request_id or '-' }}</td>
+                    <td>{{ log.requested_model or log.model_name or '-' }}</td>
+                    <td>{{ log.provider_name or '-' }}</td>
+                    <td>{{ '成功' if log.success else '失败' }}</td>
+                    <td>{{ log.total_tokens or 0 }} / {{ '%.6f'|format(log.total_cost or 0) }}</td>
+                    <td>{{ log.duration_ms or log.latency_ms or '-' }} ms</td>
+                    <td>详情</td>
+                </tr>
+                {% endfor %}
+            </tbody>
         </table>
     </div>
     <div class="table-toolbar logs-pagination-bar">

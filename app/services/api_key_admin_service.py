@@ -34,6 +34,7 @@ from app.schemas.api_key import (
     ApiKeySummaryOut,
     ApiKeyUpdate,
 )
+from app.services.api_key_auth_cache import ApiKeyAuthCache
 from app.services.api_key_service import ApiKeyService
 from app.services.billing_service import BillingService
 from app.services.log_service import LogService
@@ -242,10 +243,14 @@ class ApiKeyAdminService:
         ApiKeyAdminService._replace_provider_bindings(db, api_key, payload.allowed_provider_ids)
         db.commit()
         db.refresh(api_key)
+        ApiKeyAuthCache.invalidate_api_key(api_key.id, api_key.key_hash)
+        ApiKeyAuthCache.invalidate_user(api_key.owner_user_id)
         return ApiKeyAdminService.get_api_key(db, api_key.id), raw_api_key
 
     @staticmethod
     def update_api_key(db: Session, api_key: ApiClientKey, payload: ApiKeyUpdate) -> ApiClientKey:
+        old_key_hash = api_key.key_hash
+        old_owner_user_id = api_key.owner_user_id
         data = payload.model_dump(exclude_unset=True)
         allowed_provider_ids = data.get("allowed_provider_ids")
         route_mode = data.get("route_mode", api_key.route_mode)
@@ -297,22 +302,36 @@ class ApiKeyAdminService:
             ApiKeyAdminService._replace_provider_bindings(db, api_key, allowed_provider_ids)
         db.commit()
         db.refresh(api_key)
+        ApiKeyAuthCache.invalidate_api_key(api_key.id, old_key_hash)
+        ApiKeyAuthCache.invalidate_api_key(api_key.id, api_key.key_hash)
+        ApiKeyAuthCache.invalidate_user(old_owner_user_id)
+        ApiKeyAuthCache.invalidate_user(api_key.owner_user_id)
         return ApiKeyAdminService.get_api_key(db, api_key.id)
 
     @staticmethod
     def set_enabled(db: Session, api_key: ApiClientKey, enabled: bool) -> ApiClientKey:
+        key_hash = api_key.key_hash
         api_key.enabled = enabled
         db.commit()
         db.refresh(api_key)
+        ApiKeyAuthCache.invalidate_api_key(api_key.id, key_hash)
+        ApiKeyAuthCache.invalidate_user(api_key.owner_user_id)
         return ApiKeyAdminService.get_api_key(db, api_key.id)
 
     @staticmethod
     def delete_api_key(db: Session, api_key: ApiClientKey) -> None:
+        api_key_id = api_key.id
+        key_hash = api_key.key_hash
+        owner_user_id = api_key.owner_user_id
         db.delete(api_key)
         db.commit()
+        ApiKeyAuthCache.invalidate_api_key(api_key_id, key_hash)
+        ApiKeyAuthCache.invalidate_user(owner_user_id)
 
     @staticmethod
     def rotate_api_key(db: Session, api_key: ApiClientKey) -> tuple[ApiClientKey, str]:
+        old_key_hash = api_key.key_hash
+        owner_user_id = api_key.owner_user_id
         raw_api_key = ApiKeyService.build_raw_api_key(None)
         ApiKeyAdminService._validate_raw_api_key_uniqueness(db, raw_api_key, exclude_api_key_id=api_key.id)
         api_key.key_prefix = ApiKeyService.extract_key_prefix(raw_api_key)
@@ -320,6 +339,9 @@ class ApiKeyAdminService:
         api_key.raw_key_encrypted = ApiKeyService.encrypt_raw_api_key(raw_api_key)
         db.commit()
         db.refresh(api_key)
+        ApiKeyAuthCache.invalidate_api_key(api_key.id, old_key_hash)
+        ApiKeyAuthCache.invalidate_api_key(api_key.id, api_key.key_hash)
+        ApiKeyAuthCache.invalidate_user(owner_user_id)
         return ApiKeyAdminService.get_api_key(db, api_key.id), raw_api_key
 
     @staticmethod
@@ -332,6 +354,9 @@ class ApiKeyAdminService:
         for item in items:
             item.enabled = True
         db.commit()
+        for item in items:
+            ApiKeyAuthCache.invalidate_api_key(item.id, item.key_hash)
+            ApiKeyAuthCache.invalidate_user(item.owner_user_id)
         return ApiKeyBatchActionResultOut(
             requested_count=len(payload.api_key_ids),
             affected_count=len(items),
@@ -348,6 +373,9 @@ class ApiKeyAdminService:
         for item in items:
             item.enabled = False
         db.commit()
+        for item in items:
+            ApiKeyAuthCache.invalidate_api_key(item.id, item.key_hash)
+            ApiKeyAuthCache.invalidate_user(item.owner_user_id)
         return ApiKeyBatchActionResultOut(
             requested_count=len(payload.api_key_ids),
             affected_count=len(items),
@@ -362,9 +390,13 @@ class ApiKeyAdminService:
             )
         )
         deleted_ids = [item.id for item in items]
+        deleted_refs = [(item.id, item.key_hash, item.owner_user_id) for item in items]
         for item in items:
             db.delete(item)
         db.commit()
+        for api_key_id, key_hash, owner_user_id in deleted_refs:
+            ApiKeyAuthCache.invalidate_api_key(api_key_id, key_hash)
+            ApiKeyAuthCache.invalidate_user(owner_user_id)
         return ApiKeyBatchActionResultOut(
             requested_count=len(payload.api_key_ids),
             affected_count=len(deleted_ids),
@@ -392,6 +424,9 @@ class ApiKeyAdminService:
             item.manual_allow_fallback = payload.manual_allow_fallback
             ApiKeyAdminService._replace_provider_bindings(db, item, payload.allowed_provider_ids)
         db.commit()
+        for item in items:
+            ApiKeyAuthCache.invalidate_api_key(item.id, item.key_hash)
+            ApiKeyAuthCache.invalidate_user(item.owner_user_id)
         return ApiKeyBatchActionResultOut(
             requested_count=len(payload.api_key_ids),
             affected_count=len(items),
@@ -461,6 +496,9 @@ class ApiKeyAdminService:
         for item in items:
             item.expires_at = now
         db.commit()
+        for item in items:
+            ApiKeyAuthCache.invalidate_api_key(item.id, item.key_hash)
+            ApiKeyAuthCache.invalidate_user(item.owner_user_id)
         return ApiKeyBatchActionResultOut(
             requested_count=len(payload.api_key_ids),
             affected_count=len(items),
@@ -684,6 +722,8 @@ class ApiKeyAdminService:
         *,
         window_hours: int = 24,
     ) -> ApiKeyDetailOut:
+        ApiKeyService.reconcile_usage_counters(db, api_client_key=api_key, auto_commit=True)
+        db.refresh(api_key)
         recent_usage = ApiKeyAdminService.get_recent_usage(
             db,
             api_key_id=api_key.id,
@@ -747,6 +787,8 @@ class ApiKeyAdminService:
             amount=payload.amount,
             remark=payload.remark,
         )
+        ApiKeyAuthCache.invalidate_api_key(api_key.id, api_key.key_hash)
+        ApiKeyAuthCache.invalidate_user(api_key.owner_user_id)
         return BillingService.list_billing_records(db, api_key_id=api_key.id, limit=50)
 
     @staticmethod

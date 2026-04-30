@@ -36,6 +36,61 @@
     {% endfor %}
 </section>
 
+<section class="panel-card monitor-panel" id="dashboard-live-monitor">
+    <div class="panel-head monitor-head">
+        <div>
+            <div class="panel-kicker">实时监控</div>
+            <h2>请求与模型运行态</h2>
+        </div>
+        <div class="monitor-toolbar">
+            <span id="dashboard-monitor-refresh-label">每 30 秒刷新</span>
+            <button class="btn btn-ghost btn-sm interactive-btn" id="dashboard-monitor-refresh-btn" type="button">手动刷新</button>
+        </div>
+    </div>
+    <div class="monitor-grid monitor-grid-admin">
+        <article class="monitor-card monitor-card-wide">
+            <div class="monitor-card-head">
+                <div>
+                    <span>请求趋势</span>
+                    <strong id="dashboard-monitor-request-total">-</strong>
+                </div>
+                <small>最近 3 小时</small>
+            </div>
+            <div class="monitor-chart" id="dashboard-monitor-traffic-chart"></div>
+        </article>
+        <article class="monitor-card">
+            <div class="monitor-card-head">
+                <div>
+                    <span>延迟与首包</span>
+                    <strong id="dashboard-monitor-latency-value">-</strong>
+                </div>
+                <small>P95 / TTFB</small>
+            </div>
+            <div class="monitor-chart monitor-chart-compact" id="dashboard-monitor-latency-chart"></div>
+        </article>
+        <article class="monitor-card">
+            <div class="monitor-card-head">
+                <div>
+                    <span>模型热度</span>
+                    <strong id="dashboard-monitor-model-count">-</strong>
+                </div>
+                <small>最近 60 分钟</small>
+            </div>
+            <div class="monitor-rank-list" id="dashboard-monitor-model-rank"></div>
+        </article>
+        <article class="monitor-card monitor-card-wide">
+            <div class="monitor-card-head">
+                <div>
+                    <span>中转健康</span>
+                    <strong id="dashboard-monitor-provider-value">-</strong>
+                </div>
+                <small>请求成功率与延迟</small>
+            </div>
+            <div class="monitor-provider-strip" id="dashboard-monitor-provider-strip"></div>
+        </article>
+    </div>
+</section>
+
 <section class="panel-card section-shell">
     <div class="section-subhead">
         <div>

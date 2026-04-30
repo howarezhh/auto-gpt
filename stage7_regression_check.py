@@ -51,7 +51,7 @@ class _FakeStreamResponse:
 
 
 @asynccontextmanager
-async def _fake_stream_request(provider, endpoint_path: str, payload: dict):
+async def _fake_stream_request(provider, endpoint_path: str, payload: dict, **_kwargs):
     yield _FakeStreamResponse(provider.name, payload.get("model", "unknown")), PreparedUpstreamRequest(
         request_path=endpoint_path,
         request_payload=payload,
@@ -282,7 +282,7 @@ def main() -> None:
                 allowed_provider_ids=[provider_a["id"]],
                 default_provider_id=provider_a["id"],
                 token_limit_total=1000,
-                balance_amount=0.00004,
+                balance_amount=0.000045,
             )
             invalid_manual_key_response = client.post(
                 "/api/api-keys",

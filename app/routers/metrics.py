@@ -6,6 +6,7 @@ from app.schemas.log import MetricItem, MetricListResponse
 from app.schemas.log import MetricPeriodItem, MetricPeriodResponse
 from app.schemas.log import MetricTimeSeriesItem, MetricTimeSeriesResponse
 from app.services.log_service import LogService
+from app.services.system_metrics_service import SystemMetricsService
 
 
 router = APIRouter(prefix="/api/metrics", tags=["metrics"])
@@ -44,3 +45,12 @@ def metrics_period_report(
         for item in LogService.metric_period_report(db, window_days=window_days, period_type=period_type)
     ]
     return MetricPeriodResponse(period_type=period_type, window_days=window_days, items=items)
+
+
+@router.get("/system")
+def system_metrics(
+    window_minutes: int = Query(default=5, ge=1, le=1440),
+    refresh_alerts: bool = Query(default=True),
+    db: Session = Depends(get_db),
+) -> dict:
+    return SystemMetricsService.collect(db, window_minutes=window_minutes, refresh_alerts=refresh_alerts)

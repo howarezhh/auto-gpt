@@ -20,11 +20,35 @@ class Settings(BaseSettings):
     app_host: str = "127.0.0.1"
     app_port: int = 8000
     database_url: str = "sqlite:///./data/app.db"
+    db_pool_size: int = 30
+    db_max_overflow: int = 70
+    db_pool_timeout: float = 5.0
+    db_pool_recycle: int = 1800
+    redis_url: str = "redis://127.0.0.1:6379/0"
+    enable_startup_db_init: bool = True
+    api_key_auth_cache_ttl_seconds: int = 60
+    concurrency_lease_ttl_seconds: int = 900
+    global_max_active_requests: int = 1000
+    global_max_active_streams: int = 300
+    api_key_max_active_requests: int = 50
+    api_key_max_active_streams: int = 10
+    account_max_active_requests: int = 100
+    account_max_active_streams: int = 20
+    provider_max_active_requests: int = 300
+    provider_max_active_streams: int = 150
+    web_concurrency: int = 4
+    gunicorn_timeout: int = 120
+    gunicorn_keepalive: int = 75
+    gunicorn_graceful_timeout: int = 30
     local_proxy_api_key: str = ""
-    request_timeout_ms: int = 30000
-    upstream_pool_timeout_s: float = 5.0
-    upstream_max_connections: int = 200
-    upstream_max_keepalive_connections: int = 50
+    request_timeout_ms: int = 60000
+    stream_connect_timeout_seconds: int = 10
+    stream_first_token_timeout_seconds: int = 60
+    stream_idle_timeout_seconds: int = 120
+    stream_max_duration_seconds: int = 600
+    upstream_pool_timeout_s: float = 10.0
+    upstream_max_connections: int = 1200
+    upstream_max_keepalive_connections: int = 300
     pip_index_url: str = "https://pypi.tuna.tsinghua.edu.cn/simple"
     session_secret_key: str = DEFAULT_SESSION_SECRET
     api_key_encryption_secret: str = DEFAULT_API_KEY_ENCRYPTION_SECRET
@@ -48,6 +72,7 @@ class Settings(BaseSettings):
     def validate_runtime_settings(self) -> None:
         if not self.is_production():
             return
+        self._validate_production_database()
         self._validate_secret(
             field_name="SESSION_SECRET_KEY",
             value=self.session_secret_key,
@@ -66,6 +91,11 @@ class Settings(BaseSettings):
             raise RuntimeError(f"{field_name} must be set to a non-default secret when APP_ENV is production")
         if len(normalized) < 32:
             raise RuntimeError(f"{field_name} must be at least 32 characters when APP_ENV is production")
+
+    def _validate_production_database(self) -> None:
+        normalized = self.database_url.strip().lower()
+        if normalized.startswith("sqlite"):
+            raise RuntimeError("DATABASE_URL must use PostgreSQL or another service database when APP_ENV is production")
 
 
 @lru_cache

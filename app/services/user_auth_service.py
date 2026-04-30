@@ -15,6 +15,7 @@ from fastapi import Depends, HTTPException, Request, status
 from app.database import get_db
 from app.models.api_client_key import ApiClientKey
 from app.models.user_account import UserAccount
+from app.services.api_key_auth_cache import ApiKeyAuthCache
 
 
 SESSION_USER_ID_KEY = "session_user_id"
@@ -185,6 +186,7 @@ class UserAuthService:
         user.enabled = enabled
         db.commit()
         db.refresh(user)
+        ApiKeyAuthCache.invalidate_user(user.id)
         return user
 
     @staticmethod
@@ -196,12 +198,15 @@ class UserAuthService:
 
     @staticmethod
     def delete_user(db: Session, user: UserAccount) -> None:
+        deleted_user_id = user.id
+        deleted_key_refs: list[tuple[int, str]] = []
         owned_api_keys = list(
             db.scalars(
                 select(ApiClientKey).where(ApiClientKey.owner_user_id == user.id)
             )
         )
         for item in owned_api_keys:
+            deleted_key_refs.append((item.id, item.key_hash))
             db.delete(item)
 
         created_users = list(
@@ -214,6 +219,9 @@ class UserAuthService:
 
         db.delete(user)
         db.commit()
+        for api_key_id, key_hash in deleted_key_refs:
+            ApiKeyAuthCache.invalidate_api_key(api_key_id, key_hash)
+        ApiKeyAuthCache.invalidate_user(deleted_user_id)
 
     @staticmethod
     def list_users(db: Session) -> list[UserAccount]:

@@ -19,6 +19,7 @@ from app.models.user_account import UserAccount
 from app.models.user_account_billing_record import UserAccountBillingRecord
 from app.schemas.api_key import ApiKeyBalanceAdjustmentIn
 from app.services.admin_audit_service import AdminAuditService
+from app.services.api_key_auth_cache import ApiKeyAuthCache
 from app.services.api_key_admin_service import ApiKeyAdminService
 from app.services.billing_service import BillingService
 from app.services.setting_service import SettingService
@@ -597,6 +598,8 @@ def batch_update_user_quota_policy(
             return JSONResponse(status_code=404, content={"success": False, "message": message})
         return _redirect_users(request.url.query, error=message)
     db.commit()
+    for affected_user_id in affected_user_ids:
+        ApiKeyAuthCache.invalidate_user(affected_user_id)
     AdminAuditService.create_log(
         db,
         actor_user_id=current_user.id,

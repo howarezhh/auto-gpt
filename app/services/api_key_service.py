@@ -11,14 +11,17 @@ from cryptography.fernet import Fernet, InvalidToken
 from fastapi import Depends, Header, Request, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
+from starlette.concurrency import run_in_threadpool
 
 from app.config import get_settings
-from app.database import SessionLocal, get_db
+from app.database import SessionLocal
 from app.models.api_client_key import ApiClientKey
 from app.models.request_log import RequestLog
 from app.models.user_account import UserAccount
 from app.scheduler import scheduler
+from app.services.api_key_auth_cache import ApiKeyAuthCache
 from app.services.billing_service import BillingService
+from app.services.rate_limit_service import RateLimitExceededError, RateLimitService
 from app.services.router_service import RoutePolicyContext
 from app.services.user_quota_service import UserQuotaService
 from app.utils.json_utils import dumps_json, loads_json
@@ -179,6 +182,193 @@ class ApiKeyService:
     ) -> ApiClientAuthContext:
         raw_key = ApiKeyService.parse_bearer_token(authorization)
         key_hash = ApiKeyService.hash_api_key(raw_key)
+        cached_auth = ApiKeyAuthCache.get_by_hash(key_hash)
+        if cached_auth is not None:
+            api_client_key, route_context = ApiKeyAuthCache.build_auth_context(cached_auth)
+            persistent_api_key = db.scalar(
+                select(ApiClientKey)
+                .options(selectinload(ApiClientKey.owner_user))
+                .where(ApiClientKey.id == api_client_key.id)
+            )
+            if persistent_api_key is None:
+                ApiKeyAuthCache.invalidate_hash(key_hash)
+                raise ApiClientAuthError(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    code="invalid_api_key",
+                    message="Invalid api key",
+                    api_client_key_prefix=getattr(api_client_key, "key_prefix", None),
+                )
+            owner_user = persistent_api_key.owner_user
+            owner_user_name = owner_user.username if owner_user else None
+            remaining_tokens = None
+            if persistent_api_key.token_limit_total is not None:
+                remaining_tokens = max(0, persistent_api_key.token_limit_total - persistent_api_key.total_tokens_used)
+            remaining_balance = None
+            if owner_user is not None:
+                remaining_balance = float(BillingService.to_decimal(owner_user.balance_amount) - BillingService.to_decimal(owner_user.frozen_amount))
+            elif persistent_api_key.balance_amount is not None:
+                remaining_balance = float(persistent_api_key.balance_amount)
+            policy_snapshot_json = str(cached_auth.get("policy_snapshot_json") or "{}")
+            remaining_requests_daily = None
+            remaining_cost_daily = None
+            if not persistent_api_key.enabled:
+                ApiKeyAuthCache.invalidate_hash(key_hash)
+                raise ApiClientAuthError(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    code="key_disabled",
+                    message="Api key is disabled",
+                    api_client_key_id=persistent_api_key.id,
+                    api_client_key_name=persistent_api_key.name,
+                    api_client_key_prefix=persistent_api_key.key_prefix,
+                    user_account_id=persistent_api_key.owner_user_id,
+                    user_account_name=owner_user_name,
+                    remaining_tokens=remaining_tokens,
+                    remaining_balance=remaining_balance,
+                    policy_snapshot_json=policy_snapshot_json,
+                )
+            if persistent_api_key.expires_at is not None and persistent_api_key.expires_at <= datetime.utcnow():
+                ApiKeyAuthCache.invalidate_hash(key_hash)
+                raise ApiClientAuthError(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    code="key_expired",
+                    message="Api key is expired",
+                    api_client_key_id=persistent_api_key.id,
+                    api_client_key_name=persistent_api_key.name,
+                    api_client_key_prefix=persistent_api_key.key_prefix,
+                    user_account_id=persistent_api_key.owner_user_id,
+                    user_account_name=owner_user_name,
+                    remaining_tokens=remaining_tokens,
+                    remaining_balance=remaining_balance,
+                    policy_snapshot_json=policy_snapshot_json,
+                )
+            if request_path and not ApiKeyService.is_endpoint_allowed(api_client_key, request_path):
+                raise ApiClientAuthError(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    code="endpoint_not_allowed",
+                    message="Api key is not allowed to access this endpoint",
+                    api_client_key_id=persistent_api_key.id,
+                    api_client_key_name=persistent_api_key.name,
+                    api_client_key_prefix=persistent_api_key.key_prefix,
+                    user_account_id=persistent_api_key.owner_user_id,
+                    user_account_name=owner_user_name,
+                    remaining_tokens=remaining_tokens,
+                    remaining_balance=remaining_balance,
+                    policy_snapshot_json=policy_snapshot_json,
+                )
+            if source_ip and not ApiKeyService.is_source_ip_allowed(api_client_key, source_ip):
+                raise ApiClientAuthError(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    code="source_ip_not_allowed",
+                    message="Api key is not allowed to call from this source ip",
+                    api_client_key_id=persistent_api_key.id,
+                    api_client_key_name=persistent_api_key.name,
+                    api_client_key_prefix=persistent_api_key.key_prefix,
+                    user_account_id=persistent_api_key.owner_user_id,
+                    user_account_name=owner_user_name,
+                    remaining_tokens=remaining_tokens,
+                    remaining_balance=remaining_balance,
+                    policy_snapshot_json=policy_snapshot_json,
+                )
+            if owner_user is not None and not owner_user.enabled:
+                ApiKeyAuthCache.invalidate_hash(key_hash)
+                raise ApiClientAuthError(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    code="owner_user_disabled",
+                    message="Owner account is disabled",
+                    api_client_key_id=persistent_api_key.id,
+                    api_client_key_name=persistent_api_key.name,
+                    api_client_key_prefix=persistent_api_key.key_prefix,
+                    user_account_id=persistent_api_key.owner_user_id,
+                    user_account_name=owner_user_name,
+                    remaining_tokens=remaining_tokens,
+                    remaining_balance=remaining_balance,
+                    policy_snapshot_json=policy_snapshot_json,
+                )
+            if not route_context.allowed_provider_ids:
+                raise ApiClientAuthError(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    code="no_authorized_provider",
+                    message="Api key has no authorized providers",
+                    api_client_key_id=persistent_api_key.id,
+                    api_client_key_name=persistent_api_key.name,
+                    api_client_key_prefix=persistent_api_key.key_prefix,
+                    user_account_id=persistent_api_key.owner_user_id,
+                    user_account_name=owner_user_name,
+                    remaining_tokens=remaining_tokens,
+                    remaining_balance=remaining_balance,
+                    policy_snapshot_json=policy_snapshot_json,
+                )
+            if (
+                persistent_api_key.token_limit_total is not None
+                and persistent_api_key.total_tokens_used >= persistent_api_key.token_limit_total
+            ):
+                raise ApiClientAuthError(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    code="insufficient_quota",
+                    message="Api key token quota exhausted",
+                    api_client_key_id=persistent_api_key.id,
+                    api_client_key_name=persistent_api_key.name,
+                    api_client_key_prefix=persistent_api_key.key_prefix,
+                    user_account_id=persistent_api_key.owner_user_id,
+                    user_account_name=owner_user_name,
+                    remaining_tokens=remaining_tokens,
+                    remaining_balance=remaining_balance,
+                    policy_snapshot_json=policy_snapshot_json,
+                )
+            if persistent_api_key.cost_limit_total is not None and Decimal(str(persistent_api_key.total_cost_used or 0)) >= Decimal(str(persistent_api_key.cost_limit_total)):
+                raise ApiClientAuthError(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    code="insufficient_quota",
+                    message="Api key billing quota exhausted",
+                    api_client_key_id=persistent_api_key.id,
+                    api_client_key_name=persistent_api_key.name,
+                    api_client_key_prefix=persistent_api_key.key_prefix,
+                    user_account_id=persistent_api_key.owner_user_id,
+                    user_account_name=owner_user_name,
+                    remaining_tokens=remaining_tokens,
+                    remaining_balance=remaining_balance,
+                    policy_snapshot_json=policy_snapshot_json,
+                )
+            if owner_user is None and persistent_api_key.balance_amount is not None and Decimal(str(persistent_api_key.balance_amount)) <= Decimal("0"):
+                raise ApiClientAuthError(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    code="insufficient_balance",
+                    message="Api key balance exhausted",
+                    api_client_key_id=persistent_api_key.id,
+                    api_client_key_name=persistent_api_key.name,
+                    api_client_key_prefix=persistent_api_key.key_prefix,
+                    user_account_id=persistent_api_key.owner_user_id,
+                    user_account_name=owner_user_name,
+                    remaining_tokens=remaining_tokens,
+                    remaining_balance=remaining_balance,
+                    policy_snapshot_json=policy_snapshot_json,
+                )
+            if owner_user is not None:
+                available_balance = BillingService.to_decimal(owner_user.balance_amount) - BillingService.to_decimal(owner_user.frozen_amount)
+                if available_balance <= Decimal("0"):
+                    raise ApiClientAuthError(
+                        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                        code="insufficient_balance",
+                        message="Owner account available balance exhausted",
+                        api_client_key_id=persistent_api_key.id,
+                        api_client_key_name=persistent_api_key.name,
+                        api_client_key_prefix=persistent_api_key.key_prefix,
+                        user_account_id=persistent_api_key.owner_user_id,
+                        user_account_name=owner_user_name,
+                        remaining_tokens=remaining_tokens,
+                        remaining_balance=remaining_balance,
+                        policy_snapshot_json=policy_snapshot_json,
+                    )
+            ApiKeyService.enqueue_last_used_touch(persistent_api_key.id)
+            return ApiClientAuthContext(
+                api_client_key=persistent_api_key,
+                route_context=route_context,
+                remaining_tokens=remaining_tokens,
+                remaining_balance=remaining_balance,
+                remaining_requests_daily=remaining_requests_daily,
+                remaining_cost_daily=remaining_cost_daily,
+                policy_snapshot_json=policy_snapshot_json,
+            )
         api_client_key = db.scalar(
             select(ApiClientKey)
             .options(selectinload(ApiClientKey.provider_bindings), selectinload(ApiClientKey.owner_user))
@@ -203,20 +393,17 @@ class ApiKeyService:
         owner_user = db.get(UserAccount, api_client_key.owner_user_id) if api_client_key.owner_user_id is not None else None
         owner_user_id = owner_user.id if owner_user is not None else None
         owner_user_name = owner_user.username if owner_user is not None else None
-        user_quota_snapshot = UserQuotaService.get_usage_snapshot(db, user=owner_user) if owner_user is not None else None
+        user_quota_snapshot = UserQuotaService.get_realtime_usage_snapshot(db, user=owner_user) if owner_user is not None else None
         remaining_balance = None
         if user_quota_snapshot is not None and user_quota_snapshot.available_balance is not None:
             remaining_balance = float(user_quota_snapshot.available_balance)
         elif api_client_key.balance_amount is not None:
             remaining_balance = float(api_client_key.balance_amount)
-        key_daily_usage = ApiKeyService.get_daily_usage_snapshot(db, api_client_key_id=api_client_key.id)
+        key_daily_usage = {"request_count": 0, "total_tokens": 0, "total_cost": 0.0}
         if api_client_key.request_limit_daily is not None:
-            remaining_requests_daily = max(0, api_client_key.request_limit_daily - key_daily_usage["request_count"])
+            remaining_requests_daily = api_client_key.request_limit_daily
         if api_client_key.cost_limit_daily is not None:
-            remaining_cost_daily = max(
-                0.0,
-                float(BillingService.to_decimal(api_client_key.cost_limit_daily) - BillingService.to_decimal(key_daily_usage["total_cost"])),
-            )
+            remaining_cost_daily = float(BillingService.to_decimal(api_client_key.cost_limit_daily))
         policy_snapshot = {
             "route_mode": api_client_key.route_mode,
             "default_provider_id": default_provider_id,
@@ -312,57 +499,6 @@ class ApiKeyService:
                 remaining_balance=remaining_balance,
                 policy_snapshot_json=policy_snapshot_json,
             )
-        if api_client_key.request_limit_daily is not None and key_daily_usage["request_count"] >= api_client_key.request_limit_daily:
-            raise ApiClientAuthError(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                code="daily_request_quota_exhausted",
-                message="Api key daily request quota exhausted",
-                api_client_key_id=api_client_key.id,
-                api_client_key_name=api_client_key.name,
-                api_client_key_prefix=api_client_key.key_prefix,
-                user_account_id=owner_user_id,
-                user_account_name=owner_user_name,
-                remaining_tokens=remaining_tokens,
-                remaining_balance=remaining_balance,
-                policy_snapshot_json=policy_snapshot_json,
-            )
-        if api_client_key.token_limit_daily is not None and key_daily_usage["total_tokens"] >= api_client_key.token_limit_daily:
-            raise ApiClientAuthError(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                code="daily_token_quota_exhausted",
-                message="Api key daily token quota exhausted",
-                api_client_key_id=api_client_key.id,
-                api_client_key_name=api_client_key.name,
-                api_client_key_prefix=api_client_key.key_prefix,
-                user_account_id=owner_user_id,
-                user_account_name=owner_user_name,
-                remaining_tokens=remaining_tokens,
-                remaining_balance=remaining_balance,
-                policy_snapshot_json=policy_snapshot_json,
-            )
-        if api_client_key.cost_limit_daily is not None and BillingService.to_decimal(key_daily_usage["total_cost"]) >= BillingService.to_decimal(api_client_key.cost_limit_daily):
-            raise ApiClientAuthError(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                code="daily_cost_quota_exhausted",
-                message="Api key daily cost quota exhausted",
-                api_client_key_id=api_client_key.id,
-                api_client_key_name=api_client_key.name,
-                api_client_key_prefix=api_client_key.key_prefix,
-                user_account_id=owner_user_id,
-                user_account_name=owner_user_name,
-                remaining_tokens=remaining_tokens,
-                remaining_balance=remaining_balance,
-                policy_snapshot_json=policy_snapshot_json,
-            )
-        ApiKeyService._validate_rate_limits(
-            db,
-            api_client_key=api_client_key,
-            owner_user_id=owner_user_id,
-            owner_user_name=owner_user_name,
-            remaining_tokens=remaining_tokens,
-            remaining_balance=remaining_balance,
-            policy_snapshot_json=policy_snapshot_json,
-        )
         if api_client_key.cost_limit_total is not None and Decimal(str(api_client_key.total_cost_used or 0)) >= Decimal(str(api_client_key.cost_limit_total)):
             raise ApiClientAuthError(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -439,6 +575,19 @@ class ApiKeyService:
             success_rate_bias=api_client_key.success_rate_bias,
             cost_bias=api_client_key.cost_bias,
         )
+        ApiKeyAuthCache.set_auth_context(
+            key_hash=key_hash,
+            api_key=api_client_key,
+            owner_user=owner_user,
+            owner_quota_snapshot=policy_snapshot.get("owner_user"),
+            allowed_provider_ids=allowed_provider_ids,
+            default_provider_id=default_provider_id,
+            remaining_tokens=remaining_tokens,
+            remaining_balance=remaining_balance,
+            remaining_requests_daily=remaining_requests_daily,
+            remaining_cost_daily=remaining_cost_daily,
+            policy_snapshot_json=policy_snapshot_json,
+        )
         ApiKeyService.enqueue_last_used_touch(api_client_key.id)
         return ApiClientAuthContext(
             api_client_key=api_client_key,
@@ -449,27 +598,6 @@ class ApiKeyService:
             remaining_cost_daily=remaining_cost_daily,
             policy_snapshot_json=policy_snapshot_json,
         )
-
-    @staticmethod
-    def get_daily_usage_snapshot(db: Session, *, api_client_key_id: int) -> dict[str, int | float]:
-        now = datetime.utcnow()
-        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        row = db.execute(
-            select(
-                func.count(RequestLog.id).label("request_count"),
-                func.sum(RequestLog.total_tokens).label("total_tokens"),
-                func.sum(RequestLog.total_cost).label("total_cost"),
-            ).where(
-                RequestLog.api_client_key_id == api_client_key_id,
-                RequestLog.created_at >= day_start,
-                RequestLog.request_path != "/v1/models",
-            )
-        ).one()
-        return {
-            "request_count": int(row.request_count or 0),
-            "total_tokens": int(row.total_tokens or 0),
-            "total_cost": float(row.total_cost or 0),
-        }
 
     @staticmethod
     def is_endpoint_allowed(api_client_key: ApiClientKey, request_path: str) -> bool:
@@ -510,53 +638,135 @@ class ApiKeyService:
         return model_name in allowed_models
 
     @staticmethod
-    def _validate_rate_limits(
-        db: Session,
-        *,
-        api_client_key: ApiClientKey,
-        owner_user_id: int | None,
-        owner_user_name: str | None,
-        remaining_tokens: int | None,
-        remaining_balance: float | None,
-        policy_snapshot_json: str | None,
-    ) -> None:
-        now = datetime.utcnow()
-        checks = []
-        if api_client_key.qps_limit:
-            checks.append(("qps_limit_exceeded", "Api key QPS limit exceeded", now - timedelta(seconds=1), api_client_key.qps_limit, "count"))
-        if api_client_key.rpm_limit:
-            checks.append(("rpm_limit_exceeded", "Api key RPM limit exceeded", now - timedelta(minutes=1), api_client_key.rpm_limit, "count"))
-        if api_client_key.tpm_limit:
-            checks.append(("tpm_limit_exceeded", "Api key TPM limit exceeded", now - timedelta(minutes=1), api_client_key.tpm_limit, "tokens"))
-        for code, message, since, limit, mode in checks:
-            if mode == "count":
-                current = db.scalar(
-                    select(func.count(RequestLog.id)).where(
-                        RequestLog.api_client_key_id == api_client_key.id,
-                        RequestLog.created_at >= since,
-                    )
-                ) or 0
-            else:
-                current = db.scalar(
-                    select(func.sum(RequestLog.total_tokens)).where(
-                        RequestLog.api_client_key_id == api_client_key.id,
-                        RequestLog.created_at >= since,
-                    )
-                ) or 0
-            if int(current or 0) >= int(limit):
-                raise ApiClientAuthError(
-                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                    code=code,
-                    message=message,
-                    api_client_key_id=api_client_key.id,
-                    api_client_key_name=api_client_key.name,
-                    api_client_key_prefix=api_client_key.key_prefix,
-                    user_account_id=owner_user_id,
-                    user_account_name=owner_user_name,
-                    remaining_tokens=remaining_tokens,
-                    remaining_balance=remaining_balance,
-                    policy_snapshot_json=policy_snapshot_json,
-                )
+    async def validate_redis_rate_limits(auth_context: ApiClientAuthContext, *, request_path: str | None = None) -> None:
+        api_client_key = auth_context.api_client_key
+        is_billable_model_request = bool(request_path and request_path != "/v1/models")
+        try:
+            policy_snapshot = loads_json(auth_context.policy_snapshot_json, {})
+            owner_snapshot = policy_snapshot.get("owner_user") if isinstance(policy_snapshot, dict) else None
+            await RateLimitService.seed_realtime_quota_counters(
+                api_key_id=api_client_key.id,
+                api_key_total_tokens_used=api_client_key.total_tokens_used,
+                api_key_total_cost_used=(
+                    float(BillingService.to_decimal(api_client_key.total_cost_used))
+                    if api_client_key.total_cost_used is not None
+                    else None
+                ),
+                account_id=api_client_key.owner_user_id,
+                account_total_tokens_used=(
+                    int(owner_snapshot.get("total_tokens"))
+                    if isinstance(owner_snapshot, dict) and owner_snapshot.get("total_tokens") is not None
+                    else None
+                ),
+                account_total_cost_used=(
+                    float(BillingService.to_decimal(owner_snapshot.get("total_cost_used")))
+                    if isinstance(owner_snapshot, dict) and owner_snapshot.get("total_cost_used") is not None
+                    else None
+                ),
+            )
+            await RateLimitService.check_api_key_limits(
+                api_key_id=api_client_key.id,
+                qps_limit=api_client_key.qps_limit,
+                rpm_limit=api_client_key.rpm_limit,
+                daily_request_limit=api_client_key.request_limit_daily if is_billable_model_request else None,
+                total_token_limit=api_client_key.token_limit_total if is_billable_model_request else None,
+                daily_token_limit=api_client_key.token_limit_daily if is_billable_model_request else None,
+                total_cost_limit=(
+                    float(BillingService.to_decimal(api_client_key.cost_limit_total))
+                    if is_billable_model_request and api_client_key.cost_limit_total is not None
+                    else None
+                ),
+                daily_cost_limit=(
+                    float(BillingService.to_decimal(api_client_key.cost_limit_daily))
+                    if is_billable_model_request and api_client_key.cost_limit_daily is not None
+                    else None
+                ),
+                tpm_limit=api_client_key.tpm_limit if is_billable_model_request else None,
+                account_id=api_client_key.owner_user_id if is_billable_model_request else None,
+                account_request_limit_total=(
+                    api_client_key.owner_user.request_limit_total
+                    if is_billable_model_request and api_client_key.owner_user is not None
+                    else None
+                ),
+                account_request_limit_daily=(
+                    api_client_key.owner_user.request_limit_daily
+                    if is_billable_model_request and api_client_key.owner_user is not None
+                    else None
+                ),
+                account_request_limit_monthly=(
+                    api_client_key.owner_user.request_limit_monthly
+                    if is_billable_model_request and api_client_key.owner_user is not None
+                    else None
+                ),
+                account_token_limit_total=(
+                    api_client_key.owner_user.token_limit_total
+                    if is_billable_model_request and api_client_key.owner_user is not None
+                    else None
+                ),
+                account_token_limit_daily=(
+                    api_client_key.owner_user.token_limit_daily
+                    if is_billable_model_request and api_client_key.owner_user is not None
+                    else None
+                ),
+                account_token_limit_monthly=(
+                    api_client_key.owner_user.token_limit_monthly
+                    if is_billable_model_request and api_client_key.owner_user is not None
+                    else None
+                ),
+                account_cost_limit_total=(
+                    float(BillingService.to_decimal(api_client_key.owner_user.cost_limit_total))
+                    if is_billable_model_request
+                    and api_client_key.owner_user is not None
+                    and api_client_key.owner_user.cost_limit_total is not None
+                    else None
+                ),
+                account_cost_limit_daily=(
+                    float(BillingService.to_decimal(api_client_key.owner_user.cost_limit_daily))
+                    if is_billable_model_request
+                    and api_client_key.owner_user is not None
+                    and api_client_key.owner_user.cost_limit_daily is not None
+                    else None
+                ),
+                account_cost_limit_monthly=(
+                    float(BillingService.to_decimal(api_client_key.owner_user.cost_limit_monthly))
+                    if is_billable_model_request
+                    and api_client_key.owner_user is not None
+                    and api_client_key.owner_user.cost_limit_monthly is not None
+                    else None
+                ),
+            )
+        except RateLimitExceededError as exc:
+            raise ApiClientAuthError(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                code=exc.code,
+                message=exc.message,
+                api_client_key_id=api_client_key.id,
+                api_client_key_name=api_client_key.name,
+                api_client_key_prefix=api_client_key.key_prefix,
+                user_account_id=api_client_key.owner_user_id,
+                user_account_name=api_client_key.owner_user.username if api_client_key.owner_user else None,
+                remaining_tokens=auth_context.remaining_tokens,
+                remaining_balance=auth_context.remaining_balance,
+                remaining_requests_daily=auth_context.remaining_requests_daily,
+                remaining_cost_daily=auth_context.remaining_cost_daily,
+                policy_snapshot_json=auth_context.policy_snapshot_json,
+            ) from exc
+        except Exception as exc:
+            raise ApiClientAuthError(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                code="redis_unavailable",
+                message="Redis rate limit service is unavailable",
+                api_client_key_id=api_client_key.id,
+                api_client_key_name=api_client_key.name,
+                api_client_key_prefix=api_client_key.key_prefix,
+                user_account_id=api_client_key.owner_user_id,
+                user_account_name=api_client_key.owner_user.username if api_client_key.owner_user else None,
+                remaining_tokens=auth_context.remaining_tokens,
+                remaining_balance=auth_context.remaining_balance,
+                remaining_requests_daily=auth_context.remaining_requests_daily,
+                remaining_cost_daily=auth_context.remaining_cost_daily,
+                policy_snapshot_json=auth_context.policy_snapshot_json,
+            ) from exc
 
     @classmethod
     def enqueue_last_used_touch(cls, api_client_key_id: int | None) -> None:
@@ -659,14 +869,33 @@ class ApiKeyService:
         return target
 
 
-def require_api_client_auth(
+def _authenticate_request_with_scoped_session(
+    authorization: str | None,
+    *,
+    request_path: str | None,
+    source_ip: str | None,
+) -> ApiClientAuthContext:
+    db = SessionLocal()
+    try:
+        return ApiKeyService.authenticate_request(
+            db,
+            authorization,
+            request_path=request_path,
+            source_ip=source_ip,
+        )
+    finally:
+        db.close()
+
+
+async def require_api_client_auth(
     request: Request,
     authorization: str | None = Header(default=None),
-    db: Session = Depends(get_db),
 ) -> ApiClientAuthContext:
-    return ApiKeyService.authenticate_request(
-        db,
+    auth_context = await run_in_threadpool(
+        _authenticate_request_with_scoped_session,
         authorization,
         request_path=request.url.path,
         source_ip=ApiKeyService.extract_source_ip(request),
     )
+    await ApiKeyService.validate_redis_rate_limits(auth_context, request_path=request.url.path)
+    return auth_context

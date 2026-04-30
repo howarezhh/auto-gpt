@@ -7,16 +7,19 @@ from functools import lru_cache
 from typing import Any
 from urllib.parse import urlparse
 
+from redis import Redis
+
 try:
     import tiktoken
 except Exception:  # pragma: no cover - optional dependency during bootstrap
     tiktoken = None
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 
+from app.config import get_settings
 from app.database import SessionLocal
+from app.models.api_client_key import ApiClientKey
 from app.models.request_log import RequestLog
-from app.services.api_key_service import ApiKeyService
 from app.scheduler import scheduler
 from app.services.billing_service import BillingService
 from app.services.log_service import LogService
@@ -26,6 +29,10 @@ from app.utils.json_utils import safeJsonParse
 class TokenUsageService:
     IMMEDIATE_DELAY_MS = 250
     BACKFILL_BATCH_SIZE = 50
+    FINALIZE_DEDUPE_TTL_SECONDS = 900
+    MAX_FINALIZE_ATTEMPTS = 3
+    RETRY_DELAYS_SECONDS = (2, 10, 30)
+    _redis_client: Redis | None = None
 
     @staticmethod
     def enqueue_log_finalize(
@@ -40,6 +47,33 @@ class TokenUsageService:
     ) -> None:
         if not request_path or request_path == "/v1/models":
             return
+        if not TokenUsageService._claim_finalize_job(log_id):
+            return
+        scheduled = TokenUsageService._schedule_finalize_job(
+            log_id=log_id,
+            model_name=model_name,
+            request_path=request_path,
+            request_payload=request_payload,
+            response_payload=response_payload,
+            response_text=response_text,
+            enable_usage_fill=enable_usage_fill,
+            delay_ms=TokenUsageService.IMMEDIATE_DELAY_MS,
+        )
+        if not scheduled:
+            TokenUsageService._release_finalize_job(log_id)
+
+    @staticmethod
+    def _schedule_finalize_job(
+        *,
+        log_id: int,
+        model_name: str | None,
+        request_path: str | None,
+        request_payload: dict[str, Any] | None = None,
+        response_payload: dict[str, Any] | None = None,
+        response_text: str | None = None,
+        enable_usage_fill: bool = True,
+        delay_ms: int,
+    ) -> bool:
         if scheduler.running:
             scheduler.add_job(
                 TokenUsageService.finalize_single_log,
@@ -58,6 +92,48 @@ class TokenUsageService:
                 replace_existing=True,
                 misfire_grace_time=30,
             )
+            return True
+        return False
+
+    @staticmethod
+    def _get_redis_client() -> Redis | None:
+        if TokenUsageService._redis_client is not None:
+            return TokenUsageService._redis_client
+        redis_url = get_settings().redis_url.strip()
+        if not redis_url:
+            return None
+        try:
+            TokenUsageService._redis_client = Redis.from_url(redis_url, decode_responses=True)
+            return TokenUsageService._redis_client
+        except Exception:
+            return None
+
+    @staticmethod
+    def _claim_finalize_job(log_id: int) -> bool:
+        client = TokenUsageService._get_redis_client()
+        if client is None:
+            return True
+        try:
+            return bool(
+                client.set(
+                    f"token_usage:finalize:dedupe:{log_id}",
+                    "1",
+                    nx=True,
+                    ex=TokenUsageService.FINALIZE_DEDUPE_TTL_SECONDS,
+                )
+            )
+        except Exception:
+            return True
+
+    @staticmethod
+    def _release_finalize_job(log_id: int) -> None:
+        client = TokenUsageService._get_redis_client()
+        if client is None:
+            return
+        try:
+            client.delete(f"token_usage:finalize:dedupe:{log_id}")
+        except Exception:
+            return
 
     @staticmethod
     def finalize_single_log(
@@ -75,9 +151,25 @@ class TokenUsageService:
             log = db.get(RequestLog, log_id)
             if log is None:
                 return
+            log.token_finalize_attempt_count = int(log.token_finalize_attempt_count or 0) + 1
+            log.token_finalize_error = None
+            db.commit()
             TokenUsageService._fill_usage_for_log(
                 db,
                 log,
+                model_name=model_name,
+                request_path=request_path,
+                request_payload=request_payload,
+                response_payload=response_payload,
+                response_text=response_text,
+                enable_usage_fill=enable_usage_fill,
+            )
+            TokenUsageService._release_finalize_job(log_id)
+        except Exception as exc:
+            db.rollback()
+            TokenUsageService._record_finalize_failure(log_id=log_id, error=exc)
+            TokenUsageService._schedule_retry_if_needed(
+                log_id=log_id,
                 model_name=model_name,
                 request_path=request_path,
                 request_payload=request_payload,
@@ -90,8 +182,6 @@ class TokenUsageService:
 
     @staticmethod
     def backfill_missing_usage(limit: int = BACKFILL_BATCH_SIZE) -> None:
-        if tiktoken is None:
-            return
         db = SessionLocal()
         try:
             logs = list(
@@ -104,6 +194,8 @@ class TokenUsageService:
                             RequestLog.prompt_tokens.is_(None),
                             RequestLog.completion_tokens.is_(None),
                             RequestLog.total_tokens.is_(None),
+                            RequestLog.billing_finalized_at.is_(None),
+                            RequestLog.billing_status == "pending_tokens",
                         )
                     )
                     .order_by(RequestLog.created_at.desc(), RequestLog.id.desc())
@@ -111,9 +203,99 @@ class TokenUsageService:
                 )
             )
             for log in logs:
-                TokenUsageService._fill_usage_for_log(db, log)
+                TokenUsageService.enqueue_log_finalize(
+                    log_id=log.id,
+                    model_name=log.requested_model or log.model_name,
+                    request_path=log.request_path,
+                    enable_usage_fill=tiktoken is not None,
+                )
         finally:
             db.close()
+
+    @staticmethod
+    def _record_finalize_failure(*, log_id: int, error: Exception) -> None:
+        db = SessionLocal()
+        try:
+            log = db.get(RequestLog, log_id)
+            if log is None:
+                return
+            log.token_finalize_error = str(error)[:1000]
+            log.billing_error = log.billing_error or str(error)[:1000]
+            db.commit()
+        finally:
+            db.close()
+
+    @staticmethod
+    def _schedule_retry_if_needed(
+        *,
+        log_id: int,
+        model_name: str | None,
+        request_path: str | None,
+        request_payload: dict[str, Any] | None = None,
+        response_payload: dict[str, Any] | None = None,
+        response_text: str | None = None,
+        enable_usage_fill: bool = True,
+    ) -> None:
+        db = SessionLocal()
+        try:
+            log = db.get(RequestLog, log_id)
+            if log is None:
+                return
+            attempts = int(log.token_finalize_attempt_count or 0)
+            if attempts >= TokenUsageService.MAX_FINALIZE_ATTEMPTS:
+                TokenUsageService._release_finalize_job(log_id)
+                TokenUsageService._write_finalize_alert(db, log)
+                return
+            delay_seconds = TokenUsageService.RETRY_DELAYS_SECONDS[min(attempts - 1, len(TokenUsageService.RETRY_DELAYS_SECONDS) - 1)]
+        finally:
+            db.close()
+        scheduled = TokenUsageService._schedule_finalize_job(
+            log_id=log_id,
+            model_name=model_name,
+            request_path=request_path,
+            request_payload=request_payload,
+            response_payload=response_payload,
+            response_text=response_text,
+            enable_usage_fill=enable_usage_fill,
+            delay_ms=delay_seconds * 1000,
+        )
+        if not scheduled:
+            TokenUsageService._release_finalize_job(log_id)
+
+    @staticmethod
+    def _write_finalize_alert(db, log: RequestLog) -> None:
+        from app.models.alert_event import AlertEvent
+        from app.utils.json_utils import dumps_json
+
+        now = datetime.utcnow()
+        alert_key = f"billing_finalize:{log.id}"
+        item = db.scalar(select(AlertEvent).where(AlertEvent.alert_key == alert_key))
+        if item is None:
+            item = AlertEvent(
+                alert_key=alert_key,
+                alert_type="billing",
+                first_seen_at=now,
+            )
+            db.add(item)
+        item.severity = "warning"
+        item.title = f"计费后台任务失败 · 日志 {log.id}"
+        item.message = log.token_finalize_error or log.billing_error or "日志 Token/计费后台任务超过最大重试次数"
+        item.payload_json = dumps_json(
+            {
+                "request_log_id": log.id,
+                "trace_id": log.trace_id,
+                "request_id": log.request_id,
+                "api_client_key_id": log.api_client_key_id,
+                "token_finalize_attempt_count": log.token_finalize_attempt_count,
+                "billing_attempt_count": log.billing_attempt_count,
+                "token_finalize_error": log.token_finalize_error,
+                "billing_error": log.billing_error,
+            }
+        )
+        item.status = "active"
+        item.last_seen_at = now
+        item.resolved_at = None
+        db.commit()
 
     @staticmethod
     def _fill_usage_for_log(
@@ -172,6 +354,7 @@ class TokenUsageService:
 
         should_finalize_billing = log.api_client_key_id is not None
         should_commit = changed
+        billing_delta = None
         if changed or should_finalize_billing:
             TokenUsageService._sync_api_client_key_usage_delta(
                 db,
@@ -181,10 +364,16 @@ class TokenUsageService:
                 original_total_tokens=original_total_tokens,
                 force=should_finalize_billing,
             )
-            BillingService.sync_request_billing(db, log)
+            billing_delta = BillingService.finalize_request_log_billing(db, log)
             should_commit = True
         if should_commit:
             db.commit()
+        if billing_delta is not None:
+            TokenUsageService._record_redis_usage_counters(
+                log,
+                original_total_tokens=original_total_tokens,
+                billing_delta=billing_delta,
+            )
 
     @staticmethod
     def _sync_api_client_key_usage_delta(
@@ -198,15 +387,82 @@ class TokenUsageService:
     ) -> None:
         if log.api_client_key_id is None:
             return
-        if (
-            not force
-            and
-            log.prompt_tokens == original_prompt_tokens
-            and log.completion_tokens == original_completion_tokens
-            and log.total_tokens == original_total_tokens
-        ):
+        prompt_delta = int(log.prompt_tokens or 0) - int(original_prompt_tokens or 0)
+        completion_delta = int(log.completion_tokens or 0) - int(original_completion_tokens or 0)
+        total_delta = int(log.total_tokens or 0) - int(original_total_tokens or 0)
+        if not force and prompt_delta == 0 and completion_delta == 0 and total_delta == 0:
             return
-        ApiKeyService.reconcile_usage_counters(db, api_client_key_id=log.api_client_key_id)
+        if prompt_delta == 0 and completion_delta == 0 and total_delta == 0:
+            return
+        db.execute(
+            update(ApiClientKey)
+            .where(ApiClientKey.id == log.api_client_key_id)
+            .values(
+                prompt_tokens_used=ApiClientKey.prompt_tokens_used + prompt_delta,
+                completion_tokens_used=ApiClientKey.completion_tokens_used + completion_delta,
+                total_tokens_used=ApiClientKey.total_tokens_used + total_delta,
+                last_used_at=datetime.utcnow(),
+            )
+        )
+
+    @staticmethod
+    def _record_redis_usage_counters(
+        log: RequestLog,
+        *,
+        original_total_tokens: int | None,
+        billing_delta,
+    ) -> None:
+        if log.api_client_key_id is None:
+            return
+        client = TokenUsageService._get_redis_client()
+        if client is None:
+            return
+        token_delta = int(log.total_tokens or 0) - int(original_total_tokens or 0)
+        cost_delta = BillingService.to_float(billing_delta) or 0
+        if token_delta == 0 and cost_delta == 0:
+            return
+        usage_time = log.created_at or datetime.utcnow()
+        day_key = usage_time.strftime("%Y%m%d")
+        minute_key = usage_time.strftime("%Y%m%d%H%M")
+        try:
+            pipe = client.pipeline(transaction=True)
+            if token_delta != 0:
+                pipe.incrby(f"quota:api_key:{log.api_client_key_id}:tokens:total", token_delta)
+                pipe.incrby(f"quota:api_key:{log.api_client_key_id}:tokens:{day_key}", token_delta)
+                pipe.expire(f"quota:api_key:{log.api_client_key_id}:tokens:{day_key}", 60 * 60 * 26)
+                pipe.incrby(f"quota:api_key:{log.api_client_key_id}:tpm:{minute_key}", token_delta)
+                pipe.expire(f"quota:api_key:{log.api_client_key_id}:tpm:{minute_key}", 180)
+            if cost_delta != 0:
+                pipe.incrbyfloat(f"quota:api_key:{log.api_client_key_id}:cost:total", cost_delta)
+                pipe.incrbyfloat(f"quota:api_key:{log.api_client_key_id}:cost:{day_key}", cost_delta)
+                pipe.expire(f"quota:api_key:{log.api_client_key_id}:cost:{day_key}", 60 * 60 * 26)
+            owner_user_id = log.user_account_id or TokenUsageService._resolve_owner_user_id(log.api_client_key_id)
+            if owner_user_id is not None:
+                month_key = usage_time.strftime("%Y%m")
+                if token_delta != 0:
+                    pipe.incrby(f"quota:account:{owner_user_id}:tokens:total", token_delta)
+                    pipe.incrby(f"quota:account:{owner_user_id}:tokens:{day_key}", token_delta)
+                    pipe.expire(f"quota:account:{owner_user_id}:tokens:{day_key}", 60 * 60 * 26)
+                    pipe.incrby(f"quota:account:{owner_user_id}:tokens:{month_key}", token_delta)
+                    pipe.expire(f"quota:account:{owner_user_id}:tokens:{month_key}", 60 * 60 * 24 * 33)
+                if cost_delta != 0:
+                    pipe.incrbyfloat(f"quota:account:{owner_user_id}:cost:total", cost_delta)
+                    pipe.incrbyfloat(f"quota:account:{owner_user_id}:cost:{day_key}", cost_delta)
+                    pipe.expire(f"quota:account:{owner_user_id}:cost:{day_key}", 60 * 60 * 26)
+                    pipe.incrbyfloat(f"quota:account:{owner_user_id}:cost:{month_key}", cost_delta)
+                    pipe.expire(f"quota:account:{owner_user_id}:cost:{month_key}", 60 * 60 * 24 * 33)
+            pipe.execute()
+        except Exception:
+            return
+
+    @staticmethod
+    def _resolve_owner_user_id(api_client_key_id: int) -> int | None:
+        db = SessionLocal()
+        try:
+            api_key = db.get(ApiClientKey, api_client_key_id)
+            return api_key.owner_user_id if api_key is not None else None
+        finally:
+            db.close()
 
     @staticmethod
     def _parse_json_object(value: str | None) -> dict[str, Any] | None:

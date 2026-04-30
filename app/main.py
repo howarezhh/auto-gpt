@@ -6,7 +6,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 
 from app.config import get_settings
 from app.database import Base, SessionLocal, engine
@@ -29,11 +29,13 @@ from app.routers.settings import router as settings_router
 from app.routers.user_accounts import router as user_accounts_router
 from app.routers.user_portal import router as user_portal_router
 from app.scheduler import scheduler
+from app.services.api_key_auth_cache import ApiKeyAuthCache
 from app.services.api_key_service import ApiClientAuthError
 from app.services.log_service import LogService
 from app.services.model_catalog_service import ModelCatalogService
 from app.services.openai_error_service import OpenAIErrorService
 from app.services.provider_service import ProviderService
+from app.services.redis_service import RedisService
 from app.services.runtime_state_service import RuntimeStateService
 from app.services.setting_service import SettingService
 from app.services.upstream_client import UpstreamClientService
@@ -46,11 +48,18 @@ settings = get_settings()
 settings.validate_runtime_settings()
 
 
-def init_database() -> None:
+def init_database(*, allow_production_ddl: bool = False) -> None:
+    if settings.is_production() and not allow_production_ddl:
+        return
     Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     try:
-        _migrate_request_log_columns(db)
+        _migrate_provider_capacity_columns(db)
+        _migrate_app_setting_concurrency_columns(db)
+        if _is_sqlite_session(db):
+            _migrate_request_log_columns(db)
+        else:
+            _backfill_user_shared_wallet(db)
         setting = db.get(AppSetting, 1)
         if setting is None:
             setting = AppSetting(id=1)
@@ -61,6 +70,64 @@ def init_database() -> None:
         ModelCatalogService.sync_model_catalogs(db)
     finally:
         db.close()
+
+
+def _is_sqlite_session(db) -> bool:
+    return db.get_bind().dialect.name == "sqlite"
+
+
+def _get_table_columns(db, table_name: str) -> set[str]:
+    inspector = inspect(db.get_bind())
+    if table_name not in inspector.get_table_names():
+        return set()
+    return {column["name"] for column in inspector.get_columns(table_name)}
+
+
+def _migrate_provider_capacity_columns(db) -> None:
+    existing_columns = _get_table_columns(db, "providers")
+    additions = {
+        "max_active_requests": "ALTER TABLE providers ADD COLUMN max_active_requests INTEGER DEFAULT 300",
+        "max_active_streams": "ALTER TABLE providers ADD COLUMN max_active_streams INTEGER DEFAULT 150",
+        "max_qps": "ALTER TABLE providers ADD COLUMN max_qps INTEGER",
+        "max_error_rate": "ALTER TABLE providers ADD COLUMN max_error_rate FLOAT DEFAULT 80",
+        "first_token_timeout_sec": "ALTER TABLE providers ADD COLUMN first_token_timeout_sec INTEGER DEFAULT 60",
+    }
+    changed = False
+    for column, ddl in additions.items():
+        if column in existing_columns:
+            continue
+        db.execute(text(ddl))
+        changed = True
+    if changed:
+        db.commit()
+
+
+def _migrate_app_setting_concurrency_columns(db) -> None:
+    existing_columns = _get_table_columns(db, "app_settings")
+    runtime_settings = get_settings()
+    additions = {
+        "global_max_active_requests": f"ALTER TABLE app_settings ADD COLUMN global_max_active_requests INTEGER DEFAULT {runtime_settings.global_max_active_requests}",
+        "global_max_active_streams": f"ALTER TABLE app_settings ADD COLUMN global_max_active_streams INTEGER DEFAULT {runtime_settings.global_max_active_streams}",
+        "api_key_max_active_requests": f"ALTER TABLE app_settings ADD COLUMN api_key_max_active_requests INTEGER DEFAULT {runtime_settings.api_key_max_active_requests}",
+        "api_key_max_active_streams": f"ALTER TABLE app_settings ADD COLUMN api_key_max_active_streams INTEGER DEFAULT {runtime_settings.api_key_max_active_streams}",
+        "account_max_active_requests": f"ALTER TABLE app_settings ADD COLUMN account_max_active_requests INTEGER DEFAULT {runtime_settings.account_max_active_requests}",
+        "account_max_active_streams": f"ALTER TABLE app_settings ADD COLUMN account_max_active_streams INTEGER DEFAULT {runtime_settings.account_max_active_streams}",
+        "provider_max_active_requests": f"ALTER TABLE app_settings ADD COLUMN provider_max_active_requests INTEGER DEFAULT {runtime_settings.provider_max_active_requests}",
+        "provider_max_active_streams": f"ALTER TABLE app_settings ADD COLUMN provider_max_active_streams INTEGER DEFAULT {runtime_settings.provider_max_active_streams}",
+        "concurrency_lease_ttl_seconds": f"ALTER TABLE app_settings ADD COLUMN concurrency_lease_ttl_seconds INTEGER DEFAULT {runtime_settings.concurrency_lease_ttl_seconds}",
+        "stream_connect_timeout_seconds": f"ALTER TABLE app_settings ADD COLUMN stream_connect_timeout_seconds INTEGER DEFAULT {runtime_settings.stream_connect_timeout_seconds}",
+        "stream_first_token_timeout_seconds": f"ALTER TABLE app_settings ADD COLUMN stream_first_token_timeout_seconds INTEGER DEFAULT {runtime_settings.stream_first_token_timeout_seconds}",
+        "stream_idle_timeout_seconds": f"ALTER TABLE app_settings ADD COLUMN stream_idle_timeout_seconds INTEGER DEFAULT {runtime_settings.stream_idle_timeout_seconds}",
+        "stream_max_duration_seconds": f"ALTER TABLE app_settings ADD COLUMN stream_max_duration_seconds INTEGER DEFAULT {runtime_settings.stream_max_duration_seconds}",
+    }
+    changed = False
+    for column, ddl in additions.items():
+        if column in existing_columns:
+            continue
+        db.execute(text(ddl))
+        changed = True
+    if changed:
+        db.commit()
 
 
 def _migrate_request_log_columns(db) -> None:
@@ -93,6 +160,12 @@ def _migrate_request_log_columns(db) -> None:
         "completion_cost": "ALTER TABLE request_logs ADD COLUMN completion_cost NUMERIC",
         "total_cost": "ALTER TABLE request_logs ADD COLUMN total_cost NUMERIC",
         "billing_status": "ALTER TABLE request_logs ADD COLUMN billing_status TEXT",
+        "billing_finalized_at": "ALTER TABLE request_logs ADD COLUMN billing_finalized_at DATETIME",
+        "billing_event_id": "ALTER TABLE request_logs ADD COLUMN billing_event_id TEXT",
+        "billing_attempt_count": "ALTER TABLE request_logs ADD COLUMN billing_attempt_count INTEGER NOT NULL DEFAULT 0",
+        "billing_error": "ALTER TABLE request_logs ADD COLUMN billing_error TEXT",
+        "token_finalize_attempt_count": "ALTER TABLE request_logs ADD COLUMN token_finalize_attempt_count INTEGER NOT NULL DEFAULT 0",
+        "token_finalize_error": "ALTER TABLE request_logs ADD COLUMN token_finalize_error TEXT",
         "billing_multiplier": "ALTER TABLE request_logs ADD COLUMN billing_multiplier FLOAT",
         "channel_price_input_per_1k": "ALTER TABLE request_logs ADD COLUMN channel_price_input_per_1k FLOAT",
         "channel_price_output_per_1k": "ALTER TABLE request_logs ADD COLUMN channel_price_output_per_1k FLOAT",
@@ -237,8 +310,8 @@ def _migrate_request_log_columns(db) -> None:
     }
     app_setting_additions = {
         "enable_token_logging": "ALTER TABLE app_settings ADD COLUMN enable_token_logging BOOLEAN NOT NULL DEFAULT 1",
-        "enable_payload_logging": "ALTER TABLE app_settings ADD COLUMN enable_payload_logging BOOLEAN NOT NULL DEFAULT 1",
-        "enable_stream_response_persist": "ALTER TABLE app_settings ADD COLUMN enable_stream_response_persist BOOLEAN NOT NULL DEFAULT 1",
+        "enable_payload_logging": "ALTER TABLE app_settings ADD COLUMN enable_payload_logging BOOLEAN NOT NULL DEFAULT 0",
+        "enable_stream_response_persist": "ALTER TABLE app_settings ADD COLUMN enable_stream_response_persist BOOLEAN NOT NULL DEFAULT 0",
         "mask_sensitive_fields": "ALTER TABLE app_settings ADD COLUMN mask_sensitive_fields BOOLEAN NOT NULL DEFAULT 1",
         "max_logged_body_bytes": "ALTER TABLE app_settings ADD COLUMN max_logged_body_bytes INTEGER NOT NULL DEFAULT 16384",
         "allow_public_user_registration": "ALTER TABLE app_settings ADD COLUMN allow_public_user_registration BOOLEAN NOT NULL DEFAULT 0",
@@ -248,6 +321,10 @@ def _migrate_request_log_columns(db) -> None:
         "model_list_cache_ttl_sec": "ALTER TABLE app_settings ADD COLUMN model_list_cache_ttl_sec INTEGER NOT NULL DEFAULT 15",
         "provider_status_cache_ttl_sec": "ALTER TABLE app_settings ADD COLUMN provider_status_cache_ttl_sec INTEGER NOT NULL DEFAULT 10",
         "async_request_logging": "ALTER TABLE app_settings ADD COLUMN async_request_logging BOOLEAN NOT NULL DEFAULT 1",
+        "stream_connect_timeout_seconds": "ALTER TABLE app_settings ADD COLUMN stream_connect_timeout_seconds INTEGER NOT NULL DEFAULT 10",
+        "stream_first_token_timeout_seconds": "ALTER TABLE app_settings ADD COLUMN stream_first_token_timeout_seconds INTEGER NOT NULL DEFAULT 60",
+        "stream_idle_timeout_seconds": "ALTER TABLE app_settings ADD COLUMN stream_idle_timeout_seconds INTEGER NOT NULL DEFAULT 120",
+        "stream_max_duration_seconds": "ALTER TABLE app_settings ADD COLUMN stream_max_duration_seconds INTEGER NOT NULL DEFAULT 600",
     }
     changed_settings = False
     for column, ddl in app_setting_additions.items():
@@ -313,10 +390,7 @@ def _migrate_request_log_columns(db) -> None:
 
 
 def _backfill_user_shared_wallet(db) -> None:
-    user_columns = {
-        row[1]
-        for row in db.execute(text("PRAGMA table_info(user_accounts)")).fetchall()
-    }
+    user_columns = _get_table_columns(db, "user_accounts")
     if "balance_amount" not in user_columns or "total_recharge_amount" not in user_columns:
         return
     rows = db.execute(
@@ -362,7 +436,9 @@ def _backfill_user_shared_wallet(db) -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    init_database()
+    if settings.enable_startup_db_init:
+        init_database(allow_production_ddl=False)
+    await RedisService.init()
     UpstreamClientService.get_client()
     if not scheduler.running:
         configure_scheduler()
@@ -371,6 +447,8 @@ async def lifespan(_: FastAPI):
     if scheduler.running:
         scheduler.shutdown(wait=False)
     await UpstreamClientService.aclose()
+    await ApiKeyAuthCache.aclose()
+    await RedisService.aclose()
 
 
 app = FastAPI(
@@ -460,9 +538,19 @@ async def _log_api_client_auth_failure(request: Request, exc: ApiClientAuthError
         request_body_json = None
         requested_model = None
         if isinstance(parsed_body, dict):
-            request_body_json = ProxySafeHelpers.truncate_json(parsed_body, settings.max_logged_body_bytes)
             requested_model = parsed_body.get("model") if isinstance(parsed_body.get("model"), str) else None
-        elif body_text:
+            if settings.enable_payload_logging:
+                request_body_json = ProxySafeHelpers.truncate_json(parsed_body, settings.max_logged_body_bytes)
+            else:
+                request_body_json = ProxySafeHelpers.truncate_json(
+                    {
+                        key: parsed_body[key]
+                        for key in ("model", "stream", "user", "metadata")
+                        if key in parsed_body
+                    },
+                    settings.max_logged_body_bytes,
+                )
+        elif body_text and settings.enable_payload_logging:
             request_body_json = body_text[: settings.max_logged_body_bytes]
         LogService.create_log(
             db,

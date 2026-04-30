@@ -10,6 +10,191 @@ $PipIndexUrl = "https://pypi.tuna.tsinghua.edu.cn/simple"
 $EnableReload = $false
 $AllowForceKillPortProcess = $false
 
+function Resolve-BootstrapPythonExe {
+    $candidates = @(
+        (Get-Command py -ErrorAction SilentlyContinue),
+        (Get-Command python -ErrorAction SilentlyContinue),
+        (Get-Command python3 -ErrorAction SilentlyContinue)
+    ) | Where-Object { $null -ne $_ }
+
+    foreach ($candidate in $candidates) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate.Source)) {
+            return $candidate.Source
+        }
+    }
+
+    throw "未找到可用于创建项目虚拟环境的 Python。请先安装 Python 后重试。"
+}
+
+function Test-ProjectVenvPython {
+    param(
+        [string]$ProjectPythonExe,
+        [string]$ProjectVenvDir
+    )
+
+    if (-not (Test-Path -LiteralPath $ProjectPythonExe)) {
+        return $false
+    }
+
+    $expectedPrefix = (Resolve-Path -LiteralPath $ProjectVenvDir).Path
+    $previousExpectedVenv = [Environment]::GetEnvironmentVariable("AOTU_GPT_EXPECTED_VENV")
+
+    try {
+        [Environment]::SetEnvironmentVariable("AOTU_GPT_EXPECTED_VENV", $expectedPrefix)
+        & $ProjectPythonExe -c @"
+import os
+import sys
+
+expected = os.path.normcase(os.path.abspath(os.environ["AOTU_GPT_EXPECTED_VENV"]))
+actual_prefix = os.path.normcase(os.path.abspath(sys.prefix))
+base_prefix = os.path.normcase(os.path.abspath(sys.base_prefix))
+has_venv_cfg = os.path.isfile(os.path.join(sys.prefix, "pyvenv.cfg"))
+
+sys.exit(0 if actual_prefix == expected and actual_prefix != base_prefix and has_venv_cfg else 1)
+"@
+        return $LASTEXITCODE -eq 0
+    }
+    finally {
+        [Environment]::SetEnvironmentVariable("AOTU_GPT_EXPECTED_VENV", $previousExpectedVenv)
+    }
+}
+
+function Get-DotEnvValues {
+    param(
+        [string]$EnvFilePath
+    )
+
+    $result = @{}
+    if (-not (Test-Path $EnvFilePath)) {
+        return $result
+    }
+
+    foreach ($rawLine in Get-Content -Path $EnvFilePath) {
+        $line = $rawLine.Trim()
+        if ([string]::IsNullOrWhiteSpace($line) -or $line.StartsWith("#")) {
+            continue
+        }
+        $separatorIndex = $line.IndexOf("=")
+        if ($separatorIndex -lt 1) {
+            continue
+        }
+        $key = $line.Substring(0, $separatorIndex).Trim()
+        $value = $line.Substring($separatorIndex + 1).Trim()
+        $result[$key] = $value
+    }
+
+    return $result
+}
+
+function Get-EffectiveEnvValue {
+    param(
+        [string]$Name,
+        [hashtable]$DotEnvValues,
+        [string]$DefaultValue = ""
+    )
+
+    $processValue = [Environment]::GetEnvironmentVariable($Name)
+    if (-not [string]::IsNullOrWhiteSpace($processValue)) {
+        return $processValue
+    }
+    if ($DotEnvValues.ContainsKey($Name) -and -not [string]::IsNullOrWhiteSpace($DotEnvValues[$Name])) {
+        return $DotEnvValues[$Name]
+    }
+    return $DefaultValue
+}
+
+function Get-UrlEndpoint {
+    param(
+        [string]$Url
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Url)) {
+        return $null
+    }
+
+    $match = [regex]::Match(
+        $Url,
+        '^[a-zA-Z0-9+.-]+:\/\/(?:[^@\/?#]+@)?(?<host>[^:\/?#]+)(?::(?<port>\d+))?'
+    )
+    if (-not $match.Success) {
+        return $null
+    }
+
+    $port = if ($match.Groups["port"].Success) { [int]$match.Groups["port"].Value } else { 0 }
+    return @{
+        Host = $match.Groups["host"].Value
+        Port = $port
+    }
+}
+
+function Test-TcpEndpoint {
+    param(
+        [string]$HostName,
+        [int]$Port,
+        [int]$TimeoutMs = 1200
+    )
+
+    if ([string]::IsNullOrWhiteSpace($HostName) -or $Port -le 0) {
+        return $false
+    }
+
+    $client = New-Object System.Net.Sockets.TcpClient
+    try {
+        $asyncResult = $client.BeginConnect($HostName, $Port, $null, $null)
+        if (-not $asyncResult.AsyncWaitHandle.WaitOne($TimeoutMs, $false)) {
+            return $false
+        }
+        $client.EndConnect($asyncResult) | Out-Null
+        return $true
+    }
+    catch {
+        return $false
+    }
+    finally {
+        $client.Dispose()
+    }
+}
+
+function Set-LocalDevRuntimeFallbacks {
+    param(
+        [string]$ProjectRootPath
+    )
+
+    $envFilePath = Join-Path $ProjectRootPath ".env"
+    $dotEnvValues = Get-DotEnvValues -EnvFilePath $envFilePath
+    $appEnv = (Get-EffectiveEnvValue -Name "APP_ENV" -DotEnvValues $dotEnvValues -DefaultValue "dev").Trim().ToLowerInvariant()
+
+    if ($appEnv -in @("prod", "production")) {
+        return
+    }
+
+    $databaseUrl = Get-EffectiveEnvValue -Name "DATABASE_URL" -DotEnvValues $dotEnvValues
+    $databaseEndpoint = Get-UrlEndpoint -Url $databaseUrl
+    if (
+        -not [string]::IsNullOrWhiteSpace($databaseUrl) -and
+        $databaseUrl.Trim().ToLowerInvariant().StartsWith("postgresql") -and
+        $null -ne $databaseEndpoint -and
+        $databaseEndpoint.Host -in @("127.0.0.1", "localhost") -and
+        -not (Test-TcpEndpoint -HostName $databaseEndpoint.Host -Port $databaseEndpoint.Port)
+    ) {
+        $env:DATABASE_URL = "sqlite:///./data/app.db"
+        Write-Warning "检测到本地 PostgreSQL 不可用，当前进程临时回退为 SQLite：$env:DATABASE_URL"
+    }
+
+    $redisUrl = Get-EffectiveEnvValue -Name "REDIS_URL" -DotEnvValues $dotEnvValues
+    $redisEndpoint = Get-UrlEndpoint -Url $redisUrl
+    if (
+        -not [string]::IsNullOrWhiteSpace($redisUrl) -and
+        $redisUrl.Trim().ToLowerInvariant().StartsWith("redis://") -and
+        $null -ne $redisEndpoint -and
+        $redisEndpoint.Host -in @("127.0.0.1", "localhost") -and
+        -not (Test-TcpEndpoint -HostName $redisEndpoint.Host -Port $redisEndpoint.Port)
+    ) {
+        $env:REDIS_URL = ""
+        Write-Warning "检测到本地 Redis 不可用，当前进程临时禁用 Redis 依赖；管理端可启动，但实时并发/限流相关能力不可用。"
+    }
+}
+
 function Stop-ProjectProcesses {
     param(
         [string]$ProjectRootPath,
@@ -135,10 +320,10 @@ function Stop-ProcessUsingPort {
         foreach ($processId in $portPids) {
             try {
                 $process = Get-Process -Id $processId -ErrorAction Stop
-                Write-Host "发现端口 $TargetPort 被进程占用: PID=$processId Name=$($process.ProcessName)"
+                Write-Host "发现端口 ${TargetPort} 被进程占用: PID=$processId Name=$($process.ProcessName)"
             }
             catch {
-                Write-Host "发现端口 $TargetPort 被进程占用: PID=$processId Name=<unknown>"
+                Write-Host "发现端口 ${TargetPort} 被进程占用: PID=$processId Name=<unknown>"
             }
 
             try {
@@ -196,14 +381,20 @@ function Resolve-AvailablePort {
 }
 
 Set-Location $ProjectRoot
+Set-LocalDevRuntimeFallbacks -ProjectRootPath $ProjectRoot
 
 if (-not (Test-Path $VenvDir)) {
     Write-Host "未检测到项目虚拟环境，正在创建: $VenvDir"
-    python -m venv $VenvDir
+    $BootstrapPythonExe = Resolve-BootstrapPythonExe
+    & $BootstrapPythonExe -m venv $VenvDir
 }
 
 if (-not (Test-Path $PythonExe)) {
     throw "项目虚拟环境解释器不存在: $PythonExe"
+}
+
+if (-not (Test-ProjectVenvPython -ProjectPythonExe $PythonExe -ProjectVenvDir $VenvDir)) {
+    throw "启动脚本拒绝继续：当前 Python 解释器未正确指向项目虚拟环境。期望: $PythonExe"
 }
 
 Stop-ProjectProcesses -ProjectRootPath $ProjectRoot -ProjectPythonExe $PythonExe -ProjectPort $Port
@@ -222,12 +413,12 @@ Write-Host "Python 解释器: $PythonExe"
 Write-Host "服务地址: http://$HostAddress`:$Port"
 Write-Host "启动模式: $(if ($EnableReload) { 'reload' } else { 'stable(no-reload)' })"
 
-python -m pip install --upgrade pip -i $PipIndexUrl
-python -m pip install -r requirements.txt -i $PipIndexUrl
+& $PythonExe -m pip install --upgrade pip -i $PipIndexUrl
+& $PythonExe -m pip install -r requirements.txt -i $PipIndexUrl
 
 $UvicornArgs = @("-m", "uvicorn", "app.main:app", "--host", $HostAddress, "--port", $Port)
 if ($EnableReload) {
     $UvicornArgs += "--reload"
 }
 
-python @UvicornArgs
+& $PythonExe @UvicornArgs

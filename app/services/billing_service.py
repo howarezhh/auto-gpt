@@ -1,7 +1,8 @@
 from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
+from uuid import uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.models.api_client_billing_record import ApiClientBillingRecord
@@ -66,13 +67,100 @@ class BillingService:
         }
 
     @staticmethod
-    def sync_request_billing(db: Session, log: RequestLog) -> None:
+    def _apply_api_key_billing_delta(db: Session, *, api_key_id: int, delta: Decimal) -> Decimal | None:
+        if delta == 0:
+            api_key = db.get(ApiClientKey, api_key_id)
+            return BillingService.to_decimal(api_key.balance_amount) if api_key and api_key.balance_amount is not None else None
+        if delta > 0:
+            result = db.execute(
+                update(ApiClientKey)
+                .where(
+                    ApiClientKey.id == api_key_id,
+                    ApiClientKey.balance_amount.is_not(None),
+                    ApiClientKey.balance_amount >= delta,
+                )
+                .values(
+                    balance_amount=ApiClientKey.balance_amount - delta,
+                    total_cost_used=func.coalesce(ApiClientKey.total_cost_used, 0) + delta,
+                )
+            )
+            if result.rowcount != 1:
+                raise ValueError("Api key balance is insufficient for request billing")
+        else:
+            result = db.execute(
+                update(ApiClientKey)
+                .where(ApiClientKey.id == api_key_id, ApiClientKey.balance_amount.is_not(None))
+                .values(
+                    balance_amount=ApiClientKey.balance_amount + abs(delta),
+                    total_cost_used=func.coalesce(ApiClientKey.total_cost_used, 0) + delta,
+                )
+            )
+            if result.rowcount != 1:
+                raise ValueError("Api key balance update failed")
+        db.flush()
+        api_key = db.get(ApiClientKey, api_key_id)
+        return BillingService.to_decimal(api_key.balance_amount) if api_key and api_key.balance_amount is not None else None
+
+    @staticmethod
+    def _apply_user_billing_delta(db: Session, *, user_id: int, delta: Decimal) -> Decimal:
+        if delta > 0:
+            result = db.execute(
+                update(UserAccount)
+                .where(
+                    UserAccount.id == user_id,
+                    func.coalesce(UserAccount.balance_amount, 0) - func.coalesce(UserAccount.frozen_amount, 0) >= delta,
+                )
+                .values(balance_amount=func.coalesce(UserAccount.balance_amount, 0) - delta)
+            )
+            if result.rowcount != 1:
+                raise ValueError("Owner account balance is insufficient for request billing")
+        elif delta < 0:
+            result = db.execute(
+                update(UserAccount)
+                .where(UserAccount.id == user_id)
+                .values(balance_amount=func.coalesce(UserAccount.balance_amount, 0) + abs(delta))
+            )
+            if result.rowcount != 1:
+                raise ValueError("Owner account balance update failed")
+        db.flush()
+        owner_user = db.get(UserAccount, user_id)
+        if owner_user is None:
+            raise ValueError("Owner account not found")
+        return BillingService.to_decimal(owner_user.balance_amount)
+
+    @staticmethod
+    def _apply_api_key_cost_delta(db: Session, *, api_key_id: int, delta: Decimal) -> None:
+        if delta == 0:
+            return
+        result = db.execute(
+            update(ApiClientKey)
+            .where(ApiClientKey.id == api_key_id)
+            .values(total_cost_used=func.coalesce(ApiClientKey.total_cost_used, 0) + delta)
+        )
+        if result.rowcount != 1:
+            raise ValueError("Api key cost usage update failed")
+        db.flush()
+
+    @staticmethod
+    def sync_request_billing(db: Session, log: RequestLog) -> Decimal:
         if log.api_client_key_id is None:
-            return
-        api_key = db.get(ApiClientKey, log.api_client_key_id)
+            return Decimal("0")
+        api_key = db.scalar(
+            select(ApiClientKey)
+            .where(ApiClientKey.id == log.api_client_key_id)
+            .with_for_update()
+        )
         if api_key is None:
-            return
-        owner_user = db.get(UserAccount, api_key.owner_user_id) if api_key.owner_user_id is not None else None
+            return Decimal("0")
+        owner_user = (
+            db.scalar(
+                select(UserAccount)
+                .where(UserAccount.id == api_key.owner_user_id)
+                .with_for_update()
+            )
+            if api_key.owner_user_id is not None
+            else None
+        )
 
         billing_data = BillingService.compute_log_cost(db, log)
         prompt_cost = billing_data["prompt_cost"]
@@ -88,16 +176,20 @@ class BillingService:
         delta = (new_amount - previous_amount).quantize(BillingService.MONEY_QUANT, rounding=ROUND_HALF_UP)
 
         if delta:
-            api_key.total_cost_used = BillingService.to_decimal(api_key.total_cost_used) + delta
             if owner_user is not None:
-                owner_user.balance_amount = BillingService.to_decimal(owner_user.balance_amount) - delta
+                BillingService._apply_api_key_cost_delta(db, api_key_id=api_key.id, delta=delta)
+                BillingService._apply_user_billing_delta(db, user_id=owner_user.id, delta=delta)
             elif api_key.balance_amount is not None:
-                api_key.balance_amount = BillingService.to_decimal(api_key.balance_amount) - delta
+                BillingService._apply_api_key_billing_delta(db, api_key_id=api_key.id, delta=delta)
+            else:
+                BillingService._apply_api_key_cost_delta(db, api_key_id=api_key.id, delta=delta)
 
         balance_after = None
         if owner_user is not None:
+            db.refresh(owner_user)
             balance_after = BillingService.to_decimal(owner_user.balance_amount)
         elif api_key.balance_amount is not None:
+            db.refresh(api_key)
             balance_after = BillingService.to_decimal(api_key.balance_amount)
 
         if new_amount > 0:
@@ -163,6 +255,27 @@ class BillingService:
         log.total_cost = BillingService.to_decimal(total_cost) if isinstance(total_cost, Decimal) else None
         log.billing_status = str(billing_status) if billing_status is not None else None
         log.api_client_balance_after = balance_after
+        return delta
+
+    @staticmethod
+    def finalize_request_log_billing(db: Session, log: RequestLog) -> Decimal | None:
+        if log.api_client_key_id is None:
+            return None
+        if log.billing_finalized_at is not None and log.billing_status != "pending_tokens":
+            return None
+        log.billing_attempt_count = int(log.billing_attempt_count or 0) + 1
+        log.billing_event_id = log.billing_event_id or f"billing-{log.id}-{uuid4().hex}"
+        try:
+            billing_delta = BillingService.sync_request_billing(db, log)
+            if log.billing_status == "pending_tokens":
+                log.billing_error = "pending_tokens"
+                return None
+            log.billing_finalized_at = datetime.utcnow()
+            log.billing_error = None
+            return billing_delta
+        except Exception as exc:
+            log.billing_error = str(exc)[:1000]
+            raise
 
     @staticmethod
     def create_balance_adjustment(
@@ -226,6 +339,9 @@ class BillingService:
         db.commit()
         db.refresh(record)
         db.refresh(api_key)
+        from app.services.api_key_auth_cache import ApiKeyAuthCache
+
+        ApiKeyAuthCache.invalidate_api_key(api_key.id, api_key.key_hash)
         return record
 
     @staticmethod
@@ -268,6 +384,9 @@ class BillingService:
         db.commit()
         db.refresh(record)
         db.refresh(user)
+        from app.services.api_key_auth_cache import ApiKeyAuthCache
+
+        ApiKeyAuthCache.invalidate_user(user.id)
         return record
 
     @staticmethod

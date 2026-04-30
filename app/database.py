@@ -13,22 +13,31 @@ class Base(DeclarativeBase):
 
 settings = get_settings()
 
-engine = create_engine(
-    settings.database_url,
-    connect_args=(
+is_sqlite_database = settings.database_url.strip().lower().startswith("sqlite")
+
+engine_kwargs = {
+    "future": True,
+    "pool_pre_ping": True,
+}
+if is_sqlite_database:
+    engine_kwargs["connect_args"] = {
+        "check_same_thread": False,
+        "timeout": 30,
+    }
+else:
+    engine_kwargs.update(
         {
-            "check_same_thread": False,
-            "timeout": 30,
+            "pool_size": settings.db_pool_size,
+            "max_overflow": settings.db_max_overflow,
+            "pool_timeout": settings.db_pool_timeout,
+            "pool_recycle": settings.db_pool_recycle,
         }
-        if settings.database_url.startswith("sqlite")
-        else {}
-    ),
-    future=True,
-    pool_pre_ping=True,
-)
+    )
+
+engine = create_engine(settings.database_url, **engine_kwargs)
 
 
-if settings.database_url.startswith("sqlite"):
+if is_sqlite_database:
     @event.listens_for(engine, "connect")
     def set_sqlite_pragma(dbapi_connection, _connection_record) -> None:
         cursor = dbapi_connection.cursor()

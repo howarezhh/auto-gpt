@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.models.api_client_key import ApiClientKey
 from app.models.request_log import RequestLog
 from app.models.user_account import UserAccount
+from app.services.api_key_auth_cache import ApiKeyAuthCache
 from app.services.billing_service import BillingService
 from app.services.log_service import LogService
 
@@ -40,6 +41,42 @@ class UserQuotaViolation:
 
 
 class UserQuotaService:
+    @staticmethod
+    def get_realtime_usage_snapshot(db: Session, *, user: UserAccount) -> UserQuotaUsageSnapshot:
+        owned_keys = list(
+            db.scalars(
+                select(ApiClientKey)
+                .where(ApiClientKey.owner_user_id == user.id)
+                .order_by(ApiClientKey.id.asc())
+            )
+        )
+        key_ids = [item.id for item in owned_keys if item.id is not None]
+        balance_amount = BillingService.to_decimal(user.balance_amount)
+        frozen_amount = BillingService.to_decimal(user.frozen_amount)
+        total_recharge_amount = BillingService.to_decimal(user.total_recharge_amount)
+        total_cost_used = sum(
+            (BillingService.to_decimal(item.total_cost_used) for item in owned_keys),
+            start=Decimal("0"),
+        )
+        total_tokens = sum((int(item.total_tokens_used or 0) for item in owned_keys), start=0)
+        return UserQuotaUsageSnapshot(
+            key_ids=key_ids,
+            has_balance_limit=True,
+            balance_amount=balance_amount,
+            frozen_amount=frozen_amount,
+            available_balance=balance_amount - frozen_amount,
+            total_recharge_amount=total_recharge_amount,
+            total_cost_used=total_cost_used,
+            day_cost_used=Decimal("0"),
+            month_cost_used=Decimal("0"),
+            total_requests=0,
+            day_requests=0,
+            month_requests=0,
+            total_tokens=total_tokens,
+            day_tokens=0,
+            month_tokens=0,
+        )
+
     @staticmethod
     def get_usage_snapshot(db: Session, *, user: UserAccount) -> UserQuotaUsageSnapshot:
         owned_keys = list(
@@ -218,4 +255,5 @@ class UserQuotaService:
         user.cost_limit_monthly = BillingService.to_decimal(cost_limit_monthly) if cost_limit_monthly is not None else None
         db.commit()
         db.refresh(user)
+        ApiKeyAuthCache.invalidate_user(user.id)
         return user

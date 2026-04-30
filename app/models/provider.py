@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Integer, Text
+from sqlalchemy import Boolean, DateTime, Float, Integer, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -21,6 +21,11 @@ class Provider(Base):
     weight: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
     timeout_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=30000)
     max_retries: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    max_active_requests: Mapped[int | None] = mapped_column(Integer, nullable=True, default=300)
+    max_active_streams: Mapped[int | None] = mapped_column(Integer, nullable=True, default=150)
+    max_qps: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_error_rate: Mapped[float | None] = mapped_column(Float, nullable=True, default=80.0)
+    first_token_timeout_sec: Mapped[int | None] = mapped_column(Integer, nullable=True, default=60)
     maintenance_window: Mapped[str | None] = mapped_column(Text, nullable=True)
     maintenance_mode_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     auto_circuit_break_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)

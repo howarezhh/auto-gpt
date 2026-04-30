@@ -1,5 +1,6 @@
 (function () {
     let page = document.body.dataset.page;
+    let pageCleanupHandlers = [];
     const authContext = {
         isAuthenticated: document.body.dataset.authenticated === "true",
         userRole: document.body.dataset.userRole || "",
@@ -915,15 +916,31 @@
     }
 
     function renderProviderModelHealth(modelConfigs = [], providerId) {
-        if (!modelConfigs.length) return "-";
-        return modelConfigs.map((item) => `
-            <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-bottom:6px;">
-                <strong>${escapeHtml(item.model_name)}</strong>
-                ${statusBadge(item.health_status)}
-                <span class="table-muted">P${item.priority} / W${item.weight}</span>
-                <button class="table-action-btn" data-action="test-model" data-provider-id="${providerId}" data-model-id="${item.id}">测模型</button>
+        if (!modelConfigs.length) return '<span class="table-muted">未挂载模型</span>';
+        const visibleModels = modelConfigs.slice(0, 2);
+        const enabledCount = modelConfigs.filter((item) => item.enabled).length;
+        const healthyCount = modelConfigs.filter((item) => item.health_status === "healthy").length;
+        const hiddenCount = Math.max(modelConfigs.length - visibleModels.length, 0);
+        return `
+            <div class="provider-model-summary">
+                <div class="provider-model-summary-head">
+                    <strong>${formatNumber(modelConfigs.length)} 个模型</strong>
+                    <span>${formatNumber(enabledCount)} 个启用 · ${formatNumber(healthyCount)} 个健康</span>
+                </div>
+                <div class="provider-model-preview-list">
+                    ${visibleModels.map((item) => `
+                        <span class="provider-model-preview-chip">
+                            <strong>${escapeHtml(item.model_name)}</strong>
+                            ${statusBadge(item.health_status)}
+                        </span>
+                    `).join("")}
+                    ${hiddenCount ? `<span class="provider-model-more-chip">+${formatNumber(hiddenCount)}</span>` : ""}
+                </div>
+                ${hiddenCount || modelConfigs.length > 2
+                    ? `<button class="table-action-btn provider-model-detail-btn" data-action="view-models" data-id="${providerId}" type="button">查看全部</button>`
+                    : ""}
             </div>
-        `).join("");
+        `;
     }
 
     function escapeHtml(value) {
@@ -1304,6 +1321,150 @@
                 ${labels}
             </svg>
         `;
+    }
+
+    function registerPageCleanup(handler) {
+        if (typeof handler === "function") {
+            pageCleanupHandlers.push(handler);
+        }
+    }
+
+    function runPageCleanup() {
+        pageCleanupHandlers.forEach((handler) => {
+            try {
+                handler();
+            } catch {
+                // Cleanup must never block shell navigation.
+            }
+        });
+        pageCleanupHandlers = [];
+    }
+
+    function formatMetricShort(value, digits = 1) {
+        const normalized = Number(value ?? 0);
+        if (!Number.isFinite(normalized)) return "-";
+        if (Math.abs(normalized) >= 1000000) return `${(normalized / 1000000).toFixed(digits)}M`;
+        if (Math.abs(normalized) >= 10000) return `${(normalized / 10000).toFixed(digits)}万`;
+        if (Math.abs(normalized) >= 1000) return `${(normalized / 1000).toFixed(digits)}k`;
+        return `${Math.round(normalized)}`;
+    }
+
+    function formatTimeLabel(value) {
+        if (!value) return "-";
+        const normalized = typeof value === "string" && !/[zZ]|[+\-]\d{2}:\d{2}$/.test(value)
+            ? `${value.replace(" ", "T")}Z`
+            : value;
+        const date = new Date(normalized);
+        if (Number.isNaN(date.getTime())) return "-";
+        return date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
+    }
+
+    function renderMonitorChart(container, items, options = {}) {
+        if (!container) return;
+        const rows = Array.isArray(items) ? items : [];
+        if (!rows.length) {
+            container.innerHTML = '<div class="empty-state">暂无监控数据</div>';
+            return;
+        }
+        const width = options.width || 720;
+        const height = options.height || 260;
+        const paddingX = 34;
+        const paddingTop = 22;
+        const paddingBottom = 36;
+        const chartHeight = height - paddingTop - paddingBottom;
+        const chartWidth = width - paddingX * 2;
+        const barKey = options.barKey || "total_requests";
+        const lineKey = options.lineKey || "failed_requests";
+        const lineLabel = options.lineLabel || "";
+        const barMax = Math.max(1, ...rows.map((item) => Number(item[barKey] || 0)));
+        const lineMax = Math.max(1, ...rows.map((item) => Number(item[lineKey] || 0)));
+        const step = rows.length > 1 ? chartWidth / (rows.length - 1) : chartWidth;
+        const barWidth = Math.max(14, Math.min(42, chartWidth / Math.max(rows.length * 1.5, 1)));
+        const bars = rows.map((item, index) => {
+            const x = paddingX + index * step - barWidth / 2;
+            const value = Number(item[barKey] || 0);
+            const barHeight = Math.max(4, (value / barMax) * chartHeight);
+            const y = paddingTop + chartHeight - barHeight;
+            return `<rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${barWidth.toFixed(2)}" height="${barHeight.toFixed(2)}" rx="9" class="monitor-chart-bar"></rect>`;
+        }).join("");
+        const linePoints = rows.map((item, index) => {
+            const x = paddingX + index * step;
+            const y = paddingTop + chartHeight - (Number(item[lineKey] || 0) / lineMax) * chartHeight;
+            return `${x.toFixed(2)},${y.toFixed(2)}`;
+        }).join(" ");
+        const nodes = rows.map((item, index) => {
+            const x = paddingX + index * step;
+            const y = paddingTop + chartHeight - (Number(item[lineKey] || 0) / lineMax) * chartHeight;
+            return `<circle cx="${x.toFixed(2)}" cy="${y.toFixed(2)}" r="4" class="monitor-chart-node"><title>${escapeHtml(lineLabel)} ${escapeHtml(String(item[lineKey] ?? "-"))}</title></circle>`;
+        }).join("");
+        const labels = rows.map((item, index) => {
+            if (index !== 0 && index !== rows.length - 1 && index % Math.ceil(rows.length / 4) !== 0) return "";
+            const x = paddingX + index * step;
+            return `<text x="${x.toFixed(2)}" y="${height - 12}" text-anchor="middle" class="monitor-chart-label">${escapeHtml(formatTimeLabel(item.bucket_start))}</text>`;
+        }).join("");
+        container.innerHTML = `
+            <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(options.label || "监控趋势图")}">
+                <line x1="${paddingX}" y1="${paddingTop + chartHeight}" x2="${width - paddingX}" y2="${paddingTop + chartHeight}" class="monitor-chart-axis"></line>
+                <line x1="${paddingX}" y1="${paddingTop + chartHeight * 0.5}" x2="${width - paddingX}" y2="${paddingTop + chartHeight * 0.5}" class="monitor-chart-grid-line"></line>
+                ${bars}
+                <polyline points="${linePoints}" class="monitor-chart-line"></polyline>
+                ${nodes}
+                ${labels}
+            </svg>
+        `;
+    }
+
+    function renderMonitorRank(container, items, options = {}) {
+        if (!container) return;
+        const rows = Array.isArray(items) ? items.filter((item) => item && (item.requested_model || item.provider_name)) : [];
+        if (!rows.length) {
+            container.innerHTML = '<div class="empty-state">暂无模型数据</div>';
+            return;
+        }
+        const maxValue = Math.max(1, ...rows.map((item) => Number(item.total_requests || 0)));
+        container.innerHTML = rows.slice(0, options.limit || 6).map((item) => {
+            const value = Number(item.total_requests || 0);
+            const rate = Math.max(4, Math.round((value / maxValue) * 100));
+            const title = item.requested_model || item.provider_name || "-";
+            const meta = [
+                `${formatNumber(value)} 次`,
+                `失败率 ${formatPercent(item.failure_rate || 0)}`,
+                item.avg_latency_ms != null ? `延迟 ${formatLatencyMs(item.avg_latency_ms)}` : null,
+            ].filter(Boolean).join(" · ");
+            return `
+                <div class="monitor-rank-item">
+                    <div class="monitor-rank-copy">
+                        <strong>${escapeHtml(title)}</strong>
+                        <span>${escapeHtml(meta)}</span>
+                    </div>
+                    <div class="monitor-rank-track" aria-hidden="true"><span style="width:${rate}%"></span></div>
+                </div>
+            `;
+        }).join("");
+    }
+
+    function summarizeMetricItems(items) {
+        const rows = Array.isArray(items) ? items : [];
+        const totalRequests = rows.reduce((sum, item) => sum + Number(item.total_requests || 0), 0);
+        const failedRequests = rows.reduce((sum, item) => sum + Number(item.failed_requests || 0), 0);
+        const totalTokens = rows.reduce((sum, item) => sum + Number(item.total_tokens || 0), 0);
+        const totalCost = rows.reduce((sum, item) => sum + Number(item.total_cost || 0), 0);
+        const p95Latency = Math.max(0, ...rows.map((item) => Number(item.p95_latency_ms || 0)));
+        const p95Ttfb = Math.max(0, ...rows.map((item) => Number(item.p95_ttfb_ms || 0)));
+        return {
+            totalRequests,
+            failedRequests,
+            totalTokens,
+            totalCost,
+            p95Latency,
+            p95Ttfb,
+            failureRate: totalRequests ? (failedRequests / totalRequests) * 100 : 0,
+        };
+    }
+
+    function updateRefreshLabel(node, prefix = "每 30 秒刷新") {
+        if (!node) return;
+        node.textContent = `${prefix} · 最近刷新 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`;
     }
 
     function formatStatusText(finishReason) {
@@ -1778,6 +1939,103 @@
             });
         }
         await refreshDashboard();
+        initDashboardLiveMonitor();
+    }
+
+    function initDashboardLiveMonitor() {
+        const refreshBtn = document.getElementById("dashboard-monitor-refresh-btn");
+        if (!document.getElementById("dashboard-live-monitor")) return;
+        let loading = false;
+        const load = async (manual = false) => {
+            if (loading) return;
+            loading = true;
+            try {
+                await refreshDashboardMonitor();
+                if (manual) showToast("监控数据已刷新");
+            } catch (error) {
+                if (manual) showToast(error.message, "error");
+            } finally {
+                loading = false;
+            }
+        };
+        refreshBtn?.addEventListener("click", () => load(true));
+        load(false);
+        const timer = window.setInterval(() => load(false), 30000);
+        registerPageCleanup(() => window.clearInterval(timer));
+    }
+
+    async function refreshDashboardMonitor() {
+        const [summary, timeSeries] = await Promise.all([
+            api.get("/api/metrics/summary?window_minutes=60"),
+            api.get("/api/metrics/timeseries?window_minutes=180&bucket_minutes=15"),
+        ]);
+        const metricItems = Array.isArray(summary.items) ? summary.items : [];
+        const timeSeriesItems = Array.isArray(timeSeries.items) ? timeSeries.items : [];
+        const overview = summarizeMetricItems(metricItems);
+        const requestTotal = document.getElementById("dashboard-monitor-request-total");
+        if (requestTotal) requestTotal.textContent = `${formatMetricShort(timeSeriesItems.reduce((sum, item) => sum + Number(item.total_requests || 0), 0))} 次`;
+        const latencyValue = document.getElementById("dashboard-monitor-latency-value");
+        if (latencyValue) latencyValue.textContent = `${formatLatencyMs(overview.p95Latency)} / ${formatLatencyMs(overview.p95Ttfb)}`;
+        const modelCount = document.getElementById("dashboard-monitor-model-count");
+        if (modelCount) modelCount.textContent = `${new Set(metricItems.map((item) => item.requested_model).filter(Boolean)).size} 个`;
+        const providerValue = document.getElementById("dashboard-monitor-provider-value");
+        if (providerValue) providerValue.textContent = `失败率 ${formatPercent(overview.failureRate)}`;
+        renderMonitorChart(document.getElementById("dashboard-monitor-traffic-chart"), timeSeriesItems, {
+            barKey: "total_requests",
+            lineKey: "failed_requests",
+            lineLabel: "失败",
+            label: "请求量与失败趋势",
+        });
+        renderMonitorChart(document.getElementById("dashboard-monitor-latency-chart"), timeSeriesItems, {
+            barKey: "avg_ttfb_ms",
+            lineKey: "p95_latency_ms",
+            lineLabel: "P95 延迟",
+            label: "延迟与首包趋势",
+            width: 520,
+            height: 220,
+        });
+        renderMonitorRank(document.getElementById("dashboard-monitor-model-rank"), metricItems);
+        renderDashboardProviderStrip(metricItems);
+        updateRefreshLabel(document.getElementById("dashboard-monitor-refresh-label"));
+    }
+
+    function renderDashboardProviderStrip(metricItems) {
+        const container = document.getElementById("dashboard-monitor-provider-strip");
+        if (!container) return;
+        const grouped = new Map();
+        (Array.isArray(metricItems) ? metricItems : []).forEach((item) => {
+            const key = item.provider_name || "未命名中转";
+            const current = grouped.get(key) || {
+                provider_name: key,
+                total_requests: 0,
+                failed_requests: 0,
+                avg_latency_sum: 0,
+                latency_samples: 0,
+            };
+            current.total_requests += Number(item.total_requests || 0);
+            current.failed_requests += Number(item.failed_requests || 0);
+            if (item.avg_latency_ms != null) {
+                current.avg_latency_sum += Number(item.avg_latency_ms);
+                current.latency_samples += 1;
+            }
+            grouped.set(key, current);
+        });
+        const rows = Array.from(grouped.values()).sort((a, b) => b.total_requests - a.total_requests).slice(0, 8);
+        if (!rows.length) {
+            container.innerHTML = '<div class="empty-state">暂无中转流量数据</div>';
+            return;
+        }
+        container.innerHTML = rows.map((item) => {
+            const failureRate = item.total_requests ? (item.failed_requests / item.total_requests) * 100 : 0;
+            const avgLatency = item.latency_samples ? item.avg_latency_sum / item.latency_samples : null;
+            const tone = failureRate >= 20 ? "danger" : failureRate >= 5 ? "warn" : "ok";
+            return `
+                <div class="monitor-provider-pill" data-tone="${tone}">
+                    <strong>${escapeHtml(item.provider_name)}</strong>
+                    <span>${formatNumber(item.total_requests)} 次 · 失败 ${formatPercent(failureRate)} · ${formatLatencyMs(avgLatency)}</span>
+                </div>
+            `;
+        }).join("");
     }
 
     async function refreshDashboard() {
@@ -1900,6 +2158,9 @@
         const testResultModal = document.getElementById("provider-test-result-modal");
         const testResultModalTitle = document.getElementById("provider-test-result-modal-title");
         const testResultModalContent = document.getElementById("provider-test-result-modal-content");
+        const modelsDetailModal = document.getElementById("provider-models-detail-modal");
+        const modelsDetailModalTitle = document.getElementById("provider-models-detail-modal-title");
+        const modelsDetailModalContent = document.getElementById("provider-models-detail-modal-content");
         const credentialModal = document.getElementById("provider-credential-modal");
         const credentialForm = document.getElementById("provider-credential-form");
         const credentialProviderIdInput = document.getElementById("provider-credential-provider-id");
@@ -1929,6 +2190,11 @@
         const providerWeightInput = document.getElementById("provider-weight");
         const providerTimeoutMsInput = document.getElementById("provider-timeout-ms");
         const providerMaxRetriesInput = document.getElementById("provider-max-retries");
+        const providerMaxActiveRequestsInput = document.getElementById("provider-max-active-requests");
+        const providerMaxActiveStreamsInput = document.getElementById("provider-max-active-streams");
+        const providerMaxQpsInput = document.getElementById("provider-max-qps");
+        const providerMaxErrorRateInput = document.getElementById("provider-max-error-rate");
+        const providerFirstTokenTimeoutSecInput = document.getElementById("provider-first-token-timeout-sec");
         const providerMaintenanceWindowInput = document.getElementById("provider-maintenance-window");
         const providerMaintenanceModeEnabledInput = document.getElementById("provider-maintenance-mode-enabled");
         const providerAutoCircuitBreakEnabledInput = document.getElementById("provider-auto-circuit-break-enabled");
@@ -1994,12 +2260,23 @@
                 }
             },
         });
+        const modelsDetailModalController = modalManager.register({
+            modal: modelsDetailModal,
+            dialog: modelsDetailModal?.querySelector('[role="dialog"]'),
+            getInitialFocus: () => document.getElementById("provider-models-detail-modal-close"),
+            afterClose: () => {
+                if (modelsDetailModalContent) {
+                    modelsDetailModalContent.innerHTML = "";
+                }
+            },
+        });
 
         enhanceInteractiveButtons(document);
         document.getElementById("add-provider-btn").addEventListener("click", (event) => openProviderModal(null, event.currentTarget));
         document.getElementById("provider-modal-close").addEventListener("click", closeProviderModal);
         document.getElementById("provider-form-cancel").addEventListener("click", closeProviderModal);
         document.getElementById("provider-test-result-modal-close")?.addEventListener("click", closeTestResultModal);
+        document.getElementById("provider-models-detail-modal-close")?.addEventListener("click", closeModelsDetailModal);
         document.getElementById("provider-credential-modal-close")?.addEventListener("click", closeCredentialModal);
         document.getElementById("provider-credential-cancel")?.addEventListener("click", closeCredentialModal);
         document.querySelectorAll("[data-model-preset]").forEach((button) => {
@@ -2088,6 +2365,11 @@
                 weight: Number(providerWeightInput.value),
                 timeout_ms: Number(providerTimeoutMsInput.value),
                 max_retries: Number(providerMaxRetriesInput.value),
+                max_active_requests: providerMaxActiveRequestsInput.value === "" ? null : Number(providerMaxActiveRequestsInput.value),
+                max_active_streams: providerMaxActiveStreamsInput.value === "" ? null : Number(providerMaxActiveStreamsInput.value),
+                max_qps: providerMaxQpsInput.value === "" ? null : Number(providerMaxQpsInput.value),
+                max_error_rate: providerMaxErrorRateInput.value === "" ? null : Number(providerMaxErrorRateInput.value),
+                first_token_timeout_sec: providerFirstTokenTimeoutSecInput.value === "" ? null : Number(providerFirstTokenTimeoutSecInput.value),
                 maintenance_window: providerMaintenanceWindowInput.value.trim() || null,
                 maintenance_mode_enabled: providerMaintenanceModeEnabledInput.checked,
                 auto_circuit_break_enabled: providerAutoCircuitBreakEnabledInput.checked,
@@ -2227,6 +2509,65 @@
                 <div class="table-muted">${escapeHtml(circuitText)}</div>
                 <div class="table-muted">${escapeHtml(overrideText || credentialText)}</div>
                 ${provider.credential_hint ? `<div class="table-muted">${escapeHtml(provider.credential_hint)}</div>` : ""}
+            `;
+        }
+
+        function formatCapacityLimit(value) {
+            return value == null || Number(value) <= 0 ? "不限" : formatNumber(value);
+        }
+
+        function renderProviderCapacity(provider) {
+            const activeRequests = provider.active_requests ?? 0;
+            const activeStreams = provider.active_streams ?? 0;
+            const currentQps = provider.current_qps ?? 0;
+            const errorLimit = provider.max_error_rate == null ? "不限" : `${provider.max_error_rate}%`;
+            return `
+                <strong>请求 ${formatNumber(activeRequests)} / ${formatCapacityLimit(provider.max_active_requests)}</strong>
+                <div class="table-muted">流式 ${formatNumber(activeStreams)} / ${formatCapacityLimit(provider.max_active_streams)}</div>
+                <div class="table-muted">QPS ${formatNumber(currentQps)} / ${formatCapacityLimit(provider.max_qps)}</div>
+                <div class="table-muted">失败率上限 ${escapeHtml(errorLimit)} · 首 Token ${provider.first_token_timeout_sec ?? "-"}s</div>
+            `;
+        }
+
+        function renderProviderModelsDetail(provider) {
+            const modelConfigs = Array.isArray(provider?.model_configs) ? provider.model_configs : [];
+            const enabledCount = modelConfigs.filter((item) => item.enabled).length;
+            const healthyCount = modelConfigs.filter((item) => item.health_status === "healthy").length;
+            const streamCount = modelConfigs.filter((item) => item.supports_stream).length;
+            const visionCount = modelConfigs.filter((item) => item.supports_vision).length;
+            return `
+                <div class="provider-model-detail-shell">
+                    <div class="provider-model-detail-meta">
+                        <div><span>模型总数</span><strong>${formatNumber(modelConfigs.length)}</strong></div>
+                        <div><span>已启用</span><strong>${formatNumber(enabledCount)}</strong></div>
+                        <div><span>健康</span><strong>${formatNumber(healthyCount)}</strong></div>
+                        <div><span>流式 / 图像</span><strong>${formatNumber(streamCount)} / ${formatNumber(visionCount)}</strong></div>
+                    </div>
+                    <div class="provider-model-detail-list">
+                        ${modelConfigs.length ? modelConfigs.map((item) => `
+                            <article class="provider-model-detail-item">
+                                <div class="provider-model-detail-item-head">
+                                    <strong>${escapeHtml(item.model_name)}</strong>
+                                    <div class="provider-model-detail-badges">
+                                        ${statusBadge(item.health_status)}
+                                        <span class="status-badge ${item.enabled ? "status-healthy" : "status-unknown"}">${item.enabled ? "已启用" : "已停用"}</span>
+                                    </div>
+                                </div>
+                                <div class="provider-model-detail-info">
+                                    <span>P${escapeHtml(item.priority ?? "-")} / W${escapeHtml(item.weight ?? "-")}</span>
+                                    <span>${item.supports_stream ? "流式" : "非流式"} · ${item.supports_vision ? "图像" : "文本"}</span>
+                                    <span>倍率 ${escapeHtml(item.price_multiplier ?? 1)}x</span>
+                                    <span>输入 ${escapeHtml(formatPrice(item.input_price_per_1k))} · 输出 ${escapeHtml(formatPrice(item.output_price_per_1k))}</span>
+                                </div>
+                                <div class="provider-model-detail-quality">${renderQualitySummary(item)}</div>
+                                ${item.last_error ? `<div class="provider-model-detail-error">${escapeHtml(item.last_error)}</div>` : ""}
+                                <div class="provider-model-detail-actions">
+                                    <button class="table-action-btn" data-action="test-model" data-provider-id="${provider.id}" data-model-id="${item.id}" type="button">测试</button>
+                                </div>
+                            </article>
+                        `).join("") : '<div class="empty-state">当前中转站尚未挂载模型。</div>'}
+                    </div>
+                </div>
             `;
         }
 
@@ -2379,6 +2720,7 @@
                     <td>${statusBadge(provider.health_status)}</td>
                     <td>${statusBadge(provider.circuit_state)}</td>
                     <td>${renderProviderStrategy(provider)}</td>
+                    <td>${renderProviderCapacity(provider)}</td>
                     <td>${renderProviderCost(provider)}</td>
                     <td>${renderQualitySummary(provider)}</td>
                     <td>${provider.priority}</td>
@@ -2394,7 +2736,7 @@
                         </div>
                     </td>
                 </tr>
-            `).join("") || '<tr><td colspan="12"><div class="empty-state">没有匹配的中转站</div></td></tr>';
+            `).join("") || '<tr><td colspan="13"><div class="empty-state">没有匹配的中转站</div></td></tr>';
             enhanceInteractiveButtons(tableBody);
         }
 
@@ -2441,6 +2783,33 @@
             enhanceInteractiveButtons(modelTableBody);
         }
 
+        async function testProviderModel(providerId, modelId, trigger, options = {}) {
+            const owner = providers.find((item) => item.id === providerId);
+            const modelConfig = owner?.model_configs?.find((item) => item.id === modelId);
+            if (!owner || !modelConfig) return;
+            setButtonLoading(trigger, true);
+            try {
+                const result = await api.post(`/api/providers/${providerId}/models/${modelId}/test`, {});
+                showToast(
+                    formatTestResultLabel(result, `模型 ${modelConfig.model_name}`),
+                    result.success ? "success" : "error",
+                );
+                if (options.closeModelsDetail) {
+                    closeModelsDetailModal({ force: true, reason: "test-model" });
+                }
+                openTestResultModal(
+                    `模型测试结果 · ${modelConfig.model_name}`,
+                    renderProviderTestModalBody(result, { scope: "model", name: `${owner.name} / ${modelConfig.model_name}` }),
+                    trigger,
+                );
+                await loadProviders();
+            } catch (error) {
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(trigger, false);
+            }
+        }
+
         tableBody.addEventListener("click", async (event) => {
             const button = event.target.closest("button[data-action]");
             if (!button) return;
@@ -2455,6 +2824,10 @@
                 }
                 if (action === "rotate-credential") {
                     openCredentialModal(provider, button);
+                    return;
+                }
+                if (action === "view-models") {
+                    openModelsDetailModal(provider, button);
                     return;
                 }
                 if (action === "test") {
@@ -2512,24 +2885,7 @@
             if (!owner || !modelConfig) return;
 
             if (action === "test-model") {
-                try {
-                    setButtonLoading(button, true);
-                    const result = await api.post(`/api/providers/${providerId}/models/${modelId}/test`, {});
-                    showToast(
-                        formatTestResultLabel(result, `模型 ${modelConfig.model_name}`),
-                        result.success ? "success" : "error",
-                    );
-                    openTestResultModal(
-                        `模型测试结果 · ${modelConfig.model_name}`,
-                        renderProviderTestModalBody(result, { scope: "model", name: `${owner.name} / ${modelConfig.model_name}` }),
-                        button,
-                    );
-                    await loadProviders();
-                } catch (error) {
-                    showToast(error.message, "error");
-                } finally {
-                    setButtonLoading(button, false);
-                }
+                await testProviderModel(providerId, modelId, button);
                 return;
             }
 
@@ -2570,6 +2926,11 @@
             providerWeightInput.value = provider?.weight ?? 100;
             providerTimeoutMsInput.value = provider?.timeout_ms ?? 30000;
             providerMaxRetriesInput.value = provider?.max_retries ?? 1;
+            providerMaxActiveRequestsInput.value = provider?.max_active_requests ?? 300;
+            providerMaxActiveStreamsInput.value = provider?.max_active_streams ?? 150;
+            providerMaxQpsInput.value = provider?.max_qps ?? "";
+            providerMaxErrorRateInput.value = provider?.max_error_rate ?? 80;
+            providerFirstTokenTimeoutSecInput.value = provider?.first_token_timeout_sec ?? 60;
             providerMaintenanceWindowInput.value = provider?.maintenance_window ?? "";
             providerMaintenanceModeEnabledInput.checked = provider?.maintenance_mode_enabled ?? false;
             providerAutoCircuitBreakEnabledInput.checked = provider?.auto_circuit_break_enabled ?? true;
@@ -2614,12 +2975,41 @@
             testResultModalController.close(options);
         }
 
+        function openModelsDetailModal(provider, trigger = document.activeElement) {
+            if (!modelsDetailModal || !modelsDetailModalTitle || !modelsDetailModalContent) return;
+            modelsDetailModalTitle.textContent = `中转站模型 · ${provider.name}`;
+            modelsDetailModalContent.innerHTML = renderProviderModelsDetail(provider);
+            enhanceInteractiveButtons(modelsDetailModalContent);
+            modelsDetailModalController.open(trigger);
+        }
+
+        function closeModelsDetailModal(options = {}) {
+            modelsDetailModalController.close(options);
+        }
+
+        modelsDetailModalContent?.addEventListener("click", async (event) => {
+            const button = event.target.closest('button[data-action="test-model"]');
+            if (!button) return;
+            await testProviderModel(
+                Number(button.dataset.providerId),
+                Number(button.dataset.modelId),
+                button,
+                { closeModelsDetail: true },
+            );
+        });
+
         await loadProviders();
     }
 
     async function initModels() {
         const tableBody = document.getElementById("models-table-body");
         const searchInput = document.getElementById("models-search");
+        const enabledSelect = document.getElementById("models-enabled");
+        const providerSelect = document.getElementById("models-provider-id");
+        const pageSizeSelect = document.getElementById("models-page-size");
+        const pageMeta = document.getElementById("models-page-meta");
+        const prevPageBtn = document.getElementById("models-prev-page-btn");
+        const nextPageBtn = document.getElementById("models-next-page-btn");
         const refreshBtn = document.getElementById("models-refresh-btn");
         const addBtn = document.getElementById("add-model-btn");
         const modal = document.getElementById("model-modal");
@@ -2636,36 +3026,65 @@
         const speedLabelInput = document.getElementById("model-speed-label");
         const remarkInput = document.getElementById("model-remark");
         const bindingBody = document.getElementById("model-binding-body");
-        if (!tableBody || !searchInput || !refreshBtn || !addBtn || !modal || !form || !bindingBody) return;
+        if (
+            !tableBody || !searchInput || !enabledSelect || !providerSelect || !pageSizeSelect
+            || !pageMeta || !prevPageBtn || !nextPageBtn || !refreshBtn || !addBtn || !modal || !form || !bindingBody
+        ) return;
 
-        const state = { models: [], providers: [], editingModelName: null };
+        const state = {
+            models: [],
+            providers: [],
+            editingModelName: null,
+            page: 1,
+            pageSize: 20,
+            total: 0,
+            totalPages: 1,
+        };
+        let searchTimer = null;
 
-        function updateSummary() {
-            const summary = {
-                total: state.models.length,
-                enabled: state.models.filter((item) => item.enabled).length,
-                boundProviders: state.models.reduce((sum, item) => sum + (item.provider_count || 0), 0),
-                enabledProviders: state.models.reduce((sum, item) => sum + (item.enabled_provider_count || 0), 0),
+        function updateSummary(summary = {}) {
+            const normalizedSummary = {
+                total: summary.total ?? 0,
+                enabled: summary.enabled ?? 0,
+                boundProviders: summary.bound_providers ?? summary.boundProviders ?? 0,
+                enabledProviders: summary.enabled_providers ?? summary.enabledProviders ?? 0,
             };
             document.querySelectorAll("[data-model-summary]").forEach((node) => {
-                node.textContent = summary[node.dataset.modelSummary] ?? "0";
+                node.textContent = normalizedSummary[node.dataset.modelSummary] ?? "0";
             });
         }
 
+        function renderProviderFilterOptions() {
+            const currentValue = providerSelect.value;
+            providerSelect.innerHTML = '<option value="">全部中转站</option>' + state.providers.map((provider) => `
+                <option value="${provider.id}">${escapeHtml(provider.name)}${provider.enabled ? "" : "（已停用）"}</option>
+            `).join("");
+            if (currentValue && Array.from(providerSelect.options).some((option) => option.value === currentValue)) {
+                providerSelect.value = currentValue;
+            }
+        }
+
+        function formatMultiplier(value) {
+            return value == null ? "-" : `${Number(value).toFixed(2)}x`;
+        }
+
+        function renderMultiplierCell(item) {
+            const boundAverage = item.avg_bound_price_multiplier ?? item.avg_price_multiplier;
+            const routableAverage = item.avg_routable_price_multiplier;
+            const boundCount = Number(item.bound_price_multiplier_count ?? item.provider_count ?? 0);
+            const routableCount = Number(item.routable_price_multiplier_count ?? item.enabled_provider_count ?? 0);
+            const rangeText = item.min_bound_price_multiplier == null || item.max_bound_price_multiplier == null
+                ? "无倍率范围"
+                : `${formatMultiplier(item.min_bound_price_multiplier)} - ${formatMultiplier(item.max_bound_price_multiplier)}`;
+            return `
+                <strong>${formatMultiplier(boundAverage)}</strong>
+                <div class="table-muted">已绑定 ${escapeHtml(String(boundCount))} 个 · 范围 ${escapeHtml(rangeText)}</div>
+                <div class="table-muted">可路由平均 ${escapeHtml(formatMultiplier(routableAverage))} · ${escapeHtml(String(routableCount))} 个</div>
+            `;
+        }
+
         function renderTable() {
-            const query = searchInput.value.trim().toLowerCase();
-            const filtered = state.models.filter((item) => {
-                if (!query) return true;
-                const haystack = [
-                    item.model_name,
-                    item.display_name || "",
-                    item.speed_label || "",
-                    (item.available_provider_names || []).join(" "),
-                    item.remark || "",
-                ].join(" ").toLowerCase();
-                return haystack.includes(query);
-            });
-            tableBody.innerHTML = filtered.map((item) => `
+            tableBody.innerHTML = state.models.map((item) => `
                 <tr>
                     <td>
                         <strong>${escapeHtml(item.display_name || item.model_name)}</strong>
@@ -2681,7 +3100,7 @@
                         <strong>${escapeHtml(String(item.enabled_provider_count || 0))} / ${escapeHtml(String(item.provider_count || 0))}</strong>
                         <div class="table-muted">${escapeHtml((item.available_provider_names || []).join("、") || "未绑定")}</div>
                     </td>
-                    <td>${item.avg_price_multiplier == null ? "-" : `${Number(item.avg_price_multiplier).toFixed(2)}x`}</td>
+                    <td>${renderMultiplierCell(item)}</td>
                     <td>
                         <div class="table-actions">
                             <button class="table-action-btn" data-action="edit" data-model-name="${escapeHtml(item.model_name)}">编辑</button>
@@ -2691,6 +3110,32 @@
                 </tr>
             `).join("") || '<tr><td colspan="7"><div class="empty-state">暂无模型配置</div></td></tr>';
             enhanceInteractiveButtons(tableBody);
+        }
+
+        function renderPagination() {
+            state.totalPages = Math.max(1, Number(state.totalPages || Math.ceil((state.total || 0) / state.pageSize) || 1));
+            state.page = Math.min(Math.max(1, Number(state.page || 1)), state.totalPages);
+            pageMeta.textContent = `第 ${formatNumber(state.page)} 页，共 ${formatNumber(state.totalPages)} 页 · 共 ${formatNumber(state.total || 0)} 条`;
+            prevPageBtn.disabled = state.page <= 1;
+            nextPageBtn.disabled = state.page >= state.totalPages;
+        }
+
+        async function reloadFirstPage() {
+            state.page = 1;
+            await loadData({ silent: true });
+        }
+
+        function buildListParams() {
+            const params = new URLSearchParams({
+                paginated: "true",
+                page: String(state.page),
+                page_size: String(state.pageSize),
+            });
+            const keyword = searchInput.value.trim();
+            if (keyword) params.set("keyword", keyword);
+            if (enabledSelect.value) params.set("enabled", enabledSelect.value);
+            if (providerSelect.value) params.set("provider_id", providerSelect.value);
+            return params;
         }
 
         function buildBindingRows(bindings = []) {
@@ -2714,7 +3159,7 @@
                     </td>
                     <td>${item.provider_enabled ? "已启用" : "已停用"}</td>
                     <td><input type="checkbox" data-binding-field="enabled" ${item.enabled ? "checked" : ""}></td>
-                    <td><input class="field-input" type="number" min="0.0001" step="0.0001" data-binding-field="price_multiplier" value="${item.price_multiplier ?? 1}"></td>
+                    <td><input class="field-input" type="number" min="0.0001" step="0.0001" data-binding-field="price_multiplier" value="${item.price_multiplier ?? 1}" title="单个渠道对当前模型的价格倍率，平均倍率会由所有已绑定渠道自动计算"></td>
                     <td><input class="field-input" type="number" data-binding-field="priority" value="${item.priority ?? 100}"></td>
                     <td><input class="field-input" type="number" data-binding-field="weight" value="${item.weight ?? 100}"></td>
                     <td data-binding-preview>-</td>
@@ -2789,12 +3234,25 @@
             });
         }
 
-        async function loadData({ silent = false } = {}) {
-            const [models, providers] = await Promise.all([api.get("/api/models"), api.get("/api/providers")]);
-            state.models = models;
+        async function loadData({ silent = false, reloadProviders = false } = {}) {
+            const providerPromise = reloadProviders || !state.providers.length
+                ? api.get("/api/providers")
+                : Promise.resolve(state.providers);
+            const [result, providers] = await Promise.all([
+                api.get(`/api/models?${buildListParams().toString()}`),
+                providerPromise,
+            ]);
             state.providers = providers;
-            updateSummary();
+            renderProviderFilterOptions();
+            state.models = Array.isArray(result.items) ? result.items : [];
+            state.total = Number(result.total || 0);
+            state.page = Number(result.page || state.page || 1);
+            state.pageSize = Number(result.page_size || state.pageSize || 20);
+            state.totalPages = Number(result.total_pages || 1);
+            pageSizeSelect.value = String(state.pageSize);
+            updateSummary(result.summary || {});
             renderTable();
+            renderPagination();
             if (!silent) showToast("模型配置已刷新");
         }
 
@@ -2863,7 +3321,7 @@
                     showToast("模型已创建");
                 }
                 closeModal();
-                await loadData({ silent: true });
+                await loadData({ silent: true, reloadProviders: true });
             } catch (error) {
                 showToast(error.message, "error");
             } finally {
@@ -2874,19 +3332,71 @@
         addBtn.addEventListener("click", () => openModal());
         refreshBtn.addEventListener("click", async () => {
             try {
-                await loadData();
+                setButtonLoading(refreshBtn, true);
+                await loadData({ reloadProviders: true });
+            } catch (error) {
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(refreshBtn, false);
+            }
+        });
+        searchInput.addEventListener("input", () => {
+            window.clearTimeout(searchTimer);
+            searchTimer = window.setTimeout(async () => {
+                try {
+                    await reloadFirstPage();
+                } catch (error) {
+                    showToast(error.message, "error");
+                }
+            }, 250);
+        });
+        enabledSelect.addEventListener("change", async () => {
+            try {
+                await reloadFirstPage();
             } catch (error) {
                 showToast(error.message, "error");
             }
         });
-        searchInput.addEventListener("input", renderTable);
+        providerSelect.addEventListener("change", async () => {
+            try {
+                await reloadFirstPage();
+            } catch (error) {
+                showToast(error.message, "error");
+            }
+        });
+        pageSizeSelect.addEventListener("change", async () => {
+            state.pageSize = Number.parseInt(pageSizeSelect.value || "20", 10) || 20;
+            try {
+                await reloadFirstPage();
+            } catch (error) {
+                showToast(error.message, "error");
+            }
+        });
+        prevPageBtn.addEventListener("click", async () => {
+            if (state.page <= 1) return;
+            state.page -= 1;
+            try {
+                await loadData({ silent: true });
+            } catch (error) {
+                showToast(error.message, "error");
+            }
+        });
+        nextPageBtn.addEventListener("click", async () => {
+            if (state.page >= state.totalPages) return;
+            state.page += 1;
+            try {
+                await loadData({ silent: true });
+            } catch (error) {
+                showToast(error.message, "error");
+            }
+        });
         closeBtn.addEventListener("click", closeModal);
         cancelBtn.addEventListener("click", closeModal);
         modal.addEventListener("click", (event) => {
             if (event.target === modal) closeModal();
         });
 
-        await loadData({ silent: true });
+        await loadData({ silent: true, reloadProviders: true });
     }
 
     async function initSettings() {
@@ -2918,6 +3428,15 @@
         document.getElementById("setting-allow-public-user-registration").checked = settings.allow_public_user_registration;
         document.getElementById("setting-request-log-retention-days").value = settings.request_log_retention_days;
         document.getElementById("setting-admin-audit-log-retention-days").value = settings.admin_audit_log_retention_days;
+        document.getElementById("setting-global-max-active-requests").value = settings.global_max_active_requests;
+        document.getElementById("setting-global-max-active-streams").value = settings.global_max_active_streams;
+        document.getElementById("setting-api-key-max-active-requests").value = settings.api_key_max_active_requests;
+        document.getElementById("setting-api-key-max-active-streams").value = settings.api_key_max_active_streams;
+        document.getElementById("setting-account-max-active-requests").value = settings.account_max_active_requests;
+        document.getElementById("setting-account-max-active-streams").value = settings.account_max_active_streams;
+        document.getElementById("setting-provider-max-active-requests").value = settings.provider_max_active_requests;
+        document.getElementById("setting-provider-max-active-streams").value = settings.provider_max_active_streams;
+        document.getElementById("setting-concurrency-lease-ttl-seconds").value = settings.concurrency_lease_ttl_seconds;
 
         const refreshRouteGuide = () => {
             renderRoutePolicyGuide({
@@ -2953,6 +3472,15 @@
                 allow_public_user_registration: document.getElementById("setting-allow-public-user-registration").checked,
                 request_log_retention_days: Number(document.getElementById("setting-request-log-retention-days").value),
                 admin_audit_log_retention_days: Number(document.getElementById("setting-admin-audit-log-retention-days").value),
+                global_max_active_requests: Number(document.getElementById("setting-global-max-active-requests").value),
+                global_max_active_streams: Number(document.getElementById("setting-global-max-active-streams").value),
+                api_key_max_active_requests: Number(document.getElementById("setting-api-key-max-active-requests").value),
+                api_key_max_active_streams: Number(document.getElementById("setting-api-key-max-active-streams").value),
+                account_max_active_requests: Number(document.getElementById("setting-account-max-active-requests").value),
+                account_max_active_streams: Number(document.getElementById("setting-account-max-active-streams").value),
+                provider_max_active_requests: Number(document.getElementById("setting-provider-max-active-requests").value),
+                provider_max_active_streams: Number(document.getElementById("setting-provider-max-active-streams").value),
+                concurrency_lease_ttl_seconds: Number(document.getElementById("setting-concurrency-lease-ttl-seconds").value),
             };
             try {
                 setButtonLoading(submitBtn, true);
@@ -3546,6 +4074,7 @@
 
     async function initUserHome() {
         renderTrendChart(document.getElementById("user-home-trend-chart"));
+        initUserLiveMonitor();
         const helperShell = document.getElementById("user-home-helper-shell");
         const keySelect = document.getElementById("user-helper-key-select");
         const modelSelect = document.getElementById("user-helper-model-select");
@@ -3599,6 +4128,60 @@
         keySelect.addEventListener("change", renderHelper);
         modelSelect.addEventListener("change", renderHelper);
         renderHelper();
+    }
+
+    function initUserLiveMonitor() {
+        const refreshBtn = document.getElementById("user-monitor-refresh-btn");
+        if (!document.getElementById("user-home-monitor")) return;
+        let loading = false;
+        const load = async (manual = false) => {
+            if (loading) return;
+            loading = true;
+            try {
+                await refreshUserMonitor();
+                if (manual) showToast("我的监控数据已刷新");
+            } catch (error) {
+                if (manual) showToast(error.message, "error");
+            } finally {
+                loading = false;
+            }
+        };
+        refreshBtn?.addEventListener("click", () => load(true));
+        load(false);
+        const timer = window.setInterval(() => load(false), 30000);
+        registerPageCleanup(() => window.clearInterval(timer));
+    }
+
+    async function refreshUserMonitor() {
+        const [summary, timeSeries] = await Promise.all([
+            api.get("/api/user/metrics/summary?window_minutes=60"),
+            api.get("/api/user/metrics/timeseries?window_minutes=180&bucket_minutes=15"),
+        ]);
+        const metricItems = Array.isArray(summary.items) ? summary.items : [];
+        const timeSeriesItems = Array.isArray(timeSeries.items) ? timeSeries.items : [];
+        const overview = summarizeMetricItems(metricItems);
+        const requestTotal = document.getElementById("user-monitor-request-total");
+        if (requestTotal) requestTotal.textContent = `${formatMetricShort(timeSeriesItems.reduce((sum, item) => sum + Number(item.total_requests || 0), 0))} 次`;
+        const costValue = document.getElementById("user-monitor-cost-value");
+        if (costValue) costValue.textContent = `${formatMoney(overview.totalCost)} / ${formatMetricShort(overview.totalTokens)} Token`;
+        const modelCount = document.getElementById("user-monitor-model-count");
+        if (modelCount) modelCount.textContent = `${new Set(metricItems.map((item) => item.requested_model).filter(Boolean)).size} 个`;
+        renderMonitorChart(document.getElementById("user-monitor-traffic-chart"), timeSeriesItems, {
+            barKey: "total_requests",
+            lineKey: "failed_requests",
+            lineLabel: "失败",
+            label: "我的请求量与失败趋势",
+        });
+        renderMonitorChart(document.getElementById("user-monitor-cost-chart"), timeSeriesItems, {
+            barKey: "total_tokens",
+            lineKey: "total_cost",
+            lineLabel: "费用",
+            label: "我的 Token 与费用趋势",
+            width: 520,
+            height: 220,
+        });
+        renderMonitorRank(document.getElementById("user-monitor-model-rank"), metricItems, { limit: 5 });
+        updateRefreshLabel(document.getElementById("user-monitor-refresh-label"));
     }
 
     async function initUserBilling() {
@@ -4555,22 +5138,81 @@
         const form = document.getElementById("alerts-subscription-form");
         const refreshBtn = document.getElementById("alerts-feed-refresh-btn");
         const tableBody = document.getElementById("alerts-event-table-body");
+        const systemMetricRoot = document.getElementById("alerts-system-metrics");
         if (!form || !refreshBtn || !tableBody) {
             return;
         }
         const notifiedKeys = new Set();
         let pollTimer = null;
 
+        function formatAlertTypeLabel(type) {
+            const labels = {
+                provider: "渠道异常",
+                api_key: "API 密钥异常",
+                account: "账户预警",
+                failure_rate: "失败率异常",
+            };
+            return labels[type] || type || "-";
+        }
+
+        function formatAlertSeverityLabel(severity) {
+            const labels = {
+                danger: "严重",
+                warning: "警告",
+                info: "提示",
+            };
+            return labels[severity] || severity || "-";
+        }
+
+        function renderAlertSuggestion(type) {
+            if (type === "provider") return "先检查中转站健康、熔断和最近延迟，再决定是否临时下线。";
+            if (type === "api_key") return "优先核对密钥状态、余额和授权渠道，再决定是否轮换或恢复。";
+            if (type === "account") return "先确认账户额度、冻结金额和最近消费，再决定调账或提升配额。";
+            return "结合失败率、消息内容和相关日志，优先处理影响正式流量的问题。";
+        }
+
+        function renderSystemMetrics(metrics) {
+            if (!systemMetricRoot || !metrics) return;
+            const values = {
+                status: metrics.status || "-",
+                redis_status: metrics.redis?.status || "-",
+                database_status: metrics.database?.status || "-",
+                active_requests: metrics.redis?.active_requests ?? "-",
+                active_streams: metrics.redis?.active_streams ?? "-",
+                pending_finalize_logs: metrics.background?.pending_finalize_logs ?? "-",
+                status_5xx: metrics.traffic?.status_5xx ?? 0,
+                status_429: metrics.traffic?.status_429 ?? 0,
+            };
+            Object.entries(values).forEach(([key, value]) => {
+                const node = systemMetricRoot.querySelector(`[data-alert-metric="${key}"]`);
+                if (node) node.textContent = String(value);
+            });
+        }
+
+        function renderAlertActions(item) {
+            const actionLinks = {
+                provider: '<a class="table-action-btn" href="/providers" data-shell-link>查渠道</a>',
+                api_key: '<a class="table-action-btn" href="/api-keys" data-shell-link>查密钥</a>',
+                account: '<a class="table-action-btn" href="/users" data-shell-link>查账户</a>',
+            };
+            return `
+                <div class="table-actions">
+                    <button class="table-action-btn" type="button" data-alert-ack-id="${escapeHtml(String(item.id))}">确认</button>
+                    ${actionLinks[item.alert_type] || ""}
+                </div>
+            `;
+        }
+
         function renderEvents(events = []) {
             tableBody.innerHTML = events.length
                 ? events.map((item) => `
                     <tr>
-                        <td>${escapeHtml(item.alert_type || "-")}</td>
-                        <td>${escapeHtml(item.severity || "-")}</td>
+                        <td>${escapeHtml(formatAlertTypeLabel(item.alert_type))}</td>
+                        <td>${escapeHtml(formatAlertSeverityLabel(item.severity))}</td>
                         <td>${escapeHtml(item.title || "-")}</td>
-                        <td>${escapeHtml(item.message || "-")}</td>
+                        <td>${escapeHtml(renderAlertSuggestion(item.alert_type))}</td>
                         <td>${escapeHtml(item.last_seen_at || "-")}</td>
-                        <td><button class="btn btn-ghost btn-sm interactive-btn" type="button" data-alert-ack-id="${item.id}">确认</button></td>
+                        <td>${renderAlertActions(item)}</td>
                     </tr>
                 `).join("")
                 : '<tr><td colspan="6"><div class="empty-state">当前没有活跃告警事件。</div></td></tr>';
@@ -4599,7 +5241,9 @@
                 if (manual) setButtonLoading(refreshBtn, true);
                 const data = await api.get("/api/alerts/feed");
                 renderEvents(data.events || []);
+                renderSystemMetrics(data.system_metrics);
                 await maybeNotify(data.events || [], data.subscription || {});
+                if (manual) showToast("告警事件已刷新");
                 if (pollTimer) window.clearTimeout(pollTimer);
                 const nextPoll = Math.max(10, Number(data.subscription?.poll_interval_seconds || 30)) * 1000;
                 pollTimer = window.setTimeout(() => {
@@ -5678,7 +6322,7 @@
         refreshBtn.addEventListener("click", async () => {
             try {
                 setButtonLoading(refreshBtn, true);
-                await loadData();
+                await loadData({ reloadReference: true });
             } catch (error) {
                 showToast(error.message, "error");
             } finally {
@@ -6730,6 +7374,7 @@
 
     async function initializePage() {
         try {
+            runPageCleanup();
             page = document.body.dataset.page;
             enhanceInteractiveButtons(document);
             scheduleResponsiveTableSync(document);

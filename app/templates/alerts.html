@@ -28,6 +28,25 @@
 <section class="panel-card section-shell">
     <div class="section-subhead">
         <div>
+            <div class="panel-kicker">系统健康</div>
+            <h3>实时运行指标</h3>
+        </div>
+    </div>
+    <div class="dashboard-signal-list" id="alerts-system-metrics">
+        <div><span>就绪状态</span><strong data-alert-metric="status">{{ system_metrics.status }}</strong></div>
+        <div><span>Redis</span><strong data-alert-metric="redis_status">{{ system_metrics.redis.status }}</strong></div>
+        <div><span>数据库</span><strong data-alert-metric="database_status">{{ system_metrics.database.status }}</strong></div>
+        <div><span>全局活跃</span><strong data-alert-metric="active_requests">{{ system_metrics.redis.active_requests if system_metrics.redis.active_requests is not none else '-' }}</strong></div>
+        <div><span>流式活跃</span><strong data-alert-metric="active_streams">{{ system_metrics.redis.active_streams if system_metrics.redis.active_streams is not none else '-' }}</strong></div>
+        <div><span>后台积压</span><strong data-alert-metric="pending_finalize_logs">{{ system_metrics.background.pending_finalize_logs if system_metrics.background.pending_finalize_logs is not none else '-' }}</strong></div>
+        <div><span>5xx</span><strong data-alert-metric="status_5xx">{{ system_metrics.traffic.status_5xx }}</strong></div>
+        <div><span>429</span><strong data-alert-metric="status_429">{{ system_metrics.traffic.status_429 }}</strong></div>
+    </div>
+</section>
+
+<section class="panel-card section-shell">
+    <div class="section-subhead">
+        <div>
             <div class="panel-kicker">订阅配置</div>
             <h3>订阅式告警</h3>
         </div>

@@ -9,6 +9,7 @@ from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
 from app.models.model_catalog import ModelCatalog
 from app.models.request_log import RequestLog
+from app.models.api_client_key_provider_binding import ApiClientKeyProviderBinding
 from app.schemas.provider import (
     ProviderCreate,
     ProviderDiscoverModelsIn,
@@ -20,6 +21,11 @@ from app.schemas.provider import (
 )
 from app.services.cache_service import CacheService
 from app.services.log_service import LogService
+from app.services.provider_capacity_service import (
+    ProviderCapacityService,
+    ProviderCapacitySnapshot,
+    ProviderCapacityUnavailableError,
+)
 from app.services.setting_service import SettingService
 from app.services.upstream_client import UpstreamClientService
 from app.utils.json_utils import dumps_json, loads_json
@@ -100,6 +106,11 @@ class ProviderService:
             weight=payload.weight,
             timeout_ms=payload.timeout_ms,
             max_retries=payload.max_retries,
+            max_active_requests=payload.max_active_requests,
+            max_active_streams=payload.max_active_streams,
+            max_qps=payload.max_qps,
+            max_error_rate=payload.max_error_rate,
+            first_token_timeout_sec=payload.first_token_timeout_sec,
             maintenance_window=payload.maintenance_window,
             maintenance_mode_enabled=payload.maintenance_mode_enabled,
             auto_circuit_break_enabled=payload.auto_circuit_break_enabled,
@@ -113,6 +124,7 @@ class ProviderService:
         db.flush()
         ProviderService._replace_provider_models(db, provider, ProviderService._resolve_model_configs(payload))
         ProviderService.refresh_provider_state(provider)
+        db.flush()
         ModelCatalogService.sync_model_catalogs(db)
         db.commit()
         ProviderService.invalidate_provider_runtime_cache()
@@ -151,9 +163,25 @@ class ProviderService:
     @staticmethod
     def delete_provider(db: Session, provider: Provider) -> None:
         from app.services.model_catalog_service import ModelCatalogService
+        from app.services.api_key_auth_cache import ApiKeyAuthCache
 
+        affected_bindings = list(
+            db.scalars(
+                select(ApiClientKeyProviderBinding)
+                .options(selectinload(ApiClientKeyProviderBinding.api_client_key))
+                .where(ApiClientKeyProviderBinding.provider_id == provider.id)
+            )
+        )
+        affected_key_refs = [
+            (binding.api_client_key.id, binding.api_client_key.key_hash, binding.api_client_key.owner_user_id)
+            for binding in affected_bindings
+            if binding.api_client_key is not None
+        ]
         db.delete(provider)
         db.commit()
+        for api_key_id, key_hash, owner_user_id in affected_key_refs:
+            ApiKeyAuthCache.invalidate_api_key(api_key_id, key_hash)
+            ApiKeyAuthCache.invalidate_user(owner_user_id)
         ProviderService.invalidate_provider_runtime_cache()
         ModelCatalogService.sync_model_catalogs(db)
 
@@ -179,6 +207,7 @@ class ProviderService:
         ProviderService._sync_provider_model_price_from_catalog(db, provider_model)
 
         ProviderService.refresh_provider_state(provider)
+        db.flush()
         ModelCatalogService.sync_model_catalogs(db)
         db.commit()
         ProviderService.invalidate_provider_runtime_cache()
@@ -189,6 +218,10 @@ class ProviderService:
     def provider_to_dict(provider: Provider, *, metrics: dict | None = None) -> dict:
         metrics = metrics or {"providers": {}, "provider_models": {}}
         provider_metric = metrics["providers"].get(provider.id, {})
+        try:
+            capacity_snapshot = ProviderCapacityService.snapshot(provider.id)
+        except ProviderCapacityUnavailableError:
+            capacity_snapshot = ProviderCapacitySnapshot()
         best_input_price = min(
             (item.input_price_per_1k for item in provider.provider_models if item.input_price_per_1k is not None),
             default=None,
@@ -210,6 +243,14 @@ class ProviderService:
             "weight": provider.weight,
             "timeout_ms": provider.timeout_ms,
             "max_retries": provider.max_retries,
+            "max_active_requests": provider.max_active_requests,
+            "max_active_streams": provider.max_active_streams,
+            "max_qps": provider.max_qps,
+            "max_error_rate": provider.max_error_rate,
+            "first_token_timeout_sec": provider.first_token_timeout_sec,
+            "active_requests": capacity_snapshot.active_requests,
+            "active_streams": capacity_snapshot.active_streams,
+            "current_qps": capacity_snapshot.current_qps,
             "maintenance_window": provider.maintenance_window,
             "maintenance_mode_enabled": provider.maintenance_mode_enabled,
             "auto_circuit_break_enabled": provider.auto_circuit_break_enabled,

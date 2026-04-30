@@ -81,9 +81,31 @@ class ModelCatalogOut(ModelCatalogBase):
     lowest_input_price_per_1k: float | None = None
     lowest_output_price_per_1k: float | None = None
     avg_price_multiplier: float | None = None
+    avg_bound_price_multiplier: float | None = None
+    avg_routable_price_multiplier: float | None = None
+    bound_price_multiplier_count: int = 0
+    routable_price_multiplier_count: int = 0
+    min_bound_price_multiplier: float | None = None
+    max_bound_price_multiplier: float | None = None
     available_provider_names: list[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
+
+
+class ModelCatalogSummaryOut(BaseModel):
+    total: int = 0
+    enabled: int = 0
+    bound_providers: int = 0
+    enabled_providers: int = 0
+
+
+class ModelCatalogPageOut(BaseModel):
+    items: list[ModelCatalogOut] = Field(default_factory=list)
+    total: int = 0
+    page: int = 1
+    page_size: int = 20
+    total_pages: int = 1
+    summary: ModelCatalogSummaryOut = Field(default_factory=ModelCatalogSummaryOut)
 
 
 class ModelCatalogDetailOut(ModelCatalogOut):

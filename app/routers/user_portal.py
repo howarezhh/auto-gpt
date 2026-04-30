@@ -15,10 +15,20 @@ from app.config import get_settings
 from app.database import get_db
 from app.schemas.api_key import ApiKeyCreate, ApiKeyUpdate, RouteMode
 from app.schemas.conversation import ConversationReplay, ConversationSummaryList
-from app.schemas.log import LogFilterOptionsResponse, LogListResponse, LogSummaryOut, RequestLogOut
+from app.schemas.log import (
+    LogFilterOptionsResponse,
+    LogListResponse,
+    LogSummaryOut,
+    MetricItem,
+    MetricListResponse,
+    MetricTimeSeriesItem,
+    MetricTimeSeriesResponse,
+    RequestLogOut,
+)
 from app.services.api_key_admin_service import ApiKeyAdminService
 from app.services.api_key_service import ApiClientAuthError, ApiKeyService
 from app.services.asset_service import AssetService
+from app.services.log_service import LogService
 from app.services.model_catalog_service import ModelCatalogService
 from app.services.provider_service import ProviderService
 from app.services.proxy_service import ProxyService
@@ -313,7 +323,6 @@ async def _run_user_self_test_probe(
     try:
         if stream:
             response_stream, provider, trace, latency_ms = await ProxyService.forward_stream_request(
-                db,
                 endpoint_path=normalized_endpoint_path,
                 payload=payload,
                 log_type=log_type,
@@ -339,7 +348,6 @@ async def _run_user_self_test_probe(
             }
 
         response, provider, trace, latency_ms = await ProxyService.forward_json_request(
-            db,
             endpoint_path=normalized_endpoint_path,
             payload=payload,
             log_type=log_type,
@@ -712,6 +720,13 @@ def user_logs_page(
     current_user = require_user_html(request, db)
     if isinstance(current_user, RedirectResponse):
         return current_user
+    _, recent_logs, _, _ = UserPortalService.list_logs(
+        db,
+        user=current_user,
+        page=1,
+        page_size=20,
+        exclude_health_checks=True,
+    )
     return templates.TemplateResponse(
         "user_logs.html",
         {
@@ -720,6 +735,7 @@ def user_logs_page(
             "page_name": "user-logs",
             "portal_type": "user",
             "current_user": current_user,
+            "recent_logs": recent_logs,
         },
     )
 
@@ -779,6 +795,52 @@ def user_logs_api(
         items=items,
         summary=LogSummaryOut.model_validate(summary),
     )
+
+
+@router.get("/api/user/metrics/summary", response_model=MetricListResponse)
+def user_metrics_summary(
+    request: Request,
+    window_minutes: int = Query(default=60, ge=1, le=1440),
+    db: Session = Depends(get_db),
+) -> MetricListResponse:
+    current_user = require_user_html(request, db)
+    if isinstance(current_user, RedirectResponse):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    api_key_ids = UserPortalService.list_owned_api_key_ids(db, user_id=current_user.id)
+    items = [
+        MetricItem.model_validate(item)
+        for item in LogService.metric_summary(
+            db,
+            window_minutes=window_minutes,
+            user_account_id=current_user.id,
+            api_client_key_ids=api_key_ids,
+        )
+    ]
+    return MetricListResponse(window_minutes=window_minutes, items=items)
+
+
+@router.get("/api/user/metrics/timeseries", response_model=MetricTimeSeriesResponse)
+def user_metrics_timeseries(
+    request: Request,
+    window_minutes: int = Query(default=180, ge=5, le=1440),
+    bucket_minutes: int = Query(default=15, ge=1, le=240),
+    db: Session = Depends(get_db),
+) -> MetricTimeSeriesResponse:
+    current_user = require_user_html(request, db)
+    if isinstance(current_user, RedirectResponse):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    api_key_ids = UserPortalService.list_owned_api_key_ids(db, user_id=current_user.id)
+    items = [
+        MetricTimeSeriesItem.model_validate(item)
+        for item in LogService.metric_timeseries(
+            db,
+            window_minutes=window_minutes,
+            bucket_minutes=bucket_minutes,
+            user_account_id=current_user.id,
+            api_client_key_ids=api_key_ids,
+        )
+    ]
+    return MetricTimeSeriesResponse(window_minutes=window_minutes, bucket_minutes=bucket_minutes, items=items)
 
 
 @router.get("/user/logs/export")

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.api_client_key import ApiClientKey
@@ -30,6 +30,51 @@ class ModelCatalogService:
     def list_model_dicts(db: Session) -> list[dict]:
         catalogs, providers = ModelCatalogService._load_catalogs_and_providers(db)
         return [ModelCatalogService._serialize_catalog(catalog, providers) for catalog in catalogs]
+
+    @staticmethod
+    def list_model_page(
+        db: Session,
+        *,
+        keyword: str | None = None,
+        enabled: bool | None = None,
+        provider_id: int | None = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> dict:
+        page = max(int(page or 1), 1)
+        page_size = min(max(int(page_size or 20), 10), 100)
+        query = ModelCatalogService._model_filter_query(keyword=keyword, enabled=enabled, provider_id=provider_id)
+        total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
+        total_pages = max((total + page_size - 1) // page_size, 1)
+        page = min(page, total_pages)
+        catalogs = list(
+            db.scalars(
+                query.order_by(ModelCatalog.model_name.asc())
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            )
+        )
+        providers = ProviderService.list_providers(db)
+        items = [ModelCatalogService._serialize_catalog(catalog, providers) for catalog in catalogs]
+        return {
+            "items": items,
+            "total": total,
+            "page": min(page, total_pages),
+            "page_size": page_size,
+            "total_pages": total_pages,
+            "summary": ModelCatalogService.model_summary(db),
+        }
+
+    @staticmethod
+    def model_summary(db: Session) -> dict:
+        catalogs, providers = ModelCatalogService._load_catalogs_and_providers(db)
+        payloads = [ModelCatalogService._serialize_catalog(catalog, providers) for catalog in catalogs]
+        return {
+            "total": len(payloads),
+            "enabled": sum(1 for item in payloads if item["enabled"]),
+            "bound_providers": sum(item["provider_count"] for item in payloads),
+            "enabled_providers": sum(item["enabled_provider_count"] for item in payloads),
+        }
 
     @staticmethod
     def get_model_detail(db: Session, model_name: str) -> dict | None:
@@ -202,6 +247,39 @@ class ModelCatalogService:
         return catalogs, providers
 
     @staticmethod
+    def _model_filter_query(
+        *,
+        keyword: str | None = None,
+        enabled: bool | None = None,
+        provider_id: int | None = None,
+    ):
+        query = select(ModelCatalog)
+        if keyword:
+            normalized = f"%{keyword.strip()}%"
+            query = query.where(
+                or_(
+                    ModelCatalog.model_name.ilike(normalized),
+                    ModelCatalog.display_name.ilike(normalized),
+                    ModelCatalog.speed_label.ilike(normalized),
+                    ModelCatalog.remark.ilike(normalized),
+                    ModelCatalog.model_name.in_(
+                        select(ProviderModel.model_name)
+                        .join(Provider)
+                        .where(Provider.name.ilike(normalized))
+                    ),
+                )
+            )
+        if enabled is not None:
+            query = query.where(ModelCatalog.enabled.is_(enabled))
+        if provider_id is not None and provider_id > 0:
+            query = query.where(
+                ModelCatalog.model_name.in_(
+                    select(ProviderModel.model_name).where(ProviderModel.provider_id == provider_id)
+                )
+            )
+        return query
+
+    @staticmethod
     def _serialize_catalog(catalog: ModelCatalog, providers: list[Provider], *, include_all_providers: bool = False) -> dict:
         provider_model_map = {
             provider.id: next((item for item in provider.provider_models if item.model_name == catalog.model_name), None)
@@ -248,7 +326,10 @@ class ModelCatalogService:
         enabled_bindings = [item for item in active_bindings if ModelCatalogService._is_binding_routable(item)]
         input_prices = [item["effective_input_price_per_1k"] for item in enabled_bindings if item["effective_input_price_per_1k"] is not None]
         output_prices = [item["effective_output_price_per_1k"] for item in enabled_bindings if item["effective_output_price_per_1k"] is not None]
-        multipliers = [item["price_multiplier"] for item in active_bindings]
+        bound_multipliers = [item["price_multiplier"] for item in active_bindings]
+        routable_multipliers = [item["price_multiplier"] for item in enabled_bindings]
+        avg_bound_price_multiplier = ModelCatalogService._average_multiplier(bound_multipliers)
+        avg_routable_price_multiplier = ModelCatalogService._average_multiplier(routable_multipliers)
         return {
             "id": catalog.id,
             "model_name": catalog.model_name,
@@ -262,12 +343,22 @@ class ModelCatalogService:
             "enabled_provider_count": len(enabled_bindings),
             "lowest_input_price_per_1k": min(input_prices) if input_prices else catalog.input_price_per_1k,
             "lowest_output_price_per_1k": min(output_prices) if output_prices else catalog.output_price_per_1k,
-            "avg_price_multiplier": round(sum(multipliers) / len(multipliers), 4) if multipliers else None,
+            "avg_price_multiplier": avg_bound_price_multiplier,
+            "avg_bound_price_multiplier": avg_bound_price_multiplier,
+            "avg_routable_price_multiplier": avg_routable_price_multiplier,
+            "bound_price_multiplier_count": len(bound_multipliers),
+            "routable_price_multiplier_count": len(routable_multipliers),
+            "min_bound_price_multiplier": min(bound_multipliers) if bound_multipliers else None,
+            "max_bound_price_multiplier": max(bound_multipliers) if bound_multipliers else None,
             "available_provider_names": [item["provider_name"] for item in enabled_bindings],
             "provider_bindings": bindings,
             "created_at": catalog.created_at,
             "updated_at": catalog.updated_at,
         }
+
+    @staticmethod
+    def _average_multiplier(multipliers: list[float]) -> float | None:
+        return round(sum(multipliers) / len(multipliers), 4) if multipliers else None
 
     @staticmethod
     def _apply_provider_bindings(db: Session, catalog: ModelCatalog, bindings: list[ModelProviderBindingIn]) -> None:
@@ -398,6 +489,8 @@ class ModelCatalogService:
 
     @staticmethod
     def _remove_model_from_authorization_scopes(db: Session, model_name: str) -> None:
+        from app.services.api_key_auth_cache import ApiKeyAuthCache
+
         api_keys = list(db.scalars(select(ApiClientKey)))
         for api_key in api_keys:
             allowed_model_names = list(loads_json(api_key.allowed_model_names_json, []))
@@ -406,6 +499,8 @@ class ModelCatalogService:
             api_key.allowed_model_names_json = dumps_json(
                 [item for item in allowed_model_names if item != model_name]
             )
+            ApiKeyAuthCache.invalidate_api_key(api_key.id, api_key.key_hash)
+            ApiKeyAuthCache.invalidate_user(api_key.owner_user_id)
 
         templates = list(db.scalars(select(ApiKeyPolicyTemplate)))
         for template in templates:

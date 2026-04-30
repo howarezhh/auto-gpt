@@ -18,8 +18,8 @@ class SettingUpdate(BaseModel):
     health_check_interval_sec: int = Field(default=60, ge=0)
     recovery_probe_interval_sec: int = Field(default=30, ge=0)
     enable_token_logging: bool = True
-    enable_payload_logging: bool = True
-    enable_stream_response_persist: bool = True
+    enable_payload_logging: bool = False
+    enable_stream_response_persist: bool = False
     mask_sensitive_fields: bool = True
     max_logged_body_bytes: int = Field(default=16384, ge=0)
     allow_public_user_registration: bool = False
@@ -29,6 +29,19 @@ class SettingUpdate(BaseModel):
     model_list_cache_ttl_sec: int = Field(default=15, ge=0, le=300)
     provider_status_cache_ttl_sec: int = Field(default=10, ge=0, le=300)
     async_request_logging: bool = True
+    global_max_active_requests: int = Field(default=1000, ge=0)
+    global_max_active_streams: int = Field(default=300, ge=0)
+    api_key_max_active_requests: int = Field(default=50, ge=0)
+    api_key_max_active_streams: int = Field(default=10, ge=0)
+    account_max_active_requests: int = Field(default=100, ge=0)
+    account_max_active_streams: int = Field(default=20, ge=0)
+    provider_max_active_requests: int = Field(default=300, ge=0)
+    provider_max_active_streams: int = Field(default=150, ge=0)
+    concurrency_lease_ttl_seconds: int = Field(default=900, ge=60)
+    stream_connect_timeout_seconds: int = Field(default=10, ge=0)
+    stream_first_token_timeout_seconds: int = Field(default=60, ge=0)
+    stream_idle_timeout_seconds: int = Field(default=120, ge=0)
+    stream_max_duration_seconds: int = Field(default=600, ge=0)
 
 
 class SettingOut(SettingUpdate):

@@ -1,10 +1,13 @@
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.models.app_setting import AppSetting
 from app.models.provider import Provider
 from app.schemas.setting import SettingUpdate
 
+
+_settings = get_settings()
 
 DEFAULT_SETTING = {
     "id": 1,
@@ -18,8 +21,8 @@ DEFAULT_SETTING = {
     "health_check_interval_sec": 60,
     "recovery_probe_interval_sec": 30,
     "enable_token_logging": True,
-    "enable_payload_logging": True,
-    "enable_stream_response_persist": True,
+    "enable_payload_logging": False,
+    "enable_stream_response_persist": False,
     "mask_sensitive_fields": True,
     "max_logged_body_bytes": 16384,
     "allow_public_user_registration": False,
@@ -29,6 +32,19 @@ DEFAULT_SETTING = {
     "model_list_cache_ttl_sec": 15,
     "provider_status_cache_ttl_sec": 10,
     "async_request_logging": True,
+    "global_max_active_requests": _settings.global_max_active_requests,
+    "global_max_active_streams": _settings.global_max_active_streams,
+    "api_key_max_active_requests": _settings.api_key_max_active_requests,
+    "api_key_max_active_streams": _settings.api_key_max_active_streams,
+    "account_max_active_requests": _settings.account_max_active_requests,
+    "account_max_active_streams": _settings.account_max_active_streams,
+    "provider_max_active_requests": _settings.provider_max_active_requests,
+    "provider_max_active_streams": _settings.provider_max_active_streams,
+    "concurrency_lease_ttl_seconds": _settings.concurrency_lease_ttl_seconds,
+    "stream_connect_timeout_seconds": _settings.stream_connect_timeout_seconds,
+    "stream_first_token_timeout_seconds": _settings.stream_first_token_timeout_seconds,
+    "stream_idle_timeout_seconds": _settings.stream_idle_timeout_seconds,
+    "stream_max_duration_seconds": _settings.stream_max_duration_seconds,
 }
 
 
@@ -55,6 +71,11 @@ class SettingService:
         SettingService._validate_retention_configuration(
             request_log_retention_days=payload.request_log_retention_days,
             admin_audit_log_retention_days=payload.admin_audit_log_retention_days,
+        )
+        SettingService._validate_stream_timeout_configuration(
+            first_token_timeout_seconds=payload.stream_first_token_timeout_seconds,
+            idle_timeout_seconds=payload.stream_idle_timeout_seconds,
+            max_duration_seconds=payload.stream_max_duration_seconds,
         )
         for field, value in payload.model_dump().items():
             setattr(setting, field, value)
@@ -89,3 +110,20 @@ class SettingService:
             raise ValueError("request_log_retention_days must be >= 0")
         if admin_audit_log_retention_days < 0:
             raise ValueError("admin_audit_log_retention_days must be >= 0")
+
+    @staticmethod
+    def _validate_stream_timeout_configuration(
+        *,
+        first_token_timeout_seconds: int,
+        idle_timeout_seconds: int,
+        max_duration_seconds: int,
+    ) -> None:
+        if max_duration_seconds <= 0:
+            return
+        positive_timeouts = [
+            value
+            for value in (first_token_timeout_seconds, idle_timeout_seconds)
+            if value > 0
+        ]
+        if positive_timeouts and max_duration_seconds < max(positive_timeouts):
+            raise ValueError("stream_max_duration_seconds must be >= enabled stream chunk timeouts")

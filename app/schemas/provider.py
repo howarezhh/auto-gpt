@@ -71,6 +71,11 @@ class ProviderBase(BaseModel):
     weight: int = 100
     timeout_ms: int = 30000
     max_retries: int = 1
+    max_active_requests: int | None = Field(default=300, ge=0)
+    max_active_streams: int | None = Field(default=150, ge=0)
+    max_qps: int | None = Field(default=None, ge=0)
+    max_error_rate: float | None = Field(default=80.0, ge=0, le=100)
+    first_token_timeout_sec: int | None = Field(default=60, ge=1)
     maintenance_window: str | None = None
     maintenance_mode_enabled: bool = False
     auto_circuit_break_enabled: bool = True
@@ -115,6 +120,11 @@ class ProviderUpdate(BaseModel):
     weight: int | None = None
     timeout_ms: int | None = None
     max_retries: int | None = None
+    max_active_requests: int | None = Field(default=None, ge=0)
+    max_active_streams: int | None = Field(default=None, ge=0)
+    max_qps: int | None = Field(default=None, ge=0)
+    max_error_rate: float | None = Field(default=None, ge=0, le=100)
+    first_token_timeout_sec: int | None = Field(default=None, ge=1)
     maintenance_window: str | None = None
     maintenance_mode_enabled: bool | None = None
     auto_circuit_break_enabled: bool | None = None
@@ -160,6 +170,14 @@ class ProviderOut(BaseModel):
     weight: int
     timeout_ms: int
     max_retries: int
+    max_active_requests: int | None
+    max_active_streams: int | None
+    max_qps: int | None
+    max_error_rate: float | None
+    first_token_timeout_sec: int | None
+    active_requests: int = 0
+    active_streams: int = 0
+    current_qps: int = 0
     maintenance_window: str | None
     maintenance_mode_enabled: bool
     auto_circuit_break_enabled: bool

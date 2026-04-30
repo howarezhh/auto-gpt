@@ -6,12 +6,15 @@ from datetime import datetime, timedelta
 
 from sqlalchemy import update
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
+from app.database import SessionLocal
 from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
 from app.services.cache_service import CacheService
 from app.services.log_service import LogService
 from app.services.model_catalog_service import ModelCatalogService
+from app.services.provider_capacity_service import ProviderCapacityService
 from app.services.provider_service import ProviderService
 from app.services.setting_service import SettingService
 
@@ -74,10 +77,6 @@ class RouterService:
             require_vision=require_vision,
             require_stream=require_stream,
         )
-        setting = SettingService.get_or_create(db)
-        cached = CacheService.get(cache_key)
-        if cached is not None:
-            return cached
         providers = ProviderService.list_providers(db)
         now = datetime.utcnow()
         metrics = LogService.route_metric_summary(db, window_minutes=RouterService.RECENT_WINDOW_MINUTES, requested_model=model_name)
@@ -137,11 +136,7 @@ class RouterService:
                         route_score=route_score,
                     )
                 )
-        return CacheService.set(
-            cache_key,
-            candidates,
-            ttl_seconds=max(0, int(setting.route_candidate_cache_ttl_sec)),
-        )
+        return candidates
 
     @staticmethod
     def order_candidates(
@@ -153,7 +148,6 @@ class RouterService:
         require_vision: bool = False,
         require_stream: bool = False,
     ) -> list[RouteCandidate]:
-        setting = SettingService.get_or_create(db)
         candidates = RouterService.get_available_candidates(
             db,
             model_name=model_name,
@@ -164,6 +158,89 @@ class RouterService:
         effective_forced_provider_id = route_context.forced_provider_id if route_context and route_context.forced_provider_id is not None else forced_provider_id
         if effective_forced_provider_id is not None:
             candidates = [item for item in candidates if item.provider.id == effective_forced_provider_id]
+        candidates = RouterService._filter_capacity_candidates(candidates, is_stream=require_stream)
+        return RouterService._order_filtered_candidates(
+            db,
+            candidates,
+            sticky_key=sticky_key,
+            route_context=route_context,
+        )
+
+    @staticmethod
+    async def async_order_candidates(
+        db: Session,
+        model_name: str | None = None,
+        sticky_key: str | None = None,
+        forced_provider_id: int | None = None,
+        route_context: RoutePolicyContext | None = None,
+        require_vision: bool = False,
+        require_stream: bool = False,
+    ) -> list[RouteCandidate]:
+        candidates = await run_in_threadpool(
+            RouterService._get_available_candidates_with_scoped_session,
+            model_name=model_name,
+            route_context=route_context,
+            require_vision=require_vision,
+            require_stream=require_stream,
+        )
+        effective_forced_provider_id = route_context.forced_provider_id if route_context and route_context.forced_provider_id is not None else forced_provider_id
+        if effective_forced_provider_id is not None:
+            candidates = [item for item in candidates if item.provider.id == effective_forced_provider_id]
+        candidates = await RouterService._async_filter_capacity_candidates(candidates, is_stream=require_stream)
+        return await run_in_threadpool(
+            RouterService._order_filtered_candidates_with_scoped_session,
+            candidates,
+            sticky_key=sticky_key,
+            route_context=route_context,
+        )
+
+    @staticmethod
+    def _get_available_candidates_with_scoped_session(
+        *,
+        model_name: str | None = None,
+        route_context: RoutePolicyContext | None = None,
+        require_vision: bool = False,
+        require_stream: bool = False,
+    ) -> list[RouteCandidate]:
+        db = SessionLocal()
+        try:
+            return RouterService.get_available_candidates(
+                db,
+                model_name=model_name,
+                route_context=route_context,
+                require_vision=require_vision,
+                require_stream=require_stream,
+            )
+        finally:
+            db.close()
+
+    @staticmethod
+    def _order_filtered_candidates_with_scoped_session(
+        candidates: list[RouteCandidate],
+        *,
+        sticky_key: str | None,
+        route_context: RoutePolicyContext | None,
+    ) -> list[RouteCandidate]:
+        db = SessionLocal()
+        try:
+            return RouterService._order_filtered_candidates(
+                db,
+                candidates,
+                sticky_key=sticky_key,
+                route_context=route_context,
+            )
+        finally:
+            db.close()
+
+    @staticmethod
+    def _order_filtered_candidates(
+        db: Session,
+        candidates: list[RouteCandidate],
+        *,
+        sticky_key: str | None,
+        route_context: RoutePolicyContext | None,
+    ) -> list[RouteCandidate]:
+        setting = SettingService.get_or_create(db)
         if not candidates:
             return []
 
@@ -234,6 +311,48 @@ class RouterService:
         if route_context and route_context.max_candidate_count is not None:
             return candidates[: max(1, route_context.max_candidate_count)]
         return candidates
+
+    @staticmethod
+    def _filter_capacity_candidates(candidates: list[RouteCandidate], *, is_stream: bool) -> list[RouteCandidate]:
+        if not candidates:
+            return []
+        snapshots = ProviderCapacityService.snapshots({item.provider.id for item in candidates})
+        filtered: list[RouteCandidate] = []
+        for candidate in candidates:
+            snapshot = snapshots.get(candidate.provider.id)
+            if snapshot is None:
+                continue
+            if not ProviderCapacityService._has_capacity(candidate.provider, snapshot=snapshot, is_stream=is_stream):
+                continue
+            if (
+                candidate.provider.max_error_rate is not None
+                and candidate.provider.max_error_rate > 0
+                and candidate.recent_failure_rate * 100 >= candidate.provider.max_error_rate
+            ):
+                continue
+            filtered.append(candidate)
+        return filtered
+
+    @staticmethod
+    async def _async_filter_capacity_candidates(candidates: list[RouteCandidate], *, is_stream: bool) -> list[RouteCandidate]:
+        if not candidates:
+            return []
+        snapshots = await ProviderCapacityService.async_snapshots({item.provider.id for item in candidates})
+        filtered: list[RouteCandidate] = []
+        for candidate in candidates:
+            snapshot = snapshots.get(candidate.provider.id)
+            if snapshot is None:
+                continue
+            if not ProviderCapacityService._has_capacity(candidate.provider, snapshot=snapshot, is_stream=is_stream):
+                continue
+            if (
+                candidate.provider.max_error_rate is not None
+                and candidate.provider.max_error_rate > 0
+                and candidate.recent_failure_rate * 100 >= candidate.provider.max_error_rate
+            ):
+                continue
+            filtered.append(candidate)
+        return filtered
 
     @staticmethod
     def _build_candidate_cache_key(

@@ -14,6 +14,8 @@ pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 ## 启动
 
+Windows 本地开发可继续使用 Uvicorn 或 `run.ps1`，该方式只用于本地开发调试，不作为生产并发启动方式。
+
 ```powershell
 .venv\Scripts\Activate.ps1
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
@@ -23,6 +25,7 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 
 - `EXTERNAL_BASE_URL`：外部接入文档使用的统一地址，例如 `https://api.example.com`；若为空，文档页会回退到当前访问地址。
 - `APP_ENV`：当值为 `prod` 或 `production` 时，`SESSION_SECRET_KEY` 与 `API_KEY_ENCRYPTION_SECRET` 必须替换为至少 32 位的非默认高强度随机值，否则应用会拒绝启动。
+- `ENABLE_STARTUP_DB_INIT`：仅控制非生产环境 Web worker 是否自动初始化数据库；生产环境 Web worker 永不执行建表或迁移，部署时应先独立执行 `python scripts/run_startup_db_init.py`，再启动 Gunicorn 服务。
 - 当前对外提供的是 OpenAI 兼容子集，而不是完整官方能力面；正式支持的路径仅为 `/v1/chat/completions`、`/v1/responses`、`/v1/models`。
 - `/v1/responses` 当前对图片输入走适配子集。支持透传字段：`model`、`instructions`、`input`、`temperature`、`top_p`、`presence_penalty`、`frequency_penalty`、`tools`、`tool_choice`、`response_format`、`stream`、`user`、`metadata`、`seed`、`max_output_tokens`、`max_tokens`。当前不适配并会直接返回 `400` 的字段包括：`previous_response_id`、`parallel_tool_calls`、`reasoning`、`reasoning_effort`、`store`、`text`、`include`、`max_tool_calls`、`truncation`、`background`。
 
@@ -53,11 +56,13 @@ sudo ./start_aliyun.sh
 
 脚本会自动完成以下操作：
 
-- 检查并安装缺失的系统依赖：`python3`、`python3-venv`、`python3-pip`、`nginx`、`curl`、`ca-certificates`
+- 检查并安装缺失的系统依赖：`python3`、`python3-venv`、`python3-pip`、`nginx`、`curl`、`ca-certificates`、`postgresql`、`postgresql-contrib`
 - 在项目根目录创建或复用 `.venv`
 - 使用清华源安装 Python 依赖
 - 自动创建 `data/` 目录
 - 创建或更新 `.env`
+- 自动写入 PostgreSQL 连接配置和 Gunicorn 多 worker 配置
+- 自动创建 PostgreSQL 数据库 `aotu_gpt`、用户 `aotu_gpt`，默认密码为 `zhh123456`
 - 自动生成生产环境所需的 `SESSION_SECRET_KEY` 与 `API_KEY_ENCRYPTION_SECRET`（若为空、仍为默认占位值或长度不足）
 - 当 `EXTERNAL_BASE_URL` 为空时，尝试根据阿里云元数据自动写入公网地址
 - 自动生成 `LOCAL_PROXY_API_KEY`（若当前为空）
@@ -68,6 +73,20 @@ sudo ./start_aliyun.sh
 - 执行本机和公网健康检查；已完成的依赖安装、虚拟环境创建、Python 依赖安装会自动跳过
 
 部署完成后，仍需在阿里云安全组放行 `80/TCP` 到 `0.0.0.0/0`。
+
+生产环境由 `start_aliyun.sh` 写入 `systemd` 并使用 `Gunicorn + UvicornWorker` 多 worker 启动，默认 `WEB_CONCURRENCY=4`、`GUNICORN_TIMEOUT=120`、`GUNICORN_KEEPALIVE=75`、`GUNICORN_GRACEFUL_TIMEOUT=30`。Nginx 继续反向代理到 `127.0.0.1:8000`，并保持 `proxy_buffering off`、`proxy_request_buffering off`、`proxy_read_timeout 600s`、`proxy_send_timeout 600s`，避免 SSE 流式响应被缓冲。
+
+上游连接池按 1000 活跃请求目标预留初始值：`REQUEST_TIMEOUT_MS=60000`、`UPSTREAM_MAX_CONNECTIONS=1200`、`UPSTREAM_MAX_KEEPALIVE_CONNECTIONS=300`、`UPSTREAM_POOL_TIMEOUT_S=10`。后台“中转站”配置支持按 provider 设置最大活跃请求、最大流式请求、QPS、失败率上限和首 Token 超时；provider 活跃容量与 QPS 计数已优先使用 Redis 共享状态，避免 Gunicorn 多 worker 下只按进程内存计数。
+
+Redis 用于生产实时并发计数、租约释放和短窗口 QPS/RPM 限流。默认 `REDIS_URL=redis://127.0.0.1:6379/0`，并发初始值为 `GLOBAL_MAX_ACTIVE_REQUESTS=1000`、`GLOBAL_MAX_ACTIVE_STREAMS=300`、`API_KEY_MAX_ACTIVE_REQUESTS=50`、`API_KEY_MAX_ACTIVE_STREAMS=10`、`ACCOUNT_MAX_ACTIVE_REQUESTS=100`、`ACCOUNT_MAX_ACTIVE_STREAMS=20`、`PROVIDER_MAX_ACTIVE_REQUESTS=300`、`PROVIDER_MAX_ACTIVE_STREAMS=150`。这些值可通过 `.env` 初始化，并可在后台“系统设置”中调整。
+
+API Key 鉴权结果会按 Bearer Key 的 SHA256 哈希写入 Redis 短 TTL 缓存，默认 `API_KEY_AUTH_CACHE_TTL_SECONDS=60`，用于减少入口重复数据库读取。缓存不保存原始明文 Key；API Key 编辑、启停、轮换、删除、批量授权更新，以及用户账户启停、额度和余额调整会主动清理受影响缓存。
+
+日志、Token 和计费采用后台化处理：主请求链路同步写入 `request_logs` 核心字段，Token 回填、费用计算、余额扣减和账单记录由后台任务补齐。生产默认建议关闭完整 payload 与流式响应持久化，仅保留核心日志字段和必要的失败样本。
+
+SSE 流式请求使用独立流式并发租约，默认 `GLOBAL_MAX_ACTIVE_STREAMS=300`，并通过 `STREAM_CONNECT_TIMEOUT_SECONDS=10`、`STREAM_FIRST_TOKEN_TIMEOUT_SECONDS=60`、`STREAM_IDLE_TIMEOUT_SECONDS=120`、`STREAM_MAX_DURATION_SECONDS=600` 控制连接上游、首 Token、空闲 chunk 和最长持续时间。流式日志只在结束、取消或异常时写一条摘要，客户端取消记录 499 且不计 provider 失败。
+
+监控与告警入口包括 `/live`、`/ready`、`/health`、`/metrics` 和后台 `/api/metrics/system`。`/ready` 会检查数据库、Redis、全局活跃请求、全局流式请求、数据库连接池和后台 Token/计费任务积压；后台“告警中心”会展示核心健康指标，并把 Redis 不可用、数据库不可用、5xx/429 异常、provider 失败率过高、后台任务积压、Token/计费失败写入告警事件流。
 
 若需要让“使用文档”页面固定展示公网地址，部署完成后再把 `.env` 中的 `EXTERNAL_BASE_URL` 改成你的公网地址，例如：
 
@@ -80,6 +99,7 @@ EXTERNAL_BASE_URL=http://114.55.144.46
 ```bash
 sudo systemctl status aotu-gpt
 sudo systemctl status nginx
-curl http://127.0.0.1:8000/login
+ps -ef | grep '[g]unicorn'
+curl http://127.0.0.1:8000/ready
 curl http://114.55.144.46/login
 ```

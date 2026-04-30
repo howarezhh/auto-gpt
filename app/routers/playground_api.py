@@ -37,7 +37,6 @@ async def playground_chat_completions(
 ):
     if payload.get("stream") is True:
         stream, provider, trace, latency_ms = await ProxyService.forward_stream_request(
-            db,
             endpoint_path="/chat/completions",
             payload=payload,
             log_type="chat",
@@ -52,7 +51,6 @@ async def playground_chat_completions(
         return StreamingResponse(stream, media_type="text/event-stream", headers=headers)
 
     result, provider, trace, latency_ms = await ProxyService.forward_json_request(
-        db,
         endpoint_path="/chat/completions",
         payload=payload,
         log_type="chat",
@@ -77,7 +75,6 @@ async def playground_responses(
 ):
     if payload.get("stream") is True:
         stream, provider, trace, latency_ms = await ProxyService.forward_stream_request(
-            db,
             endpoint_path="/responses",
             payload=payload,
             log_type="responses",
@@ -92,7 +89,6 @@ async def playground_responses(
         return StreamingResponse(stream, media_type="text/event-stream", headers=headers)
 
     result, provider, trace, latency_ms = await ProxyService.forward_json_request(
-        db,
         endpoint_path="/responses",
         payload=payload,
         log_type="responses",
