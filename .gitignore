@@ -205,15 +205,19 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-# Project deployment data
-# Keep project data in Git so a fresh server clone can restore local configuration snapshots.
-!data/
-!data/**
-data/**/*.log
-data/**/*.tmp
-data/**/*.temp
-data/**/*.pid
-data/**/*.lock
-data/**/*.db-wal
-data/**/*.db-shm
-data/**/celerybeat-schedule
+# Project runtime data
+# Server updates should only pull code/config templates. Runtime databases,
+# uploads, backups, logs, and generated state must stay outside Git.
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.dump
+*.bak
+*.tmp
+*.temp
+*.pid
+*.lock

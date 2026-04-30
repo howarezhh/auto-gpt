@@ -641,7 +641,7 @@ LOCAL_PROXY_API_KEY: ${proxy_key}
 
 Remember to open ECS security group TCP port 80 to 0.0.0.0/0.
 Useful commands:
-  RUN_DB_INIT=1 sudo bash ${PROJECT_ROOT}/start_aliyun.sh
+  sudo env RUN_DB_INIT=1 bash ${PROJECT_ROOT}/start_aliyun.sh
   systemctl status ${SERVICE_NAME}
   journalctl -u ${SERVICE_NAME} -f
   ps -ef | grep '[g]unicorn'

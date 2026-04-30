@@ -1,5 +1,4 @@
 from datetime import datetime
-from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -8,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.services.setting_service import SettingService
-from app.services.user_auth_service import USER_ROLE_ADMIN, USER_ROLE_USER, UserAuthService
+from app.services.user_auth_service import USER_ROLE_USER, UserAuthService
 
 
 router = APIRouter()
@@ -23,7 +22,6 @@ def _current_user(request: Request, db: Session):
 def setup_admin_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
     if UserAuthService.has_any_admin(db):
         return RedirectResponse("/login", status_code=303)
-    next_path = UserAuthService.normalize_next_path(request.query_params.get("next"))
     return templates.TemplateResponse(
         "setup_admin.html",
         {
@@ -31,68 +29,28 @@ def setup_admin_page(request: Request, db: Session = Depends(get_db)) -> HTMLRes
             "title": "初始化管理员",
             "page_name": "setup-admin",
             "error_message": None,
-            "next_path": next_path,
         },
     )
 
 
 @router.post("/setup-admin", response_class=HTMLResponse)
-def setup_admin_submit(
-    request: Request,
-    username: str = Form(...),
-    email: str = Form(...),
-    password: str = Form(...),
-    password_confirm: str = Form(...),
-    next_path: str | None = Form(default=None),
-    db: Session = Depends(get_db),
-):
-    if UserAuthService.has_any_admin(db):
-        return RedirectResponse("/login", status_code=303)
-    if password != password_confirm:
-        return templates.TemplateResponse(
-            "setup_admin.html",
-            {
-                "request": request,
-                "title": "初始化管理员",
-                "page_name": "setup-admin",
-                "error_message": "两次输入的密码不一致",
-                "next_path": UserAuthService.normalize_next_path(next_path),
-            },
-            status_code=400,
-        )
-    try:
-        admin = UserAuthService.create_user(
-            db,
-            username=username,
-            email=email,
-            password=password,
-            role=USER_ROLE_ADMIN,
-            enabled=True,
-        )
-    except ValueError as exc:
-        return templates.TemplateResponse(
-            "setup_admin.html",
-            {
-                "request": request,
-                "title": "初始化管理员",
-                "page_name": "setup-admin",
-                "error_message": str(exc),
-                "next_path": UserAuthService.normalize_next_path(next_path),
-            },
-            status_code=400,
-        )
-    UserAuthService.login_user(request, admin)
-    return RedirectResponse(UserAuthService.resolve_post_login_path(admin.role, next_path), status_code=303)
+def setup_admin_submit(request: Request, db: Session = Depends(get_db)):
+    return templates.TemplateResponse(
+        "setup_admin.html",
+        {
+            "request": request,
+            "title": "初始化管理员",
+            "page_name": "setup-admin",
+            "error_message": "管理员账号禁止通过网页初始化，请登录服务器后台执行 scripts/create_admin_user.py 创建。",
+        },
+        status_code=403,
+    )
 
 
 @router.get("/login", response_class=HTMLResponse)
 def login_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
     if not UserAuthService.has_any_admin(db):
-        next_path = UserAuthService.normalize_next_path(request.query_params.get("next"))
-        target = "/setup-admin"
-        if next_path:
-            target = f"{target}?next={quote(next_path, safe='')}"
-        return RedirectResponse(target, status_code=303)
+        return RedirectResponse("/setup-admin", status_code=303)
     user = _current_user(request, db)
     next_path = UserAuthService.normalize_next_path(request.query_params.get("next"))
     if user is not None:
@@ -118,11 +76,7 @@ def login_submit(
     db: Session = Depends(get_db),
 ):
     if not UserAuthService.has_any_admin(db):
-        target = "/setup-admin"
-        normalized_next = UserAuthService.normalize_next_path(next_path)
-        if normalized_next:
-            target = f"{target}?next={quote(normalized_next, safe='')}"
-        return RedirectResponse(target, status_code=303)
+        return RedirectResponse("/setup-admin", status_code=303)
     user = UserAuthService.authenticate(db, identifier, password)
     if user is None:
         return templates.TemplateResponse(

@@ -5,51 +5,33 @@
     <div class="auth-layout">
         <div class="auth-primary">
             <h1>初始化管理员</h1>
-            <p>系统当前还没有管理员账号。请先创建首个管理员，再进入管理后台端完成渠道、模型、日志、告警、用户和 API Key 的全局配置。</p>
+            <p>系统当前还没有管理员账号。出于生产安全要求，管理员不能通过网页注册或初始化，必须在服务器后台创建。</p>
             {% if error_message %}
             <div class="auth-alert">{{ error_message }}</div>
             {% endif %}
-            <form class="auth-form" method="post" action="/setup-admin">
-                {% if next_path %}
-                <input name="next_path" type="hidden" value="{{ next_path }}">
-                {% endif %}
-                <label>
-                    <span>管理员用户名</span>
-                    <input class="field-input" name="username" required>
-                </label>
-                <label>
-                    <span>管理员邮箱</span>
-                    <input class="field-input" name="email" type="email" required>
-                </label>
-                <label>
-                    <span>密码</span>
-                    <input class="field-input" name="password" type="password" required>
-                </label>
-                <label>
-                    <span>确认密码</span>
-                    <input class="field-input" name="password_confirm" type="password" required>
-                </label>
-                <button class="btn btn-accent" type="submit">创建管理员并进入后台</button>
-            </form>
+            <div class="auth-alert">请在服务器项目目录执行：<code>sudo /opt/auto-gpt/.venv/bin/python scripts/create_admin_user.py</code></div>
+            <div class="auth-links">
+                <a href="/login">返回登录</a>
+            </div>
         </div>
 
         <aside class="auth-side">
             <div class="auth-side-card">
-                <div class="panel-kicker">初始化后</div>
-                <h3>第一位管理员的下一步</h3>
+                <div class="panel-kicker">后台创建</div>
+                <h3>管理员创建方式</h3>
                 <div class="auth-note-list">
-                    <div><span>1</span><strong>先校验系统设置、对外接入地址和会话安全配置</strong></div>
-                    <div><span>2</span><strong>配置中转站、模型和价格口径，确认正式支持的 `/v1/*` 能力</strong></div>
-                    <div><span>3</span><strong>创建普通用户、发放 API Key，再让用户走接入自检流程</strong></div>
+                    <div><span>1</span><strong>SSH 登录服务器，进入项目目录 `/opt/auto-gpt`</strong></div>
+                    <div><span>2</span><strong>执行管理员创建脚本并输入用户名、邮箱和密码</strong></div>
+                    <div><span>3</span><strong>回到网页登录，再进入后台完成渠道、模型和用户配置</strong></div>
                 </div>
             </div>
             <div class="auth-side-card">
                 <div class="panel-kicker">安全说明</div>
-                <h3>首个管理员很关键</h3>
+                <h3>管理员入口必须受控</h3>
                 <div class="auth-note-list">
-                    <div><span>权限范围</span><strong>管理员可访问全部后台配置、日志、审计、告警与用户治理页面</strong></div>
-                    <div><span>密码要求</span><strong>建议使用高强度随机密码，并在部署完成后立即确认生产密钥配置</strong></div>
-                    <div><span>生产要求</span><strong>正式环境必须配置非默认的 Session 和 API Key 加密密钥</strong></div>
+                    <div><span>网页限制</span><strong>公开页面只能注册普通用户，不能创建管理员</strong></div>
+                    <div><span>后台权限</span><strong>已有管理员可在用户管理页创建或提升管理员</strong></div>
+                    <div><span>生产要求</span><strong>正式环境必须配置非默认 Session 和 API Key 加密密钥</strong></div>
                 </div>
             </div>
         </aside>
