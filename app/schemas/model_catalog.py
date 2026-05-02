@@ -38,6 +38,7 @@ class ModelCatalogBase(BaseModel):
     enabled: bool = True
     supports_stream: bool = True
     supports_vision: bool = False
+    context_window_tokens: int | None = Field(default=None, ge=1)
     input_price_per_1k: float | None = Field(default=None, ge=0)
     output_price_per_1k: float | None = Field(default=None, ge=0)
     cache_price_per_1k: float | None = Field(default=None, ge=0)
@@ -67,6 +68,7 @@ class ModelCatalogUpdate(BaseModel):
     enabled: bool | None = None
     supports_stream: bool | None = None
     supports_vision: bool | None = None
+    context_window_tokens: int | None = Field(default=None, ge=1)
     input_price_per_1k: float | None = Field(default=None, ge=0)
     output_price_per_1k: float | None = Field(default=None, ge=0)
     cache_price_per_1k: float | None = Field(default=None, ge=0)
@@ -81,6 +83,19 @@ class ModelCatalogUpdate(BaseModel):
             return None
         normalized = value.strip()
         return normalized or None
+
+
+class ModelCatalogBatchContextWindowUpdate(BaseModel):
+    model_names: list[str] = Field(..., min_length=1)
+    context_window_tokens: int | None = Field(default=None, ge=1)
+
+    @field_validator("model_names")
+    @classmethod
+    def normalize_model_names(cls, value: list[str]) -> list[str]:
+        names = [item.strip() for item in value if isinstance(item, str) and item.strip()]
+        if not names:
+            raise ValueError("model_names 不能为空")
+        return list(dict.fromkeys(names))
 
 
 class ModelCatalogOut(ModelCatalogBase):

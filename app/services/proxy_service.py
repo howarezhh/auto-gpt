@@ -29,6 +29,7 @@ from app.services.provider_capacity_service import (
 from app.services.provider_service import ProviderService
 from app.services.router_service import RoutePolicyContext, RouterService
 from app.services.setting_service import SettingService
+from app.services.token_usage_service import TokenUsageService
 from app.services.upstream_client import UpstreamClientService
 from app.utils.json_utils import dumps_json, safeJsonParse
 
@@ -168,6 +169,112 @@ class ProxyService:
         return await run_in_threadpool(ProxyService._run_db_write_sync, operation, *args, **kwargs)
 
     @staticmethod
+    def _build_request_token_limit_error(
+        *,
+        setting: Any,
+        payload: dict[str, Any],
+        model_name: str | None,
+        endpoint_path: str,
+    ) -> tuple[int, dict[str, Any]] | None:
+        limit = int(getattr(setting, "global_max_request_tokens", 0) or 0)
+        if limit <= 0:
+            return None
+        request_path = f"/v1{endpoint_path}"
+        try:
+            estimated_tokens = TokenUsageService.estimate_request_tokens(
+                payload,
+                model_name=model_name,
+                request_path=request_path,
+            )
+        except Exception as exc:
+            return status.HTTP_400_BAD_REQUEST, {
+                "message": "无法估算请求 Token，已按全局最大请求 Token 策略拒绝",
+                "code": "request_token_estimation_failed",
+                "model": model_name,
+                "request_path": request_path,
+                "global_max_request_tokens": limit,
+                "estimation_error": str(exc),
+            }
+        if estimated_tokens is None:
+            return status.HTTP_400_BAD_REQUEST, {
+                "message": "无法估算请求 Token，已按全局最大请求 Token 策略拒绝",
+                "code": "request_token_estimation_failed",
+                "model": model_name,
+                "request_path": request_path,
+                "global_max_request_tokens": limit,
+            }
+        if estimated_tokens <= limit:
+            return None
+        return status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, {
+            "message": f"请求 Token 估算值 {estimated_tokens} 超过全局最大请求 Token {limit}",
+            "code": "request_tokens_exceeded",
+            "model": model_name,
+            "request_path": request_path,
+            "estimated_request_tokens": estimated_tokens,
+            "global_max_request_tokens": limit,
+        }
+
+    @staticmethod
+    async def _reject_by_request_token_limit_async(
+        db: Session | None,
+        *,
+        status_code: int,
+        detail: dict[str, Any],
+        model_name: str | None,
+        endpoint_path: str,
+        log_type: str,
+        request_id: str,
+        is_stream: bool,
+        has_image: bool,
+        reasoning_level: str,
+        api_client_auth: ApiClientAuthContext | None,
+        trace_id: str | None,
+        source_ip: str | None,
+    ) -> None:
+        trace = [{
+            "result": "request_token_limit_rejected",
+            "latency_ms": 0,
+            "status_code": status_code,
+            "error": detail.get("code"),
+            "estimated_request_tokens": detail.get("estimated_request_tokens"),
+            "global_max_request_tokens": detail.get("global_max_request_tokens"),
+        }]
+        await ProxyService._run_db_write(
+            LogService.create_log,
+            db=db,
+            log_type=log_type,
+            trace_id=trace_id,
+            model_name=model_name,
+            requested_model=model_name,
+            tenant_name=api_client_auth.api_client_key.tenant_name if api_client_auth else None,
+            project_name=api_client_auth.api_client_key.project_name if api_client_auth else None,
+            app_name=api_client_auth.api_client_key.app_name if api_client_auth else None,
+            environment_name=api_client_auth.api_client_key.environment_name if api_client_auth else None,
+            request_id=request_id,
+            conversation_key=None,
+            session_id=None,
+            request_path=f"/v1{endpoint_path}",
+            source_ip=source_ip,
+            http_method="POST",
+            is_stream=is_stream,
+            has_image=has_image,
+            success=False,
+            status_code=status_code,
+            reasoning_level=reasoning_level,
+            request_body_json=None,
+            message=detail.get("message"),
+            error_type=ProxyService._error_type_from_status(status_code),
+            error_code=detail.get("code"),
+            retryable=False,
+            **ProxyService._build_api_client_log_kwargs(api_client_auth, auth_result="authenticated"),
+            trace=trace,
+            attempt_count=0,
+            token_request_payload=None,
+            schedule_token_fill=False,
+        )
+        raise HTTPException(status_code=status_code, detail=detail)
+
+    @staticmethod
     def _mark_success_by_id(db: Session, provider_id: int, provider_model_id: int, latency_ms: int) -> None:
         provider = db.get(Provider, provider_id)
         provider_model = db.get(ProviderModel, provider_model_id)
@@ -271,9 +378,32 @@ class ProxyService:
         has_image = ProxyService._payload_has_image(payload)
         setting = await ProxyService._get_setting_async(db)
         request_id = uuid4().hex
+        reasoning_level = LogService.extract_reasoning_level(payload)
+        token_limit_error = ProxyService._build_request_token_limit_error(
+            setting=setting,
+            payload=payload,
+            model_name=model_name,
+            endpoint_path=endpoint_path,
+        )
+        if token_limit_error is not None:
+            reject_status_code, reject_detail = token_limit_error
+            await ProxyService._reject_by_request_token_limit_async(
+                db,
+                status_code=reject_status_code,
+                detail=reject_detail,
+                model_name=model_name,
+                endpoint_path=endpoint_path,
+                log_type=log_type,
+                request_id=request_id,
+                is_stream=False,
+                has_image=has_image,
+                reasoning_level=reasoning_level,
+                api_client_auth=api_client_auth,
+                trace_id=trace_id,
+                source_ip=source_ip,
+            )
         conversation_key = ProxyService._extract_conversation_key(payload, request_id)
         session_id = LogService.extract_session_id(payload, conversation_key=conversation_key, fallback=request_id)
-        reasoning_level = LogService.extract_reasoning_level(payload)
         request_body_json = ProxyService._serialize_payload_for_logging(
             payload,
             setting=setting,
@@ -549,9 +679,32 @@ class ProxyService:
         has_image = ProxyService._payload_has_image(payload)
         setting = await ProxyService._get_setting_async(db)
         request_id = uuid4().hex
+        reasoning_level = LogService.extract_reasoning_level(payload)
+        token_limit_error = ProxyService._build_request_token_limit_error(
+            setting=setting,
+            payload=payload,
+            model_name=model_name,
+            endpoint_path=endpoint_path,
+        )
+        if token_limit_error is not None:
+            reject_status_code, reject_detail = token_limit_error
+            await ProxyService._reject_by_request_token_limit_async(
+                db,
+                status_code=reject_status_code,
+                detail=reject_detail,
+                model_name=model_name,
+                endpoint_path=endpoint_path,
+                log_type=log_type,
+                request_id=request_id,
+                is_stream=True,
+                has_image=has_image,
+                reasoning_level=reasoning_level,
+                api_client_auth=api_client_auth,
+                trace_id=trace_id,
+                source_ip=source_ip,
+            )
         conversation_key = ProxyService._extract_conversation_key(payload, request_id)
         session_id = LogService.extract_session_id(payload, conversation_key=conversation_key, fallback=request_id)
-        reasoning_level = LogService.extract_reasoning_level(payload)
         request_body_json = ProxyService._serialize_payload_for_logging(
             payload,
             setting=setting,

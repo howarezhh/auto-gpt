@@ -57,12 +57,22 @@
             </select>
         </label>
     </div>
+    <div class="models-batch-bar" id="models-batch-bar">
+        <div class="models-batch-meta" id="models-batch-meta">已选 0 个模型</div>
+        <label class="models-batch-control">
+            <span>批量上下文窗口</span>
+            <input class="field-input" id="models-batch-context-window-tokens" type="number" min="1" placeholder="例如 128000">
+        </label>
+        <button class="btn btn-accent interactive-btn" id="models-batch-context-apply-btn" type="button" disabled>应用到选中模型</button>
+    </div>
     <div class="table-shell models-catalog-table-shell">
         <table class="data-table models-catalog-table">
             <colgroup>
+                <col class="models-col-select">
                 <col class="models-col-name">
                 <col class="models-col-status">
                 <col class="models-col-ability">
+                <col class="models-col-context">
                 <col class="models-col-price">
                 <col class="models-col-speed">
                 <col class="models-col-providers">
@@ -71,9 +81,11 @@
             </colgroup>
             <thead>
                 <tr>
+                    <th><input id="models-select-page" type="checkbox" aria-label="选择当前页模型"></th>
                     <th>模型</th>
                     <th>状态</th>
                     <th>能力</th>
+                    <th>上下文窗口</th>
                     <th>基础价格</th>
                     <th>速度</th>
                     <th>可用中转站</th>
@@ -109,6 +121,10 @@
             <label>
                 <span>展示名</span>
                 <input class="field-input" id="model-display-name" placeholder="留空则直接显示模型名">
+            </label>
+            <label>
+                <span>最大上下文窗口 token</span>
+                <input class="field-input" id="model-context-window-tokens" type="number" min="1" placeholder="留空表示未单独设置">
             </label>
             <label>
                 <span>输入单价 /1M</span>

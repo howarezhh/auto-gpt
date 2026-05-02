@@ -16,6 +16,7 @@ DEFAULT_SETTING = {
     "manual_allow_fallback": True,
     "global_timeout_ms": 30000,
     "global_max_retries": 2,
+    "global_max_request_tokens": 0,
     "circuit_breaker_threshold": 3,
     "auto_health_check": True,
     "health_check_interval_sec": 60,

@@ -13,6 +13,7 @@ class SettingUpdate(BaseModel):
     manual_allow_fallback: bool = True
     global_timeout_ms: int = Field(default=30000, ge=0)
     global_max_retries: int = Field(default=2, ge=0)
+    global_max_request_tokens: int = Field(default=0, ge=0)
     circuit_breaker_threshold: int = Field(default=3, ge=0)
     auto_health_check: bool = True
     health_check_interval_sec: int = Field(default=60, ge=0)

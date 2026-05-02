@@ -94,6 +94,7 @@ class ModelCatalogService:
             enabled=payload.enabled,
             supports_stream=payload.supports_stream,
             supports_vision=payload.supports_vision,
+            context_window_tokens=payload.context_window_tokens,
             input_price_per_1k=payload.input_price_per_1k,
             output_price_per_1k=payload.output_price_per_1k,
             cache_price_per_1k=(
@@ -131,6 +132,36 @@ class ModelCatalogService:
         ModelCatalogService.invalidate_model_runtime_cache()
         db.refresh(catalog)
         return catalog
+
+    @staticmethod
+    def batch_update_context_window(
+        db: Session,
+        *,
+        model_names: list[str],
+        context_window_tokens: int | None,
+    ) -> list[ModelCatalog]:
+        normalized_names = [item.strip() for item in model_names if isinstance(item, str) and item.strip()]
+        if not normalized_names:
+            raise ValueError("请选择要更新的模型")
+        unique_names = list(dict.fromkeys(normalized_names))
+        catalogs = list(
+            db.scalars(
+                select(ModelCatalog)
+                .where(ModelCatalog.model_name.in_(unique_names))
+                .order_by(ModelCatalog.model_name.asc())
+            )
+        )
+        found_names = {catalog.model_name for catalog in catalogs}
+        missing_names = [name for name in unique_names if name not in found_names]
+        if missing_names:
+            raise ValueError(f"模型不存在：{'、'.join(missing_names)}")
+        for catalog in catalogs:
+            catalog.context_window_tokens = context_window_tokens
+        db.commit()
+        ModelCatalogService.invalidate_model_runtime_cache()
+        for catalog in catalogs:
+            db.refresh(catalog)
+        return catalogs
 
     @staticmethod
     def delete_model(db: Session, catalog: ModelCatalog) -> None:
@@ -393,6 +424,7 @@ class ModelCatalogService:
             "enabled": catalog.enabled,
             "supports_stream": catalog.supports_stream,
             "supports_vision": catalog.supports_vision,
+            "context_window_tokens": catalog.context_window_tokens,
             "input_price_per_1k": catalog.input_price_per_1k,
             "output_price_per_1k": catalog.output_price_per_1k,
             "cache_price_per_1k": catalog.cache_price_per_1k,

@@ -2,7 +2,12 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Upl
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.schemas.model_catalog import ModelCatalogCreate, ModelCatalogDetailOut, ModelCatalogOut
+from app.schemas.model_catalog import (
+    ModelCatalogBatchContextWindowUpdate,
+    ModelCatalogCreate,
+    ModelCatalogDetailOut,
+    ModelCatalogOut,
+)
 from app.schemas.model_catalog import ModelCatalogPageOut, ModelCatalogUpdate, UserModelOut
 from app.services.asset_service import AssetService
 from app.services.admin_audit_service import AdminAuditService
@@ -60,6 +65,42 @@ def create_model(
     )
     detail = ModelCatalogService.get_model_detail(db, catalog.model_name)
     return ModelCatalogDetailOut(**detail)
+
+
+@router.post(
+    "/api/models/batch/context-window",
+    response_model=list[ModelCatalogOut],
+    dependencies=[Depends(require_admin_api_user)],
+)
+def batch_update_model_context_window(
+    payload: ModelCatalogBatchContextWindowUpdate,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_admin_api_user),
+) -> list[ModelCatalogOut]:
+    try:
+        catalogs = ModelCatalogService.batch_update_context_window(
+            db,
+            model_names=payload.model_names,
+            context_window_tokens=payload.context_window_tokens,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    AdminAuditService.create_log(
+        db,
+        actor_user_id=current_user.id,
+        actor_username=current_user.username,
+        action="batch_update",
+        entity_type="model",
+        entity_name="模型上下文窗口",
+        summary=f"批量更新 {len(catalogs)} 个模型的最大上下文窗口",
+        detail=payload.model_dump(),
+    )
+    updated_names = {catalog.model_name for catalog in catalogs}
+    return [
+        ModelCatalogOut(**item)
+        for item in ModelCatalogService.list_model_dicts(db)
+        if item["model_name"] in updated_names
+    ]
 
 
 @router.get("/api/models/{model_name}", response_model=ModelCatalogDetailOut, dependencies=[Depends(require_admin_api_user)])

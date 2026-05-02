@@ -15,6 +15,7 @@ class AppSetting(Base):
     manual_allow_fallback: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     global_timeout_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=30000)
     global_max_retries: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
+    global_max_request_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     circuit_breaker_threshold: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
     auto_health_check: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     health_check_interval_sec: Mapped[int] = mapped_column(Integer, nullable=False, default=60)

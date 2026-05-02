@@ -35,6 +35,10 @@ class TokenUsageService:
     _redis_client: Redis | None = None
 
     @staticmethod
+    def estimate_request_tokens(payload: dict[str, Any], *, model_name: str | None, request_path: str | None) -> int | None:
+        return TokenUsageService._count_request_tokens(payload, model_name=model_name, request_path=request_path)
+
+    @staticmethod
     def enqueue_log_finalize(
         *,
         log_id: int,

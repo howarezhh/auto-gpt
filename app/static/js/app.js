@@ -3871,6 +3871,10 @@
         const pageMeta = document.getElementById("models-page-meta");
         const prevPageBtn = document.getElementById("models-prev-page-btn");
         const nextPageBtn = document.getElementById("models-next-page-btn");
+        const selectPageInput = document.getElementById("models-select-page");
+        const batchMeta = document.getElementById("models-batch-meta");
+        const batchContextWindowInput = document.getElementById("models-batch-context-window-tokens");
+        const batchContextApplyBtn = document.getElementById("models-batch-context-apply-btn");
         const refreshBtn = document.getElementById("models-refresh-btn");
         const addBtn = document.getElementById("add-model-btn");
         const modal = document.getElementById("model-modal");
@@ -3884,6 +3888,7 @@
         const enabledInput = document.getElementById("model-enabled");
         const supportsStreamInput = document.getElementById("model-supports-stream");
         const supportsVisionInput = document.getElementById("model-supports-vision");
+        const contextWindowInput = document.getElementById("model-context-window-tokens");
         const inputPriceInput = document.getElementById("model-input-price");
         const outputPriceInput = document.getElementById("model-output-price");
         const cachePriceInput = document.getElementById("model-cache-price");
@@ -3892,7 +3897,8 @@
         const bindingBody = document.getElementById("model-binding-body");
         if (
             !tableBody || !searchInput || !enabledSelect || !providerSelect || !pageSizeSelect || !cachePriceInput
-            || !supportsStreamInput || !supportsVisionInput
+            || !supportsStreamInput || !supportsVisionInput || !contextWindowInput
+            || !selectPageInput || !batchMeta || !batchContextWindowInput || !batchContextApplyBtn
             || !pageMeta || !prevPageBtn || !nextPageBtn || !refreshBtn || !addBtn || !modal || !form || !bindingBody
         ) return;
 
@@ -3904,6 +3910,7 @@
             pageSize: 20,
             total: 0,
             totalPages: 1,
+            selectedModelNames: new Set(),
         };
         let searchTimer = null;
 
@@ -3948,15 +3955,31 @@
             `;
         }
 
+        function formatContextWindow(value) {
+            return value == null ? "未设置" : `${formatNumber(value)} token`;
+        }
+
+        function updateBatchBar() {
+            const selectedCount = state.selectedModelNames.size;
+            batchMeta.textContent = `已选 ${formatNumber(selectedCount)} 个模型`;
+            batchContextApplyBtn.disabled = selectedCount === 0;
+            const pageNames = state.models.map((item) => item.model_name);
+            const selectedOnPage = pageNames.filter((name) => state.selectedModelNames.has(name)).length;
+            selectPageInput.checked = pageNames.length > 0 && selectedOnPage === pageNames.length;
+            selectPageInput.indeterminate = selectedOnPage > 0 && selectedOnPage < pageNames.length;
+        }
+
         function renderTable() {
             tableBody.innerHTML = state.models.map((item) => `
                 <tr>
+                    <td><input type="checkbox" data-model-select="${escapeHtml(item.model_name)}" aria-label="选择模型 ${escapeHtml(item.model_name)}" ${state.selectedModelNames.has(item.model_name) ? "checked" : ""}></td>
                     <td>
                         <strong>${escapeHtml(item.display_name || item.model_name)}</strong>
                         <div class="table-muted">${escapeHtml(item.model_name)}</div>
                     </td>
                     <td>${item.enabled ? '<span class="status-badge status-healthy">已启用</span>' : '<span class="status-badge status-unknown">已停用</span>'}</td>
                     <td>${item.supports_stream ? "流式" : "非流式"} / ${item.supports_vision ? "图像" : "文本"}</td>
+                    <td>${escapeHtml(formatContextWindow(item.context_window_tokens))}</td>
                     <td>
                         <div>输入 ${escapeHtml(formatPrice(item.input_price_per_1k ?? item.lowest_input_price_per_1k))}</div>
                         <div class="table-muted">输出 ${escapeHtml(formatPrice(item.output_price_per_1k ?? item.lowest_output_price_per_1k))}</div>
@@ -3975,8 +3998,9 @@
                         </div>
                     </td>
                 </tr>
-            `).join("") || '<tr><td colspan="7"><div class="empty-state">暂无模型配置</div></td></tr>';
+            `).join("") || '<tr><td colspan="10"><div class="empty-state">暂无模型配置</div></td></tr>';
             enhanceInteractiveButtons(tableBody);
+            updateBatchBar();
         }
 
         function renderPagination() {
@@ -4085,6 +4109,7 @@
             enabledInput.checked = detail?.enabled ?? true;
             supportsStreamInput.checked = detail?.supports_stream ?? true;
             supportsVisionInput.checked = detail?.supports_vision ?? false;
+            contextWindowInput.value = detail?.context_window_tokens == null ? "" : detail.context_window_tokens;
             inputPriceInput.value = detail?.input_price_per_1k == null ? "" : toPricePer1M(detail.input_price_per_1k);
             outputPriceInput.value = detail?.output_price_per_1k == null ? "" : toPricePer1M(detail.output_price_per_1k);
             cachePriceInput.value = detail?.cache_price_per_1k == null
@@ -4167,6 +4192,60 @@
             }
         });
 
+        tableBody.addEventListener("change", (event) => {
+            const checkbox = event.target.closest("[data-model-select]");
+            if (!checkbox) return;
+            const modelName = checkbox.dataset.modelSelect;
+            if (!modelName) return;
+            if (checkbox.checked) {
+                state.selectedModelNames.add(modelName);
+            } else {
+                state.selectedModelNames.delete(modelName);
+            }
+            updateBatchBar();
+        });
+
+        selectPageInput.addEventListener("change", () => {
+            state.models.forEach((item) => {
+                if (selectPageInput.checked) {
+                    state.selectedModelNames.add(item.model_name);
+                } else {
+                    state.selectedModelNames.delete(item.model_name);
+                }
+            });
+            renderTable();
+        });
+
+        batchContextApplyBtn.addEventListener("click", async () => {
+            const modelNames = Array.from(state.selectedModelNames);
+            if (!modelNames.length) {
+                showToast("请先选择模型", "error");
+                return;
+            }
+            if (batchContextWindowInput.value === "") {
+                showToast("请填写要应用的上下文窗口 token", "error");
+                return;
+            }
+            const contextWindowTokens = Number(batchContextWindowInput.value);
+            if (!Number.isFinite(contextWindowTokens) || contextWindowTokens < 1) {
+                showToast("上下文窗口 token 必须大于 0", "error");
+                return;
+            }
+            try {
+                setButtonLoading(batchContextApplyBtn, true);
+                await api.post("/api/models/batch/context-window", {
+                    model_names: modelNames,
+                    context_window_tokens: Math.floor(contextWindowTokens),
+                });
+                showToast("上下文窗口已批量应用");
+                await loadData({ silent: true });
+            } catch (error) {
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(batchContextApplyBtn, false);
+            }
+        });
+
         bindingBody.addEventListener("input", refreshBindingRows);
         bindingBody.addEventListener("change", (event) => {
             if (event.target.matches('input[data-binding-field="bound"]')) {
@@ -4188,6 +4267,7 @@
                 enabled: enabledInput.checked,
                 supports_stream: supportsStreamInput.checked,
                 supports_vision: supportsVisionInput.checked,
+                context_window_tokens: contextWindowInput.value === "" ? null : Number(contextWindowInput.value),
                 input_price_per_1k: inputPriceInput.value === "" ? null : toPricePer1K(Number(inputPriceInput.value)),
                 output_price_per_1k: outputPriceInput.value === "" ? null : toPricePer1K(Number(outputPriceInput.value)),
                 cache_price_per_1k: cachePriceInput.value === ""
@@ -4308,6 +4388,7 @@
         document.getElementById("setting-default-provider-id").value = settings.default_provider_id ?? "";
         document.getElementById("setting-global-timeout-ms").value = settings.global_timeout_ms;
         document.getElementById("setting-global-max-retries").value = settings.global_max_retries;
+        document.getElementById("setting-global-max-request-tokens").value = settings.global_max_request_tokens ?? 0;
         document.getElementById("setting-circuit-breaker-threshold").value = settings.circuit_breaker_threshold;
         document.getElementById("setting-health-check-interval-sec").value = settings.health_check_interval_sec;
         document.getElementById("setting-recovery-probe-interval-sec").value = settings.recovery_probe_interval_sec;
@@ -4353,6 +4434,7 @@
                 manual_allow_fallback: manualAllowFallbackInput.checked,
                 global_timeout_ms: Number(document.getElementById("setting-global-timeout-ms").value),
                 global_max_retries: Number(document.getElementById("setting-global-max-retries").value),
+                global_max_request_tokens: Number(document.getElementById("setting-global-max-request-tokens").value),
                 circuit_breaker_threshold: Number(document.getElementById("setting-circuit-breaker-threshold").value),
                 auto_health_check: document.getElementById("setting-auto-health-check").checked,
                 health_check_interval_sec: Number(document.getElementById("setting-health-check-interval-sec").value),
