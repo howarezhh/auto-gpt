@@ -75,6 +75,7 @@ class HealthService:
             status_code=status_code,
             latency_ms=latency_ms,
             message=message,
+            trace=HealthService._flatten_model_endpoint_traces(model_results),
             schedule_token_fill=False,
         )
         return {
@@ -149,11 +150,12 @@ class HealthService:
         )
         success = all(item["success"] for item in endpoint_results)
         provider_success = any(item["success"] for item in endpoint_results)
-        health_status = "healthy" if success else ("degraded" if provider_success else "unhealthy")
+        adapted_success = any(item.get("support_mode") == "adapted" for item in endpoint_results)
+        health_status = "healthy" if success and not adapted_success else ("degraded" if provider_success else "unhealthy")
         latency_ms = max((item["latency_ms"] for item in endpoint_results), default=0)
         status_code = next((item.get("status_code") for item in endpoint_results if not item["success"]), 200 if success else None)
         message = "；".join(
-            f"{item['endpoint_label']} {'成功' if item['success'] else '失败'}"
+            f"{item.get('support_label') or item['endpoint_label'] + ('成功' if item['success'] else '失败')}"
             + (f"（{item['message']}）" if item.get("message") else "")
             for item in endpoint_results
         )
@@ -176,6 +178,7 @@ class HealthService:
             status_code=status_code,
             latency_ms=latency_ms,
             message=message,
+            trace=HealthService._endpoint_results_to_trace(endpoint_results, provider=provider, provider_model=provider_model),
             schedule_token_fill=False,
         )
         return {
@@ -229,17 +232,32 @@ class HealthService:
     ) -> dict[str, Any]:
         started = time.perf_counter()
         endpoint_label = "chat/completions" if endpoint_path == "/chat/completions" else "responses"
+        native_support_label = f"原生支持 {endpoint_label}"
+        adapted_support_label = f"通过适配支持 {endpoint_label}"
+        unsupported_label = f"不支持 {endpoint_label}"
         try:
-            response, _ = await ProxyService._forward_json(provider, endpoint_path, payload)
+            response, _, fallback_trace = await ProxyService._forward_json_with_endpoint_fallback(
+                provider,
+                provider_model,
+                endpoint_path,
+                payload,
+                started=started,
+            )
             latency_ms = int((time.perf_counter() - started) * 1000)
             output_text = ProxyService._extract_response_text(response, limit_bytes=160)
+            adapted = any(item.get("result") == "endpoint_fallback_success" for item in fallback_trace)
             return {
                 "endpoint_path": endpoint_path,
                 "endpoint_label": endpoint_label,
                 "success": True,
+                "native_success": not adapted,
+                "adapted_success": adapted,
+                "support_mode": "adapted" if adapted else "native",
+                "support_label": adapted_support_label if adapted else native_support_label,
                 "latency_ms": latency_ms,
                 "status_code": 200,
                 "message": output_text or "ok",
+                "trace": fallback_trace,
             }
         except httpx.HTTPStatusError as exc:
             latency_ms = int((time.perf_counter() - started) * 1000)
@@ -248,9 +266,14 @@ class HealthService:
                 "endpoint_path": endpoint_path,
                 "endpoint_label": endpoint_label,
                 "success": False,
+                "native_success": False,
+                "adapted_success": False,
+                "support_mode": "unsupported",
+                "support_label": unsupported_label,
                 "latency_ms": latency_ms,
                 "status_code": exc.response.status_code,
                 "message": message,
+                "trace": [],
             }
         except requests.HTTPError as exc:
             latency_ms = int((time.perf_counter() - started) * 1000)
@@ -260,20 +283,69 @@ class HealthService:
                 "endpoint_path": endpoint_path,
                 "endpoint_label": endpoint_label,
                 "success": False,
+                "native_success": False,
+                "adapted_success": False,
+                "support_mode": "unsupported",
+                "support_label": unsupported_label,
                 "latency_ms": latency_ms,
                 "status_code": response.status_code if response is not None else None,
                 "message": message,
+                "trace": [],
             }
         except Exception as exc:
             latency_ms = int((time.perf_counter() - started) * 1000)
+            status_code = getattr(exc, "status_code", None)
+            detail = getattr(exc, "detail", None)
+            message = ProxyService._error_message_for_log(detail) if detail is not None else str(exc)
             return {
                 "endpoint_path": endpoint_path,
                 "endpoint_label": endpoint_label,
                 "success": False,
+                "native_success": False,
+                "adapted_success": False,
+                "support_mode": "unsupported",
+                "support_label": unsupported_label,
                 "latency_ms": latency_ms,
-                "status_code": None,
-                "message": str(exc),
+                "status_code": status_code,
+                "message": message,
+                "trace": [],
             }
+
+    @staticmethod
+    def _endpoint_results_to_trace(endpoint_results: list[dict], *, provider: Provider, provider_model: ProviderModel) -> list[dict]:
+        trace: list[dict] = []
+        for item in endpoint_results:
+            item_trace = item.get("trace")
+            if isinstance(item_trace, list) and item_trace:
+                trace.extend(item_trace)
+                continue
+            result = "success" if item.get("success") else "request_rejected"
+            trace.append(
+                ProxyService._build_trace_item(
+                    provider,
+                    provider_model,
+                    result,
+                    int(item.get("latency_ms") or 0),
+                    status_code=item.get("status_code"),
+                    error=None if item.get("success") else item.get("message"),
+                    extra={
+                        "endpoint": item.get("endpoint_path"),
+                        "support_mode": item.get("support_mode"),
+                        "support_label": item.get("support_label"),
+                    },
+                )
+            )
+        return trace
+
+    @staticmethod
+    def _flatten_model_endpoint_traces(model_results: list[dict]) -> list[dict]:
+        trace: list[dict] = []
+        for model_result in model_results:
+            for endpoint_result in model_result.get("endpoint_results") or []:
+                endpoint_trace = endpoint_result.get("trace")
+                if isinstance(endpoint_trace, list):
+                    trace.extend(endpoint_trace)
+        return trace
 
     @staticmethod
     def _build_chat_probe_payload(provider_model: ProviderModel, *, vision_probe: bool, stream_probe: bool) -> dict[str, Any]:

@@ -14,7 +14,9 @@ from app.services.concurrency_service import (
     ConcurrencyService,
 )
 from app.services.proxy_service import ProxyService
+from app.services.openai_error_service import OpenAIErrorService
 from app.services.setting_service import SettingService
+from app.utils.json_utils import dumps_json
 from app.utils.http_headers import build_proxy_response_headers
 
 
@@ -92,12 +94,44 @@ def _get_setting_with_scoped_session():
         db.close()
 
 
-async def _release_after_stream(stream: AsyncIterator[bytes], lease: ConcurrencyLease) -> AsyncIterator[bytes]:
+async def _release_after_stream(
+    stream: AsyncIterator[bytes],
+    lease: ConcurrencyLease,
+    *,
+    trace_id: str | None,
+) -> AsyncIterator[bytes]:
     try:
         async for chunk in stream:
             yield chunk
+    except Exception as exc:
+        yield _format_sse_error_event(exc, trace_id=trace_id)
+        yield b"data: [DONE]\n\n"
     finally:
         await _release_request_concurrency(lease)
+
+
+def _format_sse_error_event(exc: Exception, *, trace_id: str | None) -> bytes:
+    status_code = getattr(exc, "status_code", 500)
+    detail = getattr(exc, "detail", None)
+    error_type, default_code, retryable = OpenAIErrorService.classify_status_code(
+        status_code if isinstance(status_code, int) else 500
+    )
+    message = OpenAIErrorService.extract_message(detail, fallback=str(exc) or exc.__class__.__name__)
+    code = default_code
+    if isinstance(detail, dict):
+        if isinstance(detail.get("code"), str):
+            code = detail["code"]
+        elif isinstance(detail.get("error"), dict) and isinstance(detail["error"].get("code"), str):
+            code = detail["error"]["code"]
+    payload = OpenAIErrorService.build_error_payload(
+        message=message,
+        code=code,
+        trace_id=trace_id,
+        error_type=error_type,
+        retryable=retryable,
+        detail=detail if isinstance(detail, dict) else {"exception_type": exc.__class__.__name__},
+    )
+    return f"event: error\ndata: {dumps_json(payload)}\n\n".encode("utf-8")
 
 
 @router.post("/v1/chat/completions", response_model=None)
@@ -127,7 +161,11 @@ async def chat_completions(
                 trace_length=len(trace),
                 trace_id=getattr(request.state, "trace_id", None),
             )
-            return StreamingResponse(_release_after_stream(stream, lease), media_type="text/event-stream", headers=headers)
+            return StreamingResponse(
+                _release_after_stream(stream, lease, trace_id=getattr(request.state, "trace_id", None)),
+                media_type="text/event-stream",
+                headers=headers,
+            )
         except Exception:
             await _release_request_concurrency(lease)
             raise
@@ -183,7 +221,11 @@ async def responses(
                 trace_length=len(trace),
                 trace_id=getattr(request.state, "trace_id", None),
             )
-            return StreamingResponse(_release_after_stream(stream, lease), media_type="text/event-stream", headers=headers)
+            return StreamingResponse(
+                _release_after_stream(stream, lease, trace_id=getattr(request.state, "trace_id", None)),
+                media_type="text/event-stream",
+                headers=headers,
+            )
         except Exception:
             await _release_request_concurrency(lease)
             raise

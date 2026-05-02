@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException
+from fastapi.exceptions import RequestValidationError
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -536,6 +537,10 @@ async def trace_and_runtime_middleware(request: Request, call_next):
     RuntimeStateService.enter_request()
     try:
         response = await call_next(request)
+    except Exception as exc:
+        if request.url.path.startswith("/v1/"):
+            return _build_unhandled_v1_error_response(request, exc)
+        raise
     finally:
         RuntimeStateService.leave_request()
     response.headers["X-Trace-Id"] = trace_id
@@ -557,7 +562,27 @@ async def api_client_auth_error_handler(request: Request, exc: ApiClientAuthErro
             error_type="authentication_error" if exc.status_code in {401, 403} else "rate_limit_error",
             retryable=exc.status_code == 429,
         ),
-        headers={"X-Trace-Id": trace_id or ""},
+        headers={"X-Trace-Id": trace_id or "", "X-Request-Id": trace_id or ""},
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_exception_handler(request: Request, exc: RequestValidationError):
+    if not request.url.path.startswith("/v1/"):
+        return JSONResponse(status_code=422, content={"detail": exc.errors()})
+    trace_id = getattr(request.state, "trace_id", None)
+    detail = {"errors": _make_json_safe(exc.errors())}
+    return JSONResponse(
+        status_code=422,
+        content=OpenAIErrorService.build_error_payload(
+            message="Request validation failed",
+            code="request_validation_failed",
+            trace_id=trace_id,
+            error_type="invalid_request_error",
+            retryable=False,
+            detail=detail,
+        ),
+        headers={"X-Trace-Id": trace_id or "", "X-Request-Id": trace_id or ""},
     )
 
 
@@ -588,8 +613,46 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     return JSONResponse(
         status_code=exc.status_code,
         content=content,
-        headers={"X-Trace-Id": trace_id or ""},
+        headers={"X-Trace-Id": trace_id or "", "X-Request-Id": trace_id or ""},
     )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    if request.url.path.startswith("/v1/"):
+        return _build_unhandled_v1_error_response(request, exc)
+    raise exc
+
+
+def _build_unhandled_v1_error_response(request: Request, exc: Exception) -> JSONResponse:
+    trace_id = getattr(request.state, "trace_id", None)
+    message = str(exc).strip() or exc.__class__.__name__
+    detail = {
+        "exception_type": exc.__class__.__name__,
+        "message": message,
+    }
+    return JSONResponse(
+        status_code=500,
+        content=OpenAIErrorService.build_error_payload(
+            message=message,
+            code="internal_server_error",
+            trace_id=trace_id,
+            error_type="server_error",
+            retryable=True,
+            detail=detail,
+        ),
+        headers={"X-Trace-Id": trace_id or "", "X-Request-Id": trace_id or ""},
+    )
+
+
+def _make_json_safe(value):
+    if isinstance(value, dict):
+        return {str(key): _make_json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_make_json_safe(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
 
 
 async def _log_api_client_auth_failure(request: Request, exc: ApiClientAuthError) -> None:

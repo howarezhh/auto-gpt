@@ -45,6 +45,29 @@ class ProviderModelConfigOut(ProviderModelConfigBase):
     model_config = {"from_attributes": True}
 
 
+class ProviderModelMountProviderOut(BaseModel):
+    id: int
+    name: str
+    base_url: str
+    group_name: str | None = None
+    region_tag: str | None = None
+    enabled: bool
+    health_status: str
+
+
+class ProviderModelMountOut(BaseModel):
+    provider: ProviderModelMountProviderOut
+    model: ProviderModelConfigOut
+
+
+class ProviderModelMountListResponse(BaseModel):
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+    items: list[ProviderModelMountOut]
+
+
 class ProviderModelConfigUpdate(BaseModel):
     enabled: bool | None = None
     priority: int | None = None

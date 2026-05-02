@@ -26,6 +26,7 @@
     <a class="page-anchor-link" href="#docs-step-flow">步骤流</a>
     <a class="page-anchor-link" href="#docs-copy-flow">复制流</a>
     <a class="page-anchor-link" href="#docs-example-flow">示例流</a>
+    <a class="page-anchor-link" href="#docs-error-flow">错误返回</a>
     <a class="page-anchor-link" href="#docs-client-flow">客户端配置流</a>
 </nav>
 
@@ -186,11 +187,58 @@ OPENAI_BASE_URL={{ external_v1_base_url }}</code></pre></div>
     "model": "gpt-4o-mini",
     "input": "你好，请用一句话介绍本平台"
   }'</code></pre></div>
-            <p><code>/v1/responses</code> 当前按兼容子集提供能力。图片输入适配时，支持透传字段为 <code>model</code>、<code>instructions</code>、<code>input</code>、<code>temperature</code>、<code>top_p</code>、<code>presence_penalty</code>、<code>frequency_penalty</code>、<code>tools</code>、<code>tool_choice</code>、<code>response_format</code>、<code>stream</code>、<code>user</code>、<code>metadata</code>、<code>seed</code>、<code>max_output_tokens</code>、<code>max_tokens</code>。</p>
-            <p>当前不适配并会直接返回 <code>400</code> 的字段包括 <code>previous_response_id</code>、<code>parallel_tool_calls</code>、<code>reasoning</code>、<code>reasoning_effort</code>、<code>store</code>、<code>text</code>、<code>include</code>、<code>max_tool_calls</code>、<code>truncation</code>、<code>background</code>。</p>
+            <p><code>/v1/responses</code> 当前按兼容子集提供能力。端点互转仅覆盖简单文本、普通图片和基础流式；高风险能力会直接返回错误，不做有损转换。</p>
+            <p>可安全适配字段包括 <code>model</code>、<code>instructions</code>、<code>input</code>、<code>temperature</code>、<code>top_p</code>、<code>presence_penalty</code>、<code>frequency_penalty</code>、<code>stream</code>、<code>user</code>、<code>metadata</code>、<code>seed</code>、<code>max_output_tokens</code>、<code>max_tokens</code>。</p>
+            <p>工具调用、状态上下文、reasoning、结构化输出选项和复杂多模态内容不会互转，会返回明确错误码和原因。</p>
             <div class="hero-actions">
                 <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="curl {{ external_v1_base_url }}/responses &#10;  -H &quot;Content-Type: application/json&quot; &#10;  -H &quot;Authorization: Bearer YOUR_PLATFORM_API_KEY&quot; &#10;  -d '{&#10;    &quot;model&quot;: &quot;gpt-4o-mini&quot;,&#10;    &quot;input&quot;: &quot;你好，请用一句话介绍本平台&quot;&#10;  }'">复制 responses 示例</button>
             </div>
+        </article>
+    </div>
+</section>
+
+<section class="panel-card section-shell anchor-section-offset" id="docs-error-flow">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">错误返回</div>
+            <h3>外部请求一定返回可读结果</h3>
+        </div>
+    </div>
+    <div class="docs-client-grid">
+        <article class="docs-module-card">
+            <h4>JSON 请求错误体</h4>
+            <p>只要平台接收到外部 <code>/v1/*</code> 请求，正常请求返回正常结果；失败请求返回包含错误码、错误说明、追踪 ID 和可重试标记的 JSON。</p>
+            <div class="doc-code-block compact"><pre><code>{
+  "error": {
+    "message": "具体错误说明",
+    "type": "server_error",
+    "code": "upstream_request_failed",
+    "trace_id": "请求追踪 ID",
+    "retryable": true
+  }
+}</code></pre></div>
+        </article>
+        <article class="docs-module-card">
+            <h4>流式请求错误事件</h4>
+            <p>如果 SSE 连接已建立后发生上游中断、超时或空流，平台会发送 <code>event: error</code>，随后发送 <code>data: [DONE]</code> 结束流。</p>
+            <div class="doc-code-block compact"><pre><code>event: error
+data: {"error":{"message":"具体错误说明","code":"stream_interrupted"}}
+
+data: [DONE]</code></pre></div>
+        </article>
+        <article class="docs-module-card">
+            <h4>端点适配错误</h4>
+            <p>当请求包含不适合在 <code>chat/completions</code> 与 <code>responses</code> 间互转的能力时，平台会返回 <code>endpoint_fallback_conversion_unsafe</code> 或 <code>endpoint_response_conversion_unsafe</code>，并列出不转换原因。</p>
+            <div class="doc-code-block compact"><pre><code>{
+  "error": {
+    "message": "不安全转换说明",
+    "code": "endpoint_fallback_conversion_unsafe",
+    "detail": {
+      "unsafe_fields": ["tools"],
+      "unsafe_reasons": ["工具调用不能安全互转"]
+    }
+  }
+}</code></pre></div>
         </article>
     </div>
 </section>

@@ -2,7 +2,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 
 from httpx import HTTPError
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.provider import Provider
@@ -85,6 +85,70 @@ class ProviderService:
         providers = ProviderService.list_providers(db)
         metrics = ProviderService._build_quality_metrics(db, providers)
         return [ProviderService.provider_to_dict(provider, metrics=metrics) for provider in providers]
+
+    @staticmethod
+    def list_provider_model_mounts(
+        db: Session,
+        *,
+        page: int,
+        page_size: int,
+        keyword: str | None = None,
+        provider_id: int | None = None,
+        enabled: bool | None = None,
+        health_status: str | None = None,
+    ) -> dict:
+        page = max(1, page)
+        page_size = max(1, min(page_size, 100))
+        filters = []
+        normalized_keyword = (keyword or "").strip()
+        if normalized_keyword:
+            pattern = f"%{normalized_keyword}%"
+            filters.append(
+                or_(
+                    ProviderModel.model_name.ilike(pattern),
+                    Provider.name.ilike(pattern),
+                    Provider.group_name.ilike(pattern),
+                    Provider.region_tag.ilike(pattern),
+                    Provider.base_url.ilike(pattern),
+                )
+            )
+        if provider_id is not None:
+            filters.append(ProviderModel.provider_id == provider_id)
+        if enabled is not None:
+            filters.append(ProviderModel.enabled == enabled)
+        normalized_health = (health_status or "").strip()
+        if normalized_health:
+            filters.append(ProviderModel.health_status == normalized_health)
+
+        base_stmt = select(ProviderModel).join(Provider)
+        if filters:
+            base_stmt = base_stmt.where(*filters)
+        total = int(db.scalar(select(func.count()).select_from(base_stmt.subquery())) or 0)
+        provider_models = list(
+            db.scalars(
+                base_stmt
+                .options(selectinload(ProviderModel.provider))
+                .order_by(Provider.priority.asc(), Provider.id.asc(), ProviderModel.priority.asc(), ProviderModel.id.asc())
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            )
+        )
+        providers = list({item.provider.id: item.provider for item in provider_models if item.provider is not None}.values())
+        metrics = ProviderService._build_quality_metrics(db, providers) if providers else {"provider_models": {}}
+        return {
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": max(1, (total + page_size - 1) // page_size),
+            "items": [
+                ProviderService.provider_model_mount_to_dict(
+                    item,
+                    metrics=metrics["provider_models"].get(item.id),
+                )
+                for item in provider_models
+                if item.provider is not None
+            ],
+        }
 
     @staticmethod
     def get_provider(db: Session, provider_id: int) -> Provider | None:
@@ -484,6 +548,22 @@ class ProviderService:
             "stability_score": metrics.get("stability_score"),
             "created_at": provider_model.created_at,
             "updated_at": provider_model.updated_at,
+        }
+
+    @staticmethod
+    def provider_model_mount_to_dict(provider_model: ProviderModel, *, metrics: dict | None = None) -> dict:
+        provider = provider_model.provider
+        return {
+            "provider": {
+                "id": provider.id,
+                "name": provider.name,
+                "base_url": provider.base_url,
+                "group_name": provider.group_name,
+                "region_tag": provider.region_tag,
+                "enabled": provider.enabled,
+                "health_status": provider.health_status,
+            },
+            "model": ProviderService.provider_model_to_dict(provider_model, metrics=metrics),
         }
 
     @staticmethod

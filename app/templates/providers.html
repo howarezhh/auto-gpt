@@ -121,6 +121,45 @@
             <h2>中转站模型挂载矩阵</h2>
         </div>
     </div>
+    <div class="table-toolbar filter-toolbar provider-model-filter-toolbar">
+        <label>
+            <span>模型名称</span>
+            <input class="field-input search-input" id="provider-model-search" type="search" placeholder="搜索模型名称">
+        </label>
+        <label>
+            <span>中转站</span>
+            <select class="field-input" id="provider-model-provider-id">
+                <option value="">全部中转站</option>
+            </select>
+        </label>
+        <label>
+            <span>启用状态</span>
+            <select class="field-input" id="provider-model-enabled">
+                <option value="">全部状态</option>
+                <option value="true">已启用</option>
+                <option value="false">已停用</option>
+            </select>
+        </label>
+        <label>
+            <span>健康状态</span>
+            <select class="field-input" id="provider-model-health">
+                <option value="">全部健康状态</option>
+                <option value="healthy">健康</option>
+                <option value="degraded">降级</option>
+                <option value="unhealthy">异常</option>
+                <option value="unknown">未知</option>
+            </select>
+        </label>
+        <label>
+            <span>每页数量</span>
+            <select class="field-input" id="provider-model-page-size">
+                <option value="10">10</option>
+                <option value="20" selected>20</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
+            </select>
+        </label>
+    </div>
     <div class="table-shell provider-table-shell">
         <table class="data-table provider-data-table">
             <thead>
@@ -137,6 +176,13 @@
             </thead>
             <tbody id="provider-model-table-body"></tbody>
         </table>
+    </div>
+    <div class="table-toolbar logs-pagination-bar provider-model-pagination-bar">
+        <div class="logs-page-meta" id="provider-model-page-meta">第 1 页，共 1 页 · 共 0 条</div>
+        <div class="logs-page-actions">
+            <button class="btn btn-ghost interactive-btn" id="provider-model-prev-page-btn" type="button">上一页</button>
+            <button class="btn btn-ghost interactive-btn" id="provider-model-next-page-btn" type="button">下一页</button>
+        </div>
     </div>
 </section>
 

@@ -6973,6 +6973,43 @@ html[data-theme="dark"] .nav-link.active {
     }
 }
 
+/* 2026-05-02 navigation readability: enlarge primary menu labels. */
+.site-nav .nav-link {
+    min-height: 72px;
+    padding: 0 18px;
+    gap: 16px;
+    font-size: 28px;
+    line-height: 1.2;
+}
+
+.site-nav .nav-link i {
+    width: 34px;
+    font-size: 28px;
+}
+
+@media (min-width: 993px) {
+    .app-shell {
+        grid-template-columns: 360px minmax(0, 1fr);
+    }
+
+    .site-nav .nav-link {
+        min-height: 76px;
+        padding-inline: 18px;
+    }
+}
+
+@media (max-width: 992px) {
+    .site-nav .nav-link {
+        min-height: 64px;
+        font-size: 24px;
+    }
+
+    .site-nav .nav-link i {
+        width: 30px;
+        font-size: 24px;
+    }
+}
+
 /* 2026-04-29 adaptive fill: cards and dense grids should consume available workspace. */
 .content > * {
     min-width: 0;

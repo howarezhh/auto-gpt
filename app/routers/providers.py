@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -9,6 +9,7 @@ from app.schemas.provider import (
     ProviderCreate,
     ProviderDiscoverModelsIn,
     ProviderDiscoverModelsResponse,
+    ProviderModelMountListResponse,
     ProviderModelConfigOut,
     ProviderModelConfigUpdate,
     ProviderOut,
@@ -26,6 +27,29 @@ router = APIRouter(prefix="/api/providers", tags=["providers"])
 @router.get("", response_model=list[ProviderOut])
 def list_providers(db: Session = Depends(get_db)) -> list[ProviderOut]:
     return [ProviderOut(**item) for item in ProviderService.list_provider_dicts(db)]
+
+
+@router.get("/models", response_model=ProviderModelMountListResponse)
+def list_provider_model_mounts(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    keyword: str | None = Query(default=None),
+    provider_id: int | None = Query(default=None, ge=1),
+    enabled: bool | None = Query(default=None),
+    health_status: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+) -> ProviderModelMountListResponse:
+    return ProviderModelMountListResponse(
+        **ProviderService.list_provider_model_mounts(
+            db,
+            page=page,
+            page_size=page_size,
+            keyword=keyword,
+            provider_id=provider_id,
+            enabled=enabled,
+            health_status=health_status,
+        )
+    )
 
 
 @router.post("", response_model=ProviderOut, status_code=status.HTTP_201_CREATED)

@@ -408,12 +408,20 @@
                 <div class="playground-info-label">${escapeHtml(item.endpoint_label || item.endpoint_path || "-")}</div>
                 <div class="playground-info-value">
                     ${item.success ? '<span class="playground-status-success">成功</span>' : '<span class="playground-status-danger">失败</span>'}
+                    · ${escapeHtml(item.support_label || formatEndpointSupportMode(item.support_mode))}
                     · 状态码 ${escapeHtml(String(item.status_code ?? "-"))}
                     · 耗时 ${escapeHtml(String(item.latency_ms ?? "-"))} ms
                     · ${escapeHtml(item.message || "-")}
                 </div>
             </div>
         `).join("");
+    }
+
+    function formatEndpointSupportMode(mode) {
+        if (mode === "native") return "原生支持";
+        if (mode === "adapted") return "通过适配支持";
+        if (mode === "unsupported") return "不支持";
+        return "支持状态未知";
     }
 
     function renderProviderTestModalBody(result, options = {}) {
@@ -1066,7 +1074,7 @@
             return "-";
         }
         return endpointResults
-            .map((item) => `${item.endpoint_label || item.endpoint_path || "-"}${item.success ? "成功" : "失败"}`)
+            .map((item) => `${item.support_label || `${item.endpoint_label || item.endpoint_path || "-"}${item.success ? "成功" : "失败"}`}`)
             .join(" / ");
     }
 
@@ -2437,6 +2445,14 @@
         const availabilityRefreshBtn = document.getElementById("provider-availability-refresh-btn");
         const availabilityTableBody = document.getElementById("provider-availability-table-body");
         const searchInput = document.getElementById("provider-search");
+        const providerModelSearchInput = document.getElementById("provider-model-search");
+        const providerModelProviderSelect = document.getElementById("provider-model-provider-id");
+        const providerModelEnabledSelect = document.getElementById("provider-model-enabled");
+        const providerModelHealthSelect = document.getElementById("provider-model-health");
+        const providerModelPageSizeSelect = document.getElementById("provider-model-page-size");
+        const providerModelPageMeta = document.getElementById("provider-model-page-meta");
+        const providerModelPrevPageBtn = document.getElementById("provider-model-prev-page-btn");
+        const providerModelNextPageBtn = document.getElementById("provider-model-next-page-btn");
         const checkAllBtn = document.getElementById("providers-check-all-btn");
         const submitBtn = document.getElementById("provider-submit-btn");
         const providerModelConfigList = document.getElementById("provider-model-config-list");
@@ -2494,6 +2510,13 @@
         const DEFAULT_PROVIDER_PRESETS = ["gpt-5.4", "gpt-5", "gpt-5-mini", "gpt-4.1", "gpt-4o", "gpt-4o-mini", "o3", "o4-mini"];
         const PROVIDER_PRESETS_STORAGE_KEY = "aotu_provider_model_presets";
         let providers = [];
+        let providerModelItems = [];
+        const providerModelState = {
+            page: 1,
+            pageSize: 20,
+            total: 0,
+            totalPages: 1,
+        };
         let discoveredModels = [];
         let catalogModels = [];
         let providerFormSnapshot = "";
@@ -3002,8 +3025,9 @@
             providers = await api.get("/api/providers");
             renderProviderTelemetry(providers);
             renderProviders(searchInput.value);
-            renderProviderModels(searchInput.value);
+            renderProviderModelFilterOptions();
             populateAvailabilityProviderOptions();
+            await loadProviderModels({ silent: true });
             await loadAvailability({ manual: false });
         }
 
@@ -3405,6 +3429,56 @@
             }
         }
 
+        function renderProviderModelFilterOptions(selectedProviderId = providerModelProviderSelect?.value || "") {
+            if (!providerModelProviderSelect) return;
+            providerModelProviderSelect.innerHTML = '<option value="">全部中转站</option>' + providers.map((provider) => `
+                <option value="${provider.id}" ${String(provider.id) === String(selectedProviderId) ? "selected" : ""}>
+                    ${escapeHtml(provider.name)}${provider.group_name ? ` · ${escapeHtml(provider.group_name)}` : ""}
+                </option>
+            `).join("");
+        }
+
+        function buildProviderModelListParams() {
+            const params = new URLSearchParams({
+                page: String(providerModelState.page),
+                page_size: String(providerModelState.pageSize),
+            });
+            const keyword = providerModelSearchInput?.value.trim();
+            if (keyword) params.set("keyword", keyword);
+            if (providerModelProviderSelect?.value) params.set("provider_id", providerModelProviderSelect.value);
+            if (providerModelEnabledSelect?.value) params.set("enabled", providerModelEnabledSelect.value);
+            if (providerModelHealthSelect?.value) params.set("health_status", providerModelHealthSelect.value);
+            return params;
+        }
+
+        function renderProviderModelPagination() {
+            providerModelState.totalPages = Math.max(1, Number(providerModelState.totalPages || Math.ceil((providerModelState.total || 0) / providerModelState.pageSize) || 1));
+            providerModelState.page = Math.min(Math.max(1, Number(providerModelState.page || 1)), providerModelState.totalPages);
+            if (providerModelPageMeta) {
+                providerModelPageMeta.textContent = `第 ${formatNumber(providerModelState.page)} 页，共 ${formatNumber(providerModelState.totalPages)} 页 · 共 ${formatNumber(providerModelState.total || 0)} 条`;
+            }
+            if (providerModelPrevPageBtn) providerModelPrevPageBtn.disabled = providerModelState.page <= 1;
+            if (providerModelNextPageBtn) providerModelNextPageBtn.disabled = providerModelState.page >= providerModelState.totalPages;
+        }
+
+        async function reloadProviderModelFirstPage() {
+            providerModelState.page = 1;
+            await loadProviderModels({ silent: true });
+        }
+
+        async function loadProviderModels({ silent = false } = {}) {
+            const result = await api.get(`/api/providers/models?${buildProviderModelListParams().toString()}`);
+            providerModelItems = Array.isArray(result.items) ? result.items : [];
+            providerModelState.total = Number(result.total || 0);
+            providerModelState.page = Number(result.page || providerModelState.page || 1);
+            providerModelState.pageSize = Number(result.page_size || providerModelState.pageSize || 20);
+            providerModelState.totalPages = Number(result.total_pages || 1);
+            if (providerModelPageSizeSelect) providerModelPageSizeSelect.value = String(providerModelState.pageSize);
+            renderProviderModels(providerModelItems);
+            renderProviderModelPagination();
+            if (!silent) showToast("模型挂载矩阵已刷新");
+        }
+
         async function loadAvailability({ manual = false } = {}) {
             if (!availabilityProviderSelect || !availabilityWindowSelect || !availabilityBucketSelect || !availabilityTableBody) return;
             const providerId = Number(availabilityProviderSelect.value);
@@ -3475,15 +3549,21 @@
             enhanceInteractiveButtons(tableBody);
         }
 
-        function renderProviderModels(keyword = "") {
-            const query = keyword.trim().toLowerCase();
-            const rows = providers.flatMap((provider) => provider.model_configs.map((model) => ({ provider, model })));
-            const filtered = rows.filter(({ provider, model }) => {
-                if (!query) return true;
-                const text = [provider.name, provider.group_name || "", provider.region_tag || "", provider.base_url, model.model_name, provider.remark || ""].join(" ").toLowerCase();
-                return text.includes(query);
-            });
-            modelTableBody.innerHTML = filtered.map(({ provider, model }) => `
+        function getProviderModelContext(providerId, modelId) {
+            const mountedItem = providerModelItems.find((item) => item.provider?.id === providerId && item.model?.id === modelId);
+            if (mountedItem) {
+                return { owner: mountedItem.provider, modelConfig: mountedItem.model };
+            }
+            const owner = providers.find((item) => item.id === providerId);
+            const modelConfig = owner?.model_configs?.find((item) => item.id === modelId);
+            return { owner, modelConfig };
+        }
+
+        function renderProviderModels(items = []) {
+            modelTableBody.innerHTML = items.map((item) => {
+                const provider = item.provider || {};
+                const model = item.model || {};
+                return `
                 <tr>
                     <td>${escapeHtml(provider.name)}</td>
                     <td>
@@ -3513,13 +3593,13 @@
                         </div>
                     </td>
                 </tr>
-            `).join("") || '<tr><td colspan="8"><div class="empty-state">没有匹配的模型</div></td></tr>';
+            `;
+            }).join("") || '<tr><td colspan="8"><div class="empty-state">当前筛选条件下没有模型挂载记录</div></td></tr>';
             enhanceInteractiveButtons(modelTableBody);
         }
 
         async function testProviderModel(providerId, modelId, trigger, options = {}) {
-            const owner = providers.find((item) => item.id === providerId);
-            const modelConfig = owner?.model_configs?.find((item) => item.id === modelId);
+            const { owner, modelConfig } = getProviderModelContext(providerId, modelId);
             if (!owner || !modelConfig) return;
             setButtonLoading(trigger, true);
             try {
@@ -3614,8 +3694,7 @@
             const action = button.dataset.action;
             const providerId = Number(button.dataset.providerId);
             const modelId = Number(button.dataset.modelId);
-            const owner = providers.find((item) => item.id === providerId);
-            const modelConfig = owner?.model_configs?.find((item) => item.id === modelId);
+            const { owner, modelConfig } = getProviderModelContext(providerId, modelId);
             if (!owner || !modelConfig) return;
 
             if (action === "test-model") {
@@ -3640,6 +3719,53 @@
                 } finally {
                     setButtonLoading(button, false);
                 }
+            }
+        });
+
+        let providerModelSearchTimer = 0;
+        providerModelSearchInput?.addEventListener("input", () => {
+            window.clearTimeout(providerModelSearchTimer);
+            providerModelSearchTimer = window.setTimeout(async () => {
+                try {
+                    await reloadProviderModelFirstPage();
+                } catch (error) {
+                    showToast(error.message, "error");
+                }
+            }, 250);
+        });
+        [providerModelProviderSelect, providerModelEnabledSelect, providerModelHealthSelect].forEach((field) => {
+            field?.addEventListener("change", async () => {
+                try {
+                    await reloadProviderModelFirstPage();
+                } catch (error) {
+                    showToast(error.message, "error");
+                }
+            });
+        });
+        providerModelPageSizeSelect?.addEventListener("change", async () => {
+            providerModelState.pageSize = Number.parseInt(providerModelPageSizeSelect.value || "20", 10) || 20;
+            try {
+                await reloadProviderModelFirstPage();
+            } catch (error) {
+                showToast(error.message, "error");
+            }
+        });
+        providerModelPrevPageBtn?.addEventListener("click", async () => {
+            if (providerModelState.page <= 1) return;
+            providerModelState.page -= 1;
+            try {
+                await loadProviderModels({ silent: true });
+            } catch (error) {
+                showToast(error.message, "error");
+            }
+        });
+        providerModelNextPageBtn?.addEventListener("click", async () => {
+            if (providerModelState.page >= providerModelState.totalPages) return;
+            providerModelState.page += 1;
+            try {
+                await loadProviderModels({ silent: true });
+            } catch (error) {
+                showToast(error.message, "error");
             }
         });
 
