@@ -92,6 +92,8 @@ class ModelCatalogService:
             model_name=payload.model_name,
             display_name=payload.display_name,
             enabled=payload.enabled,
+            supports_stream=payload.supports_stream,
+            supports_vision=payload.supports_vision,
             input_price_per_1k=payload.input_price_per_1k,
             output_price_per_1k=payload.output_price_per_1k,
             cache_price_per_1k=(
@@ -121,6 +123,8 @@ class ModelCatalogService:
         changed_price_fields = set(data) & {"input_price_per_1k", "output_price_per_1k", "cache_price_per_1k"}
         if changed_price_fields:
             ModelCatalogService._sync_provider_prices_from_catalog(db, catalog, price_fields=changed_price_fields)
+        if {"supports_stream", "supports_vision"} & set(data):
+            ModelCatalogService._sync_provider_capabilities_from_catalog(db, catalog)
         if provider_bindings is not None:
             ModelCatalogService._apply_provider_bindings(db, catalog, provider_bindings)
         db.commit()
@@ -164,6 +168,8 @@ class ModelCatalogService:
                     model_name=model_name,
                     display_name=None,
                     enabled=True,
+                    supports_stream=any(item.supports_stream for item in items),
+                    supports_vision=any(item.supports_vision for item in items),
                     input_price_per_1k=ModelCatalogService._pick_base_price(items, field_name="input_price_per_1k"),
                     output_price_per_1k=ModelCatalogService._pick_base_price(items, field_name="output_price_per_1k"),
                     cache_price_per_1k=ModelCatalogService._pick_base_price(items, field_name="cache_price_per_1k"),
@@ -174,6 +180,12 @@ class ModelCatalogService:
                 changed = True
 
             for item in items:
+                if item.supports_stream != catalog.supports_stream:
+                    item.supports_stream = catalog.supports_stream
+                    changed = True
+                if item.supports_vision != catalog.supports_vision:
+                    item.supports_vision = catalog.supports_vision
+                    changed = True
                 derived_multiplier = ModelCatalogService._derive_multiplier(
                     base_input=catalog.input_price_per_1k,
                     direct_input=item.input_price_per_1k,
@@ -239,6 +251,8 @@ class ModelCatalogService:
                     "display_name": catalog.display_name,
                     "speed_label": catalog.speed_label,
                     "remark": catalog.remark,
+                    "supports_stream": catalog.supports_stream,
+                    "supports_vision": catalog.supports_vision,
                     "input_price_per_1k": min(filtered_input_prices) if filtered_input_prices else catalog.input_price_per_1k,
                     "output_price_per_1k": min(filtered_output_prices) if filtered_output_prices else catalog.output_price_per_1k,
                     "cache_price_per_1k": (
@@ -372,6 +386,8 @@ class ModelCatalogService:
             "model_name": catalog.model_name,
             "display_name": catalog.display_name,
             "enabled": catalog.enabled,
+            "supports_stream": catalog.supports_stream,
+            "supports_vision": catalog.supports_vision,
             "input_price_per_1k": catalog.input_price_per_1k,
             "output_price_per_1k": catalog.output_price_per_1k,
             "cache_price_per_1k": catalog.cache_price_per_1k,
@@ -433,6 +449,8 @@ class ModelCatalogService:
                 provider_model = ProviderModel(provider=provider, model_name=catalog.model_name)
                 db.add(provider_model)
             provider_model.enabled = binding.enabled
+            provider_model.supports_stream = catalog.supports_stream
+            provider_model.supports_vision = catalog.supports_vision
             provider_model.priority = binding.priority
             provider_model.weight = binding.weight
             provider_model.price_multiplier = binding.price_multiplier
@@ -483,6 +501,18 @@ class ModelCatalogService:
                     provider_model.cache_price_per_1k = source_cache_price * provider_model.price_multiplier
                 else:
                     provider_model.cache_price_per_1k = None
+
+    @staticmethod
+    def _sync_provider_capabilities_from_catalog(db: Session, catalog: ModelCatalog) -> None:
+        provider_models = list(
+            db.scalars(
+                select(ProviderModel)
+                .where(ProviderModel.model_name == catalog.model_name)
+            )
+        )
+        for provider_model in provider_models:
+            provider_model.supports_stream = catalog.supports_stream
+            provider_model.supports_vision = catalog.supports_vision
 
     @staticmethod
     def _pick_base_price(provider_models: list[ProviderModel], *, field_name: str) -> float | None:

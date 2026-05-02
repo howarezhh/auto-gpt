@@ -215,7 +215,7 @@ class ProviderService:
             raise ValueError("Provider model not found")
 
         for field, value in payload.model_dump(exclude_unset=True).items():
-            if field in {"input_price_per_1k", "output_price_per_1k", "cache_price_per_1k"}:
+            if field in {"supports_stream", "supports_vision", "input_price_per_1k", "output_price_per_1k", "cache_price_per_1k"}:
                 continue
             if field == "price_multiplier" and value is None:
                 continue
@@ -494,10 +494,13 @@ class ProviderService:
                 .order_by(Provider.id.asc())
             )
         )
+        catalog_names = set(db.scalars(select(ModelCatalog.model_name)))
         changed = False
         for provider in providers:
             if provider.provider_models:
                 for provider_model in provider.provider_models:
+                    if provider_model.model_name in catalog_names:
+                        continue
                     inferred = ProviderService._infer_model_capabilities(provider_model.model_name)
                     if inferred["supports_stream"] and not provider_model.supports_stream:
                         provider_model.supports_stream = True
@@ -595,10 +598,14 @@ class ProviderService:
             provider_model.enabled = config.enabled
             provider_model.priority = config.priority
             provider_model.weight = config.weight
-            provider_model.supports_stream = config.supports_stream
-            provider_model.supports_vision = config.supports_vision
             provider_model.price_multiplier = config.price_multiplier or 1.0
             catalog = catalogs_by_name.get(config.model_name)
+            if catalog is not None:
+                provider_model.supports_stream = catalog.supports_stream
+                provider_model.supports_vision = catalog.supports_vision
+            else:
+                provider_model.supports_stream = config.supports_stream
+                provider_model.supports_vision = config.supports_vision
             if catalog is not None:
                 provider_model.input_price_per_1k = (
                     catalog.input_price_per_1k * provider_model.price_multiplier

@@ -134,18 +134,23 @@ def _migrate_app_setting_concurrency_columns(db) -> None:
 def _migrate_cache_price_columns(db) -> None:
     dialect_name = db.get_bind().dialect.name
     float_type = "DOUBLE PRECISION" if dialect_name == "postgresql" else "FLOAT"
+    true_default = "TRUE" if dialect_name == "postgresql" else "1"
+    false_default = "FALSE" if dialect_name == "postgresql" else "0"
     additions_by_table = {
         "provider_models": {
             "cache_price_per_1k": f"ALTER TABLE provider_models ADD COLUMN cache_price_per_1k {float_type}",
         },
         "model_catalogs": {
             "cache_price_per_1k": f"ALTER TABLE model_catalogs ADD COLUMN cache_price_per_1k {float_type}",
+            "supports_stream": f"ALTER TABLE model_catalogs ADD COLUMN supports_stream BOOLEAN NOT NULL DEFAULT {true_default}",
+            "supports_vision": f"ALTER TABLE model_catalogs ADD COLUMN supports_vision BOOLEAN NOT NULL DEFAULT {false_default}",
         },
         "request_logs": {
             "channel_price_cache_per_1k": f"ALTER TABLE request_logs ADD COLUMN channel_price_cache_per_1k {float_type}",
         },
     }
     changed = False
+    added_model_catalog_columns: set[str] = set()
     for table_name, additions in additions_by_table.items():
         existing_columns = _get_table_columns(db, table_name)
         if not existing_columns:
@@ -154,7 +159,21 @@ def _migrate_cache_price_columns(db) -> None:
             if column in existing_columns:
                 continue
             db.execute(text(ddl))
+            if table_name == "model_catalogs":
+                added_model_catalog_columns.add(column)
             changed = True
+    if "supports_stream" in added_model_catalog_columns:
+        db.execute(text(
+            f"UPDATE model_catalogs SET supports_stream = {true_default} "
+            "WHERE model_name IN (SELECT model_name FROM provider_models WHERE supports_stream = "
+            f"{true_default})"
+        ))
+    if "supports_vision" in added_model_catalog_columns:
+        db.execute(text(
+            f"UPDATE model_catalogs SET supports_vision = {true_default} "
+            "WHERE model_name IN (SELECT model_name FROM provider_models WHERE supports_vision = "
+            f"{true_default})"
+        ))
     if changed:
         db.commit()
 

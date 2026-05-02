@@ -36,6 +36,8 @@ class ModelCatalogBase(BaseModel):
     model_name: str = Field(..., min_length=1)
     display_name: str | None = None
     enabled: bool = True
+    supports_stream: bool = True
+    supports_vision: bool = False
     input_price_per_1k: float | None = Field(default=None, ge=0)
     output_price_per_1k: float | None = Field(default=None, ge=0)
     cache_price_per_1k: float | None = Field(default=None, ge=0)
@@ -63,6 +65,8 @@ class ModelCatalogCreate(ModelCatalogBase):
 class ModelCatalogUpdate(BaseModel):
     display_name: str | None = None
     enabled: bool | None = None
+    supports_stream: bool | None = None
+    supports_vision: bool | None = None
     input_price_per_1k: float | None = Field(default=None, ge=0)
     output_price_per_1k: float | None = Field(default=None, ge=0)
     cache_price_per_1k: float | None = Field(default=None, ge=0)
@@ -122,6 +126,8 @@ class UserModelOut(BaseModel):
     display_name: str | None = None
     speed_label: str | None = None
     remark: str | None = None
+    supports_stream: bool = True
+    supports_vision: bool = False
     input_price_per_1k: float | None = None
     output_price_per_1k: float | None = None
     cache_price_per_1k: float | None = None

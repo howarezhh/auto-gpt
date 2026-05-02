@@ -2608,6 +2608,10 @@ html[data-theme="dark"] .settings-switch-control input:checked + .settings-switc
     display: grid;
     grid-template-columns:
         minmax(220px, 1fr)
+        58px
+        minmax(86px, 0.45fr)
+        minmax(76px, 0.35fr)
+        minmax(76px, 0.35fr)
         auto;
     gap: 10px;
     align-items: center;
@@ -3061,11 +3065,15 @@ html[data-theme="dark"] .settings-switch-control input:checked + .settings-switc
 }
 
 .models-catalog-table .models-col-status {
+    width: 8%;
+}
+
+.models-catalog-table .models-col-ability {
     width: 9%;
 }
 
 .models-catalog-table .models-col-price {
-    width: 13%;
+    width: 12%;
 }
 
 .models-catalog-table .models-col-speed {
@@ -3073,11 +3081,11 @@ html[data-theme="dark"] .settings-switch-control input:checked + .settings-switc
 }
 
 .models-catalog-table .models-col-providers {
-    width: 22%;
+    width: 20%;
 }
 
 .models-catalog-table .models-col-multiplier {
-    width: 18%;
+    width: 17%;
 }
 
 .models-catalog-table .models-col-actions {
@@ -5757,7 +5765,7 @@ html[data-theme="dark"] .users-empty-state p {
     }
 
     .provider-model-config-name {
-        grid-column: auto;
+        grid-column: 1 / -1;
     }
 
     .provider-models-detail-card {

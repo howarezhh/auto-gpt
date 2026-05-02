@@ -13,6 +13,8 @@ class ModelCatalog(Base):
     model_name: Mapped[str] = mapped_column(Text, unique=True, nullable=False, index=True)
     display_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    supports_stream: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    supports_vision: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     input_price_per_1k: Mapped[float | None] = mapped_column(Float, nullable=True)
     output_price_per_1k: Mapped[float | None] = mapped_column(Float, nullable=True)
     cache_price_per_1k: Mapped[float | None] = mapped_column(Float, nullable=True)

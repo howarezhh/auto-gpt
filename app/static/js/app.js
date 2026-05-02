@@ -2421,9 +2421,6 @@
             supports_vision: false,
             enabled: true,
             price_multiplier: 1,
-            input_price_per_1k: null,
-            output_price_per_1k: null,
-            cache_price_per_1k: null,
         };
         const DEFAULT_PROVIDER_PRESETS = ["gpt-5.4", "gpt-5", "gpt-5-mini", "gpt-4.1", "gpt-4o", "gpt-4o-mini", "o3", "o4-mini"];
         const PROVIDER_PRESETS_STORAGE_KEY = "aotu_provider_model_presets";
@@ -2459,9 +2456,6 @@
                 price_multiplier: Number.isFinite(Number(config.price_multiplier)) && Number(config.price_multiplier) > 0
                     ? Number(config.price_multiplier)
                     : DEFAULT_PROVIDER_MODEL_CONFIG.price_multiplier,
-                input_price_per_1k: config.input_price_per_1k ?? null,
-                output_price_per_1k: config.output_price_per_1k ?? null,
-                cache_price_per_1k: config.cache_price_per_1k ?? null,
             };
         }
 
@@ -2471,16 +2465,28 @@
             const row = document.createElement("div");
             row.className = "provider-model-config-row";
             row.dataset.modelConfigRow = "true";
-            row.dataset.priority = String(item.priority);
-            row.dataset.weight = String(item.weight);
             row.dataset.supportsStream = item.supports_stream ? "true" : "false";
             row.dataset.supportsVision = item.supports_vision ? "true" : "false";
-            row.dataset.enabled = item.enabled ? "true" : "false";
-            row.dataset.priceMultiplier = String(item.price_multiplier);
             row.innerHTML = `
                 <label class="provider-model-config-name" for="${rowId}-name">
                     <span class="visually-hidden">模型名称</span>
                     <input class="field-input" id="${rowId}-name" data-model-config-field="model_name" value="${escapeHtml(item.model_name)}" placeholder="模型名称，必填" required>
+                </label>
+                <label class="provider-model-mini-switch settings-switch-control" title="控制该模型是否参与当前中转站路由">
+                    <input type="checkbox" data-model-config-field="enabled" ${item.enabled ? "checked" : ""}>
+                    <span class="settings-switch-slider" aria-hidden="true"></span>
+                </label>
+                <label>
+                    <span class="visually-hidden">渠道倍率</span>
+                    <input class="field-input" type="number" min="0.0001" step="0.0001" data-model-config-field="price_multiplier" value="${item.price_multiplier}" placeholder="倍率">
+                </label>
+                <label>
+                    <span class="visually-hidden">优先级</span>
+                    <input class="field-input" type="number" step="1" data-model-config-field="priority" value="${item.priority}" placeholder="优先级">
+                </label>
+                <label>
+                    <span class="visually-hidden">权重</span>
+                    <input class="field-input" type="number" step="1" min="0" data-model-config-field="weight" value="${item.weight}" placeholder="权重">
                 </label>
                 <button class="table-action-btn" data-action="remove-model-config" type="button">删除</button>
             `;
@@ -2541,14 +2547,21 @@
                     return null;
                 }
                 seen.add(modelName);
+                const priceMultiplierInput = row.querySelector('[data-model-config-field="price_multiplier"]');
+                const priceMultiplier = Number(priceMultiplierInput?.value || DEFAULT_PROVIDER_MODEL_CONFIG.price_multiplier);
+                if (!Number.isFinite(priceMultiplier) || priceMultiplier <= 0) {
+                    priceMultiplierInput?.focus();
+                    showToast(`模型 ${modelName} 的倍率必须大于 0`, "error");
+                    return null;
+                }
                 configs.push({
                     model_name: modelName,
-                    priority: Number(row.dataset.priority || DEFAULT_PROVIDER_MODEL_CONFIG.priority),
-                    weight: Number(row.dataset.weight || DEFAULT_PROVIDER_MODEL_CONFIG.weight),
+                    priority: Number(row.querySelector('[data-model-config-field="priority"]')?.value || DEFAULT_PROVIDER_MODEL_CONFIG.priority),
+                    weight: Number(row.querySelector('[data-model-config-field="weight"]')?.value || DEFAULT_PROVIDER_MODEL_CONFIG.weight),
                     supports_stream: row.dataset.supportsStream ? row.dataset.supportsStream === "true" : DEFAULT_PROVIDER_MODEL_CONFIG.supports_stream,
                     supports_vision: row.dataset.supportsVision ? row.dataset.supportsVision === "true" : DEFAULT_PROVIDER_MODEL_CONFIG.supports_vision,
-                    enabled: row.dataset.enabled ? row.dataset.enabled === "true" : DEFAULT_PROVIDER_MODEL_CONFIG.enabled,
-                    price_multiplier: Number(row.dataset.priceMultiplier || DEFAULT_PROVIDER_MODEL_CONFIG.price_multiplier),
+                    enabled: row.querySelector('[data-model-config-field="enabled"]')?.checked ?? DEFAULT_PROVIDER_MODEL_CONFIG.enabled,
+                    price_multiplier: priceMultiplier,
                 });
             }
             return configs;
@@ -3528,6 +3541,8 @@
         const nameInput = document.getElementById("model-name");
         const displayNameInput = document.getElementById("model-display-name");
         const enabledInput = document.getElementById("model-enabled");
+        const supportsStreamInput = document.getElementById("model-supports-stream");
+        const supportsVisionInput = document.getElementById("model-supports-vision");
         const inputPriceInput = document.getElementById("model-input-price");
         const outputPriceInput = document.getElementById("model-output-price");
         const cachePriceInput = document.getElementById("model-cache-price");
@@ -3536,6 +3551,7 @@
         const bindingBody = document.getElementById("model-binding-body");
         if (
             !tableBody || !searchInput || !enabledSelect || !providerSelect || !pageSizeSelect || !cachePriceInput
+            || !supportsStreamInput || !supportsVisionInput
             || !pageMeta || !prevPageBtn || !nextPageBtn || !refreshBtn || !addBtn || !modal || !form || !bindingBody
         ) return;
 
@@ -3599,6 +3615,7 @@
                         <div class="table-muted">${escapeHtml(item.model_name)}</div>
                     </td>
                     <td>${item.enabled ? '<span class="status-badge status-healthy">已启用</span>' : '<span class="status-badge status-unknown">已停用</span>'}</td>
+                    <td>${item.supports_stream ? "流式" : "非流式"} / ${item.supports_vision ? "图像" : "文本"}</td>
                     <td>
                         <div>输入 ${escapeHtml(formatPrice(item.input_price_per_1k ?? item.lowest_input_price_per_1k))}</div>
                         <div class="table-muted">输出 ${escapeHtml(formatPrice(item.output_price_per_1k ?? item.lowest_output_price_per_1k))}</div>
@@ -3725,6 +3742,8 @@
             nameInput.disabled = isEditing;
             displayNameInput.value = detail?.display_name || "";
             enabledInput.checked = detail?.enabled ?? true;
+            supportsStreamInput.checked = detail?.supports_stream ?? true;
+            supportsVisionInput.checked = detail?.supports_vision ?? false;
             inputPriceInput.value = detail?.input_price_per_1k == null ? "" : toPricePer1M(detail.input_price_per_1k);
             outputPriceInput.value = detail?.output_price_per_1k == null ? "" : toPricePer1M(detail.output_price_per_1k);
             cachePriceInput.value = detail?.cache_price_per_1k == null
@@ -3826,6 +3845,8 @@
             const payload = {
                 display_name: displayNameInput.value.trim() || null,
                 enabled: enabledInput.checked,
+                supports_stream: supportsStreamInput.checked,
+                supports_vision: supportsVisionInput.checked,
                 input_price_per_1k: inputPriceInput.value === "" ? null : toPricePer1K(Number(inputPriceInput.value)),
                 output_price_per_1k: outputPriceInput.value === "" ? null : toPricePer1K(Number(outputPriceInput.value)),
                 cache_price_per_1k: cachePriceInput.value === ""
