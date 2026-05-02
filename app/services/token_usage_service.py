@@ -39,6 +39,92 @@ class TokenUsageService:
         return TokenUsageService._count_request_tokens(payload, model_name=model_name, request_path=request_path)
 
     @staticmethod
+    def fast_estimate_request_tokens(payload: dict[str, Any], *, request_path: str | None) -> int | None:
+        if not isinstance(payload, dict):
+            return None
+        if request_path == "/v1/embeddings":
+            return TokenUsageService._fast_count_value_tokens(payload.get("input"))
+        if request_path in {"/v1/chat/completions", "/chat/completions"}:
+            total = TokenUsageService._fast_count_chat_messages(payload.get("messages"))
+            for key in ("tools", "functions", "function_call", "tool_choice", "response_format"):
+                if key in payload:
+                    total += TokenUsageService._fast_count_value_tokens(payload[key])
+            return total
+        if request_path in {"/v1/responses", "/responses"}:
+            total = 0
+            if "instructions" in payload:
+                total += TokenUsageService._fast_count_value_tokens(payload["instructions"])
+            if "input" in payload:
+                total += TokenUsageService._fast_count_value_tokens(payload["input"])
+            for key in ("tools", "tool_choice", "response_format"):
+                if key in payload:
+                    total += TokenUsageService._fast_count_value_tokens(payload[key])
+            return total
+        return TokenUsageService._fast_count_value_tokens(
+            {
+                key: value
+                for key, value in payload.items()
+                if key
+                not in {
+                    "model",
+                    "stream",
+                    "max_tokens",
+                    "max_completion_tokens",
+                    "max_output_tokens",
+                    "temperature",
+                    "top_p",
+                    "presence_penalty",
+                    "frequency_penalty",
+                    "n",
+                    "seed",
+                    "metadata",
+                    "store",
+                }
+            }
+        )
+
+    @staticmethod
+    def _fast_count_chat_messages(value: Any) -> int:
+        if not isinstance(value, list):
+            return TokenUsageService._fast_count_value_tokens(value)
+        total = 3
+        for message in value:
+            total += 3
+            total += TokenUsageService._fast_count_value_tokens(message)
+        return total
+
+    @staticmethod
+    def _fast_count_value_tokens(value: Any) -> int:
+        if value is None or isinstance(value, bool):
+            return 0
+        if isinstance(value, (int, float)):
+            return 1
+        if isinstance(value, str):
+            return TokenUsageService._fast_count_text_tokens(value)
+        if isinstance(value, list):
+            return sum(TokenUsageService._fast_count_value_tokens(item) for item in value)
+        if isinstance(value, dict):
+            item_type = value.get("type")
+            if item_type in {"image_url", "input_image"} or "image_url" in value:
+                return TokenUsageService._estimate_image_tokens(value)
+            total = 2
+            for key, item in value.items():
+                total += 1 + TokenUsageService._fast_count_text_tokens(str(key))
+                total += TokenUsageService._fast_count_value_tokens(item)
+            return total
+        return TokenUsageService._fast_count_text_tokens(str(value))
+
+    @staticmethod
+    def _fast_count_text_tokens(value: str) -> int:
+        if not value:
+            return 0
+        byte_len = len(value.encode("utf-8", errors="ignore"))
+        char_len = len(value)
+        if byte_len > char_len:
+            return max(1, math.ceil(byte_len / 3))
+        return max(1, math.ceil(char_len / 4))
+
+    @staticmethod
     def enqueue_log_finalize(
         *,
         log_id: int,

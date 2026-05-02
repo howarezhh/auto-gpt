@@ -18,6 +18,7 @@ class LogService:
     REASONING_LEVEL_NONE = "无"
     REASONING_LEVEL_VALUES = {REASONING_LEVEL_NONE, "low", "medium", "high", "xhigh"}
     METRIC_ROW_SAMPLE_LIMIT = 10000
+    TOKEN_JOB_MAX_PAYLOAD_BYTES = 65536
 
     @staticmethod
     def create_log(
@@ -206,17 +207,30 @@ class LogService:
             and log_type not in LogService.HEALTH_CHECK_LOG_TYPES
         ):
             from app.services.token_usage_service import TokenUsageService
+            safe_token_request_payload = LogService._token_job_payload_or_none(token_request_payload)
 
             TokenUsageService.enqueue_log_finalize(
                 log_id=log.id,
                 model_name=requested_model or model_name,
                 request_path=request_path,
-                request_payload=token_request_payload,
+                request_payload=safe_token_request_payload,
                 response_payload=token_response_payload,
                 response_text=token_response_text,
-                enable_usage_fill=schedule_token_fill,
+                enable_usage_fill=schedule_token_fill and safe_token_request_payload is not None,
             )
         return log
+
+    @staticmethod
+    def _token_job_payload_or_none(payload: dict | None) -> dict | None:
+        if not isinstance(payload, dict):
+            return None
+        try:
+            payload_bytes = len(dumps_json(payload).encode("utf-8", errors="ignore"))
+        except Exception:
+            return None
+        if payload_bytes > LogService.TOKEN_JOB_MAX_PAYLOAD_BYTES:
+            return None
+        return payload
 
     @staticmethod
     def list_logs(

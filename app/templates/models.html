@@ -127,6 +127,14 @@
                 <input class="field-input" id="model-context-window-tokens" type="number" min="1" placeholder="留空表示未单独设置">
             </label>
             <label>
+                <span>最大输入 token</span>
+                <input class="field-input" id="model-max-input-tokens" type="number" min="1" placeholder="留空沿用上下文窗口">
+            </label>
+            <label>
+                <span>最大输出 token</span>
+                <input class="field-input" id="model-max-output-tokens" type="number" min="1" placeholder="留空表示不单独限制">
+            </label>
+            <label>
                 <span>输入单价 /1M</span>
                 <input class="field-input" id="model-input-price" type="number" min="0" step="0.0001" placeholder="例如 3">
             </label>
@@ -166,6 +174,36 @@
                         </span>
                         <span class="settings-switch-control">
                             <input id="model-supports-vision" type="checkbox">
+                            <span class="settings-switch-slider" aria-hidden="true"></span>
+                        </span>
+                    </label>
+                    <label class="settings-switch-card" for="model-supports-tools">
+                        <span class="settings-switch-copy">
+                            <strong>支持工具调用</strong>
+                            <small>用于写代码代理、函数调用等请求的原生能力过滤。</small>
+                        </span>
+                        <span class="settings-switch-control">
+                            <input id="model-supports-tools" type="checkbox">
+                            <span class="settings-switch-slider" aria-hidden="true"></span>
+                        </span>
+                    </label>
+                    <label class="settings-switch-card" for="model-supports-chat-completions">
+                        <span class="settings-switch-copy">
+                            <strong>原生支持 Chat</strong>
+                            <small>用于 /v1/chat/completions 原生路由过滤。</small>
+                        </span>
+                        <span class="settings-switch-control">
+                            <input id="model-supports-chat-completions" type="checkbox" checked>
+                            <span class="settings-switch-slider" aria-hidden="true"></span>
+                        </span>
+                    </label>
+                    <label class="settings-switch-card" for="model-supports-responses">
+                        <span class="settings-switch-copy">
+                            <strong>原生支持 Responses</strong>
+                            <small>用于 /v1/responses 原生路由过滤。</small>
+                        </span>
+                        <span class="settings-switch-control">
+                            <input id="model-supports-responses" type="checkbox" checked>
                             <span class="settings-switch-slider" aria-hidden="true"></span>
                         </span>
                     </label>

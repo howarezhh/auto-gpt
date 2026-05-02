@@ -148,6 +148,8 @@ class HealthService:
                 payload=HealthService._build_responses_probe_payload(provider_model, vision_probe=effective_vision_probe),
             )
         )
+        if provider_model.supports_tools:
+            endpoint_results.append(await HealthService._probe_native_tools(provider, provider_model))
         success = all(item["success"] for item in endpoint_results)
         provider_success = any(item["success"] for item in endpoint_results)
         adapted_success = any(item.get("support_mode") == "adapted" for item in endpoint_results)
@@ -191,6 +193,54 @@ class HealthService:
             "message": message,
             "endpoint_results": endpoint_results,
         }
+
+    @staticmethod
+    async def _probe_native_tools(provider: Provider, provider_model: ProviderModel) -> dict[str, Any]:
+        started = time.perf_counter()
+        endpoint_path = "/chat/completions"
+        endpoint_label = "tools"
+        payload = HealthService._build_chat_tool_probe_payload(provider_model)
+        try:
+            prepared = ProxyService._prepare_upstream_request(provider, endpoint_path=endpoint_path, payload=payload)
+            response, _ = await ProxyService._send_prepared_json(
+                provider,
+                prepared=prepared,
+                headers={"Authorization": f"Bearer {provider.api_key}"},
+                requested_payload=payload,
+            )
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            has_tool_call = HealthService._response_has_tool_call(response)
+            return {
+                "endpoint_path": endpoint_path,
+                "endpoint_label": endpoint_label,
+                "success": has_tool_call,
+                "native_success": has_tool_call,
+                "adapted_success": False,
+                "support_mode": "native" if has_tool_call else "unsupported",
+                "support_label": "原生支持 tools" if has_tool_call else "不支持 tools",
+                "latency_ms": latency_ms,
+                "status_code": 200,
+                "message": "ok" if has_tool_call else "未返回工具调用",
+                "trace": [],
+            }
+        except Exception as exc:
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            status_code = getattr(exc, "status_code", None)
+            detail = getattr(exc, "detail", None)
+            message = ProxyService._error_message_for_log(detail) if detail is not None else str(exc)
+            return {
+                "endpoint_path": endpoint_path,
+                "endpoint_label": endpoint_label,
+                "success": False,
+                "native_success": False,
+                "adapted_success": False,
+                "support_mode": "unsupported",
+                "support_label": "不支持 tools",
+                "latency_ms": latency_ms,
+                "status_code": status_code,
+                "message": message,
+                "trace": [],
+            }
 
     @staticmethod
     async def check_all(db: Session) -> list[dict]:
@@ -363,6 +413,48 @@ class HealthService:
         if stream_probe and provider_model.supports_stream:
             payload["stream"] = True
         return payload
+
+    @staticmethod
+    def _build_chat_tool_probe_payload(provider_model: ProviderModel) -> dict[str, Any]:
+        return {
+            "model": provider_model.model_name,
+            "messages": [{"role": "user", "content": "调用 get_time 工具。"}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_time",
+                        "description": "返回当前时间。",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": False,
+                        },
+                    },
+                }
+            ],
+            "tool_choice": {"type": "function", "function": {"name": "get_time"}},
+            "max_tokens": 16,
+        }
+
+    @staticmethod
+    def _response_has_tool_call(response: dict[str, Any]) -> bool:
+        choices = response.get("choices")
+        if isinstance(choices, list):
+            for choice in choices:
+                if not isinstance(choice, dict):
+                    continue
+                if choice.get("finish_reason") == "tool_calls":
+                    return True
+                message = choice.get("message")
+                if isinstance(message, dict) and message.get("tool_calls"):
+                    return True
+        output = response.get("output")
+        if isinstance(output, list):
+            for item in output:
+                if isinstance(item, dict) and item.get("type") in {"function_call", "tool_call"}:
+                    return True
+        return False
 
     @staticmethod
     def _build_responses_probe_payload(provider_model: ProviderModel, *, vision_probe: bool) -> dict[str, Any]:

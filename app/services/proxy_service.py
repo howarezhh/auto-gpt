@@ -15,6 +15,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.config import get_settings
 from app.database import SessionLocal
+from app.models.model_catalog import ModelCatalog
 from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
 from app.services.api_key_service import ApiKeyService
@@ -169,6 +170,51 @@ class ProxyService:
         return await run_in_threadpool(ProxyService._run_db_write_sync, operation, *args, **kwargs)
 
     @staticmethod
+    def _get_model_catalog_limits(model_name: str | None) -> dict[str, int | bool | None]:
+        if not model_name:
+            return {}
+        db = SessionLocal()
+        try:
+            catalog = db.query(ModelCatalog).filter(ModelCatalog.model_name == model_name).first()
+            if catalog is None:
+                return {}
+            return {
+                "context_window_tokens": catalog.context_window_tokens,
+                "max_input_tokens": catalog.max_input_tokens,
+                "max_output_tokens": catalog.max_output_tokens,
+                "supports_chat_completions": catalog.supports_chat_completions,
+                "supports_responses": catalog.supports_responses,
+                "supports_tools": catalog.supports_tools,
+            }
+        finally:
+            db.close()
+
+    @staticmethod
+    def _estimate_request_tokens_for_precheck(
+        payload: dict[str, Any],
+        *,
+        model_name: str | None,
+        request_path: str,
+        nearest_limit: int,
+    ) -> tuple[int | None, str]:
+        fast_estimate = TokenUsageService.fast_estimate_request_tokens(payload, request_path=request_path)
+        if fast_estimate is None:
+            return None, "fast_failed"
+        if nearest_limit > 0 and fast_estimate > nearest_limit:
+            return fast_estimate, "fast"
+        if nearest_limit > 0 and fast_estimate < int(nearest_limit * 0.75):
+            return fast_estimate, "fast"
+        try:
+            exact = TokenUsageService.estimate_request_tokens(
+                payload,
+                model_name=model_name,
+                request_path=request_path,
+            )
+        except Exception:
+            return fast_estimate, "fast_after_exact_failed"
+        return exact, "exact"
+
+    @staticmethod
     def _build_request_token_limit_error(
         *,
         setting: Any,
@@ -177,24 +223,21 @@ class ProxyService:
         endpoint_path: str,
     ) -> tuple[int, dict[str, Any]] | None:
         limit = int(getattr(setting, "global_max_request_tokens", 0) or 0)
-        if limit <= 0:
+        model_limits = ProxyService._get_model_catalog_limits(model_name)
+        max_input_tokens = int(model_limits.get("max_input_tokens") or 0)
+        context_window_tokens = int(model_limits.get("context_window_tokens") or 0)
+        effective_input_limit = max_input_tokens or context_window_tokens
+        nearest_limits = [item for item in (limit, effective_input_limit) if item > 0]
+        if not nearest_limits:
             return None
         request_path = f"/v1{endpoint_path}"
-        try:
-            estimated_tokens = TokenUsageService.estimate_request_tokens(
-                payload,
-                model_name=model_name,
-                request_path=request_path,
-            )
-        except Exception as exc:
-            return status.HTTP_400_BAD_REQUEST, {
-                "message": "无法估算请求 Token，已按全局最大请求 Token 策略拒绝",
-                "code": "request_token_estimation_failed",
-                "model": model_name,
-                "request_path": request_path,
-                "global_max_request_tokens": limit,
-                "estimation_error": str(exc),
-            }
+        nearest_limit = min(nearest_limits)
+        estimated_tokens, estimation_mode = ProxyService._estimate_request_tokens_for_precheck(
+            payload,
+            model_name=model_name,
+            request_path=request_path,
+            nearest_limit=nearest_limit,
+        )
         if estimated_tokens is None:
             return status.HTTP_400_BAD_REQUEST, {
                 "message": "无法估算请求 Token，已按全局最大请求 Token 策略拒绝",
@@ -202,17 +245,32 @@ class ProxyService:
                 "model": model_name,
                 "request_path": request_path,
                 "global_max_request_tokens": limit,
+                "model_max_input_tokens": max_input_tokens or None,
+                "model_context_window_tokens": context_window_tokens or None,
+                "token_estimation_mode": estimation_mode,
             }
-        if estimated_tokens <= limit:
-            return None
-        return status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, {
-            "message": f"请求 Token 估算值 {estimated_tokens} 超过全局最大请求 Token {limit}",
-            "code": "request_tokens_exceeded",
-            "model": model_name,
-            "request_path": request_path,
-            "estimated_request_tokens": estimated_tokens,
-            "global_max_request_tokens": limit,
-        }
+        if limit > 0 and estimated_tokens > limit:
+            return status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, {
+                "message": f"请求 Token 估算值 {estimated_tokens} 超过全局最大请求 Token {limit}",
+                "code": "request_tokens_exceeded",
+                "model": model_name,
+                "request_path": request_path,
+                "estimated_request_tokens": estimated_tokens,
+                "global_max_request_tokens": limit,
+                "token_estimation_mode": estimation_mode,
+            }
+        if effective_input_limit > 0 and estimated_tokens > effective_input_limit:
+            return status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, {
+                "message": f"请求输入 Token 估算值 {estimated_tokens} 超过模型输入窗口 {effective_input_limit}",
+                "code": "model_input_tokens_exceeded",
+                "model": model_name,
+                "request_path": request_path,
+                "estimated_request_tokens": estimated_tokens,
+                "model_max_input_tokens": max_input_tokens or None,
+                "model_context_window_tokens": context_window_tokens or None,
+                "token_estimation_mode": estimation_mode,
+            }
+        return None
 
     @staticmethod
     async def _reject_by_request_token_limit_async(
@@ -238,6 +296,7 @@ class ProxyService:
             "error": detail.get("code"),
             "estimated_request_tokens": detail.get("estimated_request_tokens"),
             "global_max_request_tokens": detail.get("global_max_request_tokens"),
+            "token_estimation_mode": detail.get("token_estimation_mode"),
         }]
         await ProxyService._run_db_write(
             LogService.create_log,
@@ -273,6 +332,69 @@ class ProxyService:
             schedule_token_fill=False,
         )
         raise HTTPException(status_code=status_code, detail=detail)
+
+    @staticmethod
+    def _requested_output_token_limit(payload: dict[str, Any]) -> int | None:
+        for key in ("max_tokens", "max_completion_tokens", "max_output_tokens"):
+            value = payload.get(key)
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, (int, float)) and int(value) > 0:
+                return int(value)
+        return None
+
+    @staticmethod
+    def _payload_uses_tools(payload: dict[str, Any]) -> bool:
+        if any(key in payload for key in ("tools", "tool_choice", "functions", "function_call", "parallel_tool_calls")):
+            return True
+        return ProxyService._value_has_tool_context(payload.get("messages")) or ProxyService._value_has_tool_context(payload.get("input"))
+
+    @staticmethod
+    def _value_has_tool_context(value: Any) -> bool:
+        if isinstance(value, list):
+            return any(ProxyService._value_has_tool_context(item) for item in value)
+        if isinstance(value, dict):
+            if any(key in value for key in ("tool_calls", "tool_call_id", "function_call")):
+                return True
+            if value.get("type") in {"tool_call", "function_call", "tool_result", "function_call_output"}:
+                return True
+            return any(ProxyService._value_has_tool_context(item) for item in value.values())
+        return False
+
+    @staticmethod
+    def _build_long_output_error(
+        *,
+        setting: Any,
+        payload: dict[str, Any],
+        model_name: str | None,
+        endpoint_path: str,
+        is_stream: bool,
+    ) -> tuple[int, dict[str, Any]] | None:
+        requested_output_tokens = ProxyService._requested_output_token_limit(payload)
+        if requested_output_tokens is None:
+            return None
+        model_limits = ProxyService._get_model_catalog_limits(model_name)
+        max_output_tokens = int(model_limits.get("max_output_tokens") or 0)
+        if max_output_tokens > 0 and requested_output_tokens > max_output_tokens:
+            return status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, {
+                "message": f"请求输出 Token 上限 {requested_output_tokens} 超过模型最大输出 Token {max_output_tokens}",
+                "code": "model_output_tokens_exceeded",
+                "model": model_name,
+                "request_path": f"/v1{endpoint_path}",
+                "requested_output_tokens": requested_output_tokens,
+                "model_max_output_tokens": max_output_tokens,
+            }
+        threshold = int(getattr(setting, "long_output_stream_threshold_tokens", 0) or 0)
+        if not is_stream and threshold > 0 and requested_output_tokens > threshold:
+            return status.HTTP_400_BAD_REQUEST, {
+                "message": f"请求输出 Token 上限 {requested_output_tokens} 超过非流式阈值 {threshold}，请使用 stream=true",
+                "code": "long_output_requires_stream",
+                "model": model_name,
+                "request_path": f"/v1{endpoint_path}",
+                "requested_output_tokens": requested_output_tokens,
+                "long_output_stream_threshold_tokens": threshold,
+            }
+        return None
 
     @staticmethod
     def _mark_success_by_id(db: Session, provider_id: int, provider_model_id: int, latency_ms: int) -> None:
@@ -376,6 +498,7 @@ class ProxyService:
     ) -> tuple[dict[str, Any], Provider, list[dict], int]:
         model_name = payload.get("model")
         has_image = ProxyService._payload_has_image(payload)
+        require_tools = ProxyService._payload_uses_tools(payload)
         setting = await ProxyService._get_setting_async(db)
         request_id = uuid4().hex
         reasoning_level = LogService.extract_reasoning_level(payload)
@@ -387,6 +510,30 @@ class ProxyService:
         )
         if token_limit_error is not None:
             reject_status_code, reject_detail = token_limit_error
+            await ProxyService._reject_by_request_token_limit_async(
+                db,
+                status_code=reject_status_code,
+                detail=reject_detail,
+                model_name=model_name,
+                endpoint_path=endpoint_path,
+                log_type=log_type,
+                request_id=request_id,
+                is_stream=False,
+                has_image=has_image,
+                reasoning_level=reasoning_level,
+                api_client_auth=api_client_auth,
+                trace_id=trace_id,
+                source_ip=source_ip,
+            )
+        long_output_error = ProxyService._build_long_output_error(
+            setting=setting,
+            payload=payload,
+            model_name=model_name,
+            endpoint_path=endpoint_path,
+            is_stream=False,
+        )
+        if long_output_error is not None:
+            reject_status_code, reject_detail = long_output_error
             await ProxyService._reject_by_request_token_limit_async(
                 db,
                 status_code=reject_status_code,
@@ -430,6 +577,9 @@ class ProxyService:
                 route_context=route_context,
                 require_vision=has_image,
                 require_stream=False,
+                require_tools=require_tools,
+                require_chat_completions=endpoint_path == "/chat/completions",
+                require_responses=endpoint_path == "/responses",
             )
         except ProviderCapacityUnavailableError as exc:
             raise HTTPException(
@@ -459,9 +609,9 @@ class ProxyService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 reasoning_level=reasoning_level,
                 request_body_json=request_body_json,
-                message="No available provider for requested model",
+                message="No native tool-capable provider for requested model" if require_tools else "No available provider for requested model",
                 error_type="invalid_request_error",
-                error_code="model_not_available",
+                error_code="model_tools_not_available" if require_tools else "model_not_available",
                 retryable=False,
                 **ProxyService._build_api_client_log_kwargs(api_client_auth, auth_result="authenticated"),
                 trace=[],
@@ -471,7 +621,11 @@ class ProxyService:
             )
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail={"message": "No available provider for requested model", "code": "model_not_available"},
+                detail={
+                    "message": "No native tool-capable provider for requested model" if require_tools else "No available provider for requested model",
+                    "code": "model_tools_not_available" if require_tools else "model_not_available",
+                    "requires_tools": require_tools,
+                },
             )
 
         trace: list[dict] = []
@@ -677,6 +831,7 @@ class ProxyService:
     ) -> tuple[AsyncIterator[bytes], Provider, list[dict], int]:
         model_name = payload.get("model")
         has_image = ProxyService._payload_has_image(payload)
+        require_tools = ProxyService._payload_uses_tools(payload)
         setting = await ProxyService._get_setting_async(db)
         request_id = uuid4().hex
         reasoning_level = LogService.extract_reasoning_level(payload)
@@ -688,6 +843,30 @@ class ProxyService:
         )
         if token_limit_error is not None:
             reject_status_code, reject_detail = token_limit_error
+            await ProxyService._reject_by_request_token_limit_async(
+                db,
+                status_code=reject_status_code,
+                detail=reject_detail,
+                model_name=model_name,
+                endpoint_path=endpoint_path,
+                log_type=log_type,
+                request_id=request_id,
+                is_stream=True,
+                has_image=has_image,
+                reasoning_level=reasoning_level,
+                api_client_auth=api_client_auth,
+                trace_id=trace_id,
+                source_ip=source_ip,
+            )
+        long_output_error = ProxyService._build_long_output_error(
+            setting=setting,
+            payload=payload,
+            model_name=model_name,
+            endpoint_path=endpoint_path,
+            is_stream=True,
+        )
+        if long_output_error is not None:
+            reject_status_code, reject_detail = long_output_error
             await ProxyService._reject_by_request_token_limit_async(
                 db,
                 status_code=reject_status_code,
@@ -725,6 +904,9 @@ class ProxyService:
                 route_context=route_context,
                 require_vision=has_image,
                 require_stream=True,
+                require_tools=require_tools,
+                require_chat_completions=endpoint_path == "/chat/completions",
+                require_responses=endpoint_path == "/responses",
             )
         except ProviderCapacityUnavailableError as exc:
             raise HTTPException(
@@ -754,9 +936,9 @@ class ProxyService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 reasoning_level=reasoning_level,
                 request_body_json=request_body_json,
-                message="No available provider for requested model",
+                message="No native tool-capable provider for requested model" if require_tools else "No available provider for requested model",
                 error_type="invalid_request_error",
-                error_code="model_not_available",
+                error_code="model_tools_not_available" if require_tools else "model_not_available",
                 retryable=False,
                 **ProxyService._build_api_client_log_kwargs(api_client_auth, auth_result="authenticated"),
                 trace=[],
@@ -766,7 +948,11 @@ class ProxyService:
             )
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail={"message": "No available provider for requested model", "code": "model_not_available"},
+                detail={
+                    "message": "No native tool-capable provider for requested model" if require_tools else "No available provider for requested model",
+                    "code": "model_tools_not_available" if require_tools else "model_not_available",
+                    "requires_tools": require_tools,
+                },
             )
 
         trace: list[dict] = []
@@ -822,6 +1008,7 @@ class ProxyService:
                         response_text_parts: list[str] = []
                         response_text_bytes = 0
                         token_response_parts: list[str] = []
+                        token_response_bytes = 0
                         event_buffer = bytearray()
                         downstream_transform_state = ProxyService._create_responses_stream_state(payload=payload)
                         chat_stream_transform_state = ProxyService._create_chat_stream_state(payload=payload)
@@ -843,6 +1030,7 @@ class ProxyService:
                                     if setting.enable_stream_response_persist or setting.enable_token_logging:
                                         (
                                             response_text_bytes,
+                                            token_response_bytes,
                                             finish_reason,
                                             usage_info,
                                         ) = ProxyService._collect_stream_log_data(
@@ -851,11 +1039,13 @@ class ProxyService:
                                             response_text_parts=response_text_parts,
                                             response_text_bytes=response_text_bytes,
                                             token_response_parts=token_response_parts if setting.enable_token_logging else None,
+                                            token_response_bytes=token_response_bytes,
                                             finish_reason=finish_reason,
                                             usage_info=usage_info,
                                             capture_text=setting.enable_stream_response_persist,
                                             capture_usage=setting.enable_token_logging,
                                             limit_bytes=setting.max_logged_body_bytes,
+                                            token_limit_bytes=getattr(setting, "stream_token_capture_max_bytes", 1048576),
                                         )
                                     if first_chunk_latency_ms is None:
                                         first_chunk_latency_ms = int((time.perf_counter() - started) * 1000)
@@ -3125,12 +3315,14 @@ class ProxyService:
         response_text_parts: list[str],
         response_text_bytes: int,
         token_response_parts: list[str] | None,
+        token_response_bytes: int,
         finish_reason: str | None,
         usage_info: dict[str, int | None],
         capture_text: bool,
         capture_usage: bool,
         limit_bytes: int,
-    ) -> tuple[int, str | None, dict[str, int | None]]:
+        token_limit_bytes: int,
+    ) -> tuple[int, int, str | None, dict[str, int | None]]:
         event_buffer.extend(chunk)
         for event_text in ProxyService._consume_sse_event_texts(event_buffer):
             for line in event_text.splitlines():
@@ -3160,8 +3352,13 @@ class ProxyService:
                             limit_bytes=limit_bytes,
                         )
                     if delta_text and token_response_parts is not None:
-                        token_response_parts.append(delta_text)
-        return response_text_bytes, finish_reason, usage_info
+                        token_response_bytes = ProxyService._append_limited_text(
+                            token_response_parts,
+                            delta_text,
+                            current_bytes=token_response_bytes,
+                            limit_bytes=token_limit_bytes,
+                        )
+        return response_text_bytes, token_response_bytes, finish_reason, usage_info
 
     @staticmethod
     def _consume_sse_event_texts(event_buffer: bytearray) -> list[str]:

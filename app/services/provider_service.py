@@ -50,9 +50,13 @@ class ProviderService:
     def _infer_model_capabilities(model_name: str) -> dict[str, bool]:
         normalized = (model_name or "").strip().lower()
         supports_vision = any(prefix in normalized for prefix in ("gpt-4o", "gpt-4.1", "gpt-5"))
+        supports_tools = any(prefix in normalized for prefix in ("gpt-4o", "gpt-4.1", "gpt-5", "o3", "o4", "claude", "qwen", "deepseek"))
         return {
             "supports_stream": True,
             "supports_vision": supports_vision,
+            "supports_tools": supports_tools,
+            "supports_chat_completions": True,
+            "supports_responses": True,
         }
 
     @staticmethod
@@ -62,6 +66,9 @@ class ProviderService:
             model_name=model_name,
             supports_stream=capabilities["supports_stream"],
             supports_vision=capabilities["supports_vision"],
+            supports_tools=capabilities["supports_tools"],
+            supports_chat_completions=capabilities["supports_chat_completions"],
+            supports_responses=capabilities["supports_responses"],
         )
 
     @staticmethod
@@ -279,7 +286,19 @@ class ProviderService:
             raise ValueError("Provider model not found")
 
         for field, value in payload.model_dump(exclude_unset=True).items():
-            if field in {"supports_stream", "supports_vision", "input_price_per_1k", "output_price_per_1k", "cache_price_per_1k"}:
+            if field in {
+                "supports_stream",
+                "supports_vision",
+                "supports_tools",
+                "supports_chat_completions",
+                "supports_responses",
+                "context_window_tokens",
+                "max_input_tokens",
+                "max_output_tokens",
+                "input_price_per_1k",
+                "output_price_per_1k",
+                "cache_price_per_1k",
+            }:
                 continue
             if field == "price_multiplier" and value is None:
                 continue
@@ -453,6 +472,9 @@ class ProviderService:
                 model_name=model_name,
                 supports_stream=ProviderService._infer_model_capabilities(model_name)["supports_stream"],
                 supports_vision=ProviderService._infer_model_capabilities(model_name)["supports_vision"],
+                supports_tools=ProviderService._infer_model_capabilities(model_name)["supports_tools"],
+                supports_chat_completions=ProviderService._infer_model_capabilities(model_name)["supports_chat_completions"],
+                supports_responses=ProviderService._infer_model_capabilities(model_name)["supports_responses"],
                 already_configured=model_name in existing_names,
             )
             for model_name in discovered_names
@@ -538,6 +560,12 @@ class ProviderService:
             "last_error": provider_model.last_error,
             "supports_stream": provider_model.supports_stream,
             "supports_vision": provider_model.supports_vision,
+            "supports_tools": provider_model.supports_tools,
+            "supports_chat_completions": provider_model.supports_chat_completions,
+            "supports_responses": provider_model.supports_responses,
+            "context_window_tokens": provider_model.context_window_tokens,
+            "max_input_tokens": provider_model.max_input_tokens,
+            "max_output_tokens": provider_model.max_output_tokens,
             "price_multiplier": provider_model.price_multiplier,
             "input_price_per_1k": provider_model.input_price_per_1k,
             "output_price_per_1k": provider_model.output_price_per_1k,
@@ -653,6 +681,12 @@ class ProviderService:
                 weight=item.weight,
                 supports_stream=item.supports_stream,
                 supports_vision=item.supports_vision,
+                supports_tools=item.supports_tools,
+                supports_chat_completions=item.supports_chat_completions,
+                supports_responses=item.supports_responses,
+                context_window_tokens=item.context_window_tokens,
+                max_input_tokens=item.max_input_tokens,
+                max_output_tokens=item.max_output_tokens,
                 price_multiplier=item.price_multiplier or 1.0,
                 input_price_per_1k=item.input_price_per_1k,
                 output_price_per_1k=item.output_price_per_1k,
@@ -712,6 +746,12 @@ class ProviderService:
                 enabled=True,
                 supports_stream=config.supports_stream,
                 supports_vision=config.supports_vision,
+                supports_tools=config.supports_tools,
+                supports_chat_completions=config.supports_chat_completions,
+                supports_responses=config.supports_responses,
+                context_window_tokens=config.context_window_tokens,
+                max_input_tokens=config.max_input_tokens,
+                max_output_tokens=config.max_output_tokens,
                 input_price_per_1k=None,
                 output_price_per_1k=None,
                 cache_price_per_1k=None,
@@ -732,6 +772,12 @@ class ProviderService:
     def _sync_provider_model_from_catalog(provider_model: ProviderModel, catalog: ModelCatalog) -> None:
         provider_model.supports_stream = catalog.supports_stream
         provider_model.supports_vision = catalog.supports_vision
+        provider_model.supports_tools = catalog.supports_tools
+        provider_model.supports_chat_completions = catalog.supports_chat_completions
+        provider_model.supports_responses = catalog.supports_responses
+        provider_model.context_window_tokens = catalog.context_window_tokens
+        provider_model.max_input_tokens = catalog.max_input_tokens
+        provider_model.max_output_tokens = catalog.max_output_tokens
         if catalog.input_price_per_1k is not None:
             provider_model.input_price_per_1k = catalog.input_price_per_1k * provider_model.price_multiplier
         else:

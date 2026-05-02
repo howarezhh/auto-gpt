@@ -28,6 +28,38 @@ Start Docker Desktop Linux Engine before running compose verification, or verify
 - Related Files: docker-compose.postgres.yml
 
 ---
+## [ERR-20260502-001] powershell_python_heredoc_syntax
+
+**Logged**: 2026-05-02T23:24:49+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+PowerShell does not support Bash-style `python - <<'PY'` heredoc syntax.
+
+### Error
+```text
+ParserError: Missing file specification after redirection operator.
+```
+
+### Context
+- Command attempted: `.venv\Scripts\python.exe - <<'PY' ... PY`
+- Environment: Windows PowerShell workspace.
+- Impact: quick Python validation snippets fail before Python starts.
+
+### Suggested Fix
+Use a PowerShell here-string piped into Python: `@' ... '@ | .venv\Scripts\python.exe -`.
+
+### Metadata
+- Reproducible: yes
+- Related Files: none
+
+### Resolution
+- **Resolved**: 2026-05-02T23:24:49+08:00
+- **Notes**: Re-ran the same validation using a PowerShell here-string and it passed.
+
+---
 ## [ERR-20260430-002] github_https_push_connection_reset
 
 **Logged**: 2026-04-30T23:55:00+08:00

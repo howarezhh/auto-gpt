@@ -42,6 +42,18 @@
             <input class="field-input" id="setting-global-max-request-tokens" type="number" min="0" placeholder="0 表示不限制">
         </label>
         <label>
+            <span>/v1 请求体最大字节数</span>
+            <input class="field-input" id="setting-max-v1-request-body-bytes" type="number" min="0" placeholder="0 表示不限制">
+        </label>
+        <label>
+            <span>长输出非流式阈值 token</span>
+            <input class="field-input" id="setting-long-output-stream-threshold-tokens" type="number" min="0" placeholder="0 表示不强制">
+        </label>
+        <label>
+            <span>流式统计缓存字节数</span>
+            <input class="field-input" id="setting-stream-token-capture-max-bytes" type="number" min="0" placeholder="0 表示不缓存输出文本">
+        </label>
+        <label>
             <span>熔断阈值</span>
             <input class="field-input" id="setting-circuit-breaker-threshold" type="number">
         </label>

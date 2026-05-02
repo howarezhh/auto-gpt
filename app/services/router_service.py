@@ -70,12 +70,18 @@ class RouterService:
         route_context: RoutePolicyContext | None = None,
         require_vision: bool = False,
         require_stream: bool = False,
+        require_tools: bool = False,
+        require_chat_completions: bool = False,
+        require_responses: bool = False,
     ) -> list[RouteCandidate]:
         cache_key = RouterService._build_candidate_cache_key(
             model_name=model_name,
             route_context=route_context,
             require_vision=require_vision,
             require_stream=require_stream,
+            require_tools=require_tools,
+            require_chat_completions=require_chat_completions,
+            require_responses=require_responses,
         )
         providers = ProviderService.list_providers(db)
         now = datetime.utcnow()
@@ -99,6 +105,12 @@ class RouterService:
                 if require_stream and not provider_model.supports_stream:
                     continue
                 if require_vision and not provider_model.supports_vision:
+                    continue
+                if require_tools and not provider_model.supports_tools:
+                    continue
+                if require_chat_completions and not provider_model.supports_chat_completions:
+                    continue
+                if require_responses and not provider_model.supports_responses:
                     continue
                 if provider_model.circuit_state == "open":
                     if not RouterService._should_probe_open_model(
@@ -147,6 +159,9 @@ class RouterService:
         route_context: RoutePolicyContext | None = None,
         require_vision: bool = False,
         require_stream: bool = False,
+        require_tools: bool = False,
+        require_chat_completions: bool = False,
+        require_responses: bool = False,
     ) -> list[RouteCandidate]:
         candidates = RouterService.get_available_candidates(
             db,
@@ -154,6 +169,9 @@ class RouterService:
             route_context=route_context,
             require_vision=require_vision,
             require_stream=require_stream,
+            require_tools=require_tools,
+            require_chat_completions=require_chat_completions,
+            require_responses=require_responses,
         )
         effective_forced_provider_id = route_context.forced_provider_id if route_context and route_context.forced_provider_id is not None else forced_provider_id
         if effective_forced_provider_id is not None:
@@ -175,6 +193,9 @@ class RouterService:
         route_context: RoutePolicyContext | None = None,
         require_vision: bool = False,
         require_stream: bool = False,
+        require_tools: bool = False,
+        require_chat_completions: bool = False,
+        require_responses: bool = False,
     ) -> list[RouteCandidate]:
         candidates = await run_in_threadpool(
             RouterService._get_available_candidates_with_scoped_session,
@@ -182,6 +203,9 @@ class RouterService:
             route_context=route_context,
             require_vision=require_vision,
             require_stream=require_stream,
+            require_tools=require_tools,
+            require_chat_completions=require_chat_completions,
+            require_responses=require_responses,
         )
         effective_forced_provider_id = route_context.forced_provider_id if route_context and route_context.forced_provider_id is not None else forced_provider_id
         if effective_forced_provider_id is not None:
@@ -201,6 +225,9 @@ class RouterService:
         route_context: RoutePolicyContext | None = None,
         require_vision: bool = False,
         require_stream: bool = False,
+        require_tools: bool = False,
+        require_chat_completions: bool = False,
+        require_responses: bool = False,
     ) -> list[RouteCandidate]:
         db = SessionLocal()
         try:
@@ -210,6 +237,9 @@ class RouterService:
                 route_context=route_context,
                 require_vision=require_vision,
                 require_stream=require_stream,
+                require_tools=require_tools,
+                require_chat_completions=require_chat_completions,
+                require_responses=require_responses,
             )
         finally:
             db.close()
@@ -361,12 +391,18 @@ class RouterService:
         route_context: RoutePolicyContext | None,
         require_vision: bool,
         require_stream: bool,
+        require_tools: bool,
+        require_chat_completions: bool,
+        require_responses: bool,
     ) -> str:
         parts = [
             "route-candidates",
             model_name or "*",
             "vision" if require_vision else "text",
             "stream" if require_stream else "json",
+            "tools" if require_tools else "no-tools",
+            "chat" if require_chat_completions else "any-chat",
+            "responses" if require_responses else "any-responses",
         ]
         if route_context is not None:
             parts.extend(

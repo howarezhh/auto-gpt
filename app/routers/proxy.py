@@ -1,7 +1,9 @@
 from collections.abc import AsyncIterator
+from json import JSONDecodeError
+import json
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
@@ -94,6 +96,60 @@ def _get_setting_with_scoped_session():
         db.close()
 
 
+async def _read_limited_v1_json_payload(request: Request) -> dict:
+    setting = await run_in_threadpool(_get_setting_with_scoped_session)
+    limit = int(getattr(setting, "max_v1_request_body_bytes", 0) or 0)
+    content_length = request.headers.get("content-length")
+    try:
+        content_length_bytes = int(content_length) if content_length is not None else None
+    except ValueError:
+        content_length_bytes = None
+    if limit > 0 and content_length_bytes is not None and content_length_bytes > limit:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail={
+                "message": f"请求体大小 {content_length_bytes} 字节超过应用层上限 {limit} 字节",
+                "code": "request_body_too_large",
+                "request_body_bytes": content_length_bytes,
+                "max_v1_request_body_bytes": limit,
+            },
+        )
+
+    body = bytearray()
+    async for chunk in request.stream():
+        if not chunk:
+            continue
+        if limit > 0 and len(body) + len(chunk) > limit:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail={
+                    "message": f"请求体大小超过应用层上限 {limit} 字节",
+                    "code": "request_body_too_large",
+                    "max_v1_request_body_bytes": limit,
+                },
+            )
+        body.extend(chunk)
+
+    if not body:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"message": "请求体不能为空", "code": "invalid_json_body"},
+        )
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"message": "请求体必须是合法 JSON", "code": "invalid_json_body"},
+        ) from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"message": "请求体 JSON 顶层必须是对象", "code": "invalid_json_body"},
+        )
+    return payload
+
+
 async def _release_after_stream(
     stream: AsyncIterator[bytes],
     lease: ConcurrencyLease,
@@ -137,11 +193,11 @@ def _format_sse_error_event(exc: Exception, *, trace_id: str | None) -> bytes:
 @router.post("/v1/chat/completions", response_model=None)
 async def chat_completions(
     request: Request,
-    payload: dict,
     response: Response,
     api_client_auth: ApiClientAuthContext = Depends(require_api_client_auth),
 ):
     source_ip = ApiKeyService.extract_source_ip(request)
+    payload = await _read_limited_v1_json_payload(request)
     if payload.get("stream") is True:
         lease = await _acquire_request_concurrency(request=request, api_client_auth=api_client_auth, is_stream=True)
         try:
@@ -197,11 +253,11 @@ async def chat_completions(
 @router.post("/v1/responses", response_model=None)
 async def responses(
     request: Request,
-    payload: dict,
     response: Response,
     api_client_auth: ApiClientAuthContext = Depends(require_api_client_auth),
 ):
     source_ip = ApiKeyService.extract_source_ip(request)
+    payload = await _read_limited_v1_json_payload(request)
     if payload.get("stream") is True:
         lease = await _acquire_request_concurrency(request=request, api_client_auth=api_client_auth, is_stream=True)
         try:

@@ -94,7 +94,12 @@ class ModelCatalogService:
             enabled=payload.enabled,
             supports_stream=payload.supports_stream,
             supports_vision=payload.supports_vision,
+            supports_tools=payload.supports_tools,
+            supports_chat_completions=payload.supports_chat_completions,
+            supports_responses=payload.supports_responses,
             context_window_tokens=payload.context_window_tokens,
+            max_input_tokens=payload.max_input_tokens,
+            max_output_tokens=payload.max_output_tokens,
             input_price_per_1k=payload.input_price_per_1k,
             output_price_per_1k=payload.output_price_per_1k,
             cache_price_per_1k=(
@@ -124,7 +129,16 @@ class ModelCatalogService:
         changed_price_fields = set(data) & {"input_price_per_1k", "output_price_per_1k", "cache_price_per_1k"}
         if changed_price_fields:
             ModelCatalogService._sync_provider_prices_from_catalog(db, catalog, price_fields=changed_price_fields)
-        if {"supports_stream", "supports_vision"} & set(data):
+        if {
+            "supports_stream",
+            "supports_vision",
+            "supports_tools",
+            "supports_chat_completions",
+            "supports_responses",
+            "context_window_tokens",
+            "max_input_tokens",
+            "max_output_tokens",
+        } & set(data):
             ModelCatalogService._sync_provider_capabilities_from_catalog(db, catalog)
         if provider_bindings is not None:
             ModelCatalogService._apply_provider_bindings(db, catalog, provider_bindings)
@@ -202,6 +216,12 @@ class ModelCatalogService:
                     enabled=True,
                     supports_stream=any(item.supports_stream for item in items),
                     supports_vision=any(item.supports_vision for item in items),
+                    supports_tools=any(item.supports_tools for item in items),
+                    supports_chat_completions=any(item.supports_chat_completions for item in items),
+                    supports_responses=any(item.supports_responses for item in items),
+                    context_window_tokens=ModelCatalogService._pick_max_int(items, field_name="context_window_tokens"),
+                    max_input_tokens=ModelCatalogService._pick_max_int(items, field_name="max_input_tokens"),
+                    max_output_tokens=ModelCatalogService._pick_max_int(items, field_name="max_output_tokens"),
                     input_price_per_1k=ModelCatalogService._pick_base_price(items, field_name="input_price_per_1k"),
                     output_price_per_1k=ModelCatalogService._pick_base_price(items, field_name="output_price_per_1k"),
                     cache_price_per_1k=ModelCatalogService._pick_base_price(items, field_name="cache_price_per_1k"),
@@ -219,6 +239,19 @@ class ModelCatalogService:
                 if item.supports_vision != catalog.supports_vision:
                     item.supports_vision = catalog.supports_vision
                     changed = True
+                if item.supports_tools != catalog.supports_tools:
+                    item.supports_tools = catalog.supports_tools
+                    changed = True
+                if item.supports_chat_completions != catalog.supports_chat_completions:
+                    item.supports_chat_completions = catalog.supports_chat_completions
+                    changed = True
+                if item.supports_responses != catalog.supports_responses:
+                    item.supports_responses = catalog.supports_responses
+                    changed = True
+                for field in ("context_window_tokens", "max_input_tokens", "max_output_tokens"):
+                    if getattr(item, field) != getattr(catalog, field):
+                        setattr(item, field, getattr(catalog, field))
+                        changed = True
                 if catalog_created:
                     derived_multiplier = ModelCatalogService._derive_multiplier(
                         base_input=catalog.input_price_per_1k,
@@ -289,6 +322,12 @@ class ModelCatalogService:
                     "remark": catalog.remark,
                     "supports_stream": catalog.supports_stream,
                     "supports_vision": catalog.supports_vision,
+                    "supports_tools": catalog.supports_tools,
+                    "supports_chat_completions": catalog.supports_chat_completions,
+                    "supports_responses": catalog.supports_responses,
+                    "context_window_tokens": catalog.context_window_tokens,
+                    "max_input_tokens": catalog.max_input_tokens,
+                    "max_output_tokens": catalog.max_output_tokens,
                     "input_price_per_1k": min(filtered_input_prices) if filtered_input_prices else catalog.input_price_per_1k,
                     "output_price_per_1k": min(filtered_output_prices) if filtered_output_prices else catalog.output_price_per_1k,
                     "cache_price_per_1k": (
@@ -424,7 +463,12 @@ class ModelCatalogService:
             "enabled": catalog.enabled,
             "supports_stream": catalog.supports_stream,
             "supports_vision": catalog.supports_vision,
+            "supports_tools": catalog.supports_tools,
+            "supports_chat_completions": catalog.supports_chat_completions,
+            "supports_responses": catalog.supports_responses,
             "context_window_tokens": catalog.context_window_tokens,
+            "max_input_tokens": catalog.max_input_tokens,
+            "max_output_tokens": catalog.max_output_tokens,
             "input_price_per_1k": catalog.input_price_per_1k,
             "output_price_per_1k": catalog.output_price_per_1k,
             "cache_price_per_1k": catalog.cache_price_per_1k,
@@ -488,6 +532,12 @@ class ModelCatalogService:
             provider_model.enabled = binding.enabled
             provider_model.supports_stream = catalog.supports_stream
             provider_model.supports_vision = catalog.supports_vision
+            provider_model.supports_tools = catalog.supports_tools
+            provider_model.supports_chat_completions = catalog.supports_chat_completions
+            provider_model.supports_responses = catalog.supports_responses
+            provider_model.context_window_tokens = catalog.context_window_tokens
+            provider_model.max_input_tokens = catalog.max_input_tokens
+            provider_model.max_output_tokens = catalog.max_output_tokens
             provider_model.priority = binding.priority
             provider_model.weight = binding.weight
             provider_model.price_multiplier = binding.price_multiplier
@@ -548,6 +598,19 @@ class ModelCatalogService:
         if provider_model.supports_vision != catalog.supports_vision:
             provider_model.supports_vision = catalog.supports_vision
             changed = True
+        if provider_model.supports_tools != catalog.supports_tools:
+            provider_model.supports_tools = catalog.supports_tools
+            changed = True
+        for field in (
+            "supports_chat_completions",
+            "supports_responses",
+            "context_window_tokens",
+            "max_input_tokens",
+            "max_output_tokens",
+        ):
+            if getattr(provider_model, field) != getattr(catalog, field):
+                setattr(provider_model, field, getattr(catalog, field))
+                changed = True
         expected_input = (
             catalog.input_price_per_1k * provider_model.price_multiplier
             if catalog.input_price_per_1k is not None
@@ -588,6 +651,12 @@ class ModelCatalogService:
         for provider_model in provider_models:
             provider_model.supports_stream = catalog.supports_stream
             provider_model.supports_vision = catalog.supports_vision
+            provider_model.supports_tools = catalog.supports_tools
+            provider_model.supports_chat_completions = catalog.supports_chat_completions
+            provider_model.supports_responses = catalog.supports_responses
+            provider_model.context_window_tokens = catalog.context_window_tokens
+            provider_model.max_input_tokens = catalog.max_input_tokens
+            provider_model.max_output_tokens = catalog.max_output_tokens
 
     @staticmethod
     def _nullable_float_equal(left: float | None, right: float | None) -> bool:
@@ -599,6 +668,11 @@ class ModelCatalogService:
     def _pick_base_price(provider_models: list[ProviderModel], *, field_name: str) -> float | None:
         values = [getattr(item, field_name) for item in provider_models if getattr(item, field_name) is not None]
         return min(values) if values else None
+
+    @staticmethod
+    def _pick_max_int(provider_models: list[ProviderModel], *, field_name: str) -> int | None:
+        values = [int(getattr(item, field_name)) for item in provider_models if getattr(item, field_name) is not None]
+        return max(values) if values else None
 
     @staticmethod
     def _effective_price_per_1k(

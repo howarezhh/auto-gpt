@@ -10,6 +10,12 @@ class ProviderModelConfigBase(BaseModel):
     weight: int = 100
     supports_stream: bool = True
     supports_vision: bool = False
+    supports_tools: bool = False
+    supports_chat_completions: bool = True
+    supports_responses: bool = True
+    context_window_tokens: int | None = Field(default=None, ge=1)
+    max_input_tokens: int | None = Field(default=None, ge=1)
+    max_output_tokens: int | None = Field(default=None, ge=1)
     price_multiplier: float = Field(default=1.0, gt=0)
     input_price_per_1k: float | None = Field(default=None, ge=0)
     output_price_per_1k: float | None = Field(default=None, ge=0)
@@ -74,6 +80,12 @@ class ProviderModelConfigUpdate(BaseModel):
     weight: int | None = None
     supports_stream: bool | None = None
     supports_vision: bool | None = None
+    supports_tools: bool | None = None
+    supports_chat_completions: bool | None = None
+    supports_responses: bool | None = None
+    context_window_tokens: int | None = Field(default=None, ge=1)
+    max_input_tokens: int | None = Field(default=None, ge=1)
+    max_output_tokens: int | None = Field(default=None, ge=1)
     price_multiplier: float | None = Field(default=None, gt=0)
     input_price_per_1k: float | None = Field(default=None, ge=0)
     output_price_per_1k: float | None = Field(default=None, ge=0)
@@ -285,6 +297,12 @@ class ProviderDiscoveredModelOut(BaseModel):
     model_name: str
     supports_stream: bool = True
     supports_vision: bool = False
+    supports_tools: bool = False
+    supports_chat_completions: bool = True
+    supports_responses: bool = True
+    context_window_tokens: int | None = None
+    max_input_tokens: int | None = None
+    max_output_tokens: int | None = None
     already_configured: bool = False
 
 

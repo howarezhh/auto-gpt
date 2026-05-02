@@ -109,6 +109,9 @@ def _migrate_app_setting_concurrency_columns(db) -> None:
     runtime_settings = get_settings()
     additions = {
         "global_max_request_tokens": "ALTER TABLE app_settings ADD COLUMN global_max_request_tokens INTEGER DEFAULT 0",
+        "max_v1_request_body_bytes": "ALTER TABLE app_settings ADD COLUMN max_v1_request_body_bytes INTEGER DEFAULT 20971520",
+        "long_output_stream_threshold_tokens": "ALTER TABLE app_settings ADD COLUMN long_output_stream_threshold_tokens INTEGER DEFAULT 8192",
+        "stream_token_capture_max_bytes": "ALTER TABLE app_settings ADD COLUMN stream_token_capture_max_bytes INTEGER DEFAULT 1048576",
         "global_max_active_requests": f"ALTER TABLE app_settings ADD COLUMN global_max_active_requests INTEGER DEFAULT {runtime_settings.global_max_active_requests}",
         "global_max_active_streams": f"ALTER TABLE app_settings ADD COLUMN global_max_active_streams INTEGER DEFAULT {runtime_settings.global_max_active_streams}",
         "api_key_max_active_requests": f"ALTER TABLE app_settings ADD COLUMN api_key_max_active_requests INTEGER DEFAULT {runtime_settings.api_key_max_active_requests}",
@@ -141,12 +144,23 @@ def _migrate_cache_price_columns(db) -> None:
     additions_by_table = {
         "provider_models": {
             "cache_price_per_1k": f"ALTER TABLE provider_models ADD COLUMN cache_price_per_1k {float_type}",
+            "supports_tools": f"ALTER TABLE provider_models ADD COLUMN supports_tools BOOLEAN NOT NULL DEFAULT {false_default}",
+            "supports_chat_completions": f"ALTER TABLE provider_models ADD COLUMN supports_chat_completions BOOLEAN NOT NULL DEFAULT {true_default}",
+            "supports_responses": f"ALTER TABLE provider_models ADD COLUMN supports_responses BOOLEAN NOT NULL DEFAULT {true_default}",
+            "context_window_tokens": "ALTER TABLE provider_models ADD COLUMN context_window_tokens INTEGER",
+            "max_input_tokens": "ALTER TABLE provider_models ADD COLUMN max_input_tokens INTEGER",
+            "max_output_tokens": "ALTER TABLE provider_models ADD COLUMN max_output_tokens INTEGER",
         },
         "model_catalogs": {
             "cache_price_per_1k": f"ALTER TABLE model_catalogs ADD COLUMN cache_price_per_1k {float_type}",
             "supports_stream": f"ALTER TABLE model_catalogs ADD COLUMN supports_stream BOOLEAN NOT NULL DEFAULT {true_default}",
             "supports_vision": f"ALTER TABLE model_catalogs ADD COLUMN supports_vision BOOLEAN NOT NULL DEFAULT {false_default}",
+            "supports_tools": f"ALTER TABLE model_catalogs ADD COLUMN supports_tools BOOLEAN NOT NULL DEFAULT {false_default}",
+            "supports_chat_completions": f"ALTER TABLE model_catalogs ADD COLUMN supports_chat_completions BOOLEAN NOT NULL DEFAULT {true_default}",
+            "supports_responses": f"ALTER TABLE model_catalogs ADD COLUMN supports_responses BOOLEAN NOT NULL DEFAULT {true_default}",
             "context_window_tokens": "ALTER TABLE model_catalogs ADD COLUMN context_window_tokens INTEGER",
+            "max_input_tokens": "ALTER TABLE model_catalogs ADD COLUMN max_input_tokens INTEGER",
+            "max_output_tokens": "ALTER TABLE model_catalogs ADD COLUMN max_output_tokens INTEGER",
         },
         "request_logs": {
             "channel_price_cache_per_1k": f"ALTER TABLE request_logs ADD COLUMN channel_price_cache_per_1k {float_type}",
@@ -175,6 +189,12 @@ def _migrate_cache_price_columns(db) -> None:
         db.execute(text(
             f"UPDATE model_catalogs SET supports_vision = {true_default} "
             "WHERE model_name IN (SELECT model_name FROM provider_models WHERE supports_vision = "
+            f"{true_default})"
+        ))
+    if "supports_tools" in added_model_catalog_columns:
+        db.execute(text(
+            f"UPDATE model_catalogs SET supports_tools = {true_default} "
+            "WHERE model_name IN (SELECT model_name FROM provider_models WHERE supports_tools = "
             f"{true_default})"
         ))
     if changed:
@@ -266,6 +286,12 @@ def _migrate_request_log_columns(db) -> None:
         "input_price_per_1k": "ALTER TABLE provider_models ADD COLUMN input_price_per_1k FLOAT",
         "output_price_per_1k": "ALTER TABLE provider_models ADD COLUMN output_price_per_1k FLOAT",
         "cache_price_per_1k": "ALTER TABLE provider_models ADD COLUMN cache_price_per_1k FLOAT",
+        "supports_tools": "ALTER TABLE provider_models ADD COLUMN supports_tools BOOLEAN NOT NULL DEFAULT 0",
+        "supports_chat_completions": "ALTER TABLE provider_models ADD COLUMN supports_chat_completions BOOLEAN NOT NULL DEFAULT 1",
+        "supports_responses": "ALTER TABLE provider_models ADD COLUMN supports_responses BOOLEAN NOT NULL DEFAULT 1",
+        "context_window_tokens": "ALTER TABLE provider_models ADD COLUMN context_window_tokens INTEGER",
+        "max_input_tokens": "ALTER TABLE provider_models ADD COLUMN max_input_tokens INTEGER",
+        "max_output_tokens": "ALTER TABLE provider_models ADD COLUMN max_output_tokens INTEGER",
     }
     changed_provider_models = False
     for column, ddl in provider_model_additions.items():
@@ -283,6 +309,11 @@ def _migrate_request_log_columns(db) -> None:
     model_catalog_additions = {
         "cache_price_per_1k": "ALTER TABLE model_catalogs ADD COLUMN cache_price_per_1k FLOAT",
         "context_window_tokens": "ALTER TABLE model_catalogs ADD COLUMN context_window_tokens INTEGER",
+        "supports_tools": "ALTER TABLE model_catalogs ADD COLUMN supports_tools BOOLEAN NOT NULL DEFAULT 0",
+        "supports_chat_completions": "ALTER TABLE model_catalogs ADD COLUMN supports_chat_completions BOOLEAN NOT NULL DEFAULT 1",
+        "supports_responses": "ALTER TABLE model_catalogs ADD COLUMN supports_responses BOOLEAN NOT NULL DEFAULT 1",
+        "max_input_tokens": "ALTER TABLE model_catalogs ADD COLUMN max_input_tokens INTEGER",
+        "max_output_tokens": "ALTER TABLE model_catalogs ADD COLUMN max_output_tokens INTEGER",
     }
     changed_model_catalogs = False
     for column, ddl in model_catalog_additions.items():
@@ -385,6 +416,9 @@ def _migrate_request_log_columns(db) -> None:
         "mask_sensitive_fields": "ALTER TABLE app_settings ADD COLUMN mask_sensitive_fields BOOLEAN NOT NULL DEFAULT 1",
         "max_logged_body_bytes": "ALTER TABLE app_settings ADD COLUMN max_logged_body_bytes INTEGER NOT NULL DEFAULT 16384",
         "global_max_request_tokens": "ALTER TABLE app_settings ADD COLUMN global_max_request_tokens INTEGER NOT NULL DEFAULT 0",
+        "max_v1_request_body_bytes": "ALTER TABLE app_settings ADD COLUMN max_v1_request_body_bytes INTEGER NOT NULL DEFAULT 20971520",
+        "long_output_stream_threshold_tokens": "ALTER TABLE app_settings ADD COLUMN long_output_stream_threshold_tokens INTEGER NOT NULL DEFAULT 8192",
+        "stream_token_capture_max_bytes": "ALTER TABLE app_settings ADD COLUMN stream_token_capture_max_bytes INTEGER NOT NULL DEFAULT 1048576",
         "allow_public_user_registration": "ALTER TABLE app_settings ADD COLUMN allow_public_user_registration BOOLEAN NOT NULL DEFAULT 0",
         "request_log_retention_days": "ALTER TABLE app_settings ADD COLUMN request_log_retention_days INTEGER NOT NULL DEFAULT 90",
         "admin_audit_log_retention_days": "ALTER TABLE app_settings ADD COLUMN admin_audit_log_retention_days INTEGER NOT NULL DEFAULT 180",
@@ -540,6 +574,9 @@ async def trace_and_runtime_middleware(request: Request, call_next):
     request.state.trace_id = trace_id
     RuntimeStateService.enter_request()
     try:
+        body_limit_response = _reject_oversized_v1_request_by_content_length(request)
+        if body_limit_response is not None:
+            return body_limit_response
         response = await call_next(request)
     except Exception as exc:
         if request.url.path.startswith("/v1/"):
@@ -551,6 +588,42 @@ async def trace_and_runtime_middleware(request: Request, call_next):
     response.headers["X-Request-Id"] = trace_id
     response.headers["X-Active-Requests"] = str(RuntimeStateService.current_active_requests())
     return response
+
+
+def _reject_oversized_v1_request_by_content_length(request: Request) -> JSONResponse | None:
+    if not request.url.path.startswith("/v1/") or request.method.upper() not in {"POST", "PUT", "PATCH"}:
+        return None
+    db = SessionLocal()
+    try:
+        app_setting = SettingService.get_or_create(db)
+        limit = int(getattr(app_setting, "max_v1_request_body_bytes", 0) or 0)
+    finally:
+        db.close()
+    if limit <= 0:
+        return None
+    content_length = request.headers.get("content-length")
+    try:
+        request_bytes = int(content_length) if content_length is not None else None
+    except ValueError:
+        request_bytes = None
+    if request_bytes is None or request_bytes <= limit:
+        return None
+    trace_id = getattr(request.state, "trace_id", None)
+    return JSONResponse(
+        status_code=413,
+        content=OpenAIErrorService.build_error_payload(
+            message=f"请求体大小 {request_bytes} 字节超过应用层上限 {limit} 字节",
+            code="request_body_too_large",
+            trace_id=trace_id,
+            error_type="invalid_request_error",
+            retryable=False,
+            detail={
+                "request_body_bytes": request_bytes,
+                "max_v1_request_body_bytes": limit,
+            },
+        ),
+        headers={"X-Trace-Id": trace_id or "", "X-Request-Id": trace_id or ""},
+    )
 
 
 @app.exception_handler(ApiClientAuthError)
@@ -665,7 +738,17 @@ async def _log_api_client_auth_failure(request: Request, exc: ApiClientAuthError
     db = SessionLocal()
     try:
         settings = SettingService.get_or_create(db)
-        body_bytes = await request.body()
+        max_body_bytes = int(getattr(settings, "max_v1_request_body_bytes", 0) or 0)
+        content_length_header = request.headers.get("content-length")
+        try:
+            content_length = int(content_length_header) if content_length_header is not None else None
+        except ValueError:
+            content_length = None
+        should_read_body = (
+            content_length is not None
+            and (max_body_bytes <= 0 or content_length <= max_body_bytes)
+        )
+        body_bytes = await request.body() if should_read_body else b""
         body_text = body_bytes.decode("utf-8", errors="ignore") if body_bytes else None
         parsed_body = safeJsonParse(body_text) if body_text else None
         request_body_json = None

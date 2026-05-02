@@ -2504,6 +2504,7 @@
         const DEFAULT_PROVIDER_MODEL_CONFIG = {
             supports_stream: true,
             supports_vision: false,
+            supports_tools: false,
             enabled: true,
             price_multiplier: 1,
         };
@@ -2543,6 +2544,7 @@
                 model_name: modelName,
                 supports_stream: config.supports_stream ?? DEFAULT_PROVIDER_MODEL_CONFIG.supports_stream,
                 supports_vision: config.supports_vision ?? DEFAULT_PROVIDER_MODEL_CONFIG.supports_vision,
+                supports_tools: config.supports_tools ?? DEFAULT_PROVIDER_MODEL_CONFIG.supports_tools,
                 enabled: config.enabled ?? DEFAULT_PROVIDER_MODEL_CONFIG.enabled,
                 price_multiplier: Number.isFinite(Number(config.price_multiplier)) && Number(config.price_multiplier) > 0
                     ? Number(config.price_multiplier)
@@ -2558,6 +2560,7 @@
             row.dataset.modelConfigRow = "true";
             row.dataset.supportsStream = item.supports_stream ? "true" : "false";
             row.dataset.supportsVision = item.supports_vision ? "true" : "false";
+            row.dataset.supportsTools = item.supports_tools ? "true" : "false";
             row.innerHTML = `
                 <label class="provider-model-config-name" for="${rowId}-name">
                     <span class="visually-hidden">模型名称</span>
@@ -2646,6 +2649,7 @@
                     weight: Number(providerWeightInput.value || 100),
                     supports_stream: row.dataset.supportsStream ? row.dataset.supportsStream === "true" : DEFAULT_PROVIDER_MODEL_CONFIG.supports_stream,
                     supports_vision: row.dataset.supportsVision ? row.dataset.supportsVision === "true" : DEFAULT_PROVIDER_MODEL_CONFIG.supports_vision,
+                    supports_tools: row.dataset.supportsTools ? row.dataset.supportsTools === "true" : DEFAULT_PROVIDER_MODEL_CONFIG.supports_tools,
                     enabled: row.querySelector('[data-model-config-field="enabled"]')?.checked ?? DEFAULT_PROVIDER_MODEL_CONFIG.enabled,
                     price_multiplier: priceMultiplier,
                 });
@@ -3122,7 +3126,7 @@
                             <span class="status-badge ${item.enabled ? "status-healthy" : "status-unknown"}">${item.enabled ? "已启用" : "已停用"}</span>
                         </div>
                     </td>
-                    <td>${item.supports_stream ? "流式" : "非流式"} / ${item.supports_vision ? "图像" : "文本"}</td>
+                    <td>${item.supports_stream ? "流式" : "非流式"} / ${item.supports_vision ? "图像" : "文本"} / ${item.supports_tools ? "工具" : "无工具"}</td>
                     <td>
                         <strong>${escapeHtml(item.price_multiplier ?? 1)}x</strong>
                         <div class="table-muted">输入 ${escapeHtml(formatPrice(item.input_price_per_1k))}</div>
@@ -3230,7 +3234,7 @@
                     <td>
                         <strong>${escapeHtml(item.model_name)}</strong>
                     </td>
-                    <td>${item.supports_stream ? "流式" : "非流式"} / ${item.supports_vision ? "图像" : "文本"}</td>
+                    <td>${item.supports_stream ? "流式" : "非流式"} / ${item.supports_vision ? "图像" : "文本"} / ${item.supports_tools ? "工具" : "无工具"}</td>
                     <td>${item.already_configured ? "已在当前配置中" : "可导入"}</td>
                 </tr>
             `).join("") : '<tr><td colspan="4"><div class="empty-state">当前没有可导入的上游模型。</div></td></tr>';
@@ -3244,6 +3248,7 @@
                 enabled: item.enabled !== false,
                 supports_stream: item.supports_stream !== false,
                 supports_vision: item.supports_vision === true,
+                supports_tools: item.supports_tools === true,
                 input_price_per_1k: item.input_price_per_1k ?? null,
                 output_price_per_1k: item.output_price_per_1k ?? null,
                 cache_price_per_1k: item.cache_price_per_1k ?? null,
@@ -3282,7 +3287,7 @@
                         <strong>${escapeHtml(item.model_name)}</strong>
                         ${item.display_name ? `<div class="table-muted">${escapeHtml(item.display_name)}</div>` : ""}
                     </td>
-                    <td>${item.supports_stream ? "流式" : "非流式"} / ${item.supports_vision ? "图像" : "文本"}</td>
+                    <td>${item.supports_stream ? "流式" : "非流式"} / ${item.supports_vision ? "图像" : "文本"} / ${item.supports_tools ? "工具" : "无工具"}</td>
                     <td>
                         <span>输入 ${escapeHtml(formatPrice(item.input_price_per_1k))}</span>
                         <div class="table-muted">输出 ${escapeHtml(formatPrice(item.output_price_per_1k))} · 缓存 ${escapeHtml(formatPrice(item.cache_price_per_1k))}</div>
@@ -3405,6 +3410,7 @@
                     model_name: modelName,
                     supports_stream: catalogModel.supports_stream,
                     supports_vision: catalogModel.supports_vision,
+                    supports_tools: catalogModel.supports_tools,
                     enabled: DEFAULT_PROVIDER_MODEL_CONFIG.enabled,
                     price_multiplier: DEFAULT_PROVIDER_MODEL_CONFIG.price_multiplier,
                 })) {
@@ -3571,7 +3577,7 @@
                         <div class="table-muted">${model.last_error ? escapeHtml(model.last_error) : "-"}</div>
                     </td>
                     <td>${statusBadge(model.health_status)}</td>
-                    <td>${model.supports_stream ? "流式" : "非流式"} / ${model.supports_vision ? "图像" : "文本"}</td>
+                    <td>${model.supports_stream ? "流式" : "非流式"} / ${model.supports_vision ? "图像" : "文本"} / ${model.supports_tools ? "工具" : "无工具"}</td>
                     <td>
                         <input class="field-input" type="number" min="0.0001" step="0.0001" value="${model.price_multiplier ?? 1}" placeholder="渠道倍率" data-model-field="price_multiplier" data-provider-id="${provider.id}" data-model-id="${model.id}">
                         <div class="table-muted">输入 ${escapeHtml(formatPrice(model.input_price_per_1k))}</div>
@@ -3888,7 +3894,12 @@
         const enabledInput = document.getElementById("model-enabled");
         const supportsStreamInput = document.getElementById("model-supports-stream");
         const supportsVisionInput = document.getElementById("model-supports-vision");
+        const supportsToolsInput = document.getElementById("model-supports-tools");
+        const supportsChatCompletionsInput = document.getElementById("model-supports-chat-completions");
+        const supportsResponsesInput = document.getElementById("model-supports-responses");
         const contextWindowInput = document.getElementById("model-context-window-tokens");
+        const maxInputTokensInput = document.getElementById("model-max-input-tokens");
+        const maxOutputTokensInput = document.getElementById("model-max-output-tokens");
         const inputPriceInput = document.getElementById("model-input-price");
         const outputPriceInput = document.getElementById("model-output-price");
         const cachePriceInput = document.getElementById("model-cache-price");
@@ -3897,7 +3908,8 @@
         const bindingBody = document.getElementById("model-binding-body");
         if (
             !tableBody || !searchInput || !enabledSelect || !providerSelect || !pageSizeSelect || !cachePriceInput
-            || !supportsStreamInput || !supportsVisionInput || !contextWindowInput
+            || !supportsStreamInput || !supportsVisionInput || !supportsToolsInput || !supportsChatCompletionsInput
+            || !supportsResponsesInput || !contextWindowInput || !maxInputTokensInput || !maxOutputTokensInput
             || !selectPageInput || !batchMeta || !batchContextWindowInput || !batchContextApplyBtn
             || !pageMeta || !prevPageBtn || !nextPageBtn || !refreshBtn || !addBtn || !modal || !form || !bindingBody
         ) return;
@@ -3959,6 +3971,24 @@
             return value == null ? "未设置" : `${formatNumber(value)} token`;
         }
 
+        function renderTokenLimitCell(item) {
+            return `
+                <div>上下文 ${escapeHtml(formatContextWindow(item.context_window_tokens))}</div>
+                <div class="table-muted">输入 ${escapeHtml(formatContextWindow(item.max_input_tokens))}</div>
+                <div class="table-muted">输出 ${escapeHtml(formatContextWindow(item.max_output_tokens))}</div>
+            `;
+        }
+
+        function renderModelAbilityCell(item) {
+            const endpointLabels = [];
+            if (item.supports_chat_completions) endpointLabels.push("Chat");
+            if (item.supports_responses) endpointLabels.push("Responses");
+            return `
+                <div>${item.supports_stream ? "流式" : "非流式"} / ${item.supports_vision ? "图像" : "文本"} / ${item.supports_tools ? "工具" : "无工具"}</div>
+                <div class="table-muted">${escapeHtml(endpointLabels.join("、") || "未配置原生端点")}</div>
+            `;
+        }
+
         function updateBatchBar() {
             const selectedCount = state.selectedModelNames.size;
             batchMeta.textContent = `已选 ${formatNumber(selectedCount)} 个模型`;
@@ -3978,8 +4008,8 @@
                         <div class="table-muted">${escapeHtml(item.model_name)}</div>
                     </td>
                     <td>${item.enabled ? '<span class="status-badge status-healthy">已启用</span>' : '<span class="status-badge status-unknown">已停用</span>'}</td>
-                    <td>${item.supports_stream ? "流式" : "非流式"} / ${item.supports_vision ? "图像" : "文本"}</td>
-                    <td>${escapeHtml(formatContextWindow(item.context_window_tokens))}</td>
+                    <td>${renderModelAbilityCell(item)}</td>
+                    <td>${renderTokenLimitCell(item)}</td>
                     <td>
                         <div>输入 ${escapeHtml(formatPrice(item.input_price_per_1k ?? item.lowest_input_price_per_1k))}</div>
                         <div class="table-muted">输出 ${escapeHtml(formatPrice(item.output_price_per_1k ?? item.lowest_output_price_per_1k))}</div>
@@ -4109,7 +4139,12 @@
             enabledInput.checked = detail?.enabled ?? true;
             supportsStreamInput.checked = detail?.supports_stream ?? true;
             supportsVisionInput.checked = detail?.supports_vision ?? false;
+            supportsToolsInput.checked = detail?.supports_tools ?? false;
+            supportsChatCompletionsInput.checked = detail?.supports_chat_completions ?? true;
+            supportsResponsesInput.checked = detail?.supports_responses ?? true;
             contextWindowInput.value = detail?.context_window_tokens == null ? "" : detail.context_window_tokens;
+            maxInputTokensInput.value = detail?.max_input_tokens == null ? "" : detail.max_input_tokens;
+            maxOutputTokensInput.value = detail?.max_output_tokens == null ? "" : detail.max_output_tokens;
             inputPriceInput.value = detail?.input_price_per_1k == null ? "" : toPricePer1M(detail.input_price_per_1k);
             outputPriceInput.value = detail?.output_price_per_1k == null ? "" : toPricePer1M(detail.output_price_per_1k);
             cachePriceInput.value = detail?.cache_price_per_1k == null
@@ -4267,7 +4302,12 @@
                 enabled: enabledInput.checked,
                 supports_stream: supportsStreamInput.checked,
                 supports_vision: supportsVisionInput.checked,
+                supports_tools: supportsToolsInput.checked,
+                supports_chat_completions: supportsChatCompletionsInput.checked,
+                supports_responses: supportsResponsesInput.checked,
                 context_window_tokens: contextWindowInput.value === "" ? null : Number(contextWindowInput.value),
+                max_input_tokens: maxInputTokensInput.value === "" ? null : Number(maxInputTokensInput.value),
+                max_output_tokens: maxOutputTokensInput.value === "" ? null : Number(maxOutputTokensInput.value),
                 input_price_per_1k: inputPriceInput.value === "" ? null : toPricePer1K(Number(inputPriceInput.value)),
                 output_price_per_1k: outputPriceInput.value === "" ? null : toPricePer1K(Number(outputPriceInput.value)),
                 cache_price_per_1k: cachePriceInput.value === ""
@@ -4389,6 +4429,9 @@
         document.getElementById("setting-global-timeout-ms").value = settings.global_timeout_ms;
         document.getElementById("setting-global-max-retries").value = settings.global_max_retries;
         document.getElementById("setting-global-max-request-tokens").value = settings.global_max_request_tokens ?? 0;
+        document.getElementById("setting-max-v1-request-body-bytes").value = settings.max_v1_request_body_bytes ?? 20971520;
+        document.getElementById("setting-long-output-stream-threshold-tokens").value = settings.long_output_stream_threshold_tokens ?? 8192;
+        document.getElementById("setting-stream-token-capture-max-bytes").value = settings.stream_token_capture_max_bytes ?? 1048576;
         document.getElementById("setting-circuit-breaker-threshold").value = settings.circuit_breaker_threshold;
         document.getElementById("setting-health-check-interval-sec").value = settings.health_check_interval_sec;
         document.getElementById("setting-recovery-probe-interval-sec").value = settings.recovery_probe_interval_sec;
@@ -4435,6 +4478,9 @@
                 global_timeout_ms: Number(document.getElementById("setting-global-timeout-ms").value),
                 global_max_retries: Number(document.getElementById("setting-global-max-retries").value),
                 global_max_request_tokens: Number(document.getElementById("setting-global-max-request-tokens").value),
+                max_v1_request_body_bytes: Number(document.getElementById("setting-max-v1-request-body-bytes").value),
+                long_output_stream_threshold_tokens: Number(document.getElementById("setting-long-output-stream-threshold-tokens").value),
+                stream_token_capture_max_bytes: Number(document.getElementById("setting-stream-token-capture-max-bytes").value),
                 circuit_breaker_threshold: Number(document.getElementById("setting-circuit-breaker-threshold").value),
                 auto_health_check: document.getElementById("setting-auto-health-check").checked,
                 health_check_interval_sec: Number(document.getElementById("setting-health-check-interval-sec").value),

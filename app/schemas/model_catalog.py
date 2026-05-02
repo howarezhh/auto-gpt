@@ -38,7 +38,12 @@ class ModelCatalogBase(BaseModel):
     enabled: bool = True
     supports_stream: bool = True
     supports_vision: bool = False
+    supports_tools: bool = False
+    supports_chat_completions: bool = True
+    supports_responses: bool = True
     context_window_tokens: int | None = Field(default=None, ge=1)
+    max_input_tokens: int | None = Field(default=None, ge=1)
+    max_output_tokens: int | None = Field(default=None, ge=1)
     input_price_per_1k: float | None = Field(default=None, ge=0)
     output_price_per_1k: float | None = Field(default=None, ge=0)
     cache_price_per_1k: float | None = Field(default=None, ge=0)
@@ -68,7 +73,12 @@ class ModelCatalogUpdate(BaseModel):
     enabled: bool | None = None
     supports_stream: bool | None = None
     supports_vision: bool | None = None
+    supports_tools: bool | None = None
+    supports_chat_completions: bool | None = None
+    supports_responses: bool | None = None
     context_window_tokens: int | None = Field(default=None, ge=1)
+    max_input_tokens: int | None = Field(default=None, ge=1)
+    max_output_tokens: int | None = Field(default=None, ge=1)
     input_price_per_1k: float | None = Field(default=None, ge=0)
     output_price_per_1k: float | None = Field(default=None, ge=0)
     cache_price_per_1k: float | None = Field(default=None, ge=0)
@@ -143,6 +153,12 @@ class UserModelOut(BaseModel):
     remark: str | None = None
     supports_stream: bool = True
     supports_vision: bool = False
+    supports_tools: bool = False
+    supports_chat_completions: bool = True
+    supports_responses: bool = True
+    context_window_tokens: int | None = Field(default=None, ge=1)
+    max_input_tokens: int | None = Field(default=None, ge=1)
+    max_output_tokens: int | None = Field(default=None, ge=1)
     input_price_per_1k: float | None = None
     output_price_per_1k: float | None = None
     cache_price_per_1k: float | None = None
