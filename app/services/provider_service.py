@@ -583,10 +583,7 @@ class ProviderService:
     @staticmethod
     def _replace_provider_models(db: Session, provider: Provider, model_configs: list[ProviderModelConfigInput]) -> None:
         existing_by_name = {item.model_name: item for item in provider.provider_models}
-        catalogs_by_name = {
-            item.model_name: item
-            for item in db.scalars(select(ModelCatalog).where(ModelCatalog.model_name.in_([config.model_name for config in model_configs])))
-        } if model_configs else {}
+        catalogs_by_name = ProviderService._ensure_model_catalogs_for_configs(db, model_configs)
         keep_names: set[str] = set()
 
         for config in model_configs:
@@ -601,40 +598,7 @@ class ProviderService:
             provider_model.price_multiplier = config.price_multiplier or 1.0
             catalog = catalogs_by_name.get(config.model_name)
             if catalog is not None:
-                provider_model.supports_stream = catalog.supports_stream
-                provider_model.supports_vision = catalog.supports_vision
-            else:
-                provider_model.supports_stream = config.supports_stream
-                provider_model.supports_vision = config.supports_vision
-            if catalog is not None:
-                provider_model.input_price_per_1k = (
-                    catalog.input_price_per_1k * provider_model.price_multiplier
-                    if catalog.input_price_per_1k is not None
-                    else None
-                )
-            else:
-                provider_model.input_price_per_1k = None
-
-            if catalog is not None:
-                provider_model.output_price_per_1k = (
-                    catalog.output_price_per_1k * provider_model.price_multiplier
-                    if catalog.output_price_per_1k is not None
-                    else None
-                )
-            else:
-                provider_model.output_price_per_1k = None
-
-            if catalog is not None:
-                catalog_cache_price = catalog.cache_price_per_1k
-                if catalog_cache_price is None:
-                    catalog_cache_price = catalog.input_price_per_1k
-                provider_model.cache_price_per_1k = (
-                    catalog_cache_price * provider_model.price_multiplier
-                    if catalog_cache_price is not None
-                    else None
-                )
-            else:
-                provider_model.cache_price_per_1k = None
+                ProviderService._sync_provider_model_from_catalog(provider_model, catalog)
             if provider_model.health_status not in {"healthy", "degraded", "unhealthy"}:
                 provider_model.health_status = "unknown"
             if not provider_model.circuit_state:
@@ -647,19 +611,61 @@ class ProviderService:
         ProviderService._sync_models_json(provider)
 
     @staticmethod
+    def _ensure_model_catalogs_for_configs(
+        db: Session,
+        model_configs: list[ProviderModelConfigInput],
+    ) -> dict[str, ModelCatalog]:
+        model_names = [config.model_name for config in model_configs]
+        if not model_names:
+            return {}
+        catalogs_by_name = {
+            item.model_name: item
+            for item in db.scalars(select(ModelCatalog).where(ModelCatalog.model_name.in_(model_names)))
+        }
+        for config in model_configs:
+            if config.model_name in catalogs_by_name:
+                continue
+            catalog = ModelCatalog(
+                model_name=config.model_name,
+                display_name=None,
+                enabled=True,
+                supports_stream=config.supports_stream,
+                supports_vision=config.supports_vision,
+                input_price_per_1k=None,
+                output_price_per_1k=None,
+                cache_price_per_1k=None,
+            )
+            db.add(catalog)
+            db.flush()
+            catalogs_by_name[config.model_name] = catalog
+        return catalogs_by_name
+
+    @staticmethod
     def _sync_provider_model_price_from_catalog(db: Session, provider_model: ProviderModel) -> None:
         catalog = db.scalar(select(ModelCatalog).where(ModelCatalog.model_name == provider_model.model_name))
         if catalog is None:
             return
+        ProviderService._sync_provider_model_from_catalog(provider_model, catalog)
+
+    @staticmethod
+    def _sync_provider_model_from_catalog(provider_model: ProviderModel, catalog: ModelCatalog) -> None:
+        provider_model.supports_stream = catalog.supports_stream
+        provider_model.supports_vision = catalog.supports_vision
         if catalog.input_price_per_1k is not None:
             provider_model.input_price_per_1k = catalog.input_price_per_1k * provider_model.price_multiplier
+        else:
+            provider_model.input_price_per_1k = None
         if catalog.output_price_per_1k is not None:
             provider_model.output_price_per_1k = catalog.output_price_per_1k * provider_model.price_multiplier
+        else:
+            provider_model.output_price_per_1k = None
         catalog_cache_price = catalog.cache_price_per_1k
         if catalog_cache_price is None:
             catalog_cache_price = catalog.input_price_per_1k
         if catalog_cache_price is not None:
             provider_model.cache_price_per_1k = catalog_cache_price * provider_model.price_multiplier
+        else:
+            provider_model.cache_price_per_1k = None
 
     @staticmethod
     def _sync_models_json(provider: Provider) -> None:

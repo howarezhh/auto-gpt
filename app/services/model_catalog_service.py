@@ -163,6 +163,7 @@ class ModelCatalogService:
         changed = False
         for model_name, items in grouped.items():
             catalog = catalogs.get(model_name)
+            catalog_created = False
             if catalog is None:
                 catalog = ModelCatalog(
                     model_name=model_name,
@@ -177,6 +178,7 @@ class ModelCatalogService:
                 db.add(catalog)
                 db.flush()
                 catalogs[model_name] = catalog
+                catalog_created = True
                 changed = True
 
             for item in items:
@@ -186,17 +188,20 @@ class ModelCatalogService:
                 if item.supports_vision != catalog.supports_vision:
                     item.supports_vision = catalog.supports_vision
                     changed = True
-                derived_multiplier = ModelCatalogService._derive_multiplier(
-                    base_input=catalog.input_price_per_1k,
-                    direct_input=item.input_price_per_1k,
-                    base_output=catalog.output_price_per_1k,
-                    direct_output=item.output_price_per_1k,
-                    base_cache=catalog.cache_price_per_1k,
-                    direct_cache=item.cache_price_per_1k,
-                    fallback=item.price_multiplier or 1.0,
-                )
-                if abs((item.price_multiplier or 1.0) - derived_multiplier) > 1e-9:
-                    item.price_multiplier = derived_multiplier
+                if catalog_created:
+                    derived_multiplier = ModelCatalogService._derive_multiplier(
+                        base_input=catalog.input_price_per_1k,
+                        direct_input=item.input_price_per_1k,
+                        base_output=catalog.output_price_per_1k,
+                        direct_output=item.output_price_per_1k,
+                        base_cache=catalog.cache_price_per_1k,
+                        direct_cache=item.cache_price_per_1k,
+                        fallback=item.price_multiplier or 1.0,
+                    )
+                    if abs((item.price_multiplier or 1.0) - derived_multiplier) > 1e-9:
+                        item.price_multiplier = derived_multiplier
+                        changed = True
+                if ModelCatalogService._sync_provider_model_shared_fields(item, catalog):
                     changed = True
 
         if changed:
@@ -503,6 +508,44 @@ class ModelCatalogService:
                     provider_model.cache_price_per_1k = None
 
     @staticmethod
+    def _sync_provider_model_shared_fields(provider_model: ProviderModel, catalog: ModelCatalog) -> bool:
+        changed = False
+        if provider_model.supports_stream != catalog.supports_stream:
+            provider_model.supports_stream = catalog.supports_stream
+            changed = True
+        if provider_model.supports_vision != catalog.supports_vision:
+            provider_model.supports_vision = catalog.supports_vision
+            changed = True
+        expected_input = (
+            catalog.input_price_per_1k * provider_model.price_multiplier
+            if catalog.input_price_per_1k is not None
+            else None
+        )
+        expected_output = (
+            catalog.output_price_per_1k * provider_model.price_multiplier
+            if catalog.output_price_per_1k is not None
+            else None
+        )
+        catalog_cache_price = catalog.cache_price_per_1k
+        if catalog_cache_price is None:
+            catalog_cache_price = catalog.input_price_per_1k
+        expected_cache = (
+            catalog_cache_price * provider_model.price_multiplier
+            if catalog_cache_price is not None
+            else None
+        )
+        for field, expected in (
+            ("input_price_per_1k", expected_input),
+            ("output_price_per_1k", expected_output),
+            ("cache_price_per_1k", expected_cache),
+        ):
+            current = getattr(provider_model, field)
+            if not ModelCatalogService._nullable_float_equal(current, expected):
+                setattr(provider_model, field, expected)
+                changed = True
+        return changed
+
+    @staticmethod
     def _sync_provider_capabilities_from_catalog(db: Session, catalog: ModelCatalog) -> None:
         provider_models = list(
             db.scalars(
@@ -513,6 +556,12 @@ class ModelCatalogService:
         for provider_model in provider_models:
             provider_model.supports_stream = catalog.supports_stream
             provider_model.supports_vision = catalog.supports_vision
+
+    @staticmethod
+    def _nullable_float_equal(left: float | None, right: float | None) -> bool:
+        if left is None or right is None:
+            return left is None and right is None
+        return abs(left - right) <= 1e-12
 
     @staticmethod
     def _pick_base_price(provider_models: list[ProviderModel], *, field_name: str) -> float | None:
