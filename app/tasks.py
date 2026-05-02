@@ -1,5 +1,6 @@
 import inspect
 import logging
+import asyncio
 from datetime import datetime
 from collections.abc import Callable
 from functools import wraps
@@ -74,6 +75,20 @@ def distributed_job_lock(job_name: str, *, ttl_seconds: int) -> Callable:
                 )
                 await client.expire(state_key, max(ttl_seconds, 300))
                 return result
+            except asyncio.CancelledError:
+                try:
+                    await client.hset(
+                        state_key,
+                        mapping={
+                            "status": "cancelled",
+                            "finished_at": datetime.utcnow().isoformat(),
+                            "updated_at": datetime.utcnow().isoformat(),
+                        },
+                    )
+                    await client.expire(state_key, max(ttl_seconds, 300))
+                except Exception:
+                    pass
+                raise
             except Exception as exc:
                 try:
                     await client.hset(
@@ -92,7 +107,11 @@ def distributed_job_lock(job_name: str, *, ttl_seconds: int) -> Callable:
             finally:
                 try:
                     await client.eval(_RELEASE_LOCK_LUA, 1, lock_key, token)
+                except asyncio.CancelledError:
+                    raise
                 except Exception as exc:
+                    if "closed" in str(exc).lower():
+                        return None
                     logger.warning("Failed to release scheduler job lock %s: %s", job_name, exc)
 
         return async_wrapper
