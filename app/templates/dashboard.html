@@ -54,7 +54,15 @@
                     <span>请求趋势</span>
                     <strong id="dashboard-monitor-request-total">-</strong>
                 </div>
-                <small>最近 3 小时</small>
+                <label class="monitor-card-tools" for="dashboard-monitor-traffic-window">
+                    <span class="visually-hidden">选择请求趋势时间范围</span>
+                    <select class="field-input monitor-window-select" id="dashboard-monitor-traffic-window">
+                        <option value="180" selected>最近 3 小时</option>
+                        <option value="1440">最近 1 天</option>
+                        <option value="10080">最近 1 周</option>
+                        <option value="43200">最近 1 个月</option>
+                    </select>
+                </label>
             </div>
             <div class="monitor-chart" id="dashboard-monitor-traffic-chart"></div>
         </article>
@@ -64,7 +72,15 @@
                     <span>延迟与首包</span>
                     <strong id="dashboard-monitor-latency-value">-</strong>
                 </div>
-                <small>P95 / TTFB</small>
+                <label class="monitor-card-tools" for="dashboard-monitor-latency-window">
+                    <span class="visually-hidden">选择延迟与首包时间范围</span>
+                    <select class="field-input monitor-window-select" id="dashboard-monitor-latency-window">
+                        <option value="180" selected>最近 3 小时</option>
+                        <option value="1440">最近 1 天</option>
+                        <option value="10080">最近 1 周</option>
+                        <option value="43200">最近 1 个月</option>
+                    </select>
+                </label>
             </div>
             <div class="monitor-chart monitor-chart-compact" id="dashboard-monitor-latency-chart"></div>
         </article>

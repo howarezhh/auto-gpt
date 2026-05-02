@@ -46,6 +46,7 @@ class RequestLogOut(BaseModel):
     billing_multiplier: float | None
     channel_price_input_per_1k: float | None
     channel_price_output_per_1k: float | None
+    channel_price_cache_per_1k: float | None = None
     api_client_balance_after: float | None
     prompt_tokens: int | None
     completion_tokens: int | None

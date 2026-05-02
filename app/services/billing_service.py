@@ -48,15 +48,28 @@ class BillingService:
         if provider_model is None:
             return {"prompt_cost": Decimal("0"), "completion_cost": Decimal("0"), "total_cost": Decimal("0"), "billing_status": "price_unresolved"}
 
+        log.billing_multiplier = provider_model.price_multiplier or 1.0
+        log.channel_price_input_per_1k = provider_model.input_price_per_1k
+        log.channel_price_output_per_1k = provider_model.output_price_per_1k
+        log.channel_price_cache_per_1k = (
+            provider_model.cache_price_per_1k
+            if provider_model.cache_price_per_1k is not None
+            else provider_model.input_price_per_1k
+        )
         prompt_tokens = max(0, int(log.prompt_tokens or 0))
         completion_tokens = max(0, int(log.completion_tokens or 0))
+        cache_read_tokens = max(0, int(log.cache_read_tokens or 0))
         input_price = BillingService.to_decimal(provider_model.input_price_per_1k) if provider_model.input_price_per_1k is not None else None
         output_price = BillingService.to_decimal(provider_model.output_price_per_1k) if provider_model.output_price_per_1k is not None else None
+        cache_price = BillingService.to_decimal(provider_model.cache_price_per_1k) if provider_model.cache_price_per_1k is not None else input_price
 
         if input_price is None and output_price is None:
             return {"prompt_cost": Decimal("0"), "completion_cost": Decimal("0"), "total_cost": Decimal("0"), "billing_status": "price_unset"}
 
-        prompt_cost = (BillingService.to_decimal(prompt_tokens) / Decimal("1000")) * (input_price or Decimal("0"))
+        regular_prompt_tokens = max(0, prompt_tokens - cache_read_tokens)
+        prompt_cost = (BillingService.to_decimal(regular_prompt_tokens) / Decimal("1000")) * (input_price or Decimal("0"))
+        if cache_read_tokens > 0:
+            prompt_cost += (BillingService.to_decimal(cache_read_tokens) / Decimal("1000")) * (cache_price or input_price or Decimal("0"))
         completion_cost = (BillingService.to_decimal(completion_tokens) / Decimal("1000")) * (output_price or Decimal("0"))
         total_cost = (prompt_cost + completion_cost).quantize(BillingService.MONEY_QUANT, rounding=ROUND_HALF_UP)
         return {

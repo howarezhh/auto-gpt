@@ -59,6 +59,10 @@
         balance_exhausted: "余额耗尽",
         unbound: "未绑定渠道",
     };
+    const API_KEY_RAW_PREFIX = "sk-aotu-";
+    const API_KEY_RAW_MIN_LENGTH = 24;
+    const API_KEY_RAW_MAX_LENGTH = 128;
+    const API_KEY_RAW_PATTERN = /^[A-Za-z0-9\-_]+$/;
 
     const api = {
         get: async (url) => parseResponse(await fetch(url, { cache: "no-store", headers: { "Cache-Control": "no-cache" } })),
@@ -506,53 +510,6 @@
         return Number(value) / PRICE_PER_1M_MULTIPLIER;
     }
 
-    function parseModelConfigs(input) {
-        return input
-            .split(/\r?\n/)
-            .map((line) => line.trim())
-            .filter(Boolean)
-            .map((line) => {
-                const [modelName, priority, weight, supportsStream, supportsVision, enabled] = line.split("|").map((item) => item?.trim() ?? "");
-                return {
-                    model_name: modelName,
-                    priority: priority ? Number(priority) : 100,
-                    weight: weight ? Number(weight) : 100,
-                    supports_stream: !supportsStream || /^(y|yes|true|1)$/i.test(supportsStream),
-                    supports_vision: /^(y|yes|true|1)$/i.test(supportsVision),
-                    enabled: !enabled || /^(y|yes|true|1)$/i.test(enabled),
-                };
-            })
-            .filter((item) => item.model_name);
-    }
-
-    function formatModelConfigs(modelConfigs = []) {
-        return modelConfigs.map((item) => (
-            `${item.model_name}|${item.priority}|${item.weight}|${item.supports_stream ? "y" : "n"}|${item.supports_vision ? "y" : "n"}|${item.enabled ? "y" : "n"}`
-        )).join("\n");
-    }
-
-    function buildModelConfigLine(modelName) {
-        const normalized = String(modelName || "").trim();
-        if (!normalized) return "";
-        const supportsVision = /gpt-4o|gpt-4\.1|gpt-5/i.test(normalized);
-        return `${normalized}|100|100|y|${supportsVision ? "y" : "n"}|y`;
-    }
-
-    function appendModelConfigLine(textarea, modelName) {
-        if (!textarea) return false;
-        const line = buildModelConfigLine(modelName);
-        if (!line) return false;
-        const existingConfigs = parseModelConfigs(textarea.value);
-        if (existingConfigs.some((item) => item.model_name === modelName.trim())) {
-            showToast(`模型 ${modelName.trim()} 已存在`, "error");
-            return false;
-        }
-        textarea.value = textarea.value.trim()
-            ? `${textarea.value.trim()}\n${line}`
-            : line;
-        return true;
-    }
-
     function collectConfiguredModels(providers = [], options = {}) {
         const {
             requireStream = false,
@@ -678,6 +635,34 @@
         return `${toPricePer1M(value).toFixed(4)}/1M`;
     }
 
+    function formatMultiplier(value) {
+        if (value == null || Number.isNaN(Number(value))) return "1x";
+        return `${Number(value).toFixed(2)}x`;
+    }
+
+    function formatBillingCalculation(log) {
+        const multiplier = Number(log?.billing_multiplier ?? 1);
+        const inputPrice = log?.channel_price_input_per_1k;
+        const outputPrice = log?.channel_price_output_per_1k;
+        const cachePrice = log?.channel_price_cache_per_1k ?? inputPrice;
+        const promptTokens = Number(log?.prompt_tokens ?? 0);
+        const completionTokens = Number(log?.completion_tokens ?? 0);
+        const cacheReadTokens = Number(log?.cache_read_tokens ?? 0);
+        const regularPromptTokens = Math.max(0, promptTokens - cacheReadTokens);
+        const inputPart = inputPrice == null || Number.isNaN(Number(inputPrice))
+            ? "输入单价未设置"
+            : `输入 ${regularPromptTokens}/1000 × ${Number(inputPrice).toFixed(6)}`;
+        const cachePart = cacheReadTokens > 0
+            ? (cachePrice == null || Number.isNaN(Number(cachePrice))
+                ? "缓存单价未设置"
+                : `缓存 ${cacheReadTokens}/1000 × ${Number(cachePrice).toFixed(6)}`)
+            : null;
+        const outputPart = outputPrice == null || Number.isNaN(Number(outputPrice))
+            ? "输出单价未设置"
+            : `输出 ${completionTokens}/1000 × ${Number(outputPrice).toFixed(6)}`;
+        return `倍率 ${formatMultiplier(multiplier)}；${[inputPart, cachePart, outputPart].filter(Boolean).join(" + ")}`;
+    }
+
     function formatPercent(value) {
         if (value == null || Number.isNaN(Number(value))) return "-";
         return `${Number(value).toFixed(2)}%`;
@@ -691,13 +676,6 @@
     function formatScore(value) {
         if (value == null || Number.isNaN(Number(value))) return "-";
         return `${Number(value).toFixed(2)} 分`;
-    }
-
-    function renderProviderCost(provider) {
-        return `
-            <div>输入 ${escapeHtml(formatPrice(provider.best_input_price_per_1k))}</div>
-            <div class="table-muted">输出 ${escapeHtml(formatPrice(provider.best_output_price_per_1k))}</div>
-        `;
     }
 
     function renderQualitySummary(entity) {
@@ -933,12 +911,12 @@
                     ${visibleModels.map((item) => `
                         <span class="provider-model-preview-chip">
                             <strong>${escapeHtml(item.model_name)}</strong>
-                            <span>${formatStatusBadgeLabel(item.health_status)}</span>
+                            <span>${escapeHtml(formatMultiplier(item.price_multiplier ?? 1))}</span>
                         </span>
                     `).join("")}
                     ${hiddenCount ? `<span class="provider-model-more-chip">+${formatNumber(hiddenCount)}</span>` : ""}
                 </div>
-                <button class="table-action-btn provider-model-detail-btn" data-action="view-models" data-id="${providerId}" type="button">查看全部</button>
+                ${hiddenCount ? `<button class="table-action-btn provider-model-detail-btn" data-action="view-models" data-id="${providerId}" type="button">查看全部</button>` : ""}
             </div>
         `;
     }
@@ -1244,14 +1222,155 @@
         `;
     }
 
-    async function copyText(value) {
-        if (!value) return;
-        try {
-            await navigator.clipboard.writeText(value);
-            showToast("已复制");
-        } catch {
-            showToast("复制失败", "error");
+    function validateRawApiKeyFormat(value, { allowEmpty = false } = {}) {
+        const rawValue = String(value || "").trim();
+        if (!rawValue) {
+            return allowEmpty
+                ? { valid: true, empty: true, message: "留空时将自动生成或保留当前密钥" }
+                : { valid: false, empty: true, message: "请填写自定义 API 密钥" };
         }
+        if (rawValue.length < API_KEY_RAW_MIN_LENGTH) {
+            return { valid: false, empty: false, message: `长度至少 ${API_KEY_RAW_MIN_LENGTH} 位` };
+        }
+        if (rawValue.length > API_KEY_RAW_MAX_LENGTH) {
+            return { valid: false, empty: false, message: `长度不能超过 ${API_KEY_RAW_MAX_LENGTH} 位` };
+        }
+        if (!rawValue.startsWith(API_KEY_RAW_PREFIX)) {
+            return { valid: false, empty: false, message: `必须以 ${API_KEY_RAW_PREFIX} 开头` };
+        }
+        if (!API_KEY_RAW_PATTERN.test(rawValue)) {
+            return { valid: false, empty: false, message: "仅允许字母、数字、连字符和下划线" };
+        }
+        return { valid: true, empty: false, message: "密钥格式符合要求，可以创建" };
+    }
+
+    function updateRawApiKeyValidationState(input, feedback, options = {}) {
+        if (!input || !feedback) return { valid: true, empty: true, message: "" };
+        const result = validateRawApiKeyFormat(input.value, options);
+        feedback.classList.remove("is-valid", "is-invalid", "is-neutral");
+        input.classList.remove("is-valid", "is-invalid");
+        if (result.empty && options.allowEmpty) {
+            feedback.classList.add("is-neutral");
+            feedback.textContent = result.message;
+            input.removeAttribute("aria-invalid");
+            return result;
+        }
+        feedback.classList.add(result.valid ? "is-valid" : "is-invalid");
+        feedback.textContent = result.message;
+        input.classList.add(result.valid ? "is-valid" : "is-invalid");
+        input.setAttribute("aria-invalid", result.valid ? "false" : "true");
+        return result;
+    }
+
+    function selectTextForClipboard(value) {
+        const textarea = document.createElement("textarea");
+        textarea.value = value;
+        textarea.setAttribute("readonly", "");
+        textarea.style.position = "fixed";
+        textarea.style.left = "-9999px";
+        textarea.style.top = "0";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.focus({ preventScroll: true });
+        textarea.select();
+        textarea.setSelectionRange(0, textarea.value.length);
+        return textarea;
+    }
+
+    async function writeClipboardText(value) {
+        const text = String(value || "");
+        if (!text) return false;
+        try {
+            if (navigator.clipboard && window.isSecureContext) {
+                await navigator.clipboard.writeText(text);
+                return true;
+            }
+        } catch {
+            // Fall through to the legacy selection-based path for http deployments.
+        }
+        const textarea = selectTextForClipboard(text);
+        try {
+            return document.execCommand("copy");
+        } finally {
+            textarea.remove();
+        }
+    }
+
+    function setCopyButtonFeedback(button, status) {
+        if (!button) return;
+        if (!button.dataset.copyOriginalText) {
+            button.dataset.copyOriginalText = button.textContent.trim() || "复制";
+        }
+        window.clearTimeout(Number(button.dataset.copyFeedbackTimer || 0));
+        button.classList.remove("is-copying", "is-copy-success", "is-copy-error");
+        if (status === "copying") {
+            button.classList.add("is-copying", "is-pressed");
+            button.textContent = "复制中";
+            button.disabled = true;
+            return;
+        }
+        if (status === "success") {
+            button.classList.add("is-copy-success");
+            button.textContent = "已复制";
+        } else if (status === "error") {
+            button.classList.add("is-copy-error");
+            button.textContent = "复制失败";
+        } else {
+            button.textContent = button.dataset.copyOriginalText || "复制";
+        }
+        button.disabled = false;
+        button.dataset.copyFeedbackTimer = String(window.setTimeout(() => {
+            button.classList.remove("is-copying", "is-copy-success", "is-copy-error", "is-pressed");
+            button.textContent = button.dataset.copyOriginalText || "复制";
+            button.disabled = false;
+        }, status === "error" ? 1800 : 1400));
+    }
+
+    async function copyText(value, button = null) {
+        if (!value) return false;
+        setCopyButtonFeedback(button, "copying");
+        try {
+            const copied = await writeClipboardText(value);
+            if (!copied) throw new Error("copy command returned false");
+            setCopyButtonFeedback(button, "success");
+            showToast("已复制");
+            return true;
+        } catch {
+            setCopyButtonFeedback(button, "error");
+            showToast("复制失败", "error");
+            return false;
+        }
+    }
+
+    function initRawApiKeyValidationControls(scope = document) {
+        scope.querySelectorAll("[data-raw-api-key-input]").forEach((input) => {
+            if (input.dataset.rawApiKeyValidationBound === "true") return;
+            input.dataset.rawApiKeyValidationBound = "true";
+            const form = input.closest("form");
+            const feedback = form?.querySelector("[data-raw-api-key-feedback]");
+            const submitButton = form?.querySelector('button[type="submit"]');
+            const allowEmpty = input.dataset.rawApiKeyOptional !== "false";
+
+            const refresh = () => {
+                const result = updateRawApiKeyValidationState(input, feedback, { allowEmpty });
+                if (submitButton) {
+                    submitButton.disabled = !result.valid;
+                }
+                return result;
+            };
+
+            input.addEventListener("input", refresh);
+            input.addEventListener("blur", refresh);
+            form?.addEventListener("submit", (event) => {
+                const result = refresh();
+                if (!result.valid) {
+                    event.preventDefault();
+                    input.focus();
+                    showToast(result.message, "error");
+                }
+            });
+            refresh();
+        });
     }
 
     function formatCodeValue(value) {
@@ -1359,9 +1478,74 @@
         return date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
     }
 
+    const MONITOR_TIME_WINDOWS = {
+        180: { label: "最近 3 小时", bucketMinutes: 5, summaryMinutes: 180 },
+        1440: { label: "最近 1 天", bucketMinutes: 15, summaryMinutes: 1440 },
+        10080: { label: "最近 1 周", bucketMinutes: 120, summaryMinutes: 1440 },
+        43200: { label: "最近 1 个月", bucketMinutes: 720, summaryMinutes: 1440 },
+    };
+
+    function getMonitorWindowConfig(value) {
+        const windowMinutes = Number(value || 180);
+        return MONITOR_TIME_WINDOWS[windowMinutes] || MONITOR_TIME_WINDOWS[180];
+    }
+
+    function formatMonitorBucketLabel(value, windowMinutes = 180) {
+        if (!value) return "-";
+        const normalized = typeof value === "string" && !/[zZ]|[+\-]\d{2}:\d{2}$/.test(value)
+            ? `${value.replace(" ", "T")}Z`
+            : value;
+        const date = new Date(normalized);
+        if (Number.isNaN(date.getTime())) return "-";
+        if (Number(windowMinutes) > 1440) {
+            return date.toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" });
+        }
+        return date.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
+    }
+
+    function weightedAverage(rows, fieldName, weightName = "total_requests") {
+        let weightedSum = 0;
+        let weightSum = 0;
+        rows.forEach((item) => {
+            const value = Number(item[fieldName]);
+            if (!Number.isFinite(value)) return;
+            const weight = Math.max(1, Number(item[weightName] || 0));
+            weightedSum += value * weight;
+            weightSum += weight;
+        });
+        return weightSum ? Number((weightedSum / weightSum).toFixed(2)) : null;
+    }
+
+    function compactMonitorRows(items, maxPoints = 100) {
+        const rows = Array.isArray(items) ? items : [];
+        if (rows.length <= maxPoints) return rows;
+        const bucketSize = Math.ceil(rows.length / maxPoints);
+        const compacted = [];
+        for (let index = 0; index < rows.length; index += bucketSize) {
+            const group = rows.slice(index, index + bucketSize);
+            compacted.push({
+                bucket_start: group[0]?.bucket_start,
+                total_requests: group.reduce((sum, item) => sum + Number(item.total_requests || 0), 0),
+                success_requests: group.reduce((sum, item) => sum + Number(item.success_requests || 0), 0),
+                failed_requests: group.reduce((sum, item) => sum + Number(item.failed_requests || 0), 0),
+                stream_requests: group.reduce((sum, item) => sum + Number(item.stream_requests || 0), 0),
+                image_requests: group.reduce((sum, item) => sum + Number(item.image_requests || 0), 0),
+                total_tokens: group.reduce((sum, item) => sum + Number(item.total_tokens || 0), 0),
+                total_cost: Number(group.reduce((sum, item) => sum + Number(item.total_cost || 0), 0).toFixed(6)),
+                avg_latency_ms: weightedAverage(group, "avg_latency_ms"),
+                avg_ttfb_ms: weightedAverage(group, "avg_ttfb_ms"),
+                p95_latency_ms: Math.max(0, ...group.map((item) => Number(item.p95_latency_ms || 0))),
+                p99_latency_ms: Math.max(0, ...group.map((item) => Number(item.p99_latency_ms || 0))),
+                qps: weightedAverage(group, "qps") || 0,
+                peak_active_requests: Math.max(0, ...group.map((item) => Number(item.peak_active_requests || 0))),
+            });
+        }
+        return compacted;
+    }
+
     function renderMonitorChart(container, items, options = {}) {
         if (!container) return;
-        const rows = Array.isArray(items) ? items : [];
+        const rows = compactMonitorRows(items, options.maxPoints || 100);
         if (!rows.length) {
             container.innerHTML = '<div class="empty-state">暂无监控数据</div>';
             return;
@@ -1400,7 +1584,7 @@
         const labels = rows.map((item, index) => {
             if (index !== 0 && index !== rows.length - 1 && index % Math.ceil(rows.length / 4) !== 0) return "";
             const x = paddingX + index * step;
-            return `<text x="${x.toFixed(2)}" y="${height - 12}" text-anchor="middle" class="monitor-chart-label">${escapeHtml(formatTimeLabel(item.bucket_start))}</text>`;
+            return `<text x="${x.toFixed(2)}" y="${height - 12}" text-anchor="middle" class="monitor-chart-label">${escapeHtml(formatMonitorBucketLabel(item.bucket_start, options.windowMinutes))}</text>`;
         }).join("");
         container.innerHTML = `
             <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(options.label || "监控趋势图")}">
@@ -1911,7 +2095,7 @@
     }
 
     function enhanceInteractiveButtons(scope = document) {
-        scope.querySelectorAll(".interactive-btn, .table-action-btn").forEach((button) => {
+        scope.querySelectorAll(".interactive-btn, .table-action-btn, .playground-copy-btn").forEach((button) => {
             if (button.dataset.animated === "true") return;
             button.dataset.animated = "true";
             button.addEventListener("pointerdown", (event) => {
@@ -1944,6 +2128,8 @@
 
     function initDashboardLiveMonitor() {
         const refreshBtn = document.getElementById("dashboard-monitor-refresh-btn");
+        const trafficWindowSelect = document.getElementById("dashboard-monitor-traffic-window");
+        const latencyWindowSelect = document.getElementById("dashboard-monitor-latency-window");
         if (!document.getElementById("dashboard-live-monitor")) return;
         let loading = false;
         const load = async (manual = false) => {
@@ -1959,40 +2145,53 @@
             }
         };
         refreshBtn?.addEventListener("click", () => load(true));
+        trafficWindowSelect?.addEventListener("change", () => load(true));
+        latencyWindowSelect?.addEventListener("change", () => load(true));
         load(false);
         const timer = window.setInterval(() => load(false), 30000);
         registerPageCleanup(() => window.clearInterval(timer));
     }
 
     async function refreshDashboardMonitor() {
-        const [summary, timeSeries] = await Promise.all([
-            api.get("/api/metrics/summary?window_minutes=60"),
-            api.get("/api/metrics/timeseries?window_minutes=180&bucket_minutes=15"),
+        const trafficWindowSelect = document.getElementById("dashboard-monitor-traffic-window");
+        const latencyWindowSelect = document.getElementById("dashboard-monitor-latency-window");
+        const trafficWindow = getMonitorWindowConfig(trafficWindowSelect?.value);
+        const latencyWindow = getMonitorWindowConfig(latencyWindowSelect?.value);
+        const trafficWindowMinutes = Number(trafficWindowSelect?.value || 180);
+        const latencyWindowMinutes = Number(latencyWindowSelect?.value || 180);
+        const [summary, trafficSeries, latencySeries] = await Promise.all([
+            api.get(`/api/metrics/summary?window_minutes=${encodeURIComponent(trafficWindow.summaryMinutes)}`),
+            api.get(`/api/metrics/timeseries?window_minutes=${encodeURIComponent(trafficWindowMinutes)}&bucket_minutes=${encodeURIComponent(trafficWindow.bucketMinutes)}`),
+            api.get(`/api/metrics/timeseries?window_minutes=${encodeURIComponent(latencyWindowMinutes)}&bucket_minutes=${encodeURIComponent(latencyWindow.bucketMinutes)}`),
         ]);
         const metricItems = Array.isArray(summary.items) ? summary.items : [];
-        const timeSeriesItems = Array.isArray(timeSeries.items) ? timeSeries.items : [];
-        const overview = summarizeMetricItems(metricItems);
+        const trafficItems = Array.isArray(trafficSeries.items) ? trafficSeries.items : [];
+        const latencyItems = Array.isArray(latencySeries.items) ? latencySeries.items : [];
+        const trafficOverview = summarizeMetricItems(trafficItems);
+        const latencyOverview = summarizeMetricItems(latencyItems);
         const requestTotal = document.getElementById("dashboard-monitor-request-total");
-        if (requestTotal) requestTotal.textContent = `${formatMetricShort(timeSeriesItems.reduce((sum, item) => sum + Number(item.total_requests || 0), 0))} 次`;
+        if (requestTotal) requestTotal.textContent = `${formatMetricShort(trafficOverview.totalRequests)} 次`;
         const latencyValue = document.getElementById("dashboard-monitor-latency-value");
-        if (latencyValue) latencyValue.textContent = `${formatLatencyMs(overview.p95Latency)} / ${formatLatencyMs(overview.p95Ttfb)}`;
+        if (latencyValue) latencyValue.textContent = `${formatLatencyMs(latencyOverview.p95Latency)} / ${formatLatencyMs(latencyOverview.p95Ttfb)}`;
         const modelCount = document.getElementById("dashboard-monitor-model-count");
         if (modelCount) modelCount.textContent = `${new Set(metricItems.map((item) => item.requested_model).filter(Boolean)).size} 个`;
         const providerValue = document.getElementById("dashboard-monitor-provider-value");
-        if (providerValue) providerValue.textContent = `失败率 ${formatPercent(overview.failureRate)}`;
-        renderMonitorChart(document.getElementById("dashboard-monitor-traffic-chart"), timeSeriesItems, {
+        if (providerValue) providerValue.textContent = `失败率 ${formatPercent(trafficOverview.failureRate)}`;
+        renderMonitorChart(document.getElementById("dashboard-monitor-traffic-chart"), trafficItems, {
             barKey: "total_requests",
             lineKey: "failed_requests",
             lineLabel: "失败",
             label: "请求量与失败趋势",
+            windowMinutes: trafficWindowMinutes,
         });
-        renderMonitorChart(document.getElementById("dashboard-monitor-latency-chart"), timeSeriesItems, {
+        renderMonitorChart(document.getElementById("dashboard-monitor-latency-chart"), latencyItems, {
             barKey: "avg_ttfb_ms",
             lineKey: "p95_latency_ms",
             lineLabel: "P95 延迟",
             label: "延迟与首包趋势",
             width: 520,
             height: 220,
+            windowMinutes: latencyWindowMinutes,
         });
         renderMonitorRank(document.getElementById("dashboard-monitor-model-rank"), metricItems);
         renderDashboardProviderStrip(metricItems);
@@ -2175,9 +2374,18 @@
         const searchInput = document.getElementById("provider-search");
         const checkAllBtn = document.getElementById("providers-check-all-btn");
         const submitBtn = document.getElementById("provider-submit-btn");
-        const providerModelsTextarea = document.getElementById("provider-models");
+        const providerModelConfigList = document.getElementById("provider-model-config-list");
+        const providerUniformMultiplierInput = document.getElementById("provider-uniform-multiplier");
+        const providerApplyMultiplierBtn = document.getElementById("provider-apply-multiplier-btn");
         const customModelInput = document.getElementById("provider-custom-model-name");
         const addCustomModelBtn = document.getElementById("provider-add-custom-model");
+        const addEmptyModelBtn = document.getElementById("provider-add-empty-model");
+        const presetManageBtn = document.getElementById("provider-preset-manage-btn");
+        const presetList = document.getElementById("provider-model-preset-list");
+        const presetManager = document.getElementById("provider-preset-manager");
+        const presetEditorList = document.getElementById("provider-preset-editor-list");
+        const newPresetInput = document.getElementById("provider-new-preset-model");
+        const addPresetBtn = document.getElementById("provider-add-preset-model");
         const providerForm = document.getElementById("provider-form");
         const providerIdInput = document.getElementById("provider-id");
         const providerNameInput = document.getElementById("provider-name");
@@ -2205,14 +2413,28 @@
         const providerEnabledInput = document.getElementById("provider-enabled");
         const discoverModelsBtn = document.getElementById("provider-discover-models-btn");
         const importSelectedModelsBtn = document.getElementById("provider-import-selected-models-btn");
-        const importAllModelsBtn = document.getElementById("provider-import-all-models-btn");
         const discoveredModelsCheckAll = document.getElementById("provider-discovered-models-check-all");
         const discoveredModelsBody = document.getElementById("provider-discovered-models-body");
+        const discoverFeedback = document.getElementById("provider-discover-feedback");
+        const DEFAULT_PROVIDER_MODEL_CONFIG = {
+            priority: 100,
+            weight: 100,
+            supports_stream: true,
+            supports_vision: false,
+            enabled: true,
+            price_multiplier: 1,
+            input_price_per_1k: null,
+            output_price_per_1k: null,
+            cache_price_per_1k: null,
+        };
+        const DEFAULT_PROVIDER_PRESETS = ["gpt-5.4", "gpt-5", "gpt-5-mini", "gpt-4.1", "gpt-4o", "gpt-4o-mini", "o3", "o4-mini"];
+        const PROVIDER_PRESETS_STORAGE_KEY = "aotu_provider_model_presets";
         let providers = [];
         let discoveredModels = [];
         let providerFormSnapshot = "";
+        let providerPresetModels = loadProviderPresetModels();
 
-        if (!tableBody || !modelTableBody || !modal || !providerForm) return;
+        if (!tableBody || !modelTableBody || !modal || !providerForm || !providerModelConfigList) return;
 
         function serializeProviderFormState() {
             return JSON.stringify(
@@ -2227,6 +2449,216 @@
             providerForm.dataset.dirty = serializeProviderFormState() === providerFormSnapshot ? "false" : "true";
         }
 
+        function normalizeProviderModelConfig(config = {}) {
+            const modelName = String(config.model_name || "").trim();
+            return {
+                model_name: modelName,
+                priority: Number.isFinite(Number(config.priority)) ? Number(config.priority) : DEFAULT_PROVIDER_MODEL_CONFIG.priority,
+                weight: Number.isFinite(Number(config.weight)) ? Number(config.weight) : DEFAULT_PROVIDER_MODEL_CONFIG.weight,
+                supports_stream: config.supports_stream ?? DEFAULT_PROVIDER_MODEL_CONFIG.supports_stream,
+                supports_vision: config.supports_vision ?? DEFAULT_PROVIDER_MODEL_CONFIG.supports_vision,
+                enabled: config.enabled ?? DEFAULT_PROVIDER_MODEL_CONFIG.enabled,
+                price_multiplier: Number.isFinite(Number(config.price_multiplier)) && Number(config.price_multiplier) > 0
+                    ? Number(config.price_multiplier)
+                    : DEFAULT_PROVIDER_MODEL_CONFIG.price_multiplier,
+                input_price_per_1k: config.input_price_per_1k ?? null,
+                output_price_per_1k: config.output_price_per_1k ?? null,
+                cache_price_per_1k: config.cache_price_per_1k ?? null,
+            };
+        }
+
+        function formatProviderPriceInputValue(value, multiplier = 1) {
+            const normalizedMultiplier = Number.isFinite(Number(multiplier)) && Number(multiplier) > 0 ? Number(multiplier) : 1;
+            const pricePer1M = toPricePer1M(value == null ? null : Number(value) / normalizedMultiplier);
+            return pricePer1M == null ? "" : String(pricePer1M);
+        }
+
+        function createProviderModelConfigRow(config = {}) {
+            const item = normalizeProviderModelConfig(config);
+            const rowId = `provider-model-config-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+            const row = document.createElement("div");
+            row.className = "provider-model-config-row";
+            row.dataset.modelConfigRow = "true";
+            row.innerHTML = `
+                <label class="provider-model-config-name" for="${rowId}-name">
+                    <span class="visually-hidden">模型名称</span>
+                    <input class="field-input" id="${rowId}-name" data-model-config-field="model_name" value="${escapeHtml(item.model_name)}" placeholder="模型名称，必填" required>
+                </label>
+                <label for="${rowId}-multiplier">
+                    <span class="visually-hidden">倍率</span>
+                    <input class="field-input" id="${rowId}-multiplier" data-model-config-field="price_multiplier" type="number" min="0.0001" step="0.0001" value="${escapeHtml(item.price_multiplier)}" placeholder="1">
+                </label>
+                <label for="${rowId}-input-price">
+                    <span class="visually-hidden">输入价格，每百万 token</span>
+                    <input class="field-input" id="${rowId}-input-price" data-model-config-field="input_price_per_1m" type="number" min="0" step="0.0001" value="${escapeHtml(formatProviderPriceInputValue(item.input_price_per_1k, item.price_multiplier))}" placeholder="输入价/百万">
+                </label>
+                <label for="${rowId}-output-price">
+                    <span class="visually-hidden">输出价格，每百万 token</span>
+                    <input class="field-input" id="${rowId}-output-price" data-model-config-field="output_price_per_1m" type="number" min="0" step="0.0001" value="${escapeHtml(formatProviderPriceInputValue(item.output_price_per_1k, item.price_multiplier))}" placeholder="输出价/百万">
+                </label>
+                <label for="${rowId}-cache-price">
+                    <span class="visually-hidden">缓存价格，每百万 token</span>
+                    <input class="field-input" id="${rowId}-cache-price" data-model-config-field="cache_price_per_1m" type="number" min="0" step="0.0001" value="${escapeHtml(formatProviderPriceInputValue(item.cache_price_per_1k ?? item.input_price_per_1k, item.price_multiplier))}" placeholder="默认同输入价">
+                </label>
+                <label class="settings-switch-control provider-model-mini-switch" for="${rowId}-stream" title="支持流式">
+                    <input id="${rowId}-stream" data-model-config-field="supports_stream" type="checkbox" ${item.supports_stream ? "checked" : ""}>
+                    <span class="settings-switch-slider" aria-hidden="true"></span>
+                    <span class="visually-hidden">支持流式</span>
+                </label>
+                <label class="settings-switch-control provider-model-mini-switch" for="${rowId}-vision" title="支持图像">
+                    <input id="${rowId}-vision" data-model-config-field="supports_vision" type="checkbox" ${item.supports_vision ? "checked" : ""}>
+                    <span class="settings-switch-slider" aria-hidden="true"></span>
+                    <span class="visually-hidden">支持图像</span>
+                </label>
+                <label class="settings-switch-control provider-model-mini-switch" for="${rowId}-enabled" title="启用模型">
+                    <input id="${rowId}-enabled" data-model-config-field="enabled" type="checkbox" ${item.enabled ? "checked" : ""}>
+                    <span class="settings-switch-slider" aria-hidden="true"></span>
+                    <span class="visually-hidden">启用模型</span>
+                </label>
+                <button class="table-action-btn" data-action="remove-model-config" type="button">删除</button>
+            `;
+            return row;
+        }
+
+        function renderProviderModelConfigRows(configs = []) {
+            providerModelConfigList.innerHTML = "";
+            configs.forEach((config) => {
+                providerModelConfigList.appendChild(createProviderModelConfigRow(config));
+            });
+            if (!configs.length) {
+                providerModelConfigList.innerHTML = '<div class="empty-state provider-model-config-empty">当前中转站尚未挂载模型，可从上游发现、预设模型或自定义模型添加。</div>';
+            }
+            enhanceInteractiveButtons(providerModelConfigList);
+        }
+
+        function getProviderModelConfigRows() {
+            return Array.from(providerModelConfigList.querySelectorAll("[data-model-config-row]"));
+        }
+
+        function addProviderModelConfig(config = {}, options = {}) {
+            const item = normalizeProviderModelConfig(config);
+            if (!item.model_name && !options.allowBlank) {
+                showToast("模型名称不能为空", "error");
+                return false;
+            }
+            const existingNameSet = new Set(getCurrentConfiguredModelNames());
+            if (item.model_name && existingNameSet.has(item.model_name)) {
+                showToast(`模型 ${item.model_name} 已存在`, "error");
+                return false;
+            }
+            providerModelConfigList.querySelector(".provider-model-config-empty")?.remove();
+            providerModelConfigList.appendChild(createProviderModelConfigRow(item));
+            enhanceInteractiveButtons(providerModelConfigList);
+            if (discoveredModels.length) {
+                renderDiscoveredModels(discoveredModels);
+            }
+            updateProviderFormDirtyState();
+            return true;
+        }
+
+        function collectOptionalProviderPrice(row, fieldName, label, modelName) {
+            const input = row.querySelector(`[data-model-config-field="${fieldName}"]`);
+            const rawValue = String(input?.value || "").trim();
+            if (rawValue === "") return null;
+            const value = Number(rawValue);
+            if (!Number.isFinite(value) || value < 0) {
+                input?.focus();
+                showToast(`模型 ${modelName} 的${label}不能小于 0`, "error");
+                return undefined;
+            }
+            return toPricePer1K(value);
+        }
+
+        function collectProviderModelConfigs() {
+            const rows = getProviderModelConfigRows();
+            const seen = new Set();
+            const configs = [];
+            for (const row of rows) {
+                const modelNameInput = row.querySelector('[data-model-config-field="model_name"]');
+                const multiplierInput = row.querySelector('[data-model-config-field="price_multiplier"]');
+                const modelName = String(modelNameInput?.value || "").trim();
+                if (!modelName) {
+                    modelNameInput?.focus();
+                    showToast("模型名称为必填项", "error");
+                    return null;
+                }
+                if (seen.has(modelName)) {
+                    modelNameInput?.focus();
+                    showToast(`模型 ${modelName} 重复，请删除或修改重复项`, "error");
+                    return null;
+                }
+                seen.add(modelName);
+                const multiplier = multiplierInput?.value === "" ? 1 : Number(multiplierInput?.value);
+                if (!Number.isFinite(multiplier) || multiplier <= 0) {
+                    multiplierInput?.focus();
+                    showToast(`模型 ${modelName} 的倍率必须大于 0`, "error");
+                    return null;
+                }
+                const inputPrice = collectOptionalProviderPrice(row, "input_price_per_1m", "输入价格", modelName);
+                if (inputPrice === undefined) return null;
+                const outputPrice = collectOptionalProviderPrice(row, "output_price_per_1m", "输出价格", modelName);
+                if (outputPrice === undefined) return null;
+                const cachePrice = collectOptionalProviderPrice(row, "cache_price_per_1m", "缓存价格", modelName);
+                if (cachePrice === undefined) return null;
+                const normalizedCachePrice = cachePrice ?? inputPrice;
+                configs.push({
+                    model_name: modelName,
+                    priority: DEFAULT_PROVIDER_MODEL_CONFIG.priority,
+                    weight: DEFAULT_PROVIDER_MODEL_CONFIG.weight,
+                    supports_stream: row.querySelector('[data-model-config-field="supports_stream"]')?.checked ?? DEFAULT_PROVIDER_MODEL_CONFIG.supports_stream,
+                    supports_vision: row.querySelector('[data-model-config-field="supports_vision"]')?.checked ?? DEFAULT_PROVIDER_MODEL_CONFIG.supports_vision,
+                    enabled: row.querySelector('[data-model-config-field="enabled"]')?.checked ?? DEFAULT_PROVIDER_MODEL_CONFIG.enabled,
+                    price_multiplier: multiplier,
+                    input_price_per_1k: inputPrice,
+                    output_price_per_1k: outputPrice,
+                    cache_price_per_1k: normalizedCachePrice,
+                });
+            }
+            return configs;
+        }
+
+        function loadProviderPresetModels() {
+            try {
+                const raw = window.localStorage?.getItem(PROVIDER_PRESETS_STORAGE_KEY);
+                const parsed = raw ? JSON.parse(raw) : null;
+                if (Array.isArray(parsed)) {
+                    const normalized = parsed.map((item) => String(item || "").trim()).filter(Boolean);
+                    return Array.from(new Set(normalized)).length ? Array.from(new Set(normalized)) : DEFAULT_PROVIDER_PRESETS;
+                }
+            } catch (error) {
+                console.warn("Failed to load provider presets", error);
+            }
+            return DEFAULT_PROVIDER_PRESETS;
+        }
+
+        function saveProviderPresetModels() {
+            try {
+                window.localStorage?.setItem(PROVIDER_PRESETS_STORAGE_KEY, JSON.stringify(providerPresetModels));
+            } catch (error) {
+                console.warn("Failed to save provider presets", error);
+            }
+        }
+
+        function renderProviderPresetModels() {
+            if (presetList) {
+                presetList.innerHTML = providerPresetModels.map((modelName) => `
+                    <button class="table-action-btn" type="button" data-model-preset="${escapeHtml(modelName)}">${escapeHtml(modelName)}</button>
+                `).join("");
+                enhanceInteractiveButtons(presetList);
+            }
+            if (presetEditorList) {
+                presetEditorList.innerHTML = providerPresetModels.map((modelName, index) => `
+                    <div class="provider-preset-editor-row" data-preset-row="${index}">
+                        <label class="visually-hidden" for="provider-preset-${index}">预设模型名</label>
+                        <input class="field-input" id="provider-preset-${index}" value="${escapeHtml(modelName)}" data-preset-input="${index}">
+                        <button class="table-action-btn" type="button" data-action="save-preset" data-index="${index}">保存</button>
+                        <button class="table-action-btn" type="button" data-action="delete-preset" data-index="${index}">删除</button>
+                    </div>
+                `).join("") || '<div class="empty-state">暂无预设模型，可在下方新增。</div>';
+                enhanceInteractiveButtons(presetEditorList);
+            }
+        }
+
         const providerModalController = modalManager.register({
             modal,
             dialog: modal.querySelector('[role="dialog"]'),
@@ -2238,6 +2670,7 @@
             },
             afterClose: () => {
                 renderDiscoveredModels([]);
+                renderDiscoverFeedback();
                 providerForm.dataset.dirty = "false";
             },
         });
@@ -2279,14 +2712,71 @@
         document.getElementById("provider-models-detail-modal-close")?.addEventListener("click", closeModelsDetailModal);
         document.getElementById("provider-credential-modal-close")?.addEventListener("click", closeCredentialModal);
         document.getElementById("provider-credential-cancel")?.addEventListener("click", closeCredentialModal);
-        document.querySelectorAll("[data-model-preset]").forEach((button) => {
-            button.addEventListener("click", () => {
-                const modelName = button.dataset.modelPreset;
-                if (appendModelConfigLine(providerModelsTextarea, modelName)) {
-                    updateProviderFormDirtyState();
-                    showToast(`已添加预设模型 ${modelName}`);
+        renderProviderPresetModels();
+        presetList?.addEventListener("click", (event) => {
+            const button = event.target.closest("[data-model-preset]");
+            if (!button) return;
+            const modelName = button.dataset.modelPreset;
+            if (addProviderModelConfig({ model_name: modelName })) {
+                showToast(`已添加预设模型 ${modelName}`);
+            }
+        });
+        presetManageBtn?.addEventListener("click", () => {
+            const willShow = presetManager?.classList.contains("hidden");
+            presetManager?.classList.toggle("hidden", !willShow);
+            presetManager?.setAttribute("aria-hidden", willShow ? "false" : "true");
+            presetManageBtn.setAttribute("aria-expanded", willShow ? "true" : "false");
+            if (willShow) {
+                renderProviderPresetModels();
+                newPresetInput?.focus();
+            }
+        });
+        addPresetBtn?.addEventListener("click", () => {
+            const modelName = String(newPresetInput?.value || "").trim();
+            if (!modelName) {
+                showToast("请先输入预设模型名", "error");
+                return;
+            }
+            if (providerPresetModels.includes(modelName)) {
+                showToast(`预设模型 ${modelName} 已存在`, "error");
+                return;
+            }
+            providerPresetModels = [...providerPresetModels, modelName];
+            saveProviderPresetModels();
+            if (newPresetInput) newPresetInput.value = "";
+            renderProviderPresetModels();
+            showToast(`已新增预设模型 ${modelName}`);
+        });
+        presetEditorList?.addEventListener("click", (event) => {
+            const button = event.target.closest("[data-action]");
+            if (!button) return;
+            const index = Number(button.dataset.index);
+            if (!Number.isInteger(index) || index < 0 || index >= providerPresetModels.length) return;
+            if (button.dataset.action === "delete-preset") {
+                const [removed] = providerPresetModels.splice(index, 1);
+                saveProviderPresetModels();
+                renderProviderPresetModels();
+                showToast(`已删除预设模型 ${removed}`);
+                return;
+            }
+            if (button.dataset.action === "save-preset") {
+                const input = presetEditorList.querySelector(`[data-preset-input="${index}"]`);
+                const nextName = String(input?.value || "").trim();
+                if (!nextName) {
+                    showToast("预设模型名不能为空", "error");
+                    input?.focus();
+                    return;
                 }
-            });
+                if (providerPresetModels.some((item, itemIndex) => item === nextName && itemIndex !== index)) {
+                    showToast(`预设模型 ${nextName} 已存在`, "error");
+                    input?.focus();
+                    return;
+                }
+                providerPresetModels[index] = nextName;
+                saveProviderPresetModels();
+                renderProviderPresetModels();
+                showToast(`已保存预设模型 ${nextName}`);
+            }
         });
         addCustomModelBtn.addEventListener("click", () => {
             const modelName = customModelInput.value.trim();
@@ -2294,11 +2784,37 @@
                 showToast("请先输入自定义模型名", "error");
                 return;
             }
-            if (appendModelConfigLine(providerModelsTextarea, modelName)) {
+            if (addProviderModelConfig({ model_name: modelName })) {
                 customModelInput.value = "";
-                updateProviderFormDirtyState();
                 showToast(`已添加自定义模型 ${modelName}`);
             }
+        });
+        addEmptyModelBtn?.addEventListener("click", () => {
+            if (addProviderModelConfig({}, { allowBlank: true })) {
+                const rows = getProviderModelConfigRows();
+                rows.at(-1)?.querySelector('[data-model-config-field="model_name"]')?.focus();
+            }
+        });
+        providerApplyMultiplierBtn?.addEventListener("click", () => {
+            const multiplier = Number(providerUniformMultiplierInput?.value || 1);
+            if (!Number.isFinite(multiplier) || multiplier <= 0) {
+                showToast("请填写大于 0 的统一倍率", "error");
+                return;
+            }
+            const rows = getProviderModelConfigRows();
+            if (!rows.length) {
+                showToast("当前没有可设置倍率的模型", "error");
+                return;
+            }
+            rows.forEach((row) => {
+                const input = row.querySelector('[data-model-config-field="price_multiplier"]');
+                if (input) input.value = String(multiplier);
+            });
+            if (discoveredModels.length) {
+                renderDiscoveredModels(discoveredModels);
+            }
+            updateProviderFormDirtyState();
+            showToast(`已将 ${formatNumber(rows.length)} 个模型设置为 ${formatMultiplier(multiplier)} 倍率`);
         });
         discoverModelsBtn?.addEventListener("click", async () => {
             await discoverProviderModels();
@@ -2310,16 +2826,6 @@
                 return;
             }
             importDiscoveredModels(selectedModelNames);
-        });
-        importAllModelsBtn?.addEventListener("click", () => {
-            const modelNames = discoveredModels
-                .filter((item) => !item.already_configured)
-                .map((item) => item.model_name);
-            if (!modelNames.length) {
-                showToast("当前没有可新增的上游模型", "error");
-                return;
-            }
-            importDiscoveredModels(modelNames);
         });
         discoveredModelsCheckAll?.addEventListener("change", () => {
             discoveredModelsBody?.querySelectorAll("[data-discovered-model-name]").forEach((node) => {
@@ -2354,6 +2860,8 @@
                 showToast("新增中转站时必须填写 API Key", "error");
                 return;
             }
+            const modelConfigs = collectProviderModelConfigs();
+            if (modelConfigs === null) return;
             const payload = {
                 name: providerNameInput.value.trim(),
                 base_url: providerBaseUrlInput.value.trim(),
@@ -2376,7 +2884,7 @@
                 auto_recover_enabled: providerAutoRecoverEnabledInput.checked,
                 circuit_breaker_threshold_override: providerCircuitBreakerThresholdOverrideInput.value === "" ? null : Number(providerCircuitBreakerThresholdOverrideInput.value),
                 recovery_probe_interval_sec_override: providerRecoveryProbeIntervalOverrideInput.value === "" ? null : Number(providerRecoveryProbeIntervalOverrideInput.value),
-                model_configs: parseModelConfigs(providerModelsTextarea.value),
+                model_configs: modelConfigs,
                 remark: providerRemarkInput.value.trim(),
             };
             if (id) {
@@ -2399,6 +2907,7 @@
                 showToast(error.message, "error");
             } finally {
                 setButtonLoading(submitBtn, false);
+                refreshRawApiKeyInputState();
             }
         });
 
@@ -2428,7 +2937,25 @@
         });
         providerForm.addEventListener("input", updateProviderFormDirtyState);
         providerForm.addEventListener("change", updateProviderFormDirtyState);
-        providerModelsTextarea.addEventListener("input", () => {
+        providerModelConfigList.addEventListener("input", () => {
+            if (discoveredModels.length) {
+                renderDiscoveredModels(discoveredModels);
+            }
+            updateProviderFormDirtyState();
+        });
+        providerModelConfigList.addEventListener("change", () => {
+            if (discoveredModels.length) {
+                renderDiscoveredModels(discoveredModels);
+            }
+            updateProviderFormDirtyState();
+        });
+        providerModelConfigList.addEventListener("click", (event) => {
+            const button = event.target.closest('[data-action="remove-model-config"]');
+            if (!button) return;
+            button.closest("[data-model-config-row]")?.remove();
+            if (!getProviderModelConfigRows().length) {
+                renderProviderModelConfigRows([]);
+            }
             if (discoveredModels.length) {
                 renderDiscoveredModels(discoveredModels);
             }
@@ -2548,11 +3075,11 @@
                         </div>
                     </td>
                     <td>${item.supports_stream ? "流式" : "非流式"} / ${item.supports_vision ? "图像" : "文本"}</td>
-                    <td>P${escapeHtml(item.priority ?? "-")} / W${escapeHtml(item.weight ?? "-")}</td>
                     <td>
                         <strong>${escapeHtml(item.price_multiplier ?? 1)}x</strong>
                         <div class="table-muted">输入 ${escapeHtml(formatPrice(item.input_price_per_1k))}</div>
                         <div class="table-muted">输出 ${escapeHtml(formatPrice(item.output_price_per_1k))}</div>
+                        <div class="table-muted">缓存 ${escapeHtml(formatPrice(item.cache_price_per_1k))}</div>
                     </td>
                     <td>${renderQualitySummary(item)}</td>
                     <td>
@@ -2585,14 +3112,13 @@
                                     <th>模型</th>
                                     <th>状态</th>
                                     <th>能力</th>
-                                    <th>优先级 / 权重</th>
                                     <th>倍率 / 价格</th>
                                     <th>质量</th>
                                     <th>操作</th>
                                 </tr>
                             </thead>
                             <tbody>
-                                ${rows || '<tr><td colspan="7"><div class="empty-state">当前中转站尚未挂载模型。</div></td></tr>'}
+                                ${rows || '<tr><td colspan="6"><div class="empty-state">当前中转站尚未挂载模型。</div></td></tr>'}
                             </tbody>
                         </table>
                     </div>
@@ -2615,7 +3141,9 @@
         }
 
         function getCurrentConfiguredModelNames() {
-            return parseModelConfigs(providerModelsTextarea.value).map((item) => item.model_name);
+            return getProviderModelConfigRows()
+                .map((row) => String(row.querySelector('[data-model-config-field="model_name"]')?.value || "").trim())
+                .filter(Boolean);
         }
 
         function getSelectedDiscoveredModelNames() {
@@ -2627,10 +3155,11 @@
 
         function syncDiscoveredCheckAllState() {
             if (!discoveredModelsCheckAll) return;
-            const total = discoveredModels.length;
+            const total = discoveredModels.filter((item) => !item.already_configured).length;
             const selected = getSelectedDiscoveredModelNames().length;
             discoveredModelsCheckAll.checked = total > 0 && selected === total;
             discoveredModelsCheckAll.indeterminate = selected > 0 && selected < total;
+            discoveredModelsCheckAll.disabled = total === 0;
         }
 
         function renderDiscoveredModels(items = []) {
@@ -2653,6 +3182,23 @@
             syncDiscoveredCheckAllState();
         }
 
+        function renderDiscoverFeedback(result) {
+            if (!discoverFeedback) return;
+            if (!result) {
+                discoverFeedback.classList.add("hidden");
+                discoverFeedback.classList.remove("is-error");
+                discoverFeedback.innerHTML = "";
+                return;
+            }
+            const isError = result.type === "error";
+            discoverFeedback.classList.toggle("is-error", isError);
+            discoverFeedback.classList.remove("hidden");
+            discoverFeedback.innerHTML = `
+                <strong>${escapeHtml(result.title)}</strong>
+                <span>${escapeHtml(result.message)}</span>
+            `;
+        }
+
         async function discoverProviderModels() {
             const payload = {
                 provider_id: providerIdInput.value === "" ? null : Number(providerIdInput.value),
@@ -2664,11 +3210,29 @@
             };
             try {
                 setButtonLoading(discoverModelsBtn, true);
+                renderDiscoverFeedback({
+                    type: "success",
+                    title: "正在获取上游模型",
+                    message: "正在请求上游 /models，请稍候。",
+                });
                 const data = await api.post("/api/providers/discover-models", payload);
-                renderDiscoveredModels(Array.isArray(data.items) ? data.items : []);
-                showToast(`已获取 ${formatNumber(data.total_models || 0)} 个可用模型`);
+                const items = Array.isArray(data.items) ? data.items : [];
+                const modelNames = items.map((item) => item.model_name).filter(Boolean);
+                renderDiscoveredModels(items);
+                renderDiscoverFeedback({
+                    type: "success",
+                    title: `获取成功，共 ${formatNumber(modelNames.length)} 个模型`,
+                    message: modelNames.length ? modelNames.join("、") : "上游返回为空，当前没有可导入的模型。",
+                });
+                showToast(`已获取 ${formatNumber(modelNames.length)} 个可用模型`);
             } catch (error) {
                 renderDiscoveredModels([]);
+                renderDiscoverFeedback({
+                    type: "error",
+                    title: "获取可用模型失败",
+                    message: error.message,
+                });
+                window.alert(`获取可用模型失败：${error.message}`);
                 showToast(error.message, "error");
             } finally {
                 setButtonLoading(discoverModelsBtn, false);
@@ -2678,13 +3242,12 @@
         function importDiscoveredModels(modelNames) {
             let addedCount = 0;
             modelNames.forEach((modelName) => {
-                if (appendModelConfigLine(providerModelsTextarea, modelName)) {
+                if (addProviderModelConfig({ model_name: modelName })) {
                     addedCount += 1;
                 }
             });
             renderDiscoveredModels(discoveredModels);
             if (addedCount > 0) {
-                updateProviderFormDirtyState();
                 showToast(`已添加 ${formatNumber(addedCount)} 个模型到当前中转站挂载列表`);
             }
         }
@@ -2750,7 +3313,6 @@
                     <td>${statusBadge(provider.circuit_state)}</td>
                     <td>${renderProviderStrategy(provider)}</td>
                     <td>${renderProviderCapacity(provider)}</td>
-                    <td>${renderProviderCost(provider)}</td>
                     <td>${renderQualitySummary(provider)}</td>
                     <td>${provider.priority}</td>
                     <td>${provider.weight}</td>
@@ -2765,7 +3327,7 @@
                         </div>
                     </td>
                 </tr>
-            `).join("") || '<tr><td colspan="13"><div class="empty-state">没有匹配的中转站</div></td></tr>';
+            `).join("") || '<tr><td colspan="12"><div class="empty-state">没有匹配的中转站</div></td></tr>';
             enhanceInteractiveButtons(tableBody);
         }
 
@@ -2790,10 +3352,9 @@
                         <input class="field-input" type="number" min="0.0001" step="0.0001" value="${model.price_multiplier ?? 1}" placeholder="渠道倍率" data-model-field="price_multiplier" data-provider-id="${provider.id}" data-model-id="${model.id}">
                         <div class="table-muted">输入 ${escapeHtml(formatPrice(model.input_price_per_1k))}</div>
                         <div class="table-muted">输出 ${escapeHtml(formatPrice(model.output_price_per_1k))}</div>
+                        <div class="table-muted">缓存 ${escapeHtml(formatPrice(model.cache_price_per_1k))}</div>
                     </td>
                     <td>${renderQualitySummary(model)}</td>
-                    <td><input class="field-input" type="number" value="${model.priority}" data-model-field="priority" data-provider-id="${provider.id}" data-model-id="${model.id}"></td>
-                    <td><input class="field-input" type="number" value="${model.weight}" data-model-field="weight" data-provider-id="${provider.id}" data-model-id="${model.id}"></td>
                     <td>
                         <label class="toggle-row">
                             <input type="checkbox" ${model.enabled ? "checked" : ""} data-model-field="enabled" data-provider-id="${provider.id}" data-model-id="${model.id}">
@@ -2808,7 +3369,7 @@
                         </div>
                     </td>
                 </tr>
-            `).join("") || '<tr><td colspan="10"><div class="empty-state">没有匹配的模型</div></td></tr>';
+            `).join("") || '<tr><td colspan="8"><div class="empty-state">没有匹配的模型</div></td></tr>';
             enhanceInteractiveButtons(modelTableBody);
         }
 
@@ -2919,13 +3480,9 @@
             }
 
             if (action === "save-model" || action === "toggle-model") {
-                const priorityInput = modelTableBody.querySelector(`input[data-model-field="priority"][data-provider-id="${providerId}"][data-model-id="${modelId}"]`);
-                const weightInput = modelTableBody.querySelector(`input[data-model-field="weight"][data-provider-id="${providerId}"][data-model-id="${modelId}"]`);
                 const enabledInput = modelTableBody.querySelector(`input[data-model-field="enabled"][data-provider-id="${providerId}"][data-model-id="${modelId}"]`);
                 const priceMultiplierInput = modelTableBody.querySelector(`input[data-model-field="price_multiplier"][data-provider-id="${providerId}"][data-model-id="${modelId}"]`);
                 const payload = {
-                    priority: Number(priorityInput.value),
-                    weight: Number(weightInput.value),
                     enabled: action === "toggle-model" ? !modelConfig.enabled : enabledInput.checked,
                     price_multiplier: Number(priceMultiplierInput.value || 1),
                 };
@@ -2966,8 +3523,14 @@
             providerAutoRecoverEnabledInput.checked = provider?.auto_recover_enabled ?? true;
             providerCircuitBreakerThresholdOverrideInput.value = provider?.circuit_breaker_threshold_override ?? "";
             providerRecoveryProbeIntervalOverrideInput.value = provider?.recovery_probe_interval_sec_override ?? "";
-            providerModelsTextarea.value = formatModelConfigs(provider?.model_configs ?? []);
+            renderProviderModelConfigRows(provider?.model_configs ?? []);
+            if (providerUniformMultiplierInput) providerUniformMultiplierInput.value = "1";
             customModelInput.value = "";
+            if (presetManager) {
+                presetManager.classList.add("hidden");
+                presetManager.setAttribute("aria-hidden", "true");
+            }
+            presetManageBtn?.setAttribute("aria-expanded", "false");
             providerRemarkInput.value = provider?.remark ?? "";
             providerEnabledInput.checked = provider?.enabled ?? true;
             renderDiscoveredModels([]);
@@ -3052,11 +3615,12 @@
         const enabledInput = document.getElementById("model-enabled");
         const inputPriceInput = document.getElementById("model-input-price");
         const outputPriceInput = document.getElementById("model-output-price");
+        const cachePriceInput = document.getElementById("model-cache-price");
         const speedLabelInput = document.getElementById("model-speed-label");
         const remarkInput = document.getElementById("model-remark");
         const bindingBody = document.getElementById("model-binding-body");
         if (
-            !tableBody || !searchInput || !enabledSelect || !providerSelect || !pageSizeSelect
+            !tableBody || !searchInput || !enabledSelect || !providerSelect || !pageSizeSelect || !cachePriceInput
             || !pageMeta || !prevPageBtn || !nextPageBtn || !refreshBtn || !addBtn || !modal || !form || !bindingBody
         ) return;
 
@@ -3123,6 +3687,7 @@
                     <td>
                         <div>输入 ${escapeHtml(formatPrice(item.input_price_per_1k ?? item.lowest_input_price_per_1k))}</div>
                         <div class="table-muted">输出 ${escapeHtml(formatPrice(item.output_price_per_1k ?? item.lowest_output_price_per_1k))}</div>
+                        <div class="table-muted">缓存 ${escapeHtml(formatPrice(item.cache_price_per_1k ?? item.lowest_cache_price_per_1k))}</div>
                     </td>
                     <td>${escapeHtml(item.speed_label || "-")}</td>
                     <td>
@@ -3200,6 +3765,7 @@
         function refreshBindingRows() {
             const baseInput = inputPriceInput.value === "" ? null : Number(inputPriceInput.value);
             const baseOutput = outputPriceInput.value === "" ? null : Number(outputPriceInput.value);
+            const baseCache = cachePriceInput.value === "" ? baseInput : Number(cachePriceInput.value);
             bindingBody.querySelectorAll("tr").forEach((row) => {
                 const boundField = row.querySelector('input[data-binding-field="bound"]');
                 const enabledField = row.querySelector('input[data-binding-field="enabled"]');
@@ -3218,7 +3784,8 @@
                 const multiplier = Number(multiplierField.value || 1);
                 const inputPreview = baseInput == null || Number.isNaN(baseInput) ? "-" : `${(baseInput * multiplier).toFixed(4)}/1M`;
                 const outputPreview = baseOutput == null || Number.isNaN(baseOutput) ? "-" : `${(baseOutput * multiplier).toFixed(4)}/1M`;
-                preview.innerHTML = `<div>输入 ${escapeHtml(inputPreview)}</div><div class="table-muted">输出 ${escapeHtml(outputPreview)}</div>`;
+                const cachePreview = baseCache == null || Number.isNaN(baseCache) ? "-" : `${(baseCache * multiplier).toFixed(4)}/1M`;
+                preview.innerHTML = `<div>输入 ${escapeHtml(inputPreview)}</div><div class="table-muted">输出 ${escapeHtml(outputPreview)}</div><div class="table-muted">缓存 ${escapeHtml(cachePreview)}</div>`;
             });
         }
 
@@ -3232,6 +3799,9 @@
             enabledInput.checked = detail?.enabled ?? true;
             inputPriceInput.value = detail?.input_price_per_1k == null ? "" : toPricePer1M(detail.input_price_per_1k);
             outputPriceInput.value = detail?.output_price_per_1k == null ? "" : toPricePer1M(detail.output_price_per_1k);
+            cachePriceInput.value = detail?.cache_price_per_1k == null
+                ? (detail?.input_price_per_1k == null ? "" : toPricePer1M(detail.input_price_per_1k))
+                : toPricePer1M(detail.cache_price_per_1k);
             speedLabelInput.value = detail?.speed_label || "";
             remarkInput.value = detail?.remark || "";
             buildBindingRows(detail?.provider_bindings || []);
@@ -3321,6 +3891,7 @@
         });
         inputPriceInput.addEventListener("input", refreshBindingRows);
         outputPriceInput.addEventListener("input", refreshBindingRows);
+        cachePriceInput.addEventListener("input", refreshBindingRows);
 
         form.addEventListener("submit", async (event) => {
             event.preventDefault();
@@ -3329,6 +3900,9 @@
                 enabled: enabledInput.checked,
                 input_price_per_1k: inputPriceInput.value === "" ? null : toPricePer1K(Number(inputPriceInput.value)),
                 output_price_per_1k: outputPriceInput.value === "" ? null : toPricePer1K(Number(outputPriceInput.value)),
+                cache_price_per_1k: cachePriceInput.value === ""
+                    ? (inputPriceInput.value === "" ? null : toPricePer1K(Number(inputPriceInput.value)))
+                    : toPricePer1K(Number(cachePriceInput.value)),
                 speed_label: speedLabelInput.value.trim() || null,
                 remark: remarkInput.value.trim() || null,
                 provider_bindings: collectBindings({ isEditing: Boolean(state.editingModelName) }),
@@ -4462,6 +5036,7 @@
                             <strong>${formatMetricValue(log.total_tokens)}</strong>
                             <div class="table-muted">输入 ${formatMetricValue(log.prompt_tokens)} / 输出 ${formatMetricValue(log.completion_tokens)}</div>
                             <div class="table-muted">成本 ${formatCostValue(log.total_cost)}</div>
+                            <div class="table-muted">倍率 ${escapeHtml(formatMultiplier(log.billing_multiplier ?? 1))}</div>
                         </td>
                         <td>
                             <strong>${formatMetricValue(log.duration_ms ?? log.latency_ms, " ms")}</strong>
@@ -4542,9 +5117,11 @@
                 billing_multiplier: log.billing_multiplier,
                 channel_price_input_per_1k: log.channel_price_input_per_1k,
                 channel_price_output_per_1k: log.channel_price_output_per_1k,
+                channel_price_cache_per_1k: log.channel_price_cache_per_1k,
                 prompt_cost: log.prompt_cost,
                 completion_cost: log.completion_cost,
                 total_cost: log.total_cost,
+                billing_calculation: formatBillingCalculation(log),
                 finish_reason: log.finish_reason,
                 upstream_request_id: log.upstream_request_id,
                 request_body_json: safeJsonParse(log.request_body_json || "") ?? log.request_body_json,
@@ -5563,6 +6140,7 @@
         const nameInput = document.getElementById("api-key-name");
         const generationModeInput = document.getElementById("api-key-generation-mode");
         const rawApiKeyInput = document.getElementById("api-key-raw-api-key");
+        const rawApiKeyFeedback = document.getElementById("api-key-raw-api-key-feedback");
         const remarkInput = document.getElementById("api-key-remark");
         const idInput = document.getElementById("api-key-id");
         const form = document.getElementById("api-key-form");
@@ -5780,6 +6358,8 @@
                 generationModeInput.disabled = true;
                 rawApiKeyInput.disabled = false;
                 rawApiKeyInput.placeholder = "留空表示保持当前密钥不变；填写则替换为新密钥";
+                const result = updateRawApiKeyValidationState(rawApiKeyInput, rawApiKeyFeedback, { allowEmpty: true });
+                submitBtn.disabled = !result.valid;
                 return;
             }
             generationModeInput.disabled = false;
@@ -5791,6 +6371,8 @@
             if (!isCustom) {
                 rawApiKeyInput.value = "";
             }
+            const result = updateRawApiKeyValidationState(rawApiKeyInput, rawApiKeyFeedback, { allowEmpty: !isCustom });
+            submitBtn.disabled = isCustom && !result.valid;
         }
 
         function populateDefaultProviderOptions(selectedProviderId = null) {
@@ -6240,13 +6822,21 @@
             if (!idInput.value) {
                 payload.balance_amount = balanceAmountInput.value === "" ? null : Number(balanceAmountInput.value);
                 if (generationModeInput.value === "custom") {
-                    if (!rawApiKey) {
-                        showToast("请填写自定义 API 密钥", "error");
+                    const validation = updateRawApiKeyValidationState(rawApiKeyInput, rawApiKeyFeedback, { allowEmpty: false });
+                    if (!validation.valid) {
+                        showToast(validation.message, "error");
+                        rawApiKeyInput.focus();
                         return;
                     }
                     payload.raw_api_key = rawApiKey;
                 }
             } else if (rawApiKey) {
+                const validation = updateRawApiKeyValidationState(rawApiKeyInput, rawApiKeyFeedback, { allowEmpty: true });
+                if (!validation.valid) {
+                    showToast(validation.message, "error");
+                    rawApiKeyInput.focus();
+                    return;
+                }
                 payload.raw_api_key = rawApiKey;
             }
             if (!payload.name) {
@@ -6294,11 +6884,11 @@
         batchRotateModal?.addEventListener("click", (event) => {
             if (event.target === batchRotateModal) closeBatchRotateModal();
         });
-        batchRotateCopyBtn?.addEventListener("click", async () => copyText(batchRotateResult.value));
+        batchRotateCopyBtn?.addEventListener("click", async () => copyText(batchRotateResult.value, batchRotateCopyBtn));
         modal.addEventListener("click", (event) => {
             if (event.target === modal) closeModal();
         });
-        copyRawBtn.addEventListener("click", async () => copyText(rawValue.textContent));
+        copyRawBtn.addEventListener("click", async () => copyText(rawValue.textContent, copyRawBtn));
         templateSelect?.addEventListener("change", () => {
             if (!templateSelect.value) return;
             applyTemplateToForm(templateSelect.value);
@@ -6442,6 +7032,7 @@
             renderTable();
         });
         generationModeInput.addEventListener("change", refreshRawApiKeyInputState);
+        rawApiKeyInput.addEventListener("input", refreshRawApiKeyInputState);
         routeModeInput.addEventListener("change", refreshRoutePreview);
         manualFallbackInput.addEventListener("change", refreshRoutePreview);
         defaultProviderSelect.addEventListener("change", refreshRoutePreview);
@@ -7107,6 +7698,7 @@
                             <strong>${formatMetricValue(log.total_tokens)}</strong>
                             <div class="table-muted">输入 ${formatMetricValue(log.prompt_tokens)} / 输出 ${formatMetricValue(log.completion_tokens)}</div>
                             <div class="table-muted">成本 ${formatCostValue(log.total_cost)}</div>
+                            <div class="table-muted">倍率 ${escapeHtml(formatMultiplier(log.billing_multiplier ?? 1))}</div>
                         </td>
                         <td>
                             <strong>${formatMetricValue(log.duration_ms ?? log.latency_ms, " ms")}</strong>
@@ -7189,9 +7781,11 @@
                 billing_multiplier: log.billing_multiplier,
                 channel_price_input_per_1k: log.channel_price_input_per_1k,
                 channel_price_output_per_1k: log.channel_price_output_per_1k,
+                channel_price_cache_per_1k: log.channel_price_cache_per_1k,
                 prompt_cost: log.prompt_cost,
                 completion_cost: log.completion_cost,
                 total_cost: log.total_cost,
+                billing_calculation: formatBillingCalculation(log),
                 finish_reason: log.finish_reason,
                 upstream_request_id: log.upstream_request_id,
                 request_body_json: safeJsonParse(log.request_body_json || "") ?? log.request_body_json,
@@ -7406,6 +8000,7 @@
             runPageCleanup();
             page = document.body.dataset.page;
             enhanceInteractiveButtons(document);
+            initRawApiKeyValidationControls(document);
             scheduleResponsiveTableSync(document);
             if (page === "dashboard") await initDashboard();
             if (page === "providers") await initProviders();
@@ -7483,7 +8078,7 @@
             const copyButton = event.target.closest("[data-copy-text]");
             if (copyButton) {
                 event.preventDefault();
-                await copyText(copyButton.dataset.copyText);
+                await copyText(copyButton.dataset.copyText, copyButton);
                 return;
             }
         });

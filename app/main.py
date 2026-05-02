@@ -169,6 +169,7 @@ def _migrate_request_log_columns(db) -> None:
         "billing_multiplier": "ALTER TABLE request_logs ADD COLUMN billing_multiplier FLOAT",
         "channel_price_input_per_1k": "ALTER TABLE request_logs ADD COLUMN channel_price_input_per_1k FLOAT",
         "channel_price_output_per_1k": "ALTER TABLE request_logs ADD COLUMN channel_price_output_per_1k FLOAT",
+        "channel_price_cache_per_1k": "ALTER TABLE request_logs ADD COLUMN channel_price_cache_per_1k FLOAT",
         "api_client_balance_after": "ALTER TABLE request_logs ADD COLUMN api_client_balance_after NUMERIC",
         "prompt_tokens": "ALTER TABLE request_logs ADD COLUMN prompt_tokens INTEGER",
         "completion_tokens": "ALTER TABLE request_logs ADD COLUMN completion_tokens INTEGER",
@@ -213,6 +214,7 @@ def _migrate_request_log_columns(db) -> None:
         "price_multiplier": "ALTER TABLE provider_models ADD COLUMN price_multiplier FLOAT NOT NULL DEFAULT 1.0",
         "input_price_per_1k": "ALTER TABLE provider_models ADD COLUMN input_price_per_1k FLOAT",
         "output_price_per_1k": "ALTER TABLE provider_models ADD COLUMN output_price_per_1k FLOAT",
+        "cache_price_per_1k": "ALTER TABLE provider_models ADD COLUMN cache_price_per_1k FLOAT",
     }
     changed_provider_models = False
     for column, ddl in provider_model_additions.items():
@@ -221,6 +223,22 @@ def _migrate_request_log_columns(db) -> None:
         db.execute(text(ddl))
         changed_provider_models = True
     if changed_provider_models:
+        db.commit()
+
+    existing_model_catalog_columns = {
+        row[1]
+        for row in db.execute(text("PRAGMA table_info(model_catalogs)")).fetchall()
+    }
+    model_catalog_additions = {
+        "cache_price_per_1k": "ALTER TABLE model_catalogs ADD COLUMN cache_price_per_1k FLOAT",
+    }
+    changed_model_catalogs = False
+    for column, ddl in model_catalog_additions.items():
+        if column in existing_model_catalog_columns:
+            continue
+        db.execute(text(ddl))
+        changed_model_catalogs = True
+    if changed_model_catalogs:
         db.commit()
 
     existing_api_key_columns = {

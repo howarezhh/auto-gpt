@@ -26,8 +26,10 @@ class ModelProviderBindingOut(ModelProviderBindingBase):
     model_circuit_state: str | None = None
     effective_input_price_per_1k: float | None = None
     effective_output_price_per_1k: float | None = None
+    effective_cache_price_per_1k: float | None = None
     direct_input_price_per_1k: float | None = None
     direct_output_price_per_1k: float | None = None
+    direct_cache_price_per_1k: float | None = None
 
 
 class ModelCatalogBase(BaseModel):
@@ -36,6 +38,7 @@ class ModelCatalogBase(BaseModel):
     enabled: bool = True
     input_price_per_1k: float | None = Field(default=None, ge=0)
     output_price_per_1k: float | None = Field(default=None, ge=0)
+    cache_price_per_1k: float | None = Field(default=None, ge=0)
     speed_label: str | None = Field(default=None, max_length=50)
     remark: str | None = None
 
@@ -62,6 +65,7 @@ class ModelCatalogUpdate(BaseModel):
     enabled: bool | None = None
     input_price_per_1k: float | None = Field(default=None, ge=0)
     output_price_per_1k: float | None = Field(default=None, ge=0)
+    cache_price_per_1k: float | None = Field(default=None, ge=0)
     speed_label: str | None = Field(default=None, max_length=50)
     remark: str | None = None
     provider_bindings: list[ModelProviderBindingIn] | None = None
@@ -80,6 +84,7 @@ class ModelCatalogOut(ModelCatalogBase):
     enabled_provider_count: int = 0
     lowest_input_price_per_1k: float | None = None
     lowest_output_price_per_1k: float | None = None
+    lowest_cache_price_per_1k: float | None = None
     avg_price_multiplier: float | None = None
     avg_bound_price_multiplier: float | None = None
     avg_routable_price_multiplier: float | None = None
@@ -119,5 +124,6 @@ class UserModelOut(BaseModel):
     remark: str | None = None
     input_price_per_1k: float | None = None
     output_price_per_1k: float | None = None
+    cache_price_per_1k: float | None = None
     available_provider_names: list[str] = Field(default_factory=list)
     enabled_provider_count: int = 0

@@ -822,8 +822,8 @@ def user_metrics_summary(
 @router.get("/api/user/metrics/timeseries", response_model=MetricTimeSeriesResponse)
 def user_metrics_timeseries(
     request: Request,
-    window_minutes: int = Query(default=180, ge=5, le=1440),
-    bucket_minutes: int = Query(default=15, ge=1, le=240),
+    window_minutes: int = Query(default=180, ge=5, le=43200),
+    bucket_minutes: int = Query(default=15, ge=1, le=1440),
     db: Session = Depends(get_db),
 ) -> MetricTimeSeriesResponse:
     current_user = require_user_html(request, db)

@@ -255,7 +255,8 @@
             </label>
             <label class="form-span-2">
                 <span>密钥明文</span>
-                <input class="field-input" id="api-key-raw-api-key" maxlength="128" placeholder="自动生成时可留空；自定义时必须以 sk-aotu- 开头，长度 24-128 位">
+                <input class="field-input" id="api-key-raw-api-key" maxlength="128" placeholder="自动生成时可留空；自定义时必须以 sk-aotu- 开头，长度 24-128 位" aria-describedby="api-key-raw-api-key-feedback">
+                <div class="field-feedback api-key-validation-feedback is-neutral" id="api-key-raw-api-key-feedback">自动生成时无需填写；选择自定义后会实时校验格式。</div>
                 <div class="settings-note api-key-inline-note">
                     <strong>密钥规则</strong>
                     <span>支持自动生成或自定义录入。自定义密钥必须以 <code>sk-aotu-</code> 开头，仅允许字母、数字、连字符和下划线，长度 24-128 位。</span>

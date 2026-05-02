@@ -58,6 +58,7 @@ class RequestLog(Base):
     billing_multiplier: Mapped[float | None] = mapped_column(Float, nullable=True)
     channel_price_input_per_1k: Mapped[float | None] = mapped_column(Float, nullable=True)
     channel_price_output_per_1k: Mapped[float | None] = mapped_column(Float, nullable=True)
+    channel_price_cache_per_1k: Mapped[float | None] = mapped_column(Float, nullable=True)
     api_client_balance_after: Mapped[float | None] = mapped_column(Numeric(18, 6), nullable=True)
     prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)

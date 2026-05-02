@@ -183,6 +183,33 @@ Avoid nested `pwsh -Command` for multiline Python. Prefer direct current-shell c
 - Related Files: none
 
 ---
+## [ERR-20260502-001] ripgrep_pattern_starting_with_dash
+
+**Logged**: 2026-05-02T11:56:00+08:00
+**Priority**: low
+**Status**: pending
+**Area**: infra
+
+### Summary
+Searching CSS custom property names with `rg` failed because the pattern started with `--` and was parsed as a flag.
+
+### Error
+```text
+rg: unrecognized flag --green|--red
+```
+
+### Context
+- Command attempted: `rg -n "--green|--red" app\static\css\app.css`
+- Environment: PowerShell workspace using ripgrep.
+
+### Suggested Fix
+Use `rg -n -- "--green|--red" app\static\css\app.css` when the search pattern starts with `-`.
+
+### Metadata
+- Reproducible: yes
+- Related Files: none
+
+---
 ## [ERR-20260430-001] local_bash_validation_wsl_unavailable
 
 **Logged**: 2026-04-30T23:43:00+08:00

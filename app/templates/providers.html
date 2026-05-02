@@ -52,7 +52,6 @@
                     <th>熔断</th>
                     <th>维护 / 策略</th>
                     <th>容量</th>
-                    <th>成本</th>
                     <th>质量</th>
                     <th>优先级</th>
                     <th>权重</th>
@@ -132,8 +131,6 @@
                     <th>能力</th>
                     <th>倍率 / 价格</th>
                     <th>质量</th>
-                    <th>优先级</th>
-                    <th>权重</th>
                     <th>启用</th>
                     <th>操作</th>
                 </tr>
@@ -218,21 +215,13 @@
                 <span>维护窗口</span>
                 <input class="field-input" id="provider-maintenance-window" placeholder="例如：每周日 02:00-04:00 UTC，或按需维护说明">
             </label>
-            <label class="form-span-2" for="provider-models">
+            <div class="form-span-2 provider-model-editor" id="provider-model-editor">
                 <span>模型挂载</span>
-                <div class="settings-note provider-model-note">
-                    <strong>统一管理</strong>
-                    <span>模型基础价格、展示名、速度标签和全局启用状态统一在“模型配置”页面维护；当前页面仅负责把模型挂载到中转站，并设置优先级、权重与能力标记。</span>
-                </div>
-                <div class="settings-note provider-model-note">
-                    <strong>上游发现</strong>
-                    <span>可直接请求上游 <code>/models</code>，把一个、多个或全部模型导入当前中转站挂载列表；保存后会自动同步到统一模型目录。</span>
-                </div>
-                <div class="provider-model-custom-row">
+                <div class="provider-model-discover-actions">
                     <button class="btn btn-ghost interactive-btn" id="provider-discover-models-btn" type="button">获取可用模型</button>
                     <button class="btn btn-ghost interactive-btn" id="provider-import-selected-models-btn" type="button">添加选中模型</button>
-                    <button class="btn btn-ghost interactive-btn" id="provider-import-all-models-btn" type="button">添加全部模型</button>
                 </div>
+                <div class="provider-discover-feedback hidden" id="provider-discover-feedback" role="status" aria-live="polite"></div>
                 <div class="table-shell provider-discovered-model-shell">
                     <table class="data-table provider-data-table">
                         <thead>
@@ -244,21 +233,24 @@
                             </tr>
                         </thead>
                         <tbody id="provider-discovered-models-body">
-                            <tr><td colspan="4"><div class="empty-state">点击“获取可用模型”后可把上游返回的模型一键导入当前挂载列表。</div></td></tr>
+                            <tr><td colspan="4"><div class="empty-state">点击“获取可用模型”后，勾选需要的模型，再点击“添加选中模型”。</div></td></tr>
                         </tbody>
                     </table>
                 </div>
                 <div class="provider-model-preset-bar">
-                    <span class="provider-model-preset-label">预设模型</span>
-                    <div class="provider-model-preset-list">
-                        <button class="table-action-btn" type="button" data-model-preset="gpt-5.4">gpt-5.4</button>
-                        <button class="table-action-btn" type="button" data-model-preset="gpt-5">gpt-5</button>
-                        <button class="table-action-btn" type="button" data-model-preset="gpt-5-mini">gpt-5-mini</button>
-                        <button class="table-action-btn" type="button" data-model-preset="gpt-4.1">gpt-4.1</button>
-                        <button class="table-action-btn" type="button" data-model-preset="gpt-4o">gpt-4o</button>
-                        <button class="table-action-btn" type="button" data-model-preset="gpt-4o-mini">gpt-4o-mini</button>
-                        <button class="table-action-btn" type="button" data-model-preset="o3">o3</button>
-                        <button class="table-action-btn" type="button" data-model-preset="o4-mini">o4-mini</button>
+                    <button class="provider-model-preset-label" id="provider-preset-manage-btn" type="button" aria-expanded="false" aria-controls="provider-preset-manager">预设模型</button>
+                    <div class="provider-model-preset-list" id="provider-model-preset-list"></div>
+                    <div class="provider-preset-manager hidden" id="provider-preset-manager" aria-hidden="true">
+                        <div class="provider-preset-manager-head">
+                            <strong>编辑预设模型</strong>
+                            <span>用于快速添加常用或自定义模型名。</span>
+                        </div>
+                        <div class="provider-preset-editor-list" id="provider-preset-editor-list"></div>
+                        <div class="provider-model-custom-row">
+                            <label class="visually-hidden" for="provider-new-preset-model">新增预设模型名</label>
+                            <input class="field-input" id="provider-new-preset-model" placeholder="新增预设模型名" type="text">
+                            <button class="btn btn-ghost interactive-btn" id="provider-add-preset-model" type="button">新增预设</button>
+                        </div>
                     </div>
                 </div>
                 <div class="provider-model-custom-row">
@@ -266,8 +258,25 @@
                     <input class="field-input" id="provider-custom-model-name" placeholder="输入自定义模型名，例如 gpt-4.1-mini" type="text">
                     <button class="btn btn-ghost interactive-btn" id="provider-add-custom-model" type="button">添加自定义模型</button>
                 </div>
-                <textarea class="field-input provider-model-textarea" id="provider-models" rows="5" placeholder="每行一个模型，格式：模型名|优先级|权重|stream(y/n)|vision(y/n)|enabled(y/n)&#10;例如：gpt-4o-mini|100|100|y|n|y"></textarea>
-            </label>
+                <div class="provider-model-custom-row">
+                    <label class="visually-hidden" for="provider-uniform-multiplier">统一设置模型倍率</label>
+                    <input class="field-input" id="provider-uniform-multiplier" type="number" min="0.0001" step="0.0001" value="1" placeholder="统一倍率">
+                    <button class="btn btn-ghost interactive-btn" id="provider-apply-multiplier-btn" type="button">统一倍率</button>
+                </div>
+                <div class="provider-model-config-head" aria-hidden="true">
+                    <span>模型名称 *</span>
+                    <span>倍率</span>
+                    <span>输入价</span>
+                    <span>输出价</span>
+                    <span>缓存价</span>
+                    <span>流式</span>
+                    <span>图像</span>
+                    <span>启用</span>
+                    <span>操作</span>
+                </div>
+                <div class="provider-model-config-list" id="provider-model-config-list" aria-live="polite"></div>
+                <button class="btn btn-ghost interactive-btn provider-add-empty-model-btn" id="provider-add-empty-model" type="button">新增空模型</button>
+            </div>
             <label class="form-span-2" for="provider-remark">
                 <span>备注</span>
                 <textarea class="field-input" id="provider-remark" rows="3"></textarea>

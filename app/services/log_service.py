@@ -78,6 +78,7 @@ class LogService:
         billing_multiplier: float | None = None,
         channel_price_input_per_1k: float | None = None,
         channel_price_output_per_1k: float | None = None,
+        channel_price_cache_per_1k: float | None = None,
         trace: list[dict] | dict | None = None,
         token_request_payload: dict | None = None,
         token_response_payload: dict | None = None,
@@ -90,6 +91,7 @@ class LogService:
             billing_multiplier is None
             or channel_price_input_per_1k is None
             or channel_price_output_per_1k is None
+            or channel_price_cache_per_1k is None
         ):
             provider_model = db.get(ProviderModel, resolved_provider_model_id)
         read_tokens, write_tokens = LogService.extract_cache_tokens(token_response_payload)
@@ -171,6 +173,19 @@ class LogService:
                 channel_price_output_per_1k
                 if channel_price_output_per_1k is not None
                 else (provider_model.output_price_per_1k if provider_model else None)
+            ),
+            channel_price_cache_per_1k=(
+                channel_price_cache_per_1k
+                if channel_price_cache_per_1k is not None
+                else (
+                    (
+                        provider_model.cache_price_per_1k
+                        if provider_model.cache_price_per_1k is not None
+                        else provider_model.input_price_per_1k
+                    )
+                    if provider_model
+                    else None
+                )
             ),
             trace_json=dumps_json(trace) if trace is not None else None,
         )
@@ -614,22 +629,46 @@ class LogService:
             return None, None
         usage = response_payload.get("usage")
         if not isinstance(usage, dict):
+            nested_response = response_payload.get("response")
+            if isinstance(nested_response, dict):
+                usage = nested_response.get("usage")
+        if not isinstance(usage, dict):
             return None, None
         cache_read = LogService._extract_usage_int(
             usage,
             ("cache_read_tokens",),
-            ("cached_tokens",),
-            ("prompt_tokens_details", "cached_tokens"),
-            ("input_tokens_details", "cached_tokens"),
             ("cache_read_input_tokens",),
+            ("cache_read_input_token_count",),
+            ("cacheReadInputTokens",),
+            ("cacheReadInputTokenCount",),
+            ("cached_tokens",),
+            ("cachedTokens",),
+            ("cached_token_count",),
+            ("cachedTokenCount",),
+            ("cached_content_token_count",),
+            ("cachedContentTokenCount",),
+            ("prompt_tokens_details", "cached_tokens"),
+            ("prompt_tokens_details", "cachedTokens"),
+            ("input_tokens_details", "cached_tokens"),
+            ("input_tokens_details", "cachedTokens"),
         )
         cache_write = LogService._extract_usage_int(
             usage,
             ("cache_write_tokens",),
+            ("cache_write_input_tokens",),
+            ("cache_write_input_token_count",),
+            ("cacheWriteInputTokens",),
+            ("cacheWriteInputTokenCount",),
             ("cache_creation_tokens",),
-            ("prompt_tokens_details", "cache_creation_tokens"),
-            ("input_tokens_details", "cache_creation_tokens"),
             ("cache_creation_input_tokens",),
+            ("cache_creation_input_token_count",),
+            ("cacheCreationTokens",),
+            ("cacheCreationInputTokens",),
+            ("cacheCreationInputTokenCount",),
+            ("prompt_tokens_details", "cache_creation_tokens"),
+            ("prompt_tokens_details", "cacheCreationTokens"),
+            ("input_tokens_details", "cache_creation_tokens"),
+            ("input_tokens_details", "cacheCreationTokens"),
         )
         return cache_read, cache_write
 
@@ -645,7 +684,7 @@ class LogService:
             if isinstance(current, bool):
                 continue
             if isinstance(current, (int, float)):
-                return int(current)
+                return max(0, int(current))
         return None
 
     @staticmethod
@@ -898,7 +937,9 @@ class LogService:
             "total_tokens",
             "cache_read_tokens",
             "cache_write_tokens",
+            "billing_multiplier",
             "total_cost",
+            "billing_calculation",
             "reasoning_level",
             "api_client_key_name",
             "user_account_name",
@@ -938,7 +979,9 @@ class LogService:
                 item.total_tokens if item.total_tokens is not None else "",
                 item.cache_read_tokens if item.cache_read_tokens is not None else "",
                 item.cache_write_tokens if item.cache_write_tokens is not None else "",
+                item.billing_multiplier if item.billing_multiplier is not None else "",
                 item.total_cost if item.total_cost is not None else "",
+                LogService.format_billing_calculation(item),
                 item.reasoning_level or "",
                 item.api_client_key_name or "",
                 item.user_account_name or "",
@@ -947,6 +990,39 @@ class LogService:
                 item.message or "",
             ])
         return buffer.getvalue()
+
+    @staticmethod
+    def format_billing_calculation(item: RequestLog) -> str:
+        multiplier = item.billing_multiplier if item.billing_multiplier is not None else 1
+        input_price = item.channel_price_input_per_1k
+        output_price = item.channel_price_output_per_1k
+        cache_price = item.channel_price_cache_per_1k if item.channel_price_cache_per_1k is not None else input_price
+        cache_read_tokens = int(item.cache_read_tokens or 0)
+        regular_input_tokens = max(0, int(item.prompt_tokens or 0) - cache_read_tokens)
+        input_part = (
+            "输入单价未设置"
+            if input_price is None
+            else f"输入 {regular_input_tokens}/1000 × {float(input_price):.6f}"
+        )
+        cache_part = (
+            None
+            if cache_read_tokens <= 0
+            else (
+                "缓存单价未设置"
+                if cache_price is None
+                else f"缓存 {cache_read_tokens}/1000 × {float(cache_price):.6f}"
+            )
+        )
+        output_part = (
+            "输出单价未设置"
+            if output_price is None
+            else f"输出 {int(item.completion_tokens or 0)}/1000 × {float(output_price):.6f}"
+        )
+        parts = [input_part]
+        if cache_part:
+            parts.append(cache_part)
+        parts.append(output_part)
+        return f"倍率 {float(multiplier):.2f}x；" + " + ".join(parts)
 
     @staticmethod
     def metric_timeseries(

@@ -244,7 +244,8 @@
                                 </label>
                                 <label>
                                     <span>替换密钥</span>
-                                    <input class="field-input" name="raw_api_key" placeholder="留空表示保留当前密钥">
+                                    <input class="field-input" name="raw_api_key" placeholder="留空表示保留当前密钥" data-raw-api-key-input data-raw-api-key-optional="true">
+                                    <div class="field-feedback api-key-validation-feedback is-neutral" data-raw-api-key-feedback>留空表示保留当前密钥；填写后会实时校验格式。</div>
                                 </label>
                                 <label class="form-span-2">
                                     <span>备注</span>
@@ -336,7 +337,8 @@
                 </label>
                 <label>
                     <span>自定义密钥</span>
-                    <input class="field-input" name="raw_api_key" placeholder="留空则自动生成，以 sk-aotu- 开头">
+                    <input class="field-input" name="raw_api_key" placeholder="留空则自动生成，以 sk-aotu- 开头" data-raw-api-key-input data-raw-api-key-optional="true">
+                    <div class="field-feedback api-key-validation-feedback is-neutral" data-raw-api-key-feedback>留空时系统自动生成；填写自定义密钥后会实时校验格式。</div>
                 </label>
                 <label class="form-span-2">
                     <span>备注</span>

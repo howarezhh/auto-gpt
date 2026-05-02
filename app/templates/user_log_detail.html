@@ -29,6 +29,7 @@
     <article class="metric-card"><span>输出 Tokens</span><strong>{{ log.completion_tokens if log.completion_tokens is not none else '-' }}</strong></article>
     <article class="metric-card"><span>总 Tokens</span><strong>{{ log.total_tokens if log.total_tokens is not none else '-' }}</strong></article>
     <article class="metric-card"><span>总费用</span><strong>{{ '%.6f'|format(log.total_cost or 0) }}</strong></article>
+    <article class="metric-card"><span>计费倍率</span><strong>{{ '%.2f'|format(log.billing_multiplier or 1) }}x</strong></article>
     <article class="metric-card"><span>缓存读</span><strong>{{ log.cache_read_tokens if log.cache_read_tokens is not none else '-' }}</strong></article>
     <article class="metric-card"><span>缓存写</span><strong>{{ log.cache_write_tokens if log.cache_write_tokens is not none else '-' }}</strong></article>
 </section>
@@ -49,6 +50,7 @@
             <article class="api-key-chip-card"><strong>方法</strong><span>{{ log.http_method or '-' }}</span></article>
             <article class="api-key-chip-card"><strong>会话号</strong><span>{{ log.session_id or log.conversation_key or '-' }}</span></article>
             <article class="api-key-chip-card"><strong>状态</strong><span>{{ '成功' if log.success else '失败' }}{% if log.status_code %} · {{ log.status_code }}{% endif %}</span></article>
+            <article class="api-key-chip-card"><strong>计费过程</strong><span>倍率 {{ '%.2f'|format(log.billing_multiplier or 1) }}x；输入 {{ log.prompt_tokens or 0 }}/1000 × {{ '%.6f'|format(log.channel_price_input_per_1k or 0) }} + 输出 {{ log.completion_tokens or 0 }}/1000 × {{ '%.6f'|format(log.channel_price_output_per_1k or 0) }}</span></article>
             <article class="api-key-chip-card"><strong>错误 / 消息</strong><span>{{ log.message or '无' }}</span></article>
         </div>
     </div>

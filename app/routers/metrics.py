@@ -23,8 +23,8 @@ def metrics_summary(
 
 @router.get("/timeseries", response_model=MetricTimeSeriesResponse)
 def metrics_timeseries(
-    window_minutes: int = Query(default=180, ge=5, le=1440),
-    bucket_minutes: int = Query(default=15, ge=1, le=240),
+    window_minutes: int = Query(default=180, ge=5, le=43200),
+    bucket_minutes: int = Query(default=15, ge=1, le=1440),
     db: Session = Depends(get_db),
 ) -> MetricTimeSeriesResponse:
     items = [

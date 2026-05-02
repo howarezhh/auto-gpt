@@ -28,6 +28,7 @@ class ProviderModel(Base):
     price_multiplier: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
     input_price_per_1k: Mapped[float | None] = mapped_column(Float, nullable=True)
     output_price_per_1k: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cache_price_per_1k: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow

@@ -2,7 +2,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 
 from httpx import HTTPError
-from sqlalchemy import select
+from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.provider import Provider
@@ -10,6 +10,8 @@ from app.models.provider_model import ProviderModel
 from app.models.model_catalog import ModelCatalog
 from app.models.request_log import RequestLog
 from app.models.api_client_key_provider_binding import ApiClientKeyProviderBinding
+from app.models.api_client_key import ApiClientKey
+from app.models.app_setting import AppSetting
 from app.schemas.provider import (
     ProviderCreate,
     ProviderDiscoverModelsIn,
@@ -165,11 +167,17 @@ class ProviderService:
         from app.services.model_catalog_service import ModelCatalogService
         from app.services.api_key_auth_cache import ApiKeyAuthCache
 
+        provider_id = provider.id
         affected_bindings = list(
             db.scalars(
                 select(ApiClientKeyProviderBinding)
                 .options(selectinload(ApiClientKeyProviderBinding.api_client_key))
-                .where(ApiClientKeyProviderBinding.provider_id == provider.id)
+                .where(ApiClientKeyProviderBinding.provider_id == provider_id)
+            )
+        )
+        affected_default_keys = list(
+            db.scalars(
+                select(ApiClientKey).where(ApiClientKey.default_provider_id == provider_id)
             )
         )
         affected_key_refs = [
@@ -177,9 +185,17 @@ class ProviderService:
             for binding in affected_bindings
             if binding.api_client_key is not None
         ]
+        affected_key_refs.extend(
+            (api_key.id, api_key.key_hash, api_key.owner_user_id)
+            for api_key in affected_default_keys
+        )
+        db.execute(update(AppSetting).where(AppSetting.default_provider_id == provider_id).values(default_provider_id=None))
+        db.execute(update(ApiClientKey).where(ApiClientKey.default_provider_id == provider_id).values(default_provider_id=None))
+        db.execute(update(RequestLog).where(RequestLog.provider_id == provider_id).values(provider_id=None))
+        db.execute(delete(ApiClientKeyProviderBinding).where(ApiClientKeyProviderBinding.provider_id == provider_id))
         db.delete(provider)
         db.commit()
-        for api_key_id, key_hash, owner_user_id in affected_key_refs:
+        for api_key_id, key_hash, owner_user_id in set(affected_key_refs):
             ApiKeyAuthCache.invalidate_api_key(api_key_id, key_hash)
             ApiKeyAuthCache.invalidate_user(owner_user_id)
         ProviderService.invalidate_provider_runtime_cache()
@@ -199,7 +215,7 @@ class ProviderService:
             raise ValueError("Provider model not found")
 
         for field, value in payload.model_dump(exclude_unset=True).items():
-            if field in {"input_price_per_1k", "output_price_per_1k"}:
+            if field in {"input_price_per_1k", "output_price_per_1k", "cache_price_per_1k"}:
                 continue
             if field == "price_multiplier" and value is None:
                 continue
@@ -326,13 +342,14 @@ class ProviderService:
             provider = ProviderService.get_provider(db, payload.provider_id)
             if provider is None:
                 raise ValueError("Provider not found")
-        base_url = (payload.base_url or provider.base_url if provider else None)
-        api_key = (payload.api_key or provider.api_key if provider else None)
+        base_url = payload.base_url or (provider.base_url if provider else None)
+        api_key = payload.api_key or (provider.api_key if provider else None)
         if not base_url or not api_key:
             raise ValueError("必须提供 Base URL 和 API 密钥，或指定已存在的中转站")
 
         normalized_base_url = base_url.rstrip("/")
-        timeout_sec = max(1, int((payload.timeout_ms or provider.timeout_ms if provider else 30000) / 1000))
+        timeout_ms = payload.timeout_ms or (provider.timeout_ms if provider else 30000)
+        timeout_sec = max(1, int(timeout_ms / 1000))
         response = None
         try:
             response = await UpstreamClientService.get_client().get(
@@ -459,6 +476,7 @@ class ProviderService:
             "price_multiplier": provider_model.price_multiplier,
             "input_price_per_1k": provider_model.input_price_per_1k,
             "output_price_per_1k": provider_model.output_price_per_1k,
+            "cache_price_per_1k": provider_model.cache_price_per_1k,
             "recent_request_count": metrics.get("recent_request_count", 0),
             "success_rate": metrics.get("success_rate"),
             "avg_first_token_latency_ms": metrics.get("avg_first_token_latency_ms"),
@@ -551,8 +569,10 @@ class ProviderService:
                 weight=item.weight,
                 supports_stream=item.supports_stream,
                 supports_vision=item.supports_vision,
+                price_multiplier=item.price_multiplier or 1.0,
                 input_price_per_1k=item.input_price_per_1k,
                 output_price_per_1k=item.output_price_per_1k,
+                cache_price_per_1k=item.cache_price_per_1k,
             )
             for item in provider.provider_models
         ]
@@ -577,23 +597,45 @@ class ProviderService:
             provider_model.weight = config.weight
             provider_model.supports_stream = config.supports_stream
             provider_model.supports_vision = config.supports_vision
-            if not provider_model.price_multiplier:
-                provider_model.price_multiplier = 1.0
+            provider_model.price_multiplier = config.price_multiplier or 1.0
             catalog = catalogs_by_name.get(config.model_name)
-            if catalog is None:
-                provider_model.input_price_per_1k = config.input_price_per_1k
-                provider_model.output_price_per_1k = config.output_price_per_1k
-            else:
+            if config.input_price_per_1k is not None:
+                provider_model.input_price_per_1k = config.input_price_per_1k * provider_model.price_multiplier
+            elif catalog is not None:
                 provider_model.input_price_per_1k = (
                     catalog.input_price_per_1k * provider_model.price_multiplier
                     if catalog.input_price_per_1k is not None
                     else None
                 )
+            else:
+                provider_model.input_price_per_1k = None
+
+            if config.output_price_per_1k is not None:
+                provider_model.output_price_per_1k = config.output_price_per_1k * provider_model.price_multiplier
+            elif catalog is not None:
                 provider_model.output_price_per_1k = (
                     catalog.output_price_per_1k * provider_model.price_multiplier
                     if catalog.output_price_per_1k is not None
                     else None
                 )
+            else:
+                provider_model.output_price_per_1k = None
+
+            if config.cache_price_per_1k is not None:
+                provider_model.cache_price_per_1k = config.cache_price_per_1k * provider_model.price_multiplier
+            elif catalog is not None:
+                catalog_cache_price = catalog.cache_price_per_1k
+                if catalog_cache_price is None:
+                    catalog_cache_price = catalog.input_price_per_1k
+                provider_model.cache_price_per_1k = (
+                    catalog_cache_price * provider_model.price_multiplier
+                    if catalog_cache_price is not None
+                    else None
+                )
+            elif config.input_price_per_1k is not None:
+                provider_model.cache_price_per_1k = config.input_price_per_1k * provider_model.price_multiplier
+            else:
+                provider_model.cache_price_per_1k = None
             if provider_model.health_status not in {"healthy", "degraded", "unhealthy"}:
                 provider_model.health_status = "unknown"
             if not provider_model.circuit_state:
@@ -614,6 +656,11 @@ class ProviderService:
             provider_model.input_price_per_1k = catalog.input_price_per_1k * provider_model.price_multiplier
         if catalog.output_price_per_1k is not None:
             provider_model.output_price_per_1k = catalog.output_price_per_1k * provider_model.price_multiplier
+        catalog_cache_price = catalog.cache_price_per_1k
+        if catalog_cache_price is None:
+            catalog_cache_price = catalog.input_price_per_1k
+        if catalog_cache_price is not None:
+            provider_model.cache_price_per_1k = catalog_cache_price * provider_model.price_multiplier
 
     @staticmethod
     def _sync_models_json(provider: Provider) -> None:

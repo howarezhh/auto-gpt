@@ -333,6 +333,8 @@ class ProxyService:
                         "prompt_tokens": None,
                         "completion_tokens": None,
                         "total_tokens": None,
+                        "cache_read_tokens": None,
+                        "cache_write_tokens": None,
                     }
                     finish_reason = ProxyService._extract_finish_reason(response)
                     response_body_json = ProxyService._serialize_payload_for_logging(response, setting=setting)
@@ -372,6 +374,8 @@ class ProxyService:
                         prompt_tokens=usage_info["prompt_tokens"],
                         completion_tokens=usage_info["completion_tokens"],
                         total_tokens=usage_info["total_tokens"],
+                        cache_read_tokens=usage_info["cache_read_tokens"],
+                        cache_write_tokens=usage_info["cache_write_tokens"],
                         finish_reason=finish_reason,
                         upstream_request_id=upstream_request_id,
                         request_body_json=request_body_json,
@@ -616,7 +620,13 @@ class ProxyService:
                         exc_traceback = None
                         error_code = "stream_interrupted"
                         first_chunk_latency_ms: int | None = None
-                        usage_info = {"prompt_tokens": None, "completion_tokens": None, "total_tokens": None}
+                        usage_info = {
+                            "prompt_tokens": None,
+                            "completion_tokens": None,
+                            "total_tokens": None,
+                            "cache_read_tokens": None,
+                            "cache_write_tokens": None,
+                        }
                         finish_reason: str | None = None
                         response_text_parts: list[str] = []
                         response_text_bytes = 0
@@ -765,6 +775,8 @@ class ProxyService:
                                         prompt_tokens=usage_info["prompt_tokens"],
                                         completion_tokens=usage_info["completion_tokens"],
                                         total_tokens=usage_info["total_tokens"],
+                                        cache_read_tokens=usage_info["cache_read_tokens"],
+                                        cache_write_tokens=usage_info["cache_write_tokens"],
                                         finish_reason=finish_reason,
                                         upstream_request_id=upstream_request_id,
                                         request_body_json=request_body_json,
@@ -835,6 +847,8 @@ class ProxyService:
                                         prompt_tokens=usage_info["prompt_tokens"],
                                         completion_tokens=usage_info["completion_tokens"],
                                         total_tokens=usage_info["total_tokens"],
+                                        cache_read_tokens=usage_info["cache_read_tokens"],
+                                        cache_write_tokens=usage_info["cache_write_tokens"],
                                         finish_reason=finish_reason,
                                         upstream_request_id=upstream_request_id,
                                         request_body_json=request_body_json,
@@ -1830,15 +1844,32 @@ class ProxyService:
             if isinstance(nested_response, dict):
                 usage = nested_response.get("usage")
         if not isinstance(usage, dict):
-            return {"prompt_tokens": None, "completion_tokens": None, "total_tokens": None}
+            return {
+                "prompt_tokens": None,
+                "completion_tokens": None,
+                "total_tokens": None,
+                "cache_read_tokens": None,
+                "cache_write_tokens": None,
+            }
         prompt_tokens = usage.get("prompt_tokens", usage.get("input_tokens"))
         completion_tokens = usage.get("completion_tokens", usage.get("output_tokens"))
         total_tokens = usage.get("total_tokens")
+        cache_read_tokens, cache_write_tokens = LogService.extract_cache_tokens({"usage": usage})
         return {
-            "prompt_tokens": int(prompt_tokens) if isinstance(prompt_tokens, int) else None,
-            "completion_tokens": int(completion_tokens) if isinstance(completion_tokens, int) else None,
-            "total_tokens": int(total_tokens) if isinstance(total_tokens, int) else None,
+            "prompt_tokens": ProxyService._coerce_non_negative_int(prompt_tokens),
+            "completion_tokens": ProxyService._coerce_non_negative_int(completion_tokens),
+            "total_tokens": ProxyService._coerce_non_negative_int(total_tokens),
+            "cache_read_tokens": cache_read_tokens,
+            "cache_write_tokens": cache_write_tokens,
         }
+
+    @staticmethod
+    def _coerce_non_negative_int(value: Any) -> int | None:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return max(0, int(value))
+        return None
 
     @staticmethod
     def _extract_finish_reason(response_json: dict[str, Any]) -> str | None:
@@ -2118,6 +2149,11 @@ class ProxyService:
             "billing_multiplier": provider_model.price_multiplier,
             "channel_price_input_per_1k": provider_model.input_price_per_1k,
             "channel_price_output_per_1k": provider_model.output_price_per_1k,
+            "channel_price_cache_per_1k": (
+                provider_model.cache_price_per_1k
+                if provider_model.cache_price_per_1k is not None
+                else provider_model.input_price_per_1k
+            ),
         }
 
     @staticmethod

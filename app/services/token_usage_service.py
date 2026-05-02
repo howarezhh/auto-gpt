@@ -312,6 +312,8 @@ class TokenUsageService:
         original_prompt_tokens = log.prompt_tokens
         original_completion_tokens = log.completion_tokens
         original_total_tokens = log.total_tokens
+        original_cache_read_tokens = log.cache_read_tokens
+        original_cache_write_tokens = log.cache_write_tokens
         effective_model = model_name or log.requested_model or log.model_name
         effective_path = request_path or log.request_path
         request_data = request_payload if isinstance(request_payload, dict) else TokenUsageService._parse_json_object(log.request_body_json)
@@ -322,6 +324,8 @@ class TokenUsageService:
         prompt_tokens = log.prompt_tokens if log.prompt_tokens is not None else usage_from_upstream["prompt_tokens"]
         completion_tokens = log.completion_tokens if log.completion_tokens is not None else usage_from_upstream["completion_tokens"]
         total_tokens = log.total_tokens if log.total_tokens is not None else usage_from_upstream["total_tokens"]
+        cache_read_tokens = log.cache_read_tokens if log.cache_read_tokens is not None else usage_from_upstream["cache_read_tokens"]
+        cache_write_tokens = log.cache_write_tokens if log.cache_write_tokens is not None else usage_from_upstream["cache_write_tokens"]
 
         if enable_usage_fill and tiktoken is not None and prompt_tokens is None and request_data is not None:
             prompt_tokens = TokenUsageService._count_request_tokens(
@@ -348,6 +352,12 @@ class TokenUsageService:
         if total_tokens is not None and log.total_tokens != total_tokens:
             log.total_tokens = total_tokens
             changed = True
+        if cache_read_tokens is not None and log.cache_read_tokens != cache_read_tokens:
+            log.cache_read_tokens = cache_read_tokens
+            changed = True
+        if cache_write_tokens is not None and log.cache_write_tokens != cache_write_tokens:
+            log.cache_write_tokens = cache_write_tokens
+            changed = True
 
         if LogService.refresh_derived_fields(log, response_payload=response_data):
             changed = True
@@ -355,6 +365,10 @@ class TokenUsageService:
         should_finalize_billing = log.api_client_key_id is not None
         should_commit = changed
         billing_delta = None
+        cache_usage_changed = (
+            int(log.cache_read_tokens or 0) != int(original_cache_read_tokens or 0)
+            or int(log.cache_write_tokens or 0) != int(original_cache_write_tokens or 0)
+        )
         if changed or should_finalize_billing:
             TokenUsageService._sync_api_client_key_usage_delta(
                 db,
@@ -364,6 +378,9 @@ class TokenUsageService:
                 original_total_tokens=original_total_tokens,
                 force=should_finalize_billing,
             )
+            billing_delta = BillingService.finalize_request_log_billing(db, log)
+            should_commit = True
+        elif cache_usage_changed:
             billing_delta = BillingService.finalize_request_log_billing(db, log)
             should_commit = True
         if should_commit:
@@ -476,22 +493,41 @@ class TokenUsageService:
                 "prompt_tokens": None,
                 "completion_tokens": None,
                 "total_tokens": None,
+                "cache_read_tokens": None,
+                "cache_write_tokens": None,
             }
         usage = response_data.get("usage")
+        if not isinstance(usage, dict):
+            nested_response = response_data.get("response")
+            if isinstance(nested_response, dict):
+                usage = nested_response.get("usage")
         if not isinstance(usage, dict):
             return {
                 "prompt_tokens": None,
                 "completion_tokens": None,
                 "total_tokens": None,
+                "cache_read_tokens": None,
+                "cache_write_tokens": None,
             }
         prompt_tokens = usage.get("prompt_tokens", usage.get("input_tokens"))
         completion_tokens = usage.get("completion_tokens", usage.get("output_tokens"))
         total_tokens = usage.get("total_tokens")
+        cache_read_tokens, cache_write_tokens = LogService.extract_cache_tokens({"usage": usage})
         return {
-            "prompt_tokens": int(prompt_tokens) if isinstance(prompt_tokens, int) else None,
-            "completion_tokens": int(completion_tokens) if isinstance(completion_tokens, int) else None,
-            "total_tokens": int(total_tokens) if isinstance(total_tokens, int) else None,
+            "prompt_tokens": TokenUsageService._coerce_non_negative_int(prompt_tokens),
+            "completion_tokens": TokenUsageService._coerce_non_negative_int(completion_tokens),
+            "total_tokens": TokenUsageService._coerce_non_negative_int(total_tokens),
+            "cache_read_tokens": cache_read_tokens,
+            "cache_write_tokens": cache_write_tokens,
         }
+
+    @staticmethod
+    def _coerce_non_negative_int(value: Any) -> int | None:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return max(0, int(value))
+        return None
 
     @staticmethod
     def _count_request_tokens(payload: dict[str, Any], *, model_name: str | None, request_path: str | None) -> int | None:

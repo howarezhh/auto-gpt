@@ -10,8 +10,10 @@ class ProviderModelConfigBase(BaseModel):
     weight: int = 100
     supports_stream: bool = True
     supports_vision: bool = False
+    price_multiplier: float = Field(default=1.0, gt=0)
     input_price_per_1k: float | None = Field(default=None, ge=0)
     output_price_per_1k: float | None = Field(default=None, ge=0)
+    cache_price_per_1k: float | None = Field(default=None, ge=0)
 
     @field_validator("model_name")
     @classmethod
@@ -25,7 +27,6 @@ class ProviderModelConfigInput(ProviderModelConfigBase):
 
 class ProviderModelConfigOut(ProviderModelConfigBase):
     id: int
-    price_multiplier: float = 1.0
     health_status: str
     circuit_state: str
     circuit_opened_at: datetime | None
@@ -53,6 +54,7 @@ class ProviderModelConfigUpdate(BaseModel):
     price_multiplier: float | None = Field(default=None, gt=0)
     input_price_per_1k: float | None = Field(default=None, ge=0)
     output_price_per_1k: float | None = Field(default=None, ge=0)
+    cache_price_per_1k: float | None = Field(default=None, ge=0)
 
 
 class ProviderBatchConnectivityTestRequest(BaseModel):

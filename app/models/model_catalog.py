@@ -15,6 +15,7 @@ class ModelCatalog(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     input_price_per_1k: Mapped[float | None] = mapped_column(Float, nullable=True)
     output_price_per_1k: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cache_price_per_1k: Mapped[float | None] = mapped_column(Float, nullable=True)
     speed_label: Mapped[str | None] = mapped_column(Text, nullable=True)
     remark: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)

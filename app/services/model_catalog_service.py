@@ -94,6 +94,11 @@ class ModelCatalogService:
             enabled=payload.enabled,
             input_price_per_1k=payload.input_price_per_1k,
             output_price_per_1k=payload.output_price_per_1k,
+            cache_price_per_1k=(
+                payload.cache_price_per_1k
+                if payload.cache_price_per_1k is not None
+                else payload.input_price_per_1k
+            ),
             speed_label=payload.speed_label,
             remark=payload.remark,
         )
@@ -109,10 +114,13 @@ class ModelCatalogService:
     def update_model(db: Session, catalog: ModelCatalog, payload: ModelCatalogUpdate) -> ModelCatalog:
         data = payload.model_dump(exclude_unset=True, exclude={"provider_bindings"})
         provider_bindings = payload.provider_bindings if "provider_bindings" in payload.model_fields_set else None
+        if "cache_price_per_1k" in data and data["cache_price_per_1k"] is None:
+            data["cache_price_per_1k"] = data.get("input_price_per_1k", catalog.input_price_per_1k)
         for field, value in data.items():
             setattr(catalog, field, value)
-        if data:
-            ModelCatalogService._sync_provider_prices_from_catalog(db, catalog)
+        changed_price_fields = set(data) & {"input_price_per_1k", "output_price_per_1k", "cache_price_per_1k"}
+        if changed_price_fields:
+            ModelCatalogService._sync_provider_prices_from_catalog(db, catalog, price_fields=changed_price_fields)
         if provider_bindings is not None:
             ModelCatalogService._apply_provider_bindings(db, catalog, provider_bindings)
         db.commit()
@@ -158,6 +166,7 @@ class ModelCatalogService:
                     enabled=True,
                     input_price_per_1k=ModelCatalogService._pick_base_price(items, field_name="input_price_per_1k"),
                     output_price_per_1k=ModelCatalogService._pick_base_price(items, field_name="output_price_per_1k"),
+                    cache_price_per_1k=ModelCatalogService._pick_base_price(items, field_name="cache_price_per_1k"),
                 )
                 db.add(catalog)
                 db.flush()
@@ -170,6 +179,8 @@ class ModelCatalogService:
                     direct_input=item.input_price_per_1k,
                     base_output=catalog.output_price_per_1k,
                     direct_output=item.output_price_per_1k,
+                    base_cache=catalog.cache_price_per_1k,
+                    direct_cache=item.cache_price_per_1k,
                     fallback=item.price_multiplier or 1.0,
                 )
                 if abs((item.price_multiplier or 1.0) - derived_multiplier) > 1e-9:
@@ -215,6 +226,11 @@ class ModelCatalogService:
                 for binding in allowed_bindings
                 if binding["effective_output_price_per_1k"] is not None
             ]
+            filtered_cache_prices = [
+                binding["effective_cache_price_per_1k"]
+                for binding in allowed_bindings
+                if binding["effective_cache_price_per_1k"] is not None
+            ]
             if not filtered_names:
                 continue
             payloads.append(
@@ -225,6 +241,15 @@ class ModelCatalogService:
                     "remark": catalog.remark,
                     "input_price_per_1k": min(filtered_input_prices) if filtered_input_prices else catalog.input_price_per_1k,
                     "output_price_per_1k": min(filtered_output_prices) if filtered_output_prices else catalog.output_price_per_1k,
+                    "cache_price_per_1k": (
+                        min(filtered_cache_prices)
+                        if filtered_cache_prices
+                        else (
+                            catalog.cache_price_per_1k
+                            if catalog.cache_price_per_1k is not None
+                            else catalog.input_price_per_1k
+                        )
+                    ),
                     "available_provider_names": filtered_names,
                     "enabled_provider_count": len(filtered_names),
                 }
@@ -300,6 +325,15 @@ class ModelCatalogService:
                 direct_price_per_1k=provider_model.output_price_per_1k if provider_model else None,
                 price_multiplier=provider_model.price_multiplier if provider_model else 1.0,
             )
+            effective_cache = ModelCatalogService._effective_price_per_1k(
+                base_price_per_1k=(
+                    catalog.cache_price_per_1k
+                    if catalog.cache_price_per_1k is not None
+                    else catalog.input_price_per_1k
+                ),
+                direct_price_per_1k=provider_model.cache_price_per_1k if provider_model else None,
+                price_multiplier=provider_model.price_multiplier if provider_model else 1.0,
+            )
             bindings.append(
                 {
                     "provider_id": provider.id,
@@ -317,8 +351,10 @@ class ModelCatalogService:
                     "model_circuit_state": provider_model.circuit_state if provider_model else None,
                     "effective_input_price_per_1k": effective_input,
                     "effective_output_price_per_1k": effective_output,
+                    "effective_cache_price_per_1k": effective_cache,
                     "direct_input_price_per_1k": provider_model.input_price_per_1k if provider_model else None,
                     "direct_output_price_per_1k": provider_model.output_price_per_1k if provider_model else None,
+                    "direct_cache_price_per_1k": provider_model.cache_price_per_1k if provider_model else None,
                 }
             )
 
@@ -326,6 +362,7 @@ class ModelCatalogService:
         enabled_bindings = [item for item in active_bindings if ModelCatalogService._is_binding_routable(item)]
         input_prices = [item["effective_input_price_per_1k"] for item in enabled_bindings if item["effective_input_price_per_1k"] is not None]
         output_prices = [item["effective_output_price_per_1k"] for item in enabled_bindings if item["effective_output_price_per_1k"] is not None]
+        cache_prices = [item["effective_cache_price_per_1k"] for item in enabled_bindings if item["effective_cache_price_per_1k"] is not None]
         bound_multipliers = [item["price_multiplier"] for item in active_bindings]
         routable_multipliers = [item["price_multiplier"] for item in enabled_bindings]
         avg_bound_price_multiplier = ModelCatalogService._average_multiplier(bound_multipliers)
@@ -337,12 +374,22 @@ class ModelCatalogService:
             "enabled": catalog.enabled,
             "input_price_per_1k": catalog.input_price_per_1k,
             "output_price_per_1k": catalog.output_price_per_1k,
+            "cache_price_per_1k": catalog.cache_price_per_1k,
             "speed_label": catalog.speed_label,
             "remark": catalog.remark,
             "provider_count": len(active_bindings),
             "enabled_provider_count": len(enabled_bindings),
             "lowest_input_price_per_1k": min(input_prices) if input_prices else catalog.input_price_per_1k,
             "lowest_output_price_per_1k": min(output_prices) if output_prices else catalog.output_price_per_1k,
+            "lowest_cache_price_per_1k": (
+                min(cache_prices)
+                if cache_prices
+                else (
+                    catalog.cache_price_per_1k
+                    if catalog.cache_price_per_1k is not None
+                    else catalog.input_price_per_1k
+                )
+            ),
             "avg_price_multiplier": avg_bound_price_multiplier,
             "avg_bound_price_multiplier": avg_bound_price_multiplier,
             "avg_routable_price_multiplier": avg_routable_price_multiplier,
@@ -393,6 +440,10 @@ class ModelCatalogService:
                 provider_model.input_price_per_1k = catalog.input_price_per_1k * binding.price_multiplier
             if catalog.output_price_per_1k is not None:
                 provider_model.output_price_per_1k = catalog.output_price_per_1k * binding.price_multiplier
+            if catalog.cache_price_per_1k is not None:
+                provider_model.cache_price_per_1k = catalog.cache_price_per_1k * binding.price_multiplier
+            elif catalog.input_price_per_1k is not None:
+                provider_model.cache_price_per_1k = catalog.input_price_per_1k * binding.price_multiplier
             ProviderService.refresh_provider_state(provider)
 
         for provider in providers:
@@ -405,7 +456,8 @@ class ModelCatalogService:
             ProviderService.refresh_provider_state(provider)
 
     @staticmethod
-    def _sync_provider_prices_from_catalog(db: Session, catalog: ModelCatalog) -> None:
+    def _sync_provider_prices_from_catalog(db: Session, catalog: ModelCatalog, *, price_fields: set[str] | None = None) -> None:
+        fields = price_fields or {"input_price_per_1k", "output_price_per_1k", "cache_price_per_1k"}
         provider_models = list(
             db.scalars(
                 select(ProviderModel)
@@ -413,14 +465,24 @@ class ModelCatalogService:
             )
         )
         for provider_model in provider_models:
-            if catalog.input_price_per_1k is not None:
-                provider_model.input_price_per_1k = catalog.input_price_per_1k * provider_model.price_multiplier
-            else:
-                provider_model.input_price_per_1k = None
-            if catalog.output_price_per_1k is not None:
-                provider_model.output_price_per_1k = catalog.output_price_per_1k * provider_model.price_multiplier
-            else:
-                provider_model.output_price_per_1k = None
+            if "input_price_per_1k" in fields:
+                if catalog.input_price_per_1k is not None:
+                    provider_model.input_price_per_1k = catalog.input_price_per_1k * provider_model.price_multiplier
+                else:
+                    provider_model.input_price_per_1k = None
+            if "output_price_per_1k" in fields:
+                if catalog.output_price_per_1k is not None:
+                    provider_model.output_price_per_1k = catalog.output_price_per_1k * provider_model.price_multiplier
+                else:
+                    provider_model.output_price_per_1k = None
+            if "cache_price_per_1k" in fields:
+                source_cache_price = catalog.cache_price_per_1k
+                if source_cache_price is None:
+                    source_cache_price = catalog.input_price_per_1k
+                if source_cache_price is not None:
+                    provider_model.cache_price_per_1k = source_cache_price * provider_model.price_multiplier
+                else:
+                    provider_model.cache_price_per_1k = None
 
     @staticmethod
     def _pick_base_price(provider_models: list[ProviderModel], *, field_name: str) -> float | None:
@@ -445,12 +507,16 @@ class ModelCatalogService:
         direct_input: float | None,
         base_output: float | None,
         direct_output: float | None,
+        base_cache: float | None,
+        direct_cache: float | None,
         fallback: float,
     ) -> float:
         if base_input and direct_input is not None:
             return max(direct_input / base_input, 0.000001)
         if base_output and direct_output is not None:
             return max(direct_output / base_output, 0.000001)
+        if base_cache and direct_cache is not None:
+            return max(direct_cache / base_cache, 0.000001)
         return max(fallback or 1.0, 0.000001)
 
     @staticmethod
