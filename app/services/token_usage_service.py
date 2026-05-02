@@ -189,6 +189,7 @@ class TokenUsageService:
                     select(RequestLog)
                     .where(RequestLog.request_path.is_not(None))
                     .where(RequestLog.request_path != "/v1/models")
+                    .where(LogService._non_health_check_expr())
                     .where(
                         or_(
                             RequestLog.prompt_tokens.is_(None),

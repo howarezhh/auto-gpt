@@ -189,6 +189,11 @@ class LogService:
             ),
             trace_json=dumps_json(trace) if trace is not None else None,
         )
+        if log_type in LogService.HEALTH_CHECK_LOG_TYPES:
+            log.billing_status = "skipped"
+            log.billing_finalized_at = datetime.utcnow()
+            log.token_finalize_error = None
+            log.billing_error = None
         LogService.refresh_derived_fields(log, response_payload=token_response_payload, trace=trace)
         db.add(log)
         db.flush()

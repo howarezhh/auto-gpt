@@ -15,6 +15,7 @@ from app.models.provider import Provider
 from app.models.request_log import RequestLog
 from app.scheduler import scheduler
 from app.services.concurrency_service import ConcurrencyService
+from app.services.log_service import LogService
 from app.services.provider_capacity_service import ProviderCapacityService, ProviderCapacityUnavailableError
 from app.services.runtime_state_service import RuntimeStateService
 from app.utils.json_utils import dumps_json
@@ -350,6 +351,7 @@ class SystemMetricsService:
                 select(func.count()).select_from(RequestLog).where(
                     RequestLog.request_path.is_not(None),
                     RequestLog.request_path != "/v1/models",
+                    LogService._non_health_check_expr(),
                     RequestLog.billing_finalized_at.is_(None),
                 )
             ) or 0
@@ -357,6 +359,7 @@ class SystemMetricsService:
         billing_failed = int(
             db.scalar(
                 select(func.count()).select_from(RequestLog).where(
+                    LogService._non_health_check_expr(),
                     RequestLog.billing_error.is_not(None),
                     RequestLog.billing_finalized_at.is_(None),
                 )
@@ -365,6 +368,7 @@ class SystemMetricsService:
         token_failed = int(
             db.scalar(
                 select(func.count()).select_from(RequestLog).where(
+                    LogService._non_health_check_expr(),
                     RequestLog.token_finalize_error.is_not(None),
                     RequestLog.billing_finalized_at.is_(None),
                 )

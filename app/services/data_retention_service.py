@@ -10,18 +10,35 @@ from app.models.request_log import RequestLog
 
 
 class DataRetentionService:
+    HEALTH_CHECK_LOG_RETENTION_HOURS = 6
+    HEALTH_CHECK_LOG_TYPES = ("health_check", "health_check_provider", "health_check_model")
+
     @staticmethod
     def cleanup(db: Session, *, request_log_retention_days: int, admin_audit_log_retention_days: int) -> dict[str, int]:
         result = {
             "request_logs_deleted": 0,
+            "health_check_logs_deleted": 0,
             "admin_audit_logs_deleted": 0,
         }
         changed = False
 
+        health_check_cutoff = datetime.utcnow() - timedelta(hours=DataRetentionService.HEALTH_CHECK_LOG_RETENTION_HOURS)
+        health_check_delete = db.execute(
+            delete(RequestLog).where(
+                RequestLog.created_at < health_check_cutoff,
+                RequestLog.log_type.in_(DataRetentionService.HEALTH_CHECK_LOG_TYPES),
+            )
+        )
+        result["health_check_logs_deleted"] = int(health_check_delete.rowcount or 0)
+        changed = changed or result["health_check_logs_deleted"] > 0
+
         if request_log_retention_days > 0:
             request_cutoff = datetime.utcnow() - timedelta(days=request_log_retention_days)
             request_delete = db.execute(
-                delete(RequestLog).where(RequestLog.created_at < request_cutoff)
+                delete(RequestLog).where(
+                    RequestLog.created_at < request_cutoff,
+                    RequestLog.log_type.not_in(DataRetentionService.HEALTH_CHECK_LOG_TYPES),
+                )
             )
             result["request_logs_deleted"] = int(request_delete.rowcount or 0)
             changed = changed or result["request_logs_deleted"] > 0
