@@ -96,9 +96,20 @@ def _get_setting_with_scoped_session():
         db.close()
 
 
-async def _read_limited_v1_json_payload(request: Request) -> dict:
+def _effective_request_body_limit(setting, endpoint_path: str) -> int:
+    global_limit = int(getattr(setting, "max_v1_request_body_bytes", 0) or 0)
+    endpoint_limit = 0
+    if endpoint_path == "/chat/completions":
+        endpoint_limit = int(getattr(setting, "max_v1_chat_request_body_bytes", 0) or 0)
+    elif endpoint_path == "/responses":
+        endpoint_limit = int(getattr(setting, "max_v1_responses_request_body_bytes", 0) or 0)
+    positive_limits = [item for item in (global_limit, endpoint_limit) if item > 0]
+    return min(positive_limits) if positive_limits else 0
+
+
+async def _read_limited_v1_json_payload(request: Request, *, endpoint_path: str) -> dict:
     setting = await run_in_threadpool(_get_setting_with_scoped_session)
-    limit = int(getattr(setting, "max_v1_request_body_bytes", 0) or 0)
+    limit = _effective_request_body_limit(setting, endpoint_path)
     content_length = request.headers.get("content-length")
     try:
         content_length_bytes = int(content_length) if content_length is not None else None
@@ -112,6 +123,7 @@ async def _read_limited_v1_json_payload(request: Request) -> dict:
                 "code": "request_body_too_large",
                 "request_body_bytes": content_length_bytes,
                 "max_v1_request_body_bytes": limit,
+                "endpoint_path": f"/v1{endpoint_path}",
             },
         )
 
@@ -126,6 +138,7 @@ async def _read_limited_v1_json_payload(request: Request) -> dict:
                     "message": f"请求体大小超过应用层上限 {limit} 字节",
                     "code": "request_body_too_large",
                     "max_v1_request_body_bytes": limit,
+                    "endpoint_path": f"/v1{endpoint_path}",
                 },
             )
         body.extend(chunk)
@@ -197,7 +210,7 @@ async def chat_completions(
     api_client_auth: ApiClientAuthContext = Depends(require_api_client_auth),
 ):
     source_ip = ApiKeyService.extract_source_ip(request)
-    payload = await _read_limited_v1_json_payload(request)
+    payload = await _read_limited_v1_json_payload(request, endpoint_path="/chat/completions")
     if payload.get("stream") is True:
         lease = await _acquire_request_concurrency(request=request, api_client_auth=api_client_auth, is_stream=True)
         try:
@@ -257,7 +270,7 @@ async def responses(
     api_client_auth: ApiClientAuthContext = Depends(require_api_client_auth),
 ):
     source_ip = ApiKeyService.extract_source_ip(request)
-    payload = await _read_limited_v1_json_payload(request)
+    payload = await _read_limited_v1_json_payload(request, endpoint_path="/responses")
     if payload.get("stream") is True:
         lease = await _acquire_request_concurrency(request=request, api_client_auth=api_client_auth, is_stream=True)
         try:

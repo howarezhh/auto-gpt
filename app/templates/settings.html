@@ -46,12 +46,28 @@
             <input class="field-input" id="setting-max-v1-request-body-bytes" type="number" min="0" placeholder="0 表示不限制">
         </label>
         <label>
+            <span>Chat 请求体最大字节数</span>
+            <input class="field-input" id="setting-max-v1-chat-request-body-bytes" type="number" min="0" placeholder="0 表示沿用 /v1 上限">
+        </label>
+        <label>
+            <span>Responses 请求体最大字节数</span>
+            <input class="field-input" id="setting-max-v1-responses-request-body-bytes" type="number" min="0" placeholder="0 表示沿用 /v1 上限">
+        </label>
+        <label>
             <span>长输出非流式阈值 token</span>
             <input class="field-input" id="setting-long-output-stream-threshold-tokens" type="number" min="0" placeholder="0 表示不强制">
         </label>
         <label>
+            <span>非流式响应最大字节数</span>
+            <input class="field-input" id="setting-max-non-stream-response-body-bytes" type="number" min="0" placeholder="0 表示不限制">
+        </label>
+        <label>
             <span>流式统计缓存字节数</span>
             <input class="field-input" id="setting-stream-token-capture-max-bytes" type="number" min="0" placeholder="0 表示不缓存输出文本">
+        </label>
+        <label>
+            <span>日志 metadata 最大字节数</span>
+            <input class="field-input" id="setting-max-logged-metadata-bytes" type="number" min="0" placeholder="0 表示只保留摘要">
         </label>
         <label>
             <span>熔断阈值</span>

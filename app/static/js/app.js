@@ -4430,8 +4430,12 @@
         document.getElementById("setting-global-max-retries").value = settings.global_max_retries;
         document.getElementById("setting-global-max-request-tokens").value = settings.global_max_request_tokens ?? 0;
         document.getElementById("setting-max-v1-request-body-bytes").value = settings.max_v1_request_body_bytes ?? 20971520;
+        document.getElementById("setting-max-v1-chat-request-body-bytes").value = settings.max_v1_chat_request_body_bytes ?? 0;
+        document.getElementById("setting-max-v1-responses-request-body-bytes").value = settings.max_v1_responses_request_body_bytes ?? 0;
         document.getElementById("setting-long-output-stream-threshold-tokens").value = settings.long_output_stream_threshold_tokens ?? 8192;
+        document.getElementById("setting-max-non-stream-response-body-bytes").value = settings.max_non_stream_response_body_bytes ?? 20971520;
         document.getElementById("setting-stream-token-capture-max-bytes").value = settings.stream_token_capture_max_bytes ?? 1048576;
+        document.getElementById("setting-max-logged-metadata-bytes").value = settings.max_logged_metadata_bytes ?? 1024;
         document.getElementById("setting-circuit-breaker-threshold").value = settings.circuit_breaker_threshold;
         document.getElementById("setting-health-check-interval-sec").value = settings.health_check_interval_sec;
         document.getElementById("setting-recovery-probe-interval-sec").value = settings.recovery_probe_interval_sec;
@@ -4479,8 +4483,12 @@
                 global_max_retries: Number(document.getElementById("setting-global-max-retries").value),
                 global_max_request_tokens: Number(document.getElementById("setting-global-max-request-tokens").value),
                 max_v1_request_body_bytes: Number(document.getElementById("setting-max-v1-request-body-bytes").value),
+                max_v1_chat_request_body_bytes: Number(document.getElementById("setting-max-v1-chat-request-body-bytes").value),
+                max_v1_responses_request_body_bytes: Number(document.getElementById("setting-max-v1-responses-request-body-bytes").value),
                 long_output_stream_threshold_tokens: Number(document.getElementById("setting-long-output-stream-threshold-tokens").value),
+                max_non_stream_response_body_bytes: Number(document.getElementById("setting-max-non-stream-response-body-bytes").value),
                 stream_token_capture_max_bytes: Number(document.getElementById("setting-stream-token-capture-max-bytes").value),
+                max_logged_metadata_bytes: Number(document.getElementById("setting-max-logged-metadata-bytes").value),
                 circuit_breaker_threshold: Number(document.getElementById("setting-circuit-breaker-threshold").value),
                 auto_health_check: document.getElementById("setting-auto-health-check").checked,
                 health_check_interval_sec: Number(document.getElementById("setting-health-check-interval-sec").value),

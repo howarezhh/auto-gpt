@@ -51,6 +51,12 @@ class RequestsUpstreamHTTPError(Exception):
 
 
 @dataclass(slots=True)
+class NonStreamResponseTooLarge(Exception):
+    status_code: int
+    detail: dict[str, Any]
+
+
+@dataclass(slots=True)
 class EndpointConversionSafety:
     safe: bool
     code: str | None = None
@@ -647,6 +653,7 @@ class ProxyService:
                             endpoint_path,
                             payload,
                             started=started,
+                            setting=setting,
                         )
                     latency_ms = int((time.perf_counter() - started) * 1000)
                     usage_info = ProxyService._extract_usage_info(response) if setting.enable_token_logging else {
@@ -775,6 +782,23 @@ class ProxyService:
                     await ProxyService._mark_failure_async(provider, provider_model, latency_ms, error_body, db=db)
                     if exc.status_code not in {401, 403, 404, 429} and exc.status_code < 500:
                         break
+                except NonStreamResponseTooLarge as exc:
+                    latency_ms = int((time.perf_counter() - started) * 1000)
+                    trace.append(
+                        ProxyService._build_trace_item(
+                            provider,
+                            provider_model,
+                            "non_stream_response_too_large",
+                            latency_ms,
+                            status_code=exc.status_code,
+                            error=exc.detail.get("message"),
+                        )
+                    )
+                    last_upstream_error = {
+                        "status_code": exc.status_code,
+                        "detail": exc.detail,
+                    }
+                    break
                 except Exception as exc:
                     latency_ms = int((time.perf_counter() - started) * 1000)
                     trace.append(
@@ -1374,7 +1398,8 @@ class ProxyService:
     async def _forward_json(provider: Provider, endpoint_path: str, payload: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
         headers = {"Authorization": f"Bearer {provider.api_key}"}
         prepared = ProxyService._prepare_upstream_request(provider, endpoint_path=endpoint_path, payload=payload)
-        return await ProxyService._send_prepared_json(provider, prepared=prepared, headers=headers, requested_payload=payload)
+        setting = await ProxyService._get_setting_async()
+        return await ProxyService._send_prepared_json(provider, prepared=prepared, headers=headers, requested_payload=payload, setting=setting)
 
     @staticmethod
     async def _forward_json_with_endpoint_fallback(
@@ -1384,6 +1409,7 @@ class ProxyService:
         payload: dict[str, Any],
         *,
         started: float,
+        setting: Any,
     ) -> tuple[dict[str, Any], str | None, list[dict]]:
         headers = {"Authorization": f"Bearer {provider.api_key}"}
         prepared = ProxyService._prepare_upstream_request(provider, endpoint_path=endpoint_path, payload=payload)
@@ -1393,6 +1419,7 @@ class ProxyService:
                 prepared=prepared,
                 headers=headers,
                 requested_payload=payload,
+                setting=setting,
             )
             return response_json, upstream_request_id, []
         except httpx.HTTPStatusError as exc:
@@ -1429,6 +1456,7 @@ class ProxyService:
                 prepared=fallback_prepared,
                 headers=headers,
                 requested_payload=payload,
+                setting=setting,
             )
             fallback_trace.append(
                 ProxyService._build_trace_item(
@@ -1477,6 +1505,7 @@ class ProxyService:
                 prepared=fallback_prepared,
                 headers=headers,
                 requested_payload=payload,
+                setting=setting,
             )
             fallback_trace.append(
                 ProxyService._build_trace_item(
@@ -1500,15 +1529,18 @@ class ProxyService:
         prepared: PreparedUpstreamRequest,
         headers: dict[str, str],
         requested_payload: dict[str, Any],
+        setting: Any,
     ) -> tuple[dict[str, Any], str | None]:
         if ProxyService._payload_has_image(prepared.request_payload):
-            return await ProxyService._forward_json_image_request(provider, prepared=prepared, headers=headers)
+            return await ProxyService._forward_json_image_request(provider, prepared=prepared, headers=headers, setting=setting)
         client = ProxyService._select_upstream_client(payload=prepared.request_payload)
-        response = await client.post(
+        response = await ProxyService._post_json_with_response_size_limit(
+            client,
             f"{provider.base_url}{prepared.request_path}",
             headers=headers,
             json=prepared.request_payload,
             timeout=ProxyService._build_httpx_timeout(provider, payload=prepared.request_payload, is_stream=False),
+            max_response_bytes=int(getattr(setting, "max_non_stream_response_body_bytes", 20971520) or 0),
         )
         response.raise_for_status()
         response_json = response.json()
@@ -1532,6 +1564,7 @@ class ProxyService:
         *,
         prepared: PreparedUpstreamRequest,
         headers: dict[str, str],
+        setting: Any,
     ) -> tuple[dict[str, Any], str | None]:
         timeout = ProxyService._build_httpx_timeout(provider, payload=prepared.request_payload, is_stream=False)
         response_json, upstream_request_id = await asyncio.to_thread(
@@ -1541,6 +1574,7 @@ class ProxyService:
             headers,
             prepared.request_payload,
             timeout,
+            int(getattr(setting, "max_non_stream_response_body_bytes", 20971520) or 0),
         )
         if prepared.adapt_chat_response_to_responses:
             ProxyService._assert_chat_response_adapter_safe(response_json)
@@ -1563,6 +1597,7 @@ class ProxyService:
         headers: dict[str, str],
         request_payload: dict[str, Any],
         timeout: httpx.Timeout,
+        max_response_bytes: int,
     ) -> tuple[dict[str, Any], str | None]:
         response = requests.post(
             f"{base_url}{request_path}",
@@ -1572,7 +1607,13 @@ class ProxyService:
                 timeout.connect if timeout.connect is not None else None,
                 timeout.read if timeout.read is not None else None,
             ),
+            stream=True,
         )
+        content = ProxyService._read_limited_requests_response(
+            response,
+            max_response_bytes=max_response_bytes,
+        )
+        response._content = content
         try:
             response.raise_for_status()
         except requests.HTTPError as exc:
@@ -1584,6 +1625,61 @@ class ProxyService:
             or response.headers.get("openai-request-id")
         )
         return response.json(), upstream_request_id
+
+    @staticmethod
+    async def _post_json_with_response_size_limit(
+        client: httpx.AsyncClient,
+        url: str,
+        *,
+        headers: dict[str, str],
+        json: dict[str, Any],
+        timeout: httpx.Timeout,
+        max_response_bytes: int,
+    ) -> httpx.Response:
+        async with client.stream("POST", url, headers=headers, json=json, timeout=timeout) as response:
+            content = await ProxyService._read_limited_httpx_response(
+                response,
+                max_response_bytes=max_response_bytes,
+            )
+            response._content = content
+            return response
+
+    @staticmethod
+    async def _read_limited_httpx_response(response: httpx.Response, *, max_response_bytes: int) -> bytes:
+        body = bytearray()
+        async for chunk in response.aiter_bytes():
+            if not chunk:
+                continue
+            if max_response_bytes > 0 and len(body) + len(chunk) > max_response_bytes:
+                raise NonStreamResponseTooLarge(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail={
+                        "message": f"非流式上游响应超过应用层上限 {max_response_bytes} 字节，请使用 stream=true",
+                        "code": "non_stream_response_too_large",
+                        "max_non_stream_response_body_bytes": max_response_bytes,
+                    },
+                )
+            body.extend(chunk)
+        return bytes(body)
+
+    @staticmethod
+    def _read_limited_requests_response(response: requests.Response, *, max_response_bytes: int) -> bytes:
+        body = bytearray()
+        for chunk in response.iter_content(chunk_size=65536):
+            if not chunk:
+                continue
+            if max_response_bytes > 0 and len(body) + len(chunk) > max_response_bytes:
+                response.close()
+                raise NonStreamResponseTooLarge(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail={
+                        "message": f"非流式上游响应超过应用层上限 {max_response_bytes} 字节，请使用 stream=true",
+                        "code": "non_stream_response_too_large",
+                        "max_non_stream_response_body_bytes": max_response_bytes,
+                    },
+                )
+            body.extend(chunk)
+        return bytes(body)
 
     @staticmethod
     @asynccontextmanager
@@ -3254,14 +3350,14 @@ class ProxyService:
         if not should_log_full_payload:
             if not preserve_request_content_when_disabled:
                 return None
-            payload_to_log = ProxyService._extract_request_logging_payload(payload)
+            payload_to_log = ProxyService._extract_request_logging_payload(payload, setting=setting)
             if payload_to_log is None:
                 return None
         sanitized = ProxyService._sanitize_for_logging(payload_to_log, mask_sensitive=getattr(setting, "mask_sensitive_fields", True))
         return ProxyService._truncate_serialized_json(sanitized, getattr(setting, "max_logged_body_bytes", 16384))
 
     @staticmethod
-    def _extract_request_logging_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
+    def _extract_request_logging_payload(payload: dict[str, Any], *, setting: Any) -> dict[str, Any] | None:
         if not isinstance(payload, dict):
             return None
         compact_payload: dict[str, Any] = {}
@@ -3269,7 +3365,6 @@ class ProxyService:
             "model",
             "stream",
             "user",
-            "metadata",
             "max_tokens",
             "max_completion_tokens",
             "max_output_tokens",
@@ -3278,7 +3373,34 @@ class ProxyService:
         ):
             if key in payload:
                 compact_payload[key] = payload[key]
+        if "metadata" in payload:
+            compact_payload["metadata"] = ProxyService._compact_metadata_for_logging(
+                payload.get("metadata"),
+                max_bytes=int(getattr(setting, "max_logged_metadata_bytes", 1024) or 0),
+            )
         return compact_payload or None
+
+    @staticmethod
+    def _compact_metadata_for_logging(value: Any, *, max_bytes: int) -> Any:
+        if value is None:
+            return None
+        serialized = dumps_json(value)
+        encoded = serialized.encode("utf-8", errors="ignore")
+        if max_bytes > 0 and len(encoded) <= max_bytes:
+            return value
+
+        summary: dict[str, Any] = {
+            "_summary": "metadata omitted from compact request log",
+            "value_type": type(value).__name__,
+            "original_bytes": len(encoded),
+        }
+        if isinstance(value, dict):
+            keys = [str(key) for key in value.keys()]
+            summary["key_count"] = len(keys)
+            summary["keys"] = keys[:50]
+        elif isinstance(value, list):
+            summary["item_count"] = len(value)
+        return summary
 
     @staticmethod
     def _sanitize_for_logging(value: Any, *, mask_sensitive: bool) -> Any:

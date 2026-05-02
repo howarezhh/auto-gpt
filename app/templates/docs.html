@@ -64,7 +64,7 @@
                 <div class="docs-flow-index">4</div>
                 <div>
                     <h4>按客户端类型填配置</h4>
-                    <p>如果用 Chatbox、Cherry Studio、Codex 或自建服务，统一按 OpenAI 兼容方式配置 Base URL、API Key 和模型名。</p>
+                    <p>支持 OpenAI 兼容 Base URL 且仅使用本平台 <code>/v1/*</code> 兼容子集的客户端，可以按 OpenAI 兼容方式配置 Base URL、API Key 和模型名。</p>
                 </div>
             </article>
         </div>
@@ -277,9 +277,10 @@ API Key: YOUR_PLATFORM_API_KEY
 
         <article class="docs-module-card">
             <h4>Codex / CLI / 自建服务</h4>
-            <p>如果是本地开发工具链、服务端代理或脚本任务，优先采用环境变量方式接入。</p>
+            <p>本地开发工具链、服务端代理或脚本任务仅在支持 OpenAI 兼容 Base URL，且只使用本平台已开放的 <code>/v1/*</code> 子集时适配；工具调用、状态上下文与 reasoning 等能力还需要目标模型和命中的中转站同时原生支持。</p>
             <div class="doc-code-block compact"><pre><code>OPENAI_API_KEY=YOUR_PLATFORM_API_KEY
 OPENAI_BASE_URL={{ external_v1_base_url }}</code></pre></div>
+            <p>Claude Code 官方主要面向 Anthropic Messages API，本平台当前不提供 Anthropic Messages API 兼容入口，因此不能作为 Claude Code 的完整后端；若第三方插件可配置 OpenAI 兼容 provider，只能按上述兼容子集尝试。</p>
             <div class="hero-actions">
                 <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="OPENAI_API_KEY=YOUR_PLATFORM_API_KEY&#10;OPENAI_BASE_URL={{ external_v1_base_url }}">复制 CLI 配置</button>
             </div>

@@ -110,8 +110,12 @@ def _migrate_app_setting_concurrency_columns(db) -> None:
     additions = {
         "global_max_request_tokens": "ALTER TABLE app_settings ADD COLUMN global_max_request_tokens INTEGER DEFAULT 0",
         "max_v1_request_body_bytes": "ALTER TABLE app_settings ADD COLUMN max_v1_request_body_bytes INTEGER DEFAULT 20971520",
+        "max_v1_chat_request_body_bytes": "ALTER TABLE app_settings ADD COLUMN max_v1_chat_request_body_bytes INTEGER DEFAULT 0",
+        "max_v1_responses_request_body_bytes": "ALTER TABLE app_settings ADD COLUMN max_v1_responses_request_body_bytes INTEGER DEFAULT 0",
         "long_output_stream_threshold_tokens": "ALTER TABLE app_settings ADD COLUMN long_output_stream_threshold_tokens INTEGER DEFAULT 8192",
+        "max_non_stream_response_body_bytes": "ALTER TABLE app_settings ADD COLUMN max_non_stream_response_body_bytes INTEGER DEFAULT 20971520",
         "stream_token_capture_max_bytes": "ALTER TABLE app_settings ADD COLUMN stream_token_capture_max_bytes INTEGER DEFAULT 1048576",
+        "max_logged_metadata_bytes": "ALTER TABLE app_settings ADD COLUMN max_logged_metadata_bytes INTEGER DEFAULT 1024",
         "global_max_active_requests": f"ALTER TABLE app_settings ADD COLUMN global_max_active_requests INTEGER DEFAULT {runtime_settings.global_max_active_requests}",
         "global_max_active_streams": f"ALTER TABLE app_settings ADD COLUMN global_max_active_streams INTEGER DEFAULT {runtime_settings.global_max_active_streams}",
         "api_key_max_active_requests": f"ALTER TABLE app_settings ADD COLUMN api_key_max_active_requests INTEGER DEFAULT {runtime_settings.api_key_max_active_requests}",
@@ -417,8 +421,12 @@ def _migrate_request_log_columns(db) -> None:
         "max_logged_body_bytes": "ALTER TABLE app_settings ADD COLUMN max_logged_body_bytes INTEGER NOT NULL DEFAULT 16384",
         "global_max_request_tokens": "ALTER TABLE app_settings ADD COLUMN global_max_request_tokens INTEGER NOT NULL DEFAULT 0",
         "max_v1_request_body_bytes": "ALTER TABLE app_settings ADD COLUMN max_v1_request_body_bytes INTEGER NOT NULL DEFAULT 20971520",
+        "max_v1_chat_request_body_bytes": "ALTER TABLE app_settings ADD COLUMN max_v1_chat_request_body_bytes INTEGER NOT NULL DEFAULT 0",
+        "max_v1_responses_request_body_bytes": "ALTER TABLE app_settings ADD COLUMN max_v1_responses_request_body_bytes INTEGER NOT NULL DEFAULT 0",
         "long_output_stream_threshold_tokens": "ALTER TABLE app_settings ADD COLUMN long_output_stream_threshold_tokens INTEGER NOT NULL DEFAULT 8192",
+        "max_non_stream_response_body_bytes": "ALTER TABLE app_settings ADD COLUMN max_non_stream_response_body_bytes INTEGER NOT NULL DEFAULT 20971520",
         "stream_token_capture_max_bytes": "ALTER TABLE app_settings ADD COLUMN stream_token_capture_max_bytes INTEGER NOT NULL DEFAULT 1048576",
+        "max_logged_metadata_bytes": "ALTER TABLE app_settings ADD COLUMN max_logged_metadata_bytes INTEGER NOT NULL DEFAULT 1024",
         "allow_public_user_registration": "ALTER TABLE app_settings ADD COLUMN allow_public_user_registration BOOLEAN NOT NULL DEFAULT 0",
         "request_log_retention_days": "ALTER TABLE app_settings ADD COLUMN request_log_retention_days INTEGER NOT NULL DEFAULT 90",
         "admin_audit_log_retention_days": "ALTER TABLE app_settings ADD COLUMN admin_audit_log_retention_days INTEGER NOT NULL DEFAULT 180",
@@ -596,7 +604,7 @@ def _reject_oversized_v1_request_by_content_length(request: Request) -> JSONResp
     db = SessionLocal()
     try:
         app_setting = SettingService.get_or_create(db)
-        limit = int(getattr(app_setting, "max_v1_request_body_bytes", 0) or 0)
+        limit = _effective_v1_body_limit(app_setting, request.url.path)
     finally:
         db.close()
     if limit <= 0:
@@ -624,6 +632,17 @@ def _reject_oversized_v1_request_by_content_length(request: Request) -> JSONResp
         ),
         headers={"X-Trace-Id": trace_id or "", "X-Request-Id": trace_id or ""},
     )
+
+
+def _effective_v1_body_limit(app_setting: AppSetting, request_path: str) -> int:
+    global_limit = int(getattr(app_setting, "max_v1_request_body_bytes", 0) or 0)
+    endpoint_limit = 0
+    if request_path == "/v1/chat/completions":
+        endpoint_limit = int(getattr(app_setting, "max_v1_chat_request_body_bytes", 0) or 0)
+    elif request_path == "/v1/responses":
+        endpoint_limit = int(getattr(app_setting, "max_v1_responses_request_body_bytes", 0) or 0)
+    positive_limits = [item for item in (global_limit, endpoint_limit) if item > 0]
+    return min(positive_limits) if positive_limits else 0
 
 
 @app.exception_handler(ApiClientAuthError)
@@ -759,11 +778,7 @@ async def _log_api_client_auth_failure(request: Request, exc: ApiClientAuthError
                 request_body_json = ProxySafeHelpers.truncate_json(parsed_body, settings.max_logged_body_bytes)
             else:
                 request_body_json = ProxySafeHelpers.truncate_json(
-                    {
-                        key: parsed_body[key]
-                        for key in ("model", "stream", "user", "metadata")
-                        if key in parsed_body
-                    },
+                    ProxySafeHelpers.compact_request_log_payload(parsed_body, settings),
                     settings.max_logged_body_bytes,
                 )
         elif body_text and settings.enable_payload_logging:
@@ -827,6 +842,39 @@ class ProxySafeHelpers:
             return serialized
         clipped = encoded[:limit_bytes].decode("utf-8", errors="ignore")
         return f"{clipped}...[truncated]"
+
+    @staticmethod
+    def compact_request_log_payload(payload: dict, settings: AppSetting) -> dict:
+        compact = {
+            key: payload[key]
+            for key in ("model", "stream", "user", "max_tokens", "max_completion_tokens", "max_output_tokens")
+            if key in payload
+        }
+        if "metadata" in payload:
+            compact["metadata"] = ProxySafeHelpers.compact_metadata(
+                payload.get("metadata"),
+                max_bytes=int(getattr(settings, "max_logged_metadata_bytes", 1024) or 0),
+            )
+        return compact
+
+    @staticmethod
+    def compact_metadata(value, *, max_bytes: int):
+        serialized = dumps_json(value)
+        encoded = serialized.encode("utf-8", errors="ignore")
+        if max_bytes > 0 and len(encoded) <= max_bytes:
+            return value
+        summary = {
+            "_summary": "metadata omitted from compact request log",
+            "value_type": type(value).__name__,
+            "original_bytes": len(encoded),
+        }
+        if isinstance(value, dict):
+            keys = [str(key) for key in value.keys()]
+            summary["key_count"] = len(keys)
+            summary["keys"] = keys[:50]
+        elif isinstance(value, list):
+            summary["item_count"] = len(value)
+        return summary
 
     @staticmethod
     def payload_has_image(payload: dict | None) -> bool:

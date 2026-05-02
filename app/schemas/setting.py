@@ -15,8 +15,12 @@ class SettingUpdate(BaseModel):
     global_max_retries: int = Field(default=2, ge=0)
     global_max_request_tokens: int = Field(default=0, ge=0)
     max_v1_request_body_bytes: int = Field(default=20971520, ge=0)
+    max_v1_chat_request_body_bytes: int = Field(default=0, ge=0)
+    max_v1_responses_request_body_bytes: int = Field(default=0, ge=0)
     long_output_stream_threshold_tokens: int = Field(default=8192, ge=0)
+    max_non_stream_response_body_bytes: int = Field(default=20971520, ge=0)
     stream_token_capture_max_bytes: int = Field(default=1048576, ge=0)
+    max_logged_metadata_bytes: int = Field(default=1024, ge=0)
     circuit_breaker_threshold: int = Field(default=3, ge=0)
     auto_health_check: bool = True
     health_check_interval_sec: int = Field(default=60, ge=0)
