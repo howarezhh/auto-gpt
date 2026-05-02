@@ -2375,8 +2375,6 @@
         const checkAllBtn = document.getElementById("providers-check-all-btn");
         const submitBtn = document.getElementById("provider-submit-btn");
         const providerModelConfigList = document.getElementById("provider-model-config-list");
-        const providerUniformMultiplierInput = document.getElementById("provider-uniform-multiplier");
-        const providerApplyMultiplierBtn = document.getElementById("provider-apply-multiplier-btn");
         const customModelInput = document.getElementById("provider-custom-model-name");
         const addCustomModelBtn = document.getElementById("provider-add-custom-model");
         const addEmptyModelBtn = document.getElementById("provider-add-empty-model");
@@ -2467,53 +2465,22 @@
             };
         }
 
-        function formatProviderPriceInputValue(value, multiplier = 1) {
-            const normalizedMultiplier = Number.isFinite(Number(multiplier)) && Number(multiplier) > 0 ? Number(multiplier) : 1;
-            const pricePer1M = toPricePer1M(value == null ? null : Number(value) / normalizedMultiplier);
-            return pricePer1M == null ? "" : String(pricePer1M);
-        }
-
         function createProviderModelConfigRow(config = {}) {
             const item = normalizeProviderModelConfig(config);
             const rowId = `provider-model-config-${Date.now()}-${Math.random().toString(16).slice(2)}`;
             const row = document.createElement("div");
             row.className = "provider-model-config-row";
             row.dataset.modelConfigRow = "true";
+            row.dataset.priority = String(item.priority);
+            row.dataset.weight = String(item.weight);
+            row.dataset.supportsStream = item.supports_stream ? "true" : "false";
+            row.dataset.supportsVision = item.supports_vision ? "true" : "false";
+            row.dataset.enabled = item.enabled ? "true" : "false";
+            row.dataset.priceMultiplier = String(item.price_multiplier);
             row.innerHTML = `
                 <label class="provider-model-config-name" for="${rowId}-name">
                     <span class="visually-hidden">模型名称</span>
                     <input class="field-input" id="${rowId}-name" data-model-config-field="model_name" value="${escapeHtml(item.model_name)}" placeholder="模型名称，必填" required>
-                </label>
-                <label for="${rowId}-multiplier">
-                    <span class="visually-hidden">倍率</span>
-                    <input class="field-input" id="${rowId}-multiplier" data-model-config-field="price_multiplier" type="number" min="0.0001" step="0.0001" value="${escapeHtml(item.price_multiplier)}" placeholder="1">
-                </label>
-                <label for="${rowId}-input-price">
-                    <span class="visually-hidden">输入价格，每百万 token</span>
-                    <input class="field-input" id="${rowId}-input-price" data-model-config-field="input_price_per_1m" type="number" min="0" step="0.0001" value="${escapeHtml(formatProviderPriceInputValue(item.input_price_per_1k, item.price_multiplier))}" placeholder="输入价/百万">
-                </label>
-                <label for="${rowId}-output-price">
-                    <span class="visually-hidden">输出价格，每百万 token</span>
-                    <input class="field-input" id="${rowId}-output-price" data-model-config-field="output_price_per_1m" type="number" min="0" step="0.0001" value="${escapeHtml(formatProviderPriceInputValue(item.output_price_per_1k, item.price_multiplier))}" placeholder="输出价/百万">
-                </label>
-                <label for="${rowId}-cache-price">
-                    <span class="visually-hidden">缓存价格，每百万 token</span>
-                    <input class="field-input" id="${rowId}-cache-price" data-model-config-field="cache_price_per_1m" type="number" min="0" step="0.0001" value="${escapeHtml(formatProviderPriceInputValue(item.cache_price_per_1k ?? item.input_price_per_1k, item.price_multiplier))}" placeholder="默认同输入价">
-                </label>
-                <label class="settings-switch-control provider-model-mini-switch" for="${rowId}-stream" title="支持流式">
-                    <input id="${rowId}-stream" data-model-config-field="supports_stream" type="checkbox" ${item.supports_stream ? "checked" : ""}>
-                    <span class="settings-switch-slider" aria-hidden="true"></span>
-                    <span class="visually-hidden">支持流式</span>
-                </label>
-                <label class="settings-switch-control provider-model-mini-switch" for="${rowId}-vision" title="支持图像">
-                    <input id="${rowId}-vision" data-model-config-field="supports_vision" type="checkbox" ${item.supports_vision ? "checked" : ""}>
-                    <span class="settings-switch-slider" aria-hidden="true"></span>
-                    <span class="visually-hidden">支持图像</span>
-                </label>
-                <label class="settings-switch-control provider-model-mini-switch" for="${rowId}-enabled" title="启用模型">
-                    <input id="${rowId}-enabled" data-model-config-field="enabled" type="checkbox" ${item.enabled ? "checked" : ""}>
-                    <span class="settings-switch-slider" aria-hidden="true"></span>
-                    <span class="visually-hidden">启用模型</span>
                 </label>
                 <button class="table-action-btn" data-action="remove-model-config" type="button">删除</button>
             `;
@@ -2556,26 +2523,12 @@
             return true;
         }
 
-        function collectOptionalProviderPrice(row, fieldName, label, modelName) {
-            const input = row.querySelector(`[data-model-config-field="${fieldName}"]`);
-            const rawValue = String(input?.value || "").trim();
-            if (rawValue === "") return null;
-            const value = Number(rawValue);
-            if (!Number.isFinite(value) || value < 0) {
-                input?.focus();
-                showToast(`模型 ${modelName} 的${label}不能小于 0`, "error");
-                return undefined;
-            }
-            return toPricePer1K(value);
-        }
-
         function collectProviderModelConfigs() {
             const rows = getProviderModelConfigRows();
             const seen = new Set();
             const configs = [];
             for (const row of rows) {
                 const modelNameInput = row.querySelector('[data-model-config-field="model_name"]');
-                const multiplierInput = row.querySelector('[data-model-config-field="price_multiplier"]');
                 const modelName = String(modelNameInput?.value || "").trim();
                 if (!modelName) {
                     modelNameInput?.focus();
@@ -2588,30 +2541,14 @@
                     return null;
                 }
                 seen.add(modelName);
-                const multiplier = multiplierInput?.value === "" ? 1 : Number(multiplierInput?.value);
-                if (!Number.isFinite(multiplier) || multiplier <= 0) {
-                    multiplierInput?.focus();
-                    showToast(`模型 ${modelName} 的倍率必须大于 0`, "error");
-                    return null;
-                }
-                const inputPrice = collectOptionalProviderPrice(row, "input_price_per_1m", "输入价格", modelName);
-                if (inputPrice === undefined) return null;
-                const outputPrice = collectOptionalProviderPrice(row, "output_price_per_1m", "输出价格", modelName);
-                if (outputPrice === undefined) return null;
-                const cachePrice = collectOptionalProviderPrice(row, "cache_price_per_1m", "缓存价格", modelName);
-                if (cachePrice === undefined) return null;
-                const normalizedCachePrice = cachePrice ?? inputPrice;
                 configs.push({
                     model_name: modelName,
-                    priority: DEFAULT_PROVIDER_MODEL_CONFIG.priority,
-                    weight: DEFAULT_PROVIDER_MODEL_CONFIG.weight,
-                    supports_stream: row.querySelector('[data-model-config-field="supports_stream"]')?.checked ?? DEFAULT_PROVIDER_MODEL_CONFIG.supports_stream,
-                    supports_vision: row.querySelector('[data-model-config-field="supports_vision"]')?.checked ?? DEFAULT_PROVIDER_MODEL_CONFIG.supports_vision,
-                    enabled: row.querySelector('[data-model-config-field="enabled"]')?.checked ?? DEFAULT_PROVIDER_MODEL_CONFIG.enabled,
-                    price_multiplier: multiplier,
-                    input_price_per_1k: inputPrice,
-                    output_price_per_1k: outputPrice,
-                    cache_price_per_1k: normalizedCachePrice,
+                    priority: Number(row.dataset.priority || DEFAULT_PROVIDER_MODEL_CONFIG.priority),
+                    weight: Number(row.dataset.weight || DEFAULT_PROVIDER_MODEL_CONFIG.weight),
+                    supports_stream: row.dataset.supportsStream ? row.dataset.supportsStream === "true" : DEFAULT_PROVIDER_MODEL_CONFIG.supports_stream,
+                    supports_vision: row.dataset.supportsVision ? row.dataset.supportsVision === "true" : DEFAULT_PROVIDER_MODEL_CONFIG.supports_vision,
+                    enabled: row.dataset.enabled ? row.dataset.enabled === "true" : DEFAULT_PROVIDER_MODEL_CONFIG.enabled,
+                    price_multiplier: Number(row.dataset.priceMultiplier || DEFAULT_PROVIDER_MODEL_CONFIG.price_multiplier),
                 });
             }
             return configs;
@@ -2794,27 +2731,6 @@
                 const rows = getProviderModelConfigRows();
                 rows.at(-1)?.querySelector('[data-model-config-field="model_name"]')?.focus();
             }
-        });
-        providerApplyMultiplierBtn?.addEventListener("click", () => {
-            const multiplier = Number(providerUniformMultiplierInput?.value || 1);
-            if (!Number.isFinite(multiplier) || multiplier <= 0) {
-                showToast("请填写大于 0 的统一倍率", "error");
-                return;
-            }
-            const rows = getProviderModelConfigRows();
-            if (!rows.length) {
-                showToast("当前没有可设置倍率的模型", "error");
-                return;
-            }
-            rows.forEach((row) => {
-                const input = row.querySelector('[data-model-config-field="price_multiplier"]');
-                if (input) input.value = String(multiplier);
-            });
-            if (discoveredModels.length) {
-                renderDiscoveredModels(discoveredModels);
-            }
-            updateProviderFormDirtyState();
-            showToast(`已将 ${formatNumber(rows.length)} 个模型设置为 ${formatMultiplier(multiplier)} 倍率`);
         });
         discoverModelsBtn?.addEventListener("click", async () => {
             await discoverProviderModels();
@@ -3524,7 +3440,6 @@
             providerCircuitBreakerThresholdOverrideInput.value = provider?.circuit_breaker_threshold_override ?? "";
             providerRecoveryProbeIntervalOverrideInput.value = provider?.recovery_probe_interval_sec_override ?? "";
             renderProviderModelConfigRows(provider?.model_configs ?? []);
-            if (providerUniformMultiplierInput) providerUniformMultiplierInput.value = "1";
             customModelInput.value = "";
             if (presetManager) {
                 presetManager.classList.add("hidden");
@@ -3753,9 +3668,22 @@
                     </td>
                     <td>${item.provider_enabled ? "已启用" : "已停用"}</td>
                     <td><input type="checkbox" data-binding-field="enabled" ${item.enabled ? "checked" : ""}></td>
-                    <td><input class="field-input" type="number" min="0.0001" step="0.0001" data-binding-field="price_multiplier" value="${item.price_multiplier ?? 1}" title="单个渠道对当前模型的价格倍率，平均倍率会由所有已绑定渠道自动计算"></td>
-                    <td><input class="field-input" type="number" data-binding-field="priority" value="${item.priority ?? 100}"></td>
-                    <td><input class="field-input" type="number" data-binding-field="weight" value="${item.weight ?? 100}"></td>
+                    <td>
+                        <div class="model-binding-controls">
+                            <label>
+                                <span>倍率</span>
+                                <input class="field-input" type="number" min="0.0001" step="0.0001" data-binding-field="price_multiplier" value="${item.price_multiplier ?? 1}" title="单个渠道对当前模型的价格倍率，平均倍率会由所有已绑定渠道自动计算">
+                            </label>
+                            <label>
+                                <span>优先级</span>
+                                <input class="field-input" type="number" data-binding-field="priority" value="${item.priority ?? 100}">
+                            </label>
+                            <label>
+                                <span>权重</span>
+                                <input class="field-input" type="number" data-binding-field="weight" value="${item.weight ?? 100}">
+                            </label>
+                        </div>
+                    </td>
                     <td data-binding-preview>-</td>
                 </tr>
             `).join("");

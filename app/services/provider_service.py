@@ -599,9 +599,7 @@ class ProviderService:
             provider_model.supports_vision = config.supports_vision
             provider_model.price_multiplier = config.price_multiplier or 1.0
             catalog = catalogs_by_name.get(config.model_name)
-            if config.input_price_per_1k is not None:
-                provider_model.input_price_per_1k = config.input_price_per_1k * provider_model.price_multiplier
-            elif catalog is not None:
+            if catalog is not None:
                 provider_model.input_price_per_1k = (
                     catalog.input_price_per_1k * provider_model.price_multiplier
                     if catalog.input_price_per_1k is not None
@@ -610,9 +608,7 @@ class ProviderService:
             else:
                 provider_model.input_price_per_1k = None
 
-            if config.output_price_per_1k is not None:
-                provider_model.output_price_per_1k = config.output_price_per_1k * provider_model.price_multiplier
-            elif catalog is not None:
+            if catalog is not None:
                 provider_model.output_price_per_1k = (
                     catalog.output_price_per_1k * provider_model.price_multiplier
                     if catalog.output_price_per_1k is not None
@@ -621,9 +617,7 @@ class ProviderService:
             else:
                 provider_model.output_price_per_1k = None
 
-            if config.cache_price_per_1k is not None:
-                provider_model.cache_price_per_1k = config.cache_price_per_1k * provider_model.price_multiplier
-            elif catalog is not None:
+            if catalog is not None:
                 catalog_cache_price = catalog.cache_price_per_1k
                 if catalog_cache_price is None:
                     catalog_cache_price = catalog.input_price_per_1k
@@ -632,8 +626,6 @@ class ProviderService:
                     if catalog_cache_price is not None
                     else None
                 )
-            elif config.input_price_per_1k is not None:
-                provider_model.cache_price_per_1k = config.input_price_per_1k * provider_model.price_multiplier
             else:
                 provider_model.cache_price_per_1k = None
             if provider_model.health_status not in {"healthy", "degraded", "unhealthy"}:

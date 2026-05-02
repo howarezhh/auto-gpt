@@ -132,30 +132,36 @@
                 <span>备注</span>
                 <textarea class="field-input" id="model-remark" rows="3" placeholder="可填写适用场景、限制说明、推荐用途"></textarea>
             </label>
-            <label class="form-span-2">
+            <div class="form-span-2 model-binding-section">
                 <span>渠道绑定与倍率</span>
                 <div class="settings-note">
                     <strong>价格与平均倍率</strong>
                     <span>渠道实际价格 = 模型基础价格 × 该渠道倍率。平均倍率是系统按已绑定渠道自动汇总的只读指标；当上游成本、商务加价、渠道质量或绑定关系变化时，由管理员调整对应渠道倍率。</span>
                 </div>
-                <div class="table-shell">
-                    <table class="data-table">
+                <div class="table-shell model-binding-table-shell">
+                    <table class="data-table model-binding-table">
+                        <colgroup>
+                            <col class="model-binding-col-bound">
+                            <col class="model-binding-col-provider">
+                            <col class="model-binding-col-provider-enabled">
+                            <col class="model-binding-col-model-enabled">
+                            <col class="model-binding-col-route">
+                            <col class="model-binding-col-preview">
+                        </colgroup>
                         <thead>
                             <tr>
                                 <th>绑定</th>
                                 <th>渠道</th>
                                 <th>渠道启用</th>
                                 <th>模型启用</th>
-                                <th>倍率</th>
-                                <th>优先级</th>
-                                <th>权重</th>
+                                <th>路由参数</th>
                                 <th>预估价格</th>
                             </tr>
                         </thead>
                         <tbody id="model-binding-body"></tbody>
                     </table>
                 </div>
-            </label>
+            </div>
             <div class="form-actions form-span-2">
                 <button class="btn btn-ghost interactive-btn" id="model-form-cancel" type="button">取消</button>
                 <button class="btn btn-accent interactive-btn" id="model-submit-btn" type="submit">保存</button>

@@ -2607,14 +2607,7 @@ html[data-theme="dark"] .settings-switch-control input:checked + .settings-switc
 .provider-model-config-row {
     display: grid;
     grid-template-columns:
-        minmax(180px, 1.4fr)
-        minmax(86px, 0.55fr)
-        minmax(108px, 0.7fr)
-        minmax(108px, 0.7fr)
-        minmax(108px, 0.7fr)
-        56px
-        56px
-        56px
+        minmax(220px, 1fr)
         auto;
     gap: 10px;
     align-items: center;
@@ -2649,6 +2642,62 @@ html[data-theme="dark"] .settings-switch-control input:checked + .settings-switc
 
 .provider-model-config-name {
     min-width: 0;
+}
+
+.model-binding-section {
+    display: grid;
+    gap: 10px;
+}
+
+.model-binding-section > span {
+    color: var(--text);
+    font-size: 14px;
+    font-weight: 700;
+}
+
+.model-binding-table {
+    table-layout: fixed;
+}
+
+.model-binding-col-bound {
+    width: 54px;
+}
+
+.model-binding-col-provider {
+    width: 25%;
+}
+
+.model-binding-col-provider-enabled,
+.model-binding-col-model-enabled {
+    width: 92px;
+}
+
+.model-binding-col-route {
+    width: 270px;
+}
+
+.model-binding-col-preview {
+    width: 170px;
+}
+
+.model-binding-controls {
+    display: grid;
+    grid-template-columns: minmax(72px, 1fr) minmax(62px, 0.8fr) minmax(62px, 0.8fr);
+    gap: 8px;
+    align-items: end;
+}
+
+.model-binding-controls label {
+    display: grid;
+    gap: 4px;
+    margin: 0;
+}
+
+.model-binding-controls span {
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1.2;
 }
 
 .provider-model-mini-switch {
@@ -5704,21 +5753,11 @@ html[data-theme="dark"] .users-empty-state p {
     }
 
     .provider-model-config-row {
-        grid-template-columns: 1fr 1fr 1fr;
+        grid-template-columns: minmax(0, 1fr) auto;
     }
 
     .provider-model-config-name {
-        grid-column: 1 / -1;
-    }
-
-    .provider-model-config-row > label:nth-child(2) {
-        grid-column: 1 / -1;
-    }
-
-    .provider-model-config-row > label:nth-child(3),
-    .provider-model-config-row > label:nth-child(4),
-    .provider-model-config-row > label:nth-child(5) {
-        grid-column: 1 / -1;
+        grid-column: auto;
     }
 
     .provider-models-detail-card {
