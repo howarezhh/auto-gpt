@@ -28,6 +28,36 @@ Start Docker Desktop Linux Engine before running compose verification, or verify
 - Related Files: docker-compose.postgres.yml
 
 ---
+## [ERR-20260502-002] github_push_network_unreachable
+
+**Logged**: 2026-05-02T23:30:00+08:00
+**Priority**: medium
+**Status**: pending
+**Area**: infra
+
+### Summary
+`git push -u origin main` failed because the local environment could not connect to GitHub over HTTPS.
+
+### Error
+```text
+fatal: unable to access 'https://github.com/howarezhh/auto-gpt.git/': Recv failure: Connection was reset
+fatal: unable to access 'https://github.com/howarezhh/auto-gpt.git/': Failed to connect to github.com port 443 after 21089 ms: Could not connect to server
+```
+
+### Context
+- Command attempted twice: `git push -u origin main`
+- Branch: `main`
+- Remote: `https://github.com/howarezhh/auto-gpt.git`
+- Impact: local commits are ready but not synced to GitHub.
+
+### Suggested Fix
+Retry after network/proxy access to `github.com:443` is restored; do not run fetch/pull/merge unless the remote rejects with non-fast-forward and the user confirms a recovery plan.
+
+### Metadata
+- Reproducible: yes
+- Related Files: none
+
+---
 ## [ERR-20260502-001] powershell_python_heredoc_syntax
 
 **Logged**: 2026-05-02T23:24:49+08:00
