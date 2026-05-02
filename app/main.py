@@ -56,6 +56,7 @@ def init_database(*, allow_production_ddl: bool = False) -> None:
     try:
         _migrate_provider_capacity_columns(db)
         _migrate_app_setting_concurrency_columns(db)
+        _migrate_cache_price_columns(db)
         if _is_sqlite_session(db):
             _migrate_request_log_columns(db)
         else:
@@ -126,6 +127,34 @@ def _migrate_app_setting_concurrency_columns(db) -> None:
             continue
         db.execute(text(ddl))
         changed = True
+    if changed:
+        db.commit()
+
+
+def _migrate_cache_price_columns(db) -> None:
+    dialect_name = db.get_bind().dialect.name
+    float_type = "DOUBLE PRECISION" if dialect_name == "postgresql" else "FLOAT"
+    additions_by_table = {
+        "provider_models": {
+            "cache_price_per_1k": f"ALTER TABLE provider_models ADD COLUMN cache_price_per_1k {float_type}",
+        },
+        "model_catalogs": {
+            "cache_price_per_1k": f"ALTER TABLE model_catalogs ADD COLUMN cache_price_per_1k {float_type}",
+        },
+        "request_logs": {
+            "channel_price_cache_per_1k": f"ALTER TABLE request_logs ADD COLUMN channel_price_cache_per_1k {float_type}",
+        },
+    }
+    changed = False
+    for table_name, additions in additions_by_table.items():
+        existing_columns = _get_table_columns(db, table_name)
+        if not existing_columns:
+            continue
+        for column, ddl in additions.items():
+            if column in existing_columns:
+                continue
+            db.execute(text(ddl))
+            changed = True
     if changed:
         db.commit()
 
