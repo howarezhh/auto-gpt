@@ -2237,6 +2237,67 @@
         }).join("");
     }
 
+    function renderDashboardUsageRows(items, options = {}) {
+        const rows = Array.isArray(items) ? items : [];
+        const showProvider = options.showProvider === true;
+        const showModel = options.showModel === true;
+        const colspan = Number(options.colspan || 4);
+        if (!rows.length) {
+            return `<tr><td colspan="${colspan}"><div class="empty-state">${escapeHtml(options.emptyText || "暂无累计统计数据")}</div></td></tr>`;
+        }
+        return rows.map((item) => `
+            <tr>
+                ${showProvider ? `<td>${escapeHtml(item.provider_name || "-")}</td>` : ""}
+                ${showModel ? `<td>${escapeHtml(item.model_name || "-")}</td>` : ""}
+                <td>${formatNumber(item.total_requests || 0)}</td>
+                <td>${formatNumber(item.total_tokens || 0)}</td>
+                <td>${formatMoney(item.total_cost || 0)}</td>
+            </tr>
+        `).join("");
+    }
+
+    function renderDashboardUsageOverview(usageOverview = {}) {
+        const summary = usageOverview.summary || {};
+        const summaryNode = document.getElementById("dashboard-usage-summary");
+        if (summaryNode) {
+            summaryNode.innerHTML = `
+                <div><span>总请求数</span><strong>${formatNumber(summary.total_requests || 0)}</strong></div>
+                <div><span>总 Token</span><strong>${formatNumber(summary.total_tokens || 0)}</strong></div>
+                <div><span>输入 / 输出 Token</span><strong>${formatNumber(summary.prompt_tokens || 0)} / ${formatNumber(summary.completion_tokens || 0)}</strong></div>
+                <div><span>总价格成本</span><strong>${formatMoney(summary.total_cost || 0)}</strong></div>
+            `;
+        }
+        const modelBody = document.getElementById("dashboard-usage-model-body");
+        if (modelBody) {
+            modelBody.innerHTML = renderDashboardUsageRows(usageOverview.top_models, {
+                showModel: true,
+                colspan: 4,
+                emptyText: "暂无模型成本数据",
+            });
+        }
+        const providerBody = document.getElementById("dashboard-usage-provider-body");
+        if (providerBody) {
+            providerBody.innerHTML = renderDashboardUsageRows(usageOverview.top_providers, {
+                showProvider: true,
+                colspan: 4,
+                emptyText: "暂无中转站成本数据",
+            });
+        }
+        const providerModelBody = document.getElementById("dashboard-usage-provider-model-body");
+        if (providerModelBody) {
+            providerModelBody.innerHTML = renderDashboardUsageRows(usageOverview.top_provider_models, {
+                showProvider: true,
+                showModel: true,
+                colspan: 5,
+                emptyText: "暂无中转站模型成本数据",
+            });
+        }
+        const cacheNote = document.getElementById("dashboard-usage-cache-note");
+        if (cacheNote) {
+            cacheNote.textContent = `精确聚合，${formatNumber(usageOverview.cache_ttl_seconds || 30)} 秒短缓存`;
+        }
+    }
+
     async function refreshDashboard() {
         const [stats, providers, settings, metrics, timeSeries] = await Promise.all([
             api.get("/api/dashboard"),
@@ -2252,6 +2313,9 @@
         document.querySelector('[data-stat="model_count"]').textContent = stats.model_count;
         document.querySelector('[data-stat="recent_requests"]').textContent = stats.recent_requests;
         document.querySelector('[data-stat="recent_tokens"]').textContent = stats.recent_tokens;
+        document.querySelector('[data-stat="total_requests"]').textContent = formatNumber(stats.total_requests || 0);
+        document.querySelector('[data-stat="total_tokens"]').textContent = formatNumber(stats.total_tokens || 0);
+        document.querySelector('[data-stat="total_cost"]').textContent = formatMoney(stats.total_cost || 0);
         document.querySelector('[data-stat="conversation_count"]').textContent = stats.conversation_count;
         document.querySelector('[data-stat="api_key_total"]').textContent = stats.api_key_total;
         document.querySelector('[data-stat="api_key_enabled"]').textContent = stats.api_key_enabled;
@@ -2262,6 +2326,7 @@
         document.querySelector('[data-stat="api_key_total_tokens"]').textContent = stats.api_key_total_tokens;
         document.querySelector('[data-stat="recent_failure_rate"]').textContent = `${stats.recent_failure_rate}%`;
         document.querySelector('[data-stat="total_failures"]').textContent = stats.total_failures;
+        renderDashboardUsageOverview(stats.usage_overview || {});
 
         const grid = document.getElementById("dashboard-provider-grid");
         grid.innerHTML = providers.map((provider) => `
@@ -2410,13 +2475,17 @@
         const providerRemarkInput = document.getElementById("provider-remark");
         const providerEnabledInput = document.getElementById("provider-enabled");
         const discoverModelsBtn = document.getElementById("provider-discover-models-btn");
+        const loadCatalogModelsBtn = document.getElementById("provider-load-catalog-models-btn");
         const importSelectedModelsBtn = document.getElementById("provider-import-selected-models-btn");
         const discoveredModelsCheckAll = document.getElementById("provider-discovered-models-check-all");
         const discoveredModelsBody = document.getElementById("provider-discovered-models-body");
+        const catalogModelShell = document.getElementById("provider-catalog-model-shell");
+        const catalogModelMeta = document.getElementById("provider-catalog-model-meta");
+        const catalogModelsCheckAll = document.getElementById("provider-catalog-models-check-all");
+        const catalogModelsBody = document.getElementById("provider-catalog-models-body");
+        const importCatalogModelsBtn = document.getElementById("provider-import-catalog-models-btn");
         const discoverFeedback = document.getElementById("provider-discover-feedback");
         const DEFAULT_PROVIDER_MODEL_CONFIG = {
-            priority: 100,
-            weight: 100,
             supports_stream: true,
             supports_vision: false,
             enabled: true,
@@ -2426,6 +2495,7 @@
         const PROVIDER_PRESETS_STORAGE_KEY = "aotu_provider_model_presets";
         let providers = [];
         let discoveredModels = [];
+        let catalogModels = [];
         let providerFormSnapshot = "";
         let providerPresetModels = loadProviderPresetModels();
 
@@ -2448,8 +2518,6 @@
             const modelName = String(config.model_name || "").trim();
             return {
                 model_name: modelName,
-                priority: Number.isFinite(Number(config.priority)) ? Number(config.priority) : DEFAULT_PROVIDER_MODEL_CONFIG.priority,
-                weight: Number.isFinite(Number(config.weight)) ? Number(config.weight) : DEFAULT_PROVIDER_MODEL_CONFIG.weight,
                 supports_stream: config.supports_stream ?? DEFAULT_PROVIDER_MODEL_CONFIG.supports_stream,
                 supports_vision: config.supports_vision ?? DEFAULT_PROVIDER_MODEL_CONFIG.supports_vision,
                 enabled: config.enabled ?? DEFAULT_PROVIDER_MODEL_CONFIG.enabled,
@@ -2479,14 +2547,6 @@
                 <label>
                     <span class="visually-hidden">渠道倍率</span>
                     <input class="field-input" type="number" min="0.0001" step="0.0001" data-model-config-field="price_multiplier" value="${item.price_multiplier}" placeholder="倍率">
-                </label>
-                <label>
-                    <span class="visually-hidden">优先级</span>
-                    <input class="field-input" type="number" step="1" data-model-config-field="priority" value="${item.priority}" placeholder="优先级">
-                </label>
-                <label>
-                    <span class="visually-hidden">权重</span>
-                    <input class="field-input" type="number" step="1" min="0" data-model-config-field="weight" value="${item.weight}" placeholder="权重">
                 </label>
                 <button class="table-action-btn" data-action="remove-model-config" type="button">删除</button>
             `;
@@ -2525,6 +2585,9 @@
             if (discoveredModels.length) {
                 renderDiscoveredModels(discoveredModels);
             }
+            if (catalogModels.length) {
+                renderCatalogModels(catalogModels);
+            }
             updateProviderFormDirtyState();
             return true;
         }
@@ -2556,8 +2619,8 @@
                 }
                 configs.push({
                     model_name: modelName,
-                    priority: Number(row.querySelector('[data-model-config-field="priority"]')?.value || DEFAULT_PROVIDER_MODEL_CONFIG.priority),
-                    weight: Number(row.querySelector('[data-model-config-field="weight"]')?.value || DEFAULT_PROVIDER_MODEL_CONFIG.weight),
+                    priority: Number(providerPriorityInput.value || 100),
+                    weight: Number(providerWeightInput.value || 100),
                     supports_stream: row.dataset.supportsStream ? row.dataset.supportsStream === "true" : DEFAULT_PROVIDER_MODEL_CONFIG.supports_stream,
                     supports_vision: row.dataset.supportsVision ? row.dataset.supportsVision === "true" : DEFAULT_PROVIDER_MODEL_CONFIG.supports_vision,
                     enabled: row.querySelector('[data-model-config-field="enabled"]')?.checked ?? DEFAULT_PROVIDER_MODEL_CONFIG.enabled,
@@ -2620,6 +2683,7 @@
             },
             afterClose: () => {
                 renderDiscoveredModels([]);
+                renderCatalogModels([]);
                 renderDiscoverFeedback();
                 providerForm.dataset.dirty = "false";
             },
@@ -2748,6 +2812,9 @@
         discoverModelsBtn?.addEventListener("click", async () => {
             await discoverProviderModels();
         });
+        loadCatalogModelsBtn?.addEventListener("click", async () => {
+            await loadCatalogModels();
+        });
         importSelectedModelsBtn?.addEventListener("click", () => {
             const selectedModelNames = getSelectedDiscoveredModelNames();
             if (!selectedModelNames.length) {
@@ -2766,6 +2833,25 @@
         });
         discoveredModelsBody?.addEventListener("change", () => {
             syncDiscoveredCheckAllState();
+        });
+        importCatalogModelsBtn?.addEventListener("click", () => {
+            const selectedModelNames = getSelectedCatalogModelNames();
+            if (!selectedModelNames.length) {
+                showToast("请先选择至少一个模型库模型", "error");
+                return;
+            }
+            importCatalogModels(selectedModelNames);
+        });
+        catalogModelsCheckAll?.addEventListener("change", () => {
+            catalogModelsBody?.querySelectorAll("[data-catalog-model-name]").forEach((node) => {
+                if (!node.disabled) {
+                    node.checked = catalogModelsCheckAll.checked;
+                }
+            });
+            syncCatalogCheckAllState();
+        });
+        catalogModelsBody?.addEventListener("change", () => {
+            syncCatalogCheckAllState();
         });
         checkAllBtn.addEventListener("click", async () => {
             try {
@@ -2870,11 +2956,17 @@
             if (discoveredModels.length) {
                 renderDiscoveredModels(discoveredModels);
             }
+            if (catalogModels.length) {
+                renderCatalogModels(catalogModels);
+            }
             updateProviderFormDirtyState();
         });
         providerModelConfigList.addEventListener("change", () => {
             if (discoveredModels.length) {
                 renderDiscoveredModels(discoveredModels);
+            }
+            if (catalogModels.length) {
+                renderCatalogModels(catalogModels);
             }
             updateProviderFormDirtyState();
         });
@@ -2887,6 +2979,9 @@
             }
             if (discoveredModels.length) {
                 renderDiscoveredModels(discoveredModels);
+            }
+            if (catalogModels.length) {
+                renderCatalogModels(catalogModels);
             }
             updateProviderFormDirtyState();
         });
@@ -3082,6 +3177,13 @@
                 .filter(Boolean);
         }
 
+        function getSelectedCatalogModelNames() {
+            if (!catalogModelsBody) return [];
+            return Array.from(catalogModelsBody.querySelectorAll("[data-catalog-model-name]:checked"))
+                .map((input) => String(input.dataset.catalogModelName || "").trim())
+                .filter(Boolean);
+        }
+
         function syncDiscoveredCheckAllState() {
             if (!discoveredModelsCheckAll) return;
             const total = discoveredModels.filter((item) => !item.already_configured).length;
@@ -3109,6 +3211,62 @@
                 </tr>
             `).join("") : '<tr><td colspan="4"><div class="empty-state">当前没有可导入的上游模型。</div></td></tr>';
             syncDiscoveredCheckAllState();
+        }
+
+        function normalizeCatalogModel(item = {}) {
+            return {
+                model_name: String(item.model_name || "").trim(),
+                display_name: String(item.display_name || "").trim(),
+                enabled: item.enabled !== false,
+                supports_stream: item.supports_stream !== false,
+                supports_vision: item.supports_vision === true,
+                input_price_per_1k: item.input_price_per_1k ?? null,
+                output_price_per_1k: item.output_price_per_1k ?? null,
+                cache_price_per_1k: item.cache_price_per_1k ?? null,
+            };
+        }
+
+        function syncCatalogCheckAllState() {
+            if (!catalogModelsCheckAll) return;
+            const total = Array.from(catalogModelsBody?.querySelectorAll("[data-catalog-model-name]") || [])
+                .filter((node) => !node.disabled).length;
+            const selected = getSelectedCatalogModelNames().length;
+            catalogModelsCheckAll.checked = total > 0 && selected === total;
+            catalogModelsCheckAll.indeterminate = selected > 0 && selected < total;
+            catalogModelsCheckAll.disabled = total === 0;
+        }
+
+        function renderCatalogModels(items = []) {
+            if (!catalogModelShell || !catalogModelsBody) return;
+            const configuredNameSet = new Set(getCurrentConfiguredModelNames());
+            catalogModels = items
+                .map(normalizeCatalogModel)
+                .filter((item) => item.model_name)
+                .sort((left, right) => left.model_name.localeCompare(right.model_name, "zh-CN"));
+            const availableModels = catalogModels.filter((item) => !configuredNameSet.has(item.model_name));
+            catalogModelShell.classList.toggle("hidden", !catalogModels.length);
+            catalogModelShell.setAttribute("aria-hidden", catalogModels.length ? "false" : "true");
+            if (catalogModelMeta) {
+                catalogModelMeta.textContent = catalogModels.length
+                    ? `模型库共 ${formatNumber(catalogModels.length)} 个，当前可添加 ${formatNumber(availableModels.length)} 个。`
+                    : "仅展示当前中转站尚未挂载的模型。";
+            }
+            catalogModelsBody.innerHTML = availableModels.length ? availableModels.map((item) => `
+                <tr>
+                    <td><input type="checkbox" data-catalog-model-name="${escapeHtml(item.model_name)}"></td>
+                    <td>
+                        <strong>${escapeHtml(item.model_name)}</strong>
+                        ${item.display_name ? `<div class="table-muted">${escapeHtml(item.display_name)}</div>` : ""}
+                    </td>
+                    <td>${item.supports_stream ? "流式" : "非流式"} / ${item.supports_vision ? "图像" : "文本"}</td>
+                    <td>
+                        <span>输入 ${escapeHtml(formatPrice(item.input_price_per_1k))}</span>
+                        <div class="table-muted">输出 ${escapeHtml(formatPrice(item.output_price_per_1k))} · 缓存 ${escapeHtml(formatPrice(item.cache_price_per_1k))}</div>
+                    </td>
+                    <td>${item.enabled ? "模型库启用" : "模型库停用"}</td>
+                </tr>
+            `).join("") : '<tr><td colspan="5"><div class="empty-state">模型库中暂无当前中转站未挂载的模型。</div></td></tr>';
+            syncCatalogCheckAllState();
         }
 
         function renderDiscoverFeedback(result) {
@@ -3181,6 +3339,60 @@
             }
         }
 
+        async function loadCatalogModels() {
+            try {
+                setButtonLoading(loadCatalogModelsBtn, true);
+                if (catalogModelShell) {
+                    catalogModelShell.classList.remove("hidden");
+                    catalogModelShell.setAttribute("aria-hidden", "false");
+                }
+                if (catalogModelMeta) {
+                    catalogModelMeta.textContent = "正在读取模型管理中的模型。";
+                }
+                const data = await api.get("/api/models");
+                const items = Array.isArray(data) ? data : (Array.isArray(data.items) ? data.items : []);
+                renderCatalogModels(items);
+                showToast(`已读取 ${formatNumber(items.length)} 个模型库模型`);
+            } catch (error) {
+                renderCatalogModels([]);
+                if (catalogModelShell) {
+                    catalogModelShell.classList.remove("hidden");
+                    catalogModelShell.setAttribute("aria-hidden", "false");
+                }
+                if (catalogModelsBody) {
+                    catalogModelsBody.innerHTML = `<tr><td colspan="5"><div class="empty-state">读取模型库失败：${escapeHtml(error.message)}</div></td></tr>`;
+                }
+                if (catalogModelMeta) {
+                    catalogModelMeta.textContent = "读取模型库失败。";
+                }
+                syncCatalogCheckAllState();
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(loadCatalogModelsBtn, false);
+            }
+        }
+
+        function importCatalogModels(modelNames) {
+            const catalogByName = new Map(catalogModels.map((item) => [item.model_name, item]));
+            let addedCount = 0;
+            modelNames.forEach((modelName) => {
+                const catalogModel = catalogByName.get(modelName) || {};
+                if (addProviderModelConfig({
+                    model_name: modelName,
+                    supports_stream: catalogModel.supports_stream,
+                    supports_vision: catalogModel.supports_vision,
+                    enabled: DEFAULT_PROVIDER_MODEL_CONFIG.enabled,
+                    price_multiplier: DEFAULT_PROVIDER_MODEL_CONFIG.price_multiplier,
+                })) {
+                    addedCount += 1;
+                }
+            });
+            renderCatalogModels(catalogModels);
+            if (addedCount > 0) {
+                showToast(`已从模型库添加 ${formatNumber(addedCount)} 个模型`);
+            }
+        }
+
         function populateAvailabilityProviderOptions(selectedProviderId = availabilityProviderSelect?.value || "") {
             if (!availabilityProviderSelect) return;
             availabilityProviderSelect.innerHTML = '<option value="">请选择一个中转站</option>' + providers.map((provider) => `
@@ -3233,7 +3445,10 @@
                 <tr>
                     <td>
                         <strong>${escapeHtml(provider.name)}</strong>
-                        <div class="table-muted">API Key ${escapeHtml(provider.api_key_masked)}</div>
+                        <div class="provider-key-row">
+                            <span class="table-muted">API Key ${escapeHtml(provider.api_key_masked)}</span>
+                            <button class="table-action-btn provider-key-copy-btn" type="button" data-copy-text="${escapeHtml(provider.api_key || "")}" ${provider.api_key ? "" : "disabled"}>复制</button>
+                        </div>
                     </td>
                     <td>${renderProviderScope(provider)}</td>
                     <td>${escapeHtml(provider.base_url)}</td>
@@ -3433,7 +3648,7 @@
             providerIdInput.value = provider?.id ?? "";
             providerNameInput.value = provider?.name ?? "";
             providerBaseUrlInput.value = provider?.base_url ?? "";
-            providerApiKeyInput.value = "";
+            providerApiKeyInput.value = provider?.api_key ?? "";
             providerTypeInput.value = provider?.provider_type ?? "openai_compatible";
             providerGroupNameInput.value = provider?.group_name ?? "";
             providerRegionTagInput.value = provider?.region_tag ?? "";

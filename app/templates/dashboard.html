@@ -36,6 +36,110 @@
     {% endfor %}
 </section>
 
+<section class="panel-card section-shell dashboard-usage-panel" id="dashboard-usage-panel">
+    <div class="panel-head">
+        <div>
+            <div class="panel-kicker">累计用量</div>
+            <h2>全量 Token 与成本统计</h2>
+        </div>
+        <span class="table-muted" id="dashboard-usage-cache-note">精确聚合，短缓存加速</span>
+    </div>
+    <div class="dashboard-usage-summary detail-list" id="dashboard-usage-summary">
+        <div><span>总请求数</span><strong>{{ stats.usage_overview.summary.total_requests or 0 }}</strong></div>
+        <div><span>总 Token</span><strong>{{ stats.usage_overview.summary.total_tokens or 0 }}</strong></div>
+        <div><span>输入 / 输出 Token</span><strong>{{ stats.usage_overview.summary.prompt_tokens or 0 }} / {{ stats.usage_overview.summary.completion_tokens or 0 }}</strong></div>
+        <div><span>总价格成本</span><strong>{{ '%.6f'|format(stats.usage_overview.summary.total_cost or 0) }}</strong></div>
+    </div>
+    <div class="dashboard-usage-grid">
+        <article class="summary-list-card">
+            <div class="panel-kicker">模型</div>
+            <h3>每个模型总 Token / 成本</h3>
+            <div class="table-responsive">
+                <table class="table align-middle">
+                    <thead>
+                        <tr>
+                            <th>模型</th>
+                            <th>请求</th>
+                            <th>Token</th>
+                            <th>成本</th>
+                        </tr>
+                    </thead>
+                    <tbody id="dashboard-usage-model-body">
+                        {% for item in stats.usage_overview.top_models %}
+                        <tr>
+                            <td>{{ item.model_name }}</td>
+                            <td>{{ item.total_requests }}</td>
+                            <td>{{ item.total_tokens }}</td>
+                            <td>{{ '%.6f'|format(item.total_cost or 0) }}</td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan="4"><div class="empty-state">暂无模型成本数据</div></td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </article>
+        <article class="summary-list-card">
+            <div class="panel-kicker">中转站</div>
+            <h3>每个中转站总成本</h3>
+            <div class="table-responsive">
+                <table class="table align-middle">
+                    <thead>
+                        <tr>
+                            <th>中转站</th>
+                            <th>请求</th>
+                            <th>Token</th>
+                            <th>成本</th>
+                        </tr>
+                    </thead>
+                    <tbody id="dashboard-usage-provider-body">
+                        {% for item in stats.usage_overview.top_providers %}
+                        <tr>
+                            <td>{{ item.provider_name }}</td>
+                            <td>{{ item.total_requests }}</td>
+                            <td>{{ item.total_tokens }}</td>
+                            <td>{{ '%.6f'|format(item.total_cost or 0) }}</td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan="4"><div class="empty-state">暂无中转站成本数据</div></td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </article>
+        <article class="summary-list-card dashboard-usage-wide">
+            <div class="panel-kicker">中转站 × 模型</div>
+            <h3>每个中转站的每个模型总成本</h3>
+            <div class="table-responsive">
+                <table class="table align-middle">
+                    <thead>
+                        <tr>
+                            <th>中转站</th>
+                            <th>模型</th>
+                            <th>请求</th>
+                            <th>Token</th>
+                            <th>成本</th>
+                        </tr>
+                    </thead>
+                    <tbody id="dashboard-usage-provider-model-body">
+                        {% for item in stats.usage_overview.top_provider_models %}
+                        <tr>
+                            <td>{{ item.provider_name }}</td>
+                            <td>{{ item.model_name }}</td>
+                            <td>{{ item.total_requests }}</td>
+                            <td>{{ item.total_tokens }}</td>
+                            <td>{{ '%.6f'|format(item.total_cost or 0) }}</td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan="5"><div class="empty-state">暂无中转站模型成本数据</div></td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </article>
+    </div>
+</section>
+
 <section class="panel-card monitor-panel" id="dashboard-live-monitor">
     <div class="panel-head monitor-head">
         <div>

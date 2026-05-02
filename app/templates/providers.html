@@ -161,7 +161,7 @@
             </label>
             <label for="provider-api-key">
                 <span>API 密钥</span>
-                <input class="field-input" id="provider-api-key" placeholder="新增时必填；编辑时留空表示不修改">
+                <input class="field-input" id="provider-api-key" placeholder="新增时必填；编辑时会完整回显当前 API Key">
             </label>
             <label for="provider-type">
                 <span>类型</span>
@@ -219,9 +219,35 @@
                 <span>模型挂载</span>
                 <div class="provider-model-discover-actions">
                     <button class="btn btn-ghost interactive-btn" id="provider-discover-models-btn" type="button">获取可用模型</button>
+                    <button class="btn btn-ghost interactive-btn" id="provider-load-catalog-models-btn" type="button">添加模型库中模型</button>
                     <button class="btn btn-ghost interactive-btn" id="provider-import-selected-models-btn" type="button">添加选中模型</button>
                 </div>
                 <div class="provider-discover-feedback hidden" id="provider-discover-feedback" role="status" aria-live="polite"></div>
+                <div class="provider-catalog-model-shell hidden" id="provider-catalog-model-shell" aria-hidden="true">
+                    <div class="provider-catalog-model-head">
+                        <div>
+                            <strong>模型库模型</strong>
+                            <span id="provider-catalog-model-meta">仅展示当前中转站尚未挂载的模型。</span>
+                        </div>
+                        <button class="btn btn-ghost btn-sm interactive-btn" id="provider-import-catalog-models-btn" type="button">添加选中</button>
+                    </div>
+                    <div class="table-shell provider-catalog-model-table-shell">
+                        <table class="data-table provider-data-table">
+                            <thead>
+                                <tr>
+                                    <th><input id="provider-catalog-models-check-all" type="checkbox" aria-label="选择全部模型库模型"></th>
+                                    <th>模型</th>
+                                    <th>能力</th>
+                                    <th>价格</th>
+                                    <th>状态</th>
+                                </tr>
+                            </thead>
+                            <tbody id="provider-catalog-models-body">
+                                <tr><td colspan="5"><div class="empty-state">点击“添加模型库中模型”后，从模型管理中选择要挂载的模型。</div></td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
                 <div class="table-shell provider-discovered-model-shell">
                     <table class="data-table provider-data-table">
                         <thead>
@@ -262,8 +288,6 @@
                     <span>模型名称 *</span>
                     <span>启用</span>
                     <span>倍率</span>
-                    <span>优先级</span>
-                    <span>权重</span>
                     <span>操作</span>
                 </div>
                 <div class="provider-model-config-list" id="provider-model-config-list" aria-live="polite"></div>

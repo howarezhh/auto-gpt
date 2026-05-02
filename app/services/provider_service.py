@@ -250,6 +250,7 @@ class ProviderService:
             "id": provider.id,
             "name": provider.name,
             "base_url": provider.base_url,
+            "api_key": provider.api_key,
             "api_key_masked": ProviderService.mask_api_key(provider.api_key),
             "provider_type": provider.provider_type,
             "group_name": provider.group_name,

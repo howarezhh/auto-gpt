@@ -15,6 +15,8 @@ from app.models.request_log import RequestLog
 from app.services.admin_audit_service import AdminAuditService
 from app.services.alert_service import AlertService
 from app.services.api_key_admin_service import ApiKeyAdminService
+from app.routers.dashboard import _dashboard_usage_overview
+from app.services.log_service import LogService
 from app.services.provider_service import ProviderService
 from app.services.setting_service import SettingService
 from app.services.user_auth_service import USER_ROLE_ADMIN, UserAuthService
@@ -32,6 +34,9 @@ def _build_dashboard_stat_cards(stats: dict) -> list[dict]:
         {"id": "model_count", "label": "模型总数", "value": stats["model_count"]},
         {"id": "recent_requests", "label": "24h 请求量", "value": stats["recent_requests"]},
         {"id": "recent_tokens", "label": "24h Token 用量", "value": stats["recent_tokens"]},
+        {"id": "total_requests", "label": "累计请求量", "value": stats["total_requests"]},
+        {"id": "total_tokens", "label": "累计 Token", "value": stats["total_tokens"]},
+        {"id": "total_cost", "label": "累计成本", "value": f'{stats["total_cost"]:.6f}'},
         {"id": "conversation_count", "label": "会话数", "value": stats["conversation_count"]},
         {"id": "api_key_total", "label": "API 密钥总数", "value": stats["api_key_total"]},
         {
@@ -108,10 +113,12 @@ def dashboard_page(request: Request, db: Session = Depends(get_db)) -> HTMLRespo
         return current_user
     providers = ProviderService.list_providers(db)
     api_key_summary = ApiKeyAdminService.get_summary(db)
+    usage_overview = _dashboard_usage_overview(db)
+    usage_summary = usage_overview["summary"]
     recent_since = datetime.utcnow() - timedelta(hours=24)
-    recent_requests = db.scalar(select(func.count()).select_from(RequestLog).where(RequestLog.created_at >= recent_since)) or 0
+    recent_requests = db.scalar(select(func.count()).select_from(RequestLog).where(RequestLog.created_at >= recent_since, LogService._route_traffic_expr())) or 0
     recent_failures = db.scalar(
-        select(func.count()).select_from(RequestLog).where(RequestLog.created_at >= recent_since, RequestLog.success.is_(False))
+        select(func.count()).select_from(RequestLog).where(RequestLog.created_at >= recent_since, LogService._route_traffic_expr(), RequestLog.success.is_(False))
     ) or 0
     stats = {
         "provider_count": len(providers),
@@ -123,12 +130,16 @@ def dashboard_page(request: Request, db: Session = Depends(get_db)) -> HTMLRespo
         "degraded_model_count": db.scalar(select(func.count()).select_from(ProviderModel).where(ProviderModel.health_status == "degraded")) or 0,
         "unhealthy_model_count": db.scalar(select(func.count()).select_from(ProviderModel).where(ProviderModel.health_status == "unhealthy")) or 0,
         "recent_requests": recent_requests,
-        "recent_tokens": db.scalar(select(func.sum(RequestLog.total_tokens)).where(RequestLog.created_at >= recent_since)) or 0,
+        "recent_tokens": db.scalar(select(func.sum(RequestLog.total_tokens)).where(RequestLog.created_at >= recent_since, LogService._route_traffic_expr())) or 0,
+        "total_requests": usage_summary["total_requests"],
+        "total_tokens": usage_summary["total_tokens"],
+        "total_cost": usage_summary["total_cost"],
         "conversation_count": db.scalar(
-            select(func.count(func.distinct(RequestLog.conversation_key))).where(RequestLog.conversation_key.is_not(None))
+            select(func.count(func.distinct(RequestLog.conversation_key))).where(RequestLog.conversation_key.is_not(None), LogService._route_traffic_expr())
         ) or 0,
         "recent_failure_rate": round((recent_failures / recent_requests) * 100, 2) if recent_requests else 0.0,
-        "total_failures": db.scalar(select(func.count()).select_from(RequestLog).where(RequestLog.success.is_(False))) or 0,
+        "total_failures": usage_summary["failed_requests"],
+        "usage_overview": usage_overview,
         "api_key_total": api_key_summary.total_keys,
         "api_key_enabled": api_key_summary.enabled_keys,
         "api_key_disabled": api_key_summary.disabled_keys,

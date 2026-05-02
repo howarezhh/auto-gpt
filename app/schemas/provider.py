@@ -163,6 +163,7 @@ class ProviderOut(BaseModel):
     id: int
     name: str
     base_url: str
+    api_key: str
     api_key_masked: str
     provider_type: str
     group_name: str | None
