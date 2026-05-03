@@ -3795,6 +3795,7 @@
             populateAvailabilityProviderOptions();
             await loadProviderModels({ silent: true });
             await loadAvailability({ manual: false });
+            syncOpenModelsDetailModal();
         }
 
         function renderProviderTelemetry(currentProviders) {
@@ -4326,6 +4327,45 @@
             return { owner, modelConfig };
         }
 
+        function applyProviderModelHealthSnapshot(providerId, modelId, snapshot = {}) {
+            const nextHealthStatus = snapshot.health_status || "unknown";
+            const nextLastError = snapshot.last_error === undefined
+                ? (snapshot.success ? null : (snapshot.message || null))
+                : snapshot.last_error;
+            providers.forEach((provider) => {
+                if (provider.id !== providerId || !Array.isArray(provider.model_configs)) return;
+                provider.model_configs.forEach((modelConfig) => {
+                    if (modelConfig.id !== modelId) return;
+                    modelConfig.health_status = nextHealthStatus;
+                    modelConfig.last_error = nextLastError;
+                    if (snapshot.latency_ms != null) {
+                        modelConfig.last_latency_ms = snapshot.latency_ms;
+                    }
+                });
+            });
+            providerModelItems.forEach((item) => {
+                if (item.provider?.id !== providerId || item.model?.id !== modelId) return;
+                item.model.health_status = nextHealthStatus;
+                item.model.last_error = nextLastError;
+                if (snapshot.latency_ms != null) {
+                    item.model.last_latency_ms = snapshot.latency_ms;
+                }
+            });
+            renderProviders(searchInput.value);
+            renderProviderModels(providerModelItems);
+            syncOpenModelsDetailModal();
+        }
+
+        function syncOpenModelsDetailModal() {
+            const providerId = Number(modelsDetailModal?.dataset.providerId || "");
+            if (!modelsDetailModalController?.isOpen?.() || !Number.isFinite(providerId)) return;
+            const provider = providers.find((item) => item.id === providerId);
+            if (!provider || !modelsDetailModalTitle || !modelsDetailModalContent) return;
+            modelsDetailModalTitle.textContent = `中转站模型 · ${provider.name}`;
+            modelsDetailModalContent.innerHTML = renderProviderModelsDetail(provider);
+            enhanceInteractiveButtons(modelsDetailModalContent);
+        }
+
         function renderProviderModels(items = []) {
             modelTableBody.innerHTML = items.map((item) => {
                 const provider = item.provider || {};
@@ -4370,6 +4410,13 @@
             setButtonLoading(trigger, true);
             try {
                 const result = await api.post(`/api/providers/${providerId}/models/${modelId}/test`, {});
+                applyProviderModelHealthSnapshot(providerId, modelId, {
+                    success: result.success === true,
+                    health_status: result.health_status,
+                    last_error: result.success ? null : (result.message || null),
+                    latency_ms: result.latency_ms,
+                    message: result.message,
+                });
                 setButtonLoading(trigger, false);
                 setButtonTransientFeedback(trigger, result.success ? "success" : "error", {
                     successText: "成功",
@@ -4610,6 +4657,7 @@
 
         function openModelsDetailModal(provider, trigger = document.activeElement) {
             if (!modelsDetailModal || !modelsDetailModalTitle || !modelsDetailModalContent) return;
+            modelsDetailModal.dataset.providerId = String(provider.id);
             modelsDetailModalTitle.textContent = `中转站模型 · ${provider.name}`;
             modelsDetailModalContent.innerHTML = renderProviderModelsDetail(provider);
             enhanceInteractiveButtons(modelsDetailModalContent);
@@ -4617,6 +4665,9 @@
         }
 
         function closeModelsDetailModal(options = {}) {
+            if (modelsDetailModal) {
+                delete modelsDetailModal.dataset.providerId;
+            }
             modelsDetailModalController.close(options);
         }
 
@@ -4630,6 +4681,20 @@
                 { closeModelsDetail: true },
             );
         });
+
+        let providerPageRefreshRunning = false;
+        const providerPageTimer = window.setInterval(async () => {
+            if (document.hidden || providerPageRefreshRunning) return;
+            providerPageRefreshRunning = true;
+            try {
+                await loadProviders();
+            } catch (error) {
+                console.error(error);
+            } finally {
+                providerPageRefreshRunning = false;
+            }
+        }, 30000);
+        window.addEventListener("beforeunload", () => window.clearInterval(providerPageTimer), { once: true });
 
         await loadProviders();
     }

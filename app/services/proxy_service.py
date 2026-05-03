@@ -435,12 +435,20 @@ class ProxyService:
         provider_model_id: int,
         latency_ms: int,
         error_message: str | None,
+        force_unhealthy: bool = False,
     ) -> None:
         provider = db.get(Provider, provider_id)
         provider_model = db.get(ProviderModel, provider_model_id)
         if provider is None or provider_model is None:
             return
-        ProxyService._mark_failure(db, provider, provider_model, latency_ms, error_message)
+        ProxyService._mark_failure(
+            db,
+            provider,
+            provider_model,
+            latency_ms,
+            error_message,
+            force_unhealthy=force_unhealthy,
+        )
 
     @staticmethod
     async def _mark_failure_async(
@@ -450,9 +458,18 @@ class ProxyService:
         error_message: str | None,
         *,
         db: Session | None = None,
+        force_unhealthy: bool = False,
     ) -> None:
         if db is not None:
-            await run_in_threadpool(ProxyService._mark_failure, db, provider, provider_model, latency_ms, error_message)
+            await run_in_threadpool(
+                ProxyService._mark_failure,
+                db,
+                provider,
+                provider_model,
+                latency_ms,
+                error_message,
+                force_unhealthy,
+            )
             return
         await ProxyService._run_db_write(
             ProxyService._mark_failure_by_id,
@@ -460,6 +477,7 @@ class ProxyService:
             provider_model.id,
             latency_ms,
             error_message,
+            force_unhealthy,
         )
 
     @staticmethod
@@ -759,7 +777,17 @@ class ProxyService:
                         "status_code": exc.response.status_code,
                         "detail": ProxyService._normalize_error_detail(error_body),
                     }
-                    await ProxyService._mark_failure_async(provider, provider_model, latency_ms, error_body, db=db)
+                    await ProxyService._mark_failure_async(
+                        provider,
+                        provider_model,
+                        latency_ms,
+                        error_body,
+                        db=db,
+                        force_unhealthy=ProxyService._should_mark_provider_model_unhealthy(
+                            status_code=exc.response.status_code,
+                            detail=ProxyService._normalize_error_detail(error_body),
+                        ),
+                    )
                     if exc.response.status_code not in {401, 403, 404, 429} and exc.response.status_code < 500:
                         break
                 except RequestsUpstreamHTTPError as exc:
@@ -779,7 +807,17 @@ class ProxyService:
                         "status_code": exc.status_code,
                         "detail": exc.detail,
                     }
-                    await ProxyService._mark_failure_async(provider, provider_model, latency_ms, error_body, db=db)
+                    await ProxyService._mark_failure_async(
+                        provider,
+                        provider_model,
+                        latency_ms,
+                        error_body,
+                        db=db,
+                        force_unhealthy=ProxyService._should_mark_provider_model_unhealthy(
+                            status_code=exc.status_code,
+                            detail=exc.detail,
+                        ),
+                    )
                     if exc.status_code not in {401, 403, 404, 429} and exc.status_code < 500:
                         break
                 except NonStreamResponseTooLarge as exc:
@@ -1231,6 +1269,10 @@ class ProxyService:
                                             log_provider_model,
                                             latency_ms,
                                             error_message or f"stream {log_type} failed",
+                                            force_unhealthy=ProxyService._should_mark_provider_model_unhealthy(
+                                                status_code=terminal_status_code,
+                                                detail={"message": error_message or f"stream {log_type} failed"},
+                                            ),
                                         )
                                     interrupted_trace = trace + [
                                         ProxyService._build_trace_item(
@@ -1346,7 +1388,17 @@ class ProxyService:
                         "status_code": exc.response.status_code,
                         "detail": ProxyService._normalize_error_detail(error_body),
                     }
-                    await ProxyService._mark_failure_async(provider, provider_model, latency_ms, error_body, db=db)
+                    await ProxyService._mark_failure_async(
+                        provider,
+                        provider_model,
+                        latency_ms,
+                        error_body,
+                        db=db,
+                        force_unhealthy=ProxyService._should_mark_provider_model_unhealthy(
+                            status_code=exc.response.status_code,
+                            detail=ProxyService._normalize_error_detail(error_body),
+                        ),
+                    )
                     if exc.response.status_code not in {401, 403, 404, 429} and exc.response.status_code < 500:
                         break
                 except Exception as exc:
@@ -2564,6 +2616,17 @@ class ProxyService:
         prompt_tokens = usage.get("prompt_tokens")
         completion_tokens = usage.get("completion_tokens")
         total_tokens = usage.get("total_tokens")
+        cache_read_tokens, cache_write_tokens = LogService.extract_cache_tokens({"usage": usage})
+        responses_usage = {
+            "input_tokens": int(prompt_tokens or 0),
+            "output_tokens": int(completion_tokens or 0),
+            "total_tokens": int(total_tokens or ((prompt_tokens or 0) + (completion_tokens or 0))),
+        }
+        if cache_read_tokens is not None or cache_write_tokens is not None:
+            responses_usage["input_tokens_details"] = {
+                "cached_tokens": int(cache_read_tokens or 0),
+                "cache_creation_tokens": int(cache_write_tokens or 0),
+            }
         return {
             "id": response_id,
             "object": "response",
@@ -2587,11 +2650,7 @@ class ProxyService:
                     ],
                 }
             ],
-            "usage": {
-                "input_tokens": int(prompt_tokens or 0),
-                "output_tokens": int(completion_tokens or 0),
-                "total_tokens": int(total_tokens or ((prompt_tokens or 0) + (completion_tokens or 0))),
-            },
+            "usage": responses_usage,
         }
 
     @staticmethod
@@ -2609,6 +2668,17 @@ class ProxyService:
         input_tokens = usage.get("input_tokens", usage.get("prompt_tokens"))
         output_tokens = usage.get("output_tokens", usage.get("completion_tokens"))
         total_tokens = usage.get("total_tokens")
+        cache_read_tokens, cache_write_tokens = LogService.extract_cache_tokens({"usage": usage})
+        chat_usage = {
+            "prompt_tokens": int(input_tokens or 0),
+            "completion_tokens": int(output_tokens or 0),
+            "total_tokens": int(total_tokens or ((input_tokens or 0) + (output_tokens or 0))),
+        }
+        if cache_read_tokens is not None or cache_write_tokens is not None:
+            chat_usage["prompt_tokens_details"] = {
+                "cached_tokens": int(cache_read_tokens or 0),
+                "cache_creation_tokens": int(cache_write_tokens or 0),
+            }
         return {
             "id": response_id,
             "object": "chat.completion",
@@ -2624,11 +2694,7 @@ class ProxyService:
                     "finish_reason": finish_reason if finish_reason != "completed" else "stop",
                 }
             ],
-            "usage": {
-                "prompt_tokens": int(input_tokens or 0),
-                "completion_tokens": int(output_tokens or 0),
-                "total_tokens": int(total_tokens or ((input_tokens or 0) + (output_tokens or 0))),
-            },
+            "usage": chat_usage,
         }
 
     @staticmethod
@@ -2709,12 +2775,18 @@ class ProxyService:
                     input_tokens = usage.get("prompt_tokens", usage.get("input_tokens"))
                     output_tokens = usage.get("completion_tokens", usage.get("output_tokens"))
                     total_tokens = usage.get("total_tokens")
+                    cache_read_tokens, cache_write_tokens = LogService.extract_cache_tokens({"usage": usage})
                     if isinstance(input_tokens, int):
                         state["usage"]["input_tokens"] = input_tokens
                     if isinstance(output_tokens, int):
                         state["usage"]["output_tokens"] = output_tokens
                     if isinstance(total_tokens, int):
                         state["usage"]["total_tokens"] = total_tokens
+                    if cache_read_tokens is not None or cache_write_tokens is not None:
+                        state["usage"]["input_tokens_details"] = {
+                            "cached_tokens": int(cache_read_tokens or 0),
+                            "cache_creation_tokens": int(cache_write_tokens or 0),
+                        }
                 finish_reason = ProxyService._extract_finish_reason(parsed)
                 if isinstance(finish_reason, str) and finish_reason:
                     state["finish_reason"] = finish_reason
@@ -2908,13 +2980,18 @@ class ProxyService:
         provider_model: ProviderModel,
         latency_ms: int,
         error_message: str | None,
+        force_unhealthy: bool = False,
     ) -> None:
         provider.failure_count += 1
         provider.last_latency_ms = latency_ms
         provider_model.failure_count += 1
         provider_model.last_latency_ms = latency_ms
         provider_model.last_error = error_message
-        if provider.auto_circuit_break_enabled:
+        if force_unhealthy:
+            provider_model.health_status = "unhealthy"
+            provider_model.circuit_state = "open"
+            provider_model.circuit_opened_at = datetime.utcnow()
+        elif provider.auto_circuit_break_enabled:
             threshold = ProviderService.get_effective_circuit_breaker_threshold(db, provider)
             if provider_model.circuit_state == "half_open" or provider_model.failure_count >= threshold:
                 provider_model.health_status = "unhealthy"
@@ -2923,9 +3000,11 @@ class ProxyService:
             else:
                 provider_model.health_status = "degraded"
                 provider_model.circuit_state = "closed"
+                provider_model.circuit_opened_at = None
         else:
             provider_model.health_status = "degraded"
             provider_model.circuit_state = "closed"
+            provider_model.circuit_opened_at = None
         ProviderService.refresh_provider_state(provider)
 
     @staticmethod
@@ -3117,6 +3196,45 @@ class ProxyService:
             if detail.get("message"):
                 return str(detail["message"])
         return str(detail)
+
+    @staticmethod
+    def _should_mark_provider_model_unhealthy(*, status_code: int | None, detail: Any) -> bool:
+        error_code = (ProxyService._error_code_from_detail(detail) or "").strip().lower()
+        message = ProxyService._error_message_for_log(detail).strip().lower()
+        if status_code in {401, 403, 404}:
+            return True
+        fatal_code_tokens = (
+            "subscription",
+            "model_not_found",
+            "resource_not_found",
+            "unsupported",
+            "not_supported",
+            "permission_denied",
+            "access_denied",
+            "forbidden",
+            "invalid_api_key",
+            "insufficient_permissions",
+        )
+        if error_code and any(token in error_code for token in fatal_code_tokens):
+            return True
+        fatal_message_tokens = (
+            "no active subscription",
+            "subscription not found",
+            "model not found",
+            "unknown model",
+            "no such model",
+            "does not support",
+            "do not support",
+            "not support",
+            "unsupported",
+            "not available for this group",
+            "resource not found",
+            "access denied",
+            "permission denied",
+            "forbidden",
+            "invalid api key",
+        )
+        return any(token in message for token in fatal_message_tokens)
 
     @staticmethod
     def _build_trace_item(

@@ -654,9 +654,9 @@ class ProviderService:
             provider.health_status = "healthy"
             provider.circuit_state = "closed"
             return
-        if statuses == {"unhealthy"} and all(item.circuit_state == "open" for item in enabled_models):
+        if statuses == {"unhealthy"}:
             provider.health_status = "unhealthy"
-            provider.circuit_state = "open"
+            provider.circuit_state = "open" if all(item.circuit_state == "open" for item in enabled_models) else "closed"
             return
         if "healthy" in statuses or "degraded" in statuses:
             provider.health_status = "degraded"
