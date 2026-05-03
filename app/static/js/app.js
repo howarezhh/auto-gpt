@@ -635,7 +635,7 @@
 
     function formatMoney(value) {
         if (value == null || Number.isNaN(Number(value))) return "不限";
-        return Number(value).toFixed(6);
+        return formatAdaptiveDecimal(value, { maxDecimals: 9 });
     }
 
     function formatPrice(value) {
@@ -648,27 +648,182 @@
         return `${Number(value).toFixed(2)}x`;
     }
 
-    function formatBillingCalculation(log) {
-        const multiplier = Number(log?.billing_multiplier ?? 1);
-        const inputPrice = log?.channel_price_input_per_1k;
-        const outputPrice = log?.channel_price_output_per_1k;
-        const cachePrice = log?.channel_price_cache_per_1k ?? inputPrice;
-        const promptTokens = Number(log?.prompt_tokens ?? 0);
-        const completionTokens = Number(log?.completion_tokens ?? 0);
-        const cacheReadTokens = Number(log?.cache_read_tokens ?? 0);
+    function toFiniteNumber(value) {
+        const numeric = Number(value);
+        return Number.isFinite(numeric) ? numeric : null;
+    }
+
+    function trimTrailingZeros(value) {
+        return String(value).replace(/(?:\.0+|(\.\d*?[1-9])0+)$/, "$1");
+    }
+
+    function formatAdaptiveDecimal(value, options = {}) {
+        const {
+            minDecimals = 0,
+            maxDecimals = 9,
+            fallback = "-",
+        } = options;
+        const numeric = toFiniteNumber(value);
+        if (numeric == null) return fallback;
+        const absolute = Math.abs(numeric);
+        if (absolute === 0) {
+            return Number(0).toFixed(minDecimals);
+        }
+        let decimals = maxDecimals;
+        if (absolute >= 1000) {
+            decimals = Math.min(maxDecimals, Math.max(minDecimals, 2));
+        } else if (absolute >= 1) {
+            decimals = Math.min(maxDecimals, Math.max(minDecimals, 6));
+        }
+        const fixed = numeric.toFixed(decimals);
+        return decimals === minDecimals ? fixed : trimTrailingZeros(fixed);
+    }
+
+    function roundCurrency(value, decimals = 9) {
+        return value == null || Number.isNaN(Number(value)) ? null : Number(Number(value).toFixed(decimals));
+    }
+
+    function formatTokenDisplay(value) {
+        const numeric = toFiniteNumber(value);
+        if (numeric == null) return "-";
+        const tokenValue = Math.max(0, numeric);
+        if (tokenValue < 1000) {
+            return `${formatNumber(Math.round(tokenValue))} token`;
+        }
+        const compactValue = tokenValue / 1000;
+        const digits = compactValue >= 100 ? 0 : compactValue >= 10 ? 1 : 2;
+        return `${trimTrailingZeros(compactValue.toFixed(digits))}k token`;
+    }
+
+    function formatUsdValue(value) {
+        const numeric = toFiniteNumber(value);
+        if (numeric == null) return "-";
+        return `$${formatAdaptiveDecimal(numeric, { maxDecimals: 9, fallback: "0" })} 美元`;
+    }
+
+    function formatUsdPer1k(value) {
+        const numeric = toFiniteNumber(value);
+        if (numeric == null) return "未设置";
+        return `$${formatAdaptiveDecimal(numeric, { maxDecimals: 12, fallback: "0" })} 美元 / 1k token`;
+    }
+
+    function sumCosts(...values) {
+        const numbers = values.map((value) => toFiniteNumber(value)).filter((value) => value != null);
+        if (!numbers.length) return null;
+        return roundCurrency(numbers.reduce((sum, value) => sum + value, 0));
+    }
+
+    function buildBillingBreakdown(log) {
+        const multiplierValue = toFiniteNumber(log?.billing_multiplier);
+        const multiplier = multiplierValue != null && multiplierValue > 0 ? multiplierValue : 1;
+        const inputPrice = toFiniteNumber(log?.channel_price_input_per_1k);
+        const outputPrice = toFiniteNumber(log?.channel_price_output_per_1k);
+        const cachePrice = toFiniteNumber(log?.channel_price_cache_per_1k) ?? inputPrice;
+        const promptTokens = Math.max(0, toFiniteNumber(log?.prompt_tokens) ?? 0);
+        const completionTokens = Math.max(0, toFiniteNumber(log?.completion_tokens) ?? 0);
+        const totalTokens = Math.max(0, toFiniteNumber(log?.total_tokens) ?? (promptTokens + completionTokens));
+        const cacheReadTokens = Math.max(0, toFiniteNumber(log?.cache_read_tokens) ?? 0);
+        const cacheWriteTokens = Math.max(0, toFiniteNumber(log?.cache_write_tokens) ?? 0);
         const regularPromptTokens = Math.max(0, promptTokens - cacheReadTokens);
-        const inputPart = inputPrice == null || Number.isNaN(Number(inputPrice))
-            ? "输入单价未设置"
-            : `输入 ${regularPromptTokens}/1000 × ${Number(inputPrice).toFixed(6)}`;
-        const cachePart = cacheReadTokens > 0
-            ? (cachePrice == null || Number.isNaN(Number(cachePrice))
-                ? "缓存单价未设置"
-                : `缓存 ${cacheReadTokens}/1000 × ${Number(cachePrice).toFixed(6)}`)
-            : null;
-        const outputPart = outputPrice == null || Number.isNaN(Number(outputPrice))
-            ? "输出单价未设置"
-            : `输出 ${completionTokens}/1000 × ${Number(outputPrice).toFixed(6)}`;
-        return `倍率 ${formatMultiplier(multiplier)}；${[inputPart, cachePart, outputPart].filter(Boolean).join(" + ")}`;
+        const inputCost = inputPrice == null ? null : roundCurrency((regularPromptTokens / 1000) * inputPrice, 9);
+        const cacheReadCost = cachePrice == null ? null : roundCurrency((cacheReadTokens / 1000) * cachePrice, 9);
+        const outputCost = outputPrice == null ? null : roundCurrency((completionTokens / 1000) * outputPrice, 9);
+        const promptCost = roundCurrency(log?.prompt_cost) ?? sumCosts(inputCost, cacheReadCost);
+        const completionCost = roundCurrency(log?.completion_cost) ?? outputCost;
+        const totalCost = roundCurrency(log?.total_cost) ?? sumCosts(promptCost, completionCost);
+        const baseInputPrice = inputPrice == null ? null : roundCurrency(inputPrice / multiplier, 12);
+        const baseOutputPrice = outputPrice == null ? null : roundCurrency(outputPrice / multiplier, 12);
+        const baseCachePrice = cachePrice == null ? null : roundCurrency(cachePrice / multiplier, 12);
+        return {
+            multiplier,
+            totalTokens,
+            promptTokens,
+            completionTokens,
+            cacheReadTokens,
+            cacheWriteTokens,
+            regularPromptTokens,
+            inputPrice,
+            outputPrice,
+            cachePrice,
+            baseInputPrice,
+            baseOutputPrice,
+            baseCachePrice,
+            inputCost,
+            cacheReadCost,
+            outputCost,
+            promptCost,
+            completionCost,
+            totalCost,
+        };
+    }
+
+    function renderBillingTooltip(log) {
+        const billing = buildBillingBreakdown(log);
+        const originalPriceLines = [
+            `输入 ${formatUsdPer1k(billing.baseInputPrice)}`,
+            `输出 ${formatUsdPer1k(billing.baseOutputPrice)}`,
+            `缓存 ${formatUsdPer1k(billing.baseCachePrice)}`,
+        ];
+        const channelPriceLines = [
+            `输入 ${formatUsdPer1k(billing.inputPrice)}`,
+            `输出 ${formatUsdPer1k(billing.outputPrice)}`,
+            `缓存 ${formatUsdPer1k(billing.cachePrice)}`,
+        ];
+        const calculationLines = [
+            `普通输入成本 = ${formatTokenDisplay(billing.regularPromptTokens)} / 1000 × ${formatUsdPer1k(billing.inputPrice)} = ${formatUsdValue(billing.inputCost)}`,
+            `缓存读成本 = ${formatTokenDisplay(billing.cacheReadTokens)} / 1000 × ${formatUsdPer1k(billing.cachePrice)} = ${formatUsdValue(billing.cacheReadCost)}`,
+            `输出成本 = ${formatTokenDisplay(billing.completionTokens)} / 1000 × ${formatUsdPer1k(billing.outputPrice)} = ${formatUsdValue(billing.outputCost)}`,
+            `总成本 = ${formatUsdValue(billing.totalCost)}，倍率 ${formatMultiplier(billing.multiplier)}`,
+        ];
+        return `
+            <div class="log-billing-tooltip-group">
+                <strong>原始模型价格</strong>
+                ${originalPriceLines.map((line) => `<div>${escapeHtml(line)}</div>`).join("")}
+            </div>
+            <div class="log-billing-tooltip-group">
+                <strong>中转站价格</strong>
+                ${channelPriceLines.map((line) => `<div>${escapeHtml(line)}</div>`).join("")}
+            </div>
+            <div class="log-billing-tooltip-group">
+                <strong>计算过程</strong>
+                ${calculationLines.map((line) => `<div>${escapeHtml(line)}</div>`).join("")}
+            </div>
+        `;
+    }
+
+    function renderLogBillingCell(log) {
+        const billing = buildBillingBreakdown(log);
+        return `
+            <div class="log-billing-cell">
+                <div class="log-billing-top">
+                    <strong class="log-billing-total-cost">${escapeHtml(formatUsdValue(billing.totalCost))}</strong>
+                    <span class="log-billing-help">
+                        <button class="log-billing-help-btn" type="button" aria-label="查看价格与计算过程">
+                            <i class="bi bi-question-circle" aria-hidden="true"></i>
+                        </button>
+                        <div class="log-billing-tooltip" role="tooltip">
+                            ${renderBillingTooltip(log)}
+                        </div>
+                    </span>
+                </div>
+                <div class="log-billing-total-tokens">总计 ${escapeHtml(formatTokenDisplay(billing.totalTokens))}</div>
+                <div class="log-billing-meta">普通输入 ${escapeHtml(formatTokenDisplay(billing.regularPromptTokens))} · 单价 ${escapeHtml(formatUsdPer1k(billing.inputPrice))}</div>
+                <div class="log-billing-meta">输出 ${escapeHtml(formatTokenDisplay(billing.completionTokens))} · 单价 ${escapeHtml(formatUsdPer1k(billing.outputPrice))}</div>
+                <div class="log-billing-meta">缓存读 ${escapeHtml(formatTokenDisplay(billing.cacheReadTokens))} · 单价 ${escapeHtml(formatUsdPer1k(billing.cachePrice))}</div>
+                <div class="log-billing-meta">缓存写 ${escapeHtml(formatTokenDisplay(billing.cacheWriteTokens))}</div>
+                <div class="log-billing-multiplier">倍率 ${escapeHtml(formatMultiplier(billing.multiplier))}</div>
+            </div>
+        `;
+    }
+
+    function formatBillingCalculation(log) {
+        const billing = buildBillingBreakdown(log);
+        return [
+            `原始价格：输入 ${formatUsdPer1k(billing.baseInputPrice)}，输出 ${formatUsdPer1k(billing.baseOutputPrice)}，缓存 ${formatUsdPer1k(billing.baseCachePrice)}`,
+            `中转站价格：输入 ${formatUsdPer1k(billing.inputPrice)}，输出 ${formatUsdPer1k(billing.outputPrice)}，缓存 ${formatUsdPer1k(billing.cachePrice)}`,
+            `计算：输入 ${formatTokenDisplay(billing.regularPromptTokens)} -> ${formatUsdValue(billing.inputCost)}；缓存读 ${formatTokenDisplay(billing.cacheReadTokens)} -> ${formatUsdValue(billing.cacheReadCost)}；输出 ${formatTokenDisplay(billing.completionTokens)} -> ${formatUsdValue(billing.outputCost)}`,
+            `总成本 ${formatUsdValue(billing.totalCost)}；倍率 ${formatMultiplier(billing.multiplier)}`,
+        ].join("；");
     }
 
     function formatPercent(value) {
@@ -1539,7 +1694,7 @@
                 stream_requests: group.reduce((sum, item) => sum + Number(item.stream_requests || 0), 0),
                 image_requests: group.reduce((sum, item) => sum + Number(item.image_requests || 0), 0),
                 total_tokens: group.reduce((sum, item) => sum + Number(item.total_tokens || 0), 0),
-                total_cost: Number(group.reduce((sum, item) => sum + Number(item.total_cost || 0), 0).toFixed(6)),
+                total_cost: Number(group.reduce((sum, item) => sum + Number(item.total_cost || 0), 0).toFixed(9)),
                 avg_latency_ms: weightedAverage(group, "avg_latency_ms"),
                 avg_ttfb_ms: weightedAverage(group, "avg_ttfb_ms"),
                 p95_latency_ms: Math.max(0, ...group.map((item) => Number(item.p95_latency_ms || 0))),
@@ -3931,7 +4086,7 @@
                 total: summary.total ?? 0,
                 enabled: summary.enabled ?? 0,
                 boundProviders: summary.bound_providers ?? summary.boundProviders ?? 0,
-                enabledProviders: summary.enabled_providers ?? summary.enabledProviders ?? 0,
+                availableProviders: summary.available_providers ?? summary.availableProviders ?? summary.enabled_providers ?? summary.enabledProviders ?? 0,
             };
             document.querySelectorAll("[data-model-summary]").forEach((node) => {
                 node.textContent = normalizedSummary[node.dataset.modelSummary] ?? "0";
@@ -4017,7 +4172,7 @@
                     </td>
                     <td>${escapeHtml(item.speed_label || "-")}</td>
                     <td>
-                        <strong>${escapeHtml(String(item.enabled_provider_count || 0))} / ${escapeHtml(String(item.provider_count || 0))}</strong>
+                        <strong>${escapeHtml(String(item.available_provider_count ?? item.enabled_provider_count ?? 0))} / ${escapeHtml(String(item.bound_provider_count ?? item.provider_count ?? 0))}</strong>
                         <div class="table-muted">${escapeHtml((item.available_provider_names || []).join("、") || "未绑定")}</div>
                     </td>
                     <td>${renderMultiplierCell(item)}</td>
@@ -5331,7 +5486,7 @@
             document.querySelectorAll("[data-log-summary-cost]").forEach((node) => {
                 const key = node.dataset.logSummaryCost;
                 const value = summary?.[key];
-                node.textContent = value == null || Number.isNaN(Number(value)) ? "0.000000" : Number(value).toFixed(6);
+                node.textContent = value == null || Number.isNaN(Number(value)) ? "0" : formatAdaptiveDecimal(value, { maxDecimals: 9, fallback: "0" });
             });
         }
 
@@ -5343,11 +5498,6 @@
         function formatRateValue(value) {
             if (value == null || Number.isNaN(Number(value))) return "-";
             return Number(value).toFixed(2);
-        }
-
-        function formatCostValue(value) {
-            if (value == null || Number.isNaN(Number(value))) return "-";
-            return Number(value).toFixed(6);
         }
 
         function buildSessionValue(log) {
@@ -5458,12 +5608,7 @@
                             ${log.success ? statusBadge("healthy") : statusBadge("unhealthy")}
                             <div class="table-muted">HTTP ${log.status_code ?? "-"} · 尝试 ${formatMetricValue(log.attempt_count)}</div>
                         </td>
-                        <td>
-                            <strong>${formatMetricValue(log.total_tokens)}</strong>
-                            <div class="table-muted">输入 ${formatMetricValue(log.prompt_tokens)} / 输出 ${formatMetricValue(log.completion_tokens)}</div>
-                            <div class="table-muted">成本 ${formatCostValue(log.total_cost)}</div>
-                            <div class="table-muted">倍率 ${escapeHtml(formatMultiplier(log.billing_multiplier ?? 1))}</div>
-                        </td>
+                        <td>${renderLogBillingCell(log)}</td>
                         <td>
                             <strong>${formatMetricValue(log.duration_ms ?? log.latency_ms, " ms")}</strong>
                             <div class="table-muted">TTFB ${formatMetricValue(log.ttfb_ms, " ms")} · TPS ${formatRateValue(log.tps)}</div>
@@ -8006,11 +8151,6 @@
             return Number(value).toFixed(2);
         }
 
-        function formatCostValue(value) {
-            if (value == null || Number.isNaN(Number(value))) return "-";
-            return Number(value).toFixed(6);
-        }
-
         function buildSessionValue(log) {
             return log.session_id || log.conversation_key || log.request_id || "-";
         }
@@ -8120,12 +8260,7 @@
                             ${log.success ? statusBadge("healthy") : statusBadge("unhealthy")}
                             <div class="table-muted">HTTP ${log.status_code ?? "-"} · 尝试 ${formatMetricValue(log.attempt_count)}</div>
                         </td>
-                        <td>
-                            <strong>${formatMetricValue(log.total_tokens)}</strong>
-                            <div class="table-muted">输入 ${formatMetricValue(log.prompt_tokens)} / 输出 ${formatMetricValue(log.completion_tokens)}</div>
-                            <div class="table-muted">成本 ${formatCostValue(log.total_cost)}</div>
-                            <div class="table-muted">倍率 ${escapeHtml(formatMultiplier(log.billing_multiplier ?? 1))}</div>
-                        </td>
+                        <td>${renderLogBillingCell(log)}</td>
                         <td>
                             <strong>${formatMetricValue(log.duration_ms ?? log.latency_ms, " ms")}</strong>
                             <div class="table-muted">TTFB ${formatMetricValue(log.ttfb_ms, " ms")} · TPS ${formatRateValue(log.tps)}</div>

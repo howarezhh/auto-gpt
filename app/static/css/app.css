@@ -7232,3 +7232,149 @@ html[data-theme="dark"] .nav-link.active {
         border-bottom: 0;
     }
 }
+
+/* 2026-05-03 logs billing: show cost/token breakdown with tooltip pricing details. */
+.log-billing-cell {
+    position: relative;
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+}
+
+.log-billing-top {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.log-billing-total-cost {
+    font-weight: 700;
+    color: var(--text-strong);
+    line-height: 1.3;
+}
+
+.log-billing-total-tokens,
+.log-billing-meta {
+    font-size: 13px;
+    line-height: 1.45;
+    color: var(--text-soft);
+    overflow-wrap: anywhere;
+}
+
+.log-billing-total-tokens {
+    color: var(--text-main);
+}
+
+.log-billing-multiplier {
+    font-size: 14px;
+    line-height: 1.4;
+    font-weight: 700;
+    color: #f4c84d;
+}
+
+.log-billing-help {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+}
+
+.log-billing-help-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--text-soft);
+    cursor: help;
+}
+
+.log-billing-help-btn:hover,
+.log-billing-help-btn:focus-visible {
+    color: var(--accent);
+}
+
+.log-billing-help-btn:focus-visible {
+    outline: 1px solid color-mix(in srgb, var(--accent) 42%, var(--line));
+    outline-offset: 2px;
+    border-radius: 999px;
+}
+
+.log-billing-help-btn i {
+    font-size: 14px;
+    line-height: 1;
+}
+
+.log-billing-tooltip {
+    position: absolute;
+    right: -4px;
+    bottom: calc(100% + 10px);
+    z-index: 30;
+    width: min(360px, 42vw);
+    min-width: 280px;
+    padding: 12px 14px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--panel);
+    color: var(--text-main);
+    box-shadow: 0 12px 32px rgba(15, 23, 42, 0.18);
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(6px);
+    transition: opacity 0.18s ease, transform 0.18s ease, visibility 0.18s ease;
+    pointer-events: none;
+}
+
+.log-billing-help:hover .log-billing-tooltip,
+.log-billing-help:focus-within .log-billing-tooltip {
+    opacity: 1;
+    visibility: visible;
+    transform: translateY(0);
+}
+
+.log-billing-tooltip::after {
+    content: "";
+    position: absolute;
+    right: 10px;
+    top: 100%;
+    width: 10px;
+    height: 10px;
+    background: var(--panel);
+    border-right: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+    transform: translateY(-5px) rotate(45deg);
+}
+
+.log-billing-tooltip-group {
+    display: grid;
+    gap: 4px;
+}
+
+.log-billing-tooltip-group + .log-billing-tooltip-group {
+    margin-top: 10px;
+}
+
+.log-billing-tooltip-group strong {
+    font-size: 12px;
+    color: var(--text-strong);
+}
+
+.log-billing-tooltip-group div {
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--text-soft);
+    overflow-wrap: anywhere;
+}
+
+@media (max-width: 992px) {
+    .log-billing-tooltip {
+        width: min(320px, calc(100vw - 32px));
+        min-width: 240px;
+        right: 0;
+    }
+}

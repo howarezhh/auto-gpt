@@ -1,9 +1,16 @@
 from datetime import datetime
+from decimal import Decimal
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+from app.utils.decimal_utils import (
+    DB_MULTIPLIER_PRECISION,
+    DB_MULTIPLIER_SCALE,
+    DB_PRICE_PRECISION,
+    DB_PRICE_SCALE,
+)
 
 
 class ProviderModel(Base):
@@ -31,10 +38,10 @@ class ProviderModel(Base):
     context_window_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    price_multiplier: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
-    input_price_per_1k: Mapped[float | None] = mapped_column(Float, nullable=True)
-    output_price_per_1k: Mapped[float | None] = mapped_column(Float, nullable=True)
-    cache_price_per_1k: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_multiplier: Mapped[Decimal] = mapped_column(Numeric(DB_MULTIPLIER_PRECISION, DB_MULTIPLIER_SCALE), nullable=False, default=Decimal("1"))
+    input_price_per_1k: Mapped[Decimal | None] = mapped_column(Numeric(DB_PRICE_PRECISION, DB_PRICE_SCALE), nullable=True)
+    output_price_per_1k: Mapped[Decimal | None] = mapped_column(Numeric(DB_PRICE_PRECISION, DB_PRICE_SCALE), nullable=True)
+    cache_price_per_1k: Mapped[Decimal | None] = mapped_column(Numeric(DB_PRICE_PRECISION, DB_PRICE_SCALE), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow

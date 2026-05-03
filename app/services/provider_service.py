@@ -1,5 +1,6 @@
 from collections import defaultdict
 from datetime import datetime, timedelta
+from decimal import Decimal
 
 from httpx import HTTPError
 from sqlalchemy import delete, func, or_, select, update
@@ -30,6 +31,7 @@ from app.services.provider_capacity_service import (
 )
 from app.services.setting_service import SettingService
 from app.services.upstream_client import UpstreamClientService
+from app.utils.decimal_utils import multiply_price_and_multiplier, to_multiplier_decimal
 from app.utils.json_utils import dumps_json, loads_json
 
 
@@ -710,7 +712,7 @@ class ProviderService:
             provider_model.enabled = config.enabled
             provider_model.priority = config.priority
             provider_model.weight = config.weight
-            provider_model.price_multiplier = config.price_multiplier or 1.0
+            provider_model.price_multiplier = to_multiplier_decimal(config.price_multiplier)
             catalog = catalogs_by_name.get(config.model_name)
             if catalog is not None:
                 ProviderService._sync_provider_model_from_catalog(provider_model, catalog)
@@ -779,18 +781,18 @@ class ProviderService:
         provider_model.max_input_tokens = catalog.max_input_tokens
         provider_model.max_output_tokens = catalog.max_output_tokens
         if catalog.input_price_per_1k is not None:
-            provider_model.input_price_per_1k = catalog.input_price_per_1k * provider_model.price_multiplier
+            provider_model.input_price_per_1k = multiply_price_and_multiplier(catalog.input_price_per_1k, provider_model.price_multiplier)
         else:
             provider_model.input_price_per_1k = None
         if catalog.output_price_per_1k is not None:
-            provider_model.output_price_per_1k = catalog.output_price_per_1k * provider_model.price_multiplier
+            provider_model.output_price_per_1k = multiply_price_and_multiplier(catalog.output_price_per_1k, provider_model.price_multiplier)
         else:
             provider_model.output_price_per_1k = None
         catalog_cache_price = catalog.cache_price_per_1k
         if catalog_cache_price is None:
             catalog_cache_price = catalog.input_price_per_1k
         if catalog_cache_price is not None:
-            provider_model.cache_price_per_1k = catalog_cache_price * provider_model.price_multiplier
+            provider_model.cache_price_per_1k = multiply_price_and_multiplier(catalog_cache_price, provider_model.price_multiplier)
         else:
             provider_model.cache_price_per_1k = None
 

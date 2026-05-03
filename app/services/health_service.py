@@ -281,6 +281,7 @@ class HealthService:
         payload: dict[str, Any],
     ) -> dict[str, Any]:
         started = time.perf_counter()
+        setting = await ProxyService._get_setting_async()
         endpoint_label = "chat/completions" if endpoint_path == "/chat/completions" else "responses"
         native_support_label = f"原生支持 {endpoint_label}"
         adapted_support_label = f"通过适配支持 {endpoint_label}"
@@ -292,6 +293,7 @@ class HealthService:
                 endpoint_path,
                 payload,
                 started=started,
+                setting=setting,
             )
             latency_ms = int((time.perf_counter() - started) * 1000)
             output_text = ProxyService._extract_response_text(response, limit_bytes=160)

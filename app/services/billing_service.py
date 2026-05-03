@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal
 from uuid import uuid4
 
 from sqlalchemy import func, select, update
@@ -12,43 +12,49 @@ from app.models.request_log import RequestLog
 from app.models.user_account import UserAccount
 from app.models.user_account_billing_record import UserAccountBillingRecord
 from app.schemas.api_key import ApiKeyBillingRecordOut, ApiKeyBillingSummaryOut
+from app.utils.decimal_utils import (
+    MONEY_QUANT,
+    decimal_to_float,
+    quantize_money,
+    to_money_decimal,
+    to_multiplier_decimal,
+    to_price_decimal,
+)
 
 
 class BillingService:
-    MONEY_QUANT = Decimal("0.000001")
+    MONEY_QUANT = MONEY_QUANT
 
     @staticmethod
     def to_decimal(value) -> Decimal:
-        if value is None:
-            return Decimal("0").quantize(BillingService.MONEY_QUANT)
-        if isinstance(value, Decimal):
-            return value.quantize(BillingService.MONEY_QUANT, rounding=ROUND_HALF_UP)
-        return Decimal(str(value)).quantize(BillingService.MONEY_QUANT, rounding=ROUND_HALF_UP)
+        return to_money_decimal(value)
 
     @staticmethod
     def to_float(value) -> float | None:
-        if value is None:
-            return None
-        return float(BillingService.to_decimal(value))
+        return decimal_to_float(quantize_money(value))
+
+    @staticmethod
+    def to_price_float(value) -> float | None:
+        return decimal_to_float(to_price_decimal(value))
 
     @staticmethod
     def compute_log_cost(db: Session, log: RequestLog) -> dict[str, Decimal | str | None]:
         if not log.success:
-            return {"prompt_cost": Decimal("0"), "completion_cost": Decimal("0"), "total_cost": Decimal("0"), "billing_status": "no_charge"}
+            return {"prompt_cost": BillingService.to_decimal(0), "completion_cost": BillingService.to_decimal(0), "total_cost": BillingService.to_decimal(0), "billing_status": "no_charge"}
         if log.api_client_key_id is None:
-            return {"prompt_cost": Decimal("0"), "completion_cost": Decimal("0"), "total_cost": Decimal("0"), "billing_status": "internal_request"}
+            return {"prompt_cost": BillingService.to_decimal(0), "completion_cost": BillingService.to_decimal(0), "total_cost": BillingService.to_decimal(0), "billing_status": "internal_request"}
         if log.request_path == "/v1/models":
-            return {"prompt_cost": Decimal("0"), "completion_cost": Decimal("0"), "total_cost": Decimal("0"), "billing_status": "no_charge"}
+            return {"prompt_cost": BillingService.to_decimal(0), "completion_cost": BillingService.to_decimal(0), "total_cost": BillingService.to_decimal(0), "billing_status": "no_charge"}
         if log.prompt_tokens is None and log.completion_tokens is None and log.total_tokens is None:
             return {"prompt_cost": None, "completion_cost": None, "total_cost": None, "billing_status": "pending_tokens"}
         if log.resolved_provider_model_id is None:
-            return {"prompt_cost": Decimal("0"), "completion_cost": Decimal("0"), "total_cost": Decimal("0"), "billing_status": "price_unresolved"}
+            return {"prompt_cost": BillingService.to_decimal(0), "completion_cost": BillingService.to_decimal(0), "total_cost": BillingService.to_decimal(0), "billing_status": "price_unresolved"}
 
         provider_model = db.get(ProviderModel, log.resolved_provider_model_id)
         if provider_model is None:
-            return {"prompt_cost": Decimal("0"), "completion_cost": Decimal("0"), "total_cost": Decimal("0"), "billing_status": "price_unresolved"}
+            return {"prompt_cost": BillingService.to_decimal(0), "completion_cost": BillingService.to_decimal(0), "total_cost": BillingService.to_decimal(0), "billing_status": "price_unresolved"}
 
-        log.billing_multiplier = provider_model.price_multiplier or 1.0
+        log.billing_multiplier = to_multiplier_decimal(provider_model.price_multiplier)
         log.channel_price_input_per_1k = provider_model.input_price_per_1k
         log.channel_price_output_per_1k = provider_model.output_price_per_1k
         log.channel_price_cache_per_1k = (
@@ -59,22 +65,22 @@ class BillingService:
         prompt_tokens = max(0, int(log.prompt_tokens or 0))
         completion_tokens = max(0, int(log.completion_tokens or 0))
         cache_read_tokens = max(0, int(log.cache_read_tokens or 0))
-        input_price = BillingService.to_decimal(provider_model.input_price_per_1k) if provider_model.input_price_per_1k is not None else None
-        output_price = BillingService.to_decimal(provider_model.output_price_per_1k) if provider_model.output_price_per_1k is not None else None
-        cache_price = BillingService.to_decimal(provider_model.cache_price_per_1k) if provider_model.cache_price_per_1k is not None else input_price
+        input_price = to_price_decimal(provider_model.input_price_per_1k)
+        output_price = to_price_decimal(provider_model.output_price_per_1k)
+        cache_price = to_price_decimal(provider_model.cache_price_per_1k) if provider_model.cache_price_per_1k is not None else input_price
 
         if input_price is None and output_price is None:
-            return {"prompt_cost": Decimal("0"), "completion_cost": Decimal("0"), "total_cost": Decimal("0"), "billing_status": "price_unset"}
+            return {"prompt_cost": BillingService.to_decimal(0), "completion_cost": BillingService.to_decimal(0), "total_cost": BillingService.to_decimal(0), "billing_status": "price_unset"}
 
         regular_prompt_tokens = max(0, prompt_tokens - cache_read_tokens)
-        prompt_cost = (BillingService.to_decimal(regular_prompt_tokens) / Decimal("1000")) * (input_price or Decimal("0"))
+        prompt_cost = (Decimal(regular_prompt_tokens) / Decimal("1000")) * (input_price or Decimal("0"))
         if cache_read_tokens > 0:
-            prompt_cost += (BillingService.to_decimal(cache_read_tokens) / Decimal("1000")) * (cache_price or input_price or Decimal("0"))
-        completion_cost = (BillingService.to_decimal(completion_tokens) / Decimal("1000")) * (output_price or Decimal("0"))
-        total_cost = (prompt_cost + completion_cost).quantize(BillingService.MONEY_QUANT, rounding=ROUND_HALF_UP)
+            prompt_cost += (Decimal(cache_read_tokens) / Decimal("1000")) * (cache_price or input_price or Decimal("0"))
+        completion_cost = (Decimal(completion_tokens) / Decimal("1000")) * (output_price or Decimal("0"))
+        total_cost = BillingService.to_decimal(prompt_cost + completion_cost)
         return {
-            "prompt_cost": prompt_cost.quantize(BillingService.MONEY_QUANT, rounding=ROUND_HALF_UP),
-            "completion_cost": completion_cost.quantize(BillingService.MONEY_QUANT, rounding=ROUND_HALF_UP),
+            "prompt_cost": BillingService.to_decimal(prompt_cost),
+            "completion_cost": BillingService.to_decimal(completion_cost),
             "total_cost": total_cost,
             "billing_status": "billed" if total_cost > 0 else "no_charge",
         }
@@ -184,9 +190,9 @@ class BillingService:
         existing_record = db.scalar(
             select(ApiClientBillingRecord).where(ApiClientBillingRecord.request_log_id == log.id)
         )
-        previous_amount = BillingService.to_decimal(abs(existing_record.amount)) if existing_record is not None else Decimal("0")
-        new_amount = BillingService.to_decimal(total_cost) if isinstance(total_cost, Decimal) else Decimal("0")
-        delta = (new_amount - previous_amount).quantize(BillingService.MONEY_QUANT, rounding=ROUND_HALF_UP)
+        previous_amount = BillingService.to_decimal(abs(existing_record.amount)) if existing_record is not None else BillingService.to_decimal(0)
+        new_amount = BillingService.to_decimal(total_cost) if isinstance(total_cost, Decimal) else BillingService.to_decimal(0)
+        delta = BillingService.to_decimal(new_amount - previous_amount)
 
         if delta:
             if owner_user is not None:
@@ -223,10 +229,10 @@ class BillingService:
             existing_record.completion_tokens = log.completion_tokens
             existing_record.total_tokens = log.total_tokens
             existing_record.unit_input_price_per_1k = (
-                BillingService.to_decimal(provider_model.input_price_per_1k) if provider_model and provider_model.input_price_per_1k is not None else None
+                to_price_decimal(provider_model.input_price_per_1k) if provider_model and provider_model.input_price_per_1k is not None else None
             )
             existing_record.unit_output_price_per_1k = (
-                BillingService.to_decimal(provider_model.output_price_per_1k) if provider_model and provider_model.output_price_per_1k is not None else None
+                to_price_decimal(provider_model.output_price_per_1k) if provider_model and provider_model.output_price_per_1k is not None else None
             )
             existing_record.remark = log.message
         elif existing_record is not None:
@@ -254,10 +260,10 @@ class BillingService:
             existing_user_record.completion_tokens = log.completion_tokens
             existing_user_record.total_tokens = log.total_tokens
             existing_user_record.unit_input_price_per_1k = (
-                BillingService.to_decimal(provider_model.input_price_per_1k) if provider_model and provider_model.input_price_per_1k is not None else None
+                to_price_decimal(provider_model.input_price_per_1k) if provider_model and provider_model.input_price_per_1k is not None else None
             )
             existing_user_record.unit_output_price_per_1k = (
-                BillingService.to_decimal(provider_model.output_price_per_1k) if provider_model and provider_model.output_price_per_1k is not None else None
+                to_price_decimal(provider_model.output_price_per_1k) if provider_model and provider_model.output_price_per_1k is not None else None
             )
             existing_user_record.remark = log.message
         elif existing_user_record is not None:
@@ -465,8 +471,8 @@ class BillingService:
             prompt_tokens=item.prompt_tokens,
             completion_tokens=item.completion_tokens,
             total_tokens=item.total_tokens,
-            unit_input_price_per_1k=BillingService.to_float(item.unit_input_price_per_1k),
-            unit_output_price_per_1k=BillingService.to_float(item.unit_output_price_per_1k),
+            unit_input_price_per_1k=BillingService.to_price_float(item.unit_input_price_per_1k),
+            unit_output_price_per_1k=BillingService.to_price_float(item.unit_output_price_per_1k),
             remark=item.remark,
             created_at=item.created_at,
         )
@@ -487,8 +493,8 @@ class BillingService:
             "prompt_tokens": item.prompt_tokens,
             "completion_tokens": item.completion_tokens,
             "total_tokens": item.total_tokens,
-            "unit_input_price_per_1k": BillingService.to_float(item.unit_input_price_per_1k),
-            "unit_output_price_per_1k": BillingService.to_float(item.unit_output_price_per_1k),
+            "unit_input_price_per_1k": BillingService.to_price_float(item.unit_input_price_per_1k),
+            "unit_output_price_per_1k": BillingService.to_price_float(item.unit_output_price_per_1k),
             "remark": item.remark,
             "created_at": item.created_at,
         }

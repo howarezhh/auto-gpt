@@ -648,7 +648,7 @@ class ApiKeyService:
                 api_key_id=api_client_key.id,
                 api_key_total_tokens_used=api_client_key.total_tokens_used,
                 api_key_total_cost_used=(
-                    float(BillingService.to_decimal(api_client_key.total_cost_used))
+                    BillingService.to_decimal(api_client_key.total_cost_used)
                     if api_client_key.total_cost_used is not None
                     else None
                 ),
@@ -659,7 +659,7 @@ class ApiKeyService:
                     else None
                 ),
                 account_total_cost_used=(
-                    float(BillingService.to_decimal(owner_snapshot.get("total_cost_used")))
+                    BillingService.to_decimal(owner_snapshot.get("total_cost_used"))
                     if isinstance(owner_snapshot, dict) and owner_snapshot.get("total_cost_used") is not None
                     else None
                 ),
@@ -672,12 +672,12 @@ class ApiKeyService:
                 total_token_limit=api_client_key.token_limit_total if is_billable_model_request else None,
                 daily_token_limit=api_client_key.token_limit_daily if is_billable_model_request else None,
                 total_cost_limit=(
-                    float(BillingService.to_decimal(api_client_key.cost_limit_total))
+                    BillingService.to_decimal(api_client_key.cost_limit_total)
                     if is_billable_model_request and api_client_key.cost_limit_total is not None
                     else None
                 ),
                 daily_cost_limit=(
-                    float(BillingService.to_decimal(api_client_key.cost_limit_daily))
+                    BillingService.to_decimal(api_client_key.cost_limit_daily)
                     if is_billable_model_request and api_client_key.cost_limit_daily is not None
                     else None
                 ),
@@ -714,21 +714,21 @@ class ApiKeyService:
                     else None
                 ),
                 account_cost_limit_total=(
-                    float(BillingService.to_decimal(api_client_key.owner_user.cost_limit_total))
+                    BillingService.to_decimal(api_client_key.owner_user.cost_limit_total)
                     if is_billable_model_request
                     and api_client_key.owner_user is not None
                     and api_client_key.owner_user.cost_limit_total is not None
                     else None
                 ),
                 account_cost_limit_daily=(
-                    float(BillingService.to_decimal(api_client_key.owner_user.cost_limit_daily))
+                    BillingService.to_decimal(api_client_key.owner_user.cost_limit_daily)
                     if is_billable_model_request
                     and api_client_key.owner_user is not None
                     and api_client_key.owner_user.cost_limit_daily is not None
                     else None
                 ),
                 account_cost_limit_monthly=(
-                    float(BillingService.to_decimal(api_client_key.owner_user.cost_limit_monthly))
+                    BillingService.to_decimal(api_client_key.owner_user.cost_limit_monthly)
                     if is_billable_model_request
                     and api_client_key.owner_user is not None
                     and api_client_key.owner_user.cost_limit_monthly is not None

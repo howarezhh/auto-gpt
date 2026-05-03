@@ -1,9 +1,18 @@
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, Numeric, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
+from app.utils.decimal_utils import (
+    DB_MONEY_PRECISION,
+    DB_MONEY_SCALE,
+    DB_MULTIPLIER_PRECISION,
+    DB_MULTIPLIER_SCALE,
+    DB_PRICE_PRECISION,
+    DB_PRICE_SCALE,
+)
 
 
 class RequestLog(Base):
@@ -45,9 +54,9 @@ class RequestLog(Base):
     tps: Mapped[float | None] = mapped_column(Float, nullable=True)
     reasoning_level: Mapped[str | None] = mapped_column(Text, nullable=True)
     attempt_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    prompt_cost: Mapped[float | None] = mapped_column(Numeric(18, 6), nullable=True)
-    completion_cost: Mapped[float | None] = mapped_column(Numeric(18, 6), nullable=True)
-    total_cost: Mapped[float | None] = mapped_column(Numeric(18, 6), nullable=True)
+    prompt_cost: Mapped[Decimal | None] = mapped_column(Numeric(DB_MONEY_PRECISION, DB_MONEY_SCALE), nullable=True)
+    completion_cost: Mapped[Decimal | None] = mapped_column(Numeric(DB_MONEY_PRECISION, DB_MONEY_SCALE), nullable=True)
+    total_cost: Mapped[Decimal | None] = mapped_column(Numeric(DB_MONEY_PRECISION, DB_MONEY_SCALE), nullable=True)
     billing_status: Mapped[str | None] = mapped_column(Text, nullable=True)
     billing_finalized_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     billing_event_id: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
@@ -55,11 +64,11 @@ class RequestLog(Base):
     billing_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     token_finalize_attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     token_finalize_error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    billing_multiplier: Mapped[float | None] = mapped_column(Float, nullable=True)
-    channel_price_input_per_1k: Mapped[float | None] = mapped_column(Float, nullable=True)
-    channel_price_output_per_1k: Mapped[float | None] = mapped_column(Float, nullable=True)
-    channel_price_cache_per_1k: Mapped[float | None] = mapped_column(Float, nullable=True)
-    api_client_balance_after: Mapped[float | None] = mapped_column(Numeric(18, 6), nullable=True)
+    billing_multiplier: Mapped[Decimal | None] = mapped_column(Numeric(DB_MULTIPLIER_PRECISION, DB_MULTIPLIER_SCALE), nullable=True)
+    channel_price_input_per_1k: Mapped[Decimal | None] = mapped_column(Numeric(DB_PRICE_PRECISION, DB_PRICE_SCALE), nullable=True)
+    channel_price_output_per_1k: Mapped[Decimal | None] = mapped_column(Numeric(DB_PRICE_PRECISION, DB_PRICE_SCALE), nullable=True)
+    channel_price_cache_per_1k: Mapped[Decimal | None] = mapped_column(Numeric(DB_PRICE_PRECISION, DB_PRICE_SCALE), nullable=True)
+    api_client_balance_after: Mapped[Decimal | None] = mapped_column(Numeric(DB_MONEY_PRECISION, DB_MONEY_SCALE), nullable=True)
     prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -82,7 +91,7 @@ class RequestLog(Base):
     api_client_auth_result: Mapped[str | None] = mapped_column(Text, nullable=True)
     api_client_remaining_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     api_client_remaining_requests_daily: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    api_client_remaining_cost_daily: Mapped[float | None] = mapped_column(Numeric(18, 6), nullable=True)
+    api_client_remaining_cost_daily: Mapped[Decimal | None] = mapped_column(Numeric(DB_MONEY_PRECISION, DB_MONEY_SCALE), nullable=True)
     api_client_policy_snapshot_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     trace_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)

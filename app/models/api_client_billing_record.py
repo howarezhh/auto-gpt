@@ -5,6 +5,12 @@ from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, Text, UniqueConst
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+from app.utils.decimal_utils import (
+    DB_MONEY_PRECISION,
+    DB_MONEY_SCALE,
+    DB_PRICE_PRECISION,
+    DB_PRICE_SCALE,
+)
 
 
 class ApiClientBillingRecord(Base):
@@ -17,16 +23,16 @@ class ApiClientBillingRecord(Base):
     api_client_key_id: Mapped[int] = mapped_column(ForeignKey("api_client_keys.id", ondelete="CASCADE"), nullable=False, index=True)
     request_log_id: Mapped[int | None] = mapped_column(ForeignKey("request_logs.id", ondelete="SET NULL"), nullable=True, index=True)
     record_type: Mapped[str] = mapped_column(Text, nullable=False, index=True)
-    amount: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False, default=Decimal("0"))
-    balance_after: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    amount: Mapped[Decimal] = mapped_column(Numeric(DB_MONEY_PRECISION, DB_MONEY_SCALE), nullable=False, default=Decimal("0"))
+    balance_after: Mapped[Decimal | None] = mapped_column(Numeric(DB_MONEY_PRECISION, DB_MONEY_SCALE), nullable=True)
     provider_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     provider_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     model_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    unit_input_price_per_1k: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
-    unit_output_price_per_1k: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    unit_input_price_per_1k: Mapped[Decimal | None] = mapped_column(Numeric(DB_PRICE_PRECISION, DB_PRICE_SCALE), nullable=True)
+    unit_output_price_per_1k: Mapped[Decimal | None] = mapped_column(Numeric(DB_PRICE_PRECISION, DB_PRICE_SCALE), nullable=True)
     remark: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
 

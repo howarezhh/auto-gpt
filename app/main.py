@@ -42,6 +42,14 @@ from app.services.setting_service import SettingService
 from app.services.upstream_client import UpstreamClientService
 from app.services.user_auth_service import require_admin_api_user
 from app.tasks import configure_scheduler
+from app.utils.decimal_utils import (
+    DB_MONEY_PRECISION,
+    DB_MONEY_SCALE,
+    DB_MULTIPLIER_PRECISION,
+    DB_MULTIPLIER_SCALE,
+    DB_PRICE_PRECISION,
+    DB_PRICE_SCALE,
+)
 from app.utils.json_utils import dumps_json, safeJsonParse
 
 
@@ -142,12 +150,12 @@ def _migrate_app_setting_concurrency_columns(db) -> None:
 
 def _migrate_cache_price_columns(db) -> None:
     dialect_name = db.get_bind().dialect.name
-    float_type = "DOUBLE PRECISION" if dialect_name == "postgresql" else "FLOAT"
+    price_type = f"NUMERIC({DB_PRICE_PRECISION}, {DB_PRICE_SCALE})"
     true_default = "TRUE" if dialect_name == "postgresql" else "1"
     false_default = "FALSE" if dialect_name == "postgresql" else "0"
     additions_by_table = {
         "provider_models": {
-            "cache_price_per_1k": f"ALTER TABLE provider_models ADD COLUMN cache_price_per_1k {float_type}",
+            "cache_price_per_1k": f"ALTER TABLE provider_models ADD COLUMN cache_price_per_1k {price_type}",
             "supports_tools": f"ALTER TABLE provider_models ADD COLUMN supports_tools BOOLEAN NOT NULL DEFAULT {false_default}",
             "supports_chat_completions": f"ALTER TABLE provider_models ADD COLUMN supports_chat_completions BOOLEAN NOT NULL DEFAULT {true_default}",
             "supports_responses": f"ALTER TABLE provider_models ADD COLUMN supports_responses BOOLEAN NOT NULL DEFAULT {true_default}",
@@ -156,7 +164,7 @@ def _migrate_cache_price_columns(db) -> None:
             "max_output_tokens": "ALTER TABLE provider_models ADD COLUMN max_output_tokens INTEGER",
         },
         "model_catalogs": {
-            "cache_price_per_1k": f"ALTER TABLE model_catalogs ADD COLUMN cache_price_per_1k {float_type}",
+            "cache_price_per_1k": f"ALTER TABLE model_catalogs ADD COLUMN cache_price_per_1k {price_type}",
             "supports_stream": f"ALTER TABLE model_catalogs ADD COLUMN supports_stream BOOLEAN NOT NULL DEFAULT {true_default}",
             "supports_vision": f"ALTER TABLE model_catalogs ADD COLUMN supports_vision BOOLEAN NOT NULL DEFAULT {false_default}",
             "supports_tools": f"ALTER TABLE model_catalogs ADD COLUMN supports_tools BOOLEAN NOT NULL DEFAULT {false_default}",
@@ -167,7 +175,7 @@ def _migrate_cache_price_columns(db) -> None:
             "max_output_tokens": "ALTER TABLE model_catalogs ADD COLUMN max_output_tokens INTEGER",
         },
         "request_logs": {
-            "channel_price_cache_per_1k": f"ALTER TABLE request_logs ADD COLUMN channel_price_cache_per_1k {float_type}",
+            "channel_price_cache_per_1k": f"ALTER TABLE request_logs ADD COLUMN channel_price_cache_per_1k {price_type}",
         },
     }
     changed = False
@@ -206,6 +214,9 @@ def _migrate_cache_price_columns(db) -> None:
 
 
 def _migrate_request_log_columns(db) -> None:
+    money_type = f"NUMERIC({DB_MONEY_PRECISION}, {DB_MONEY_SCALE})"
+    price_type = f"NUMERIC({DB_PRICE_PRECISION}, {DB_PRICE_SCALE})"
+    multiplier_type = f"NUMERIC({DB_MULTIPLIER_PRECISION}, {DB_MULTIPLIER_SCALE})"
     existing = {
         row[1]
         for row in db.execute(text("PRAGMA table_info(request_logs)")).fetchall()
@@ -231,9 +242,9 @@ def _migrate_request_log_columns(db) -> None:
         "tps": "ALTER TABLE request_logs ADD COLUMN tps FLOAT",
         "reasoning_level": "ALTER TABLE request_logs ADD COLUMN reasoning_level TEXT",
         "attempt_count": "ALTER TABLE request_logs ADD COLUMN attempt_count INTEGER",
-        "prompt_cost": "ALTER TABLE request_logs ADD COLUMN prompt_cost NUMERIC",
-        "completion_cost": "ALTER TABLE request_logs ADD COLUMN completion_cost NUMERIC",
-        "total_cost": "ALTER TABLE request_logs ADD COLUMN total_cost NUMERIC",
+        "prompt_cost": f"ALTER TABLE request_logs ADD COLUMN prompt_cost {money_type}",
+        "completion_cost": f"ALTER TABLE request_logs ADD COLUMN completion_cost {money_type}",
+        "total_cost": f"ALTER TABLE request_logs ADD COLUMN total_cost {money_type}",
         "billing_status": "ALTER TABLE request_logs ADD COLUMN billing_status TEXT",
         "billing_finalized_at": "ALTER TABLE request_logs ADD COLUMN billing_finalized_at DATETIME",
         "billing_event_id": "ALTER TABLE request_logs ADD COLUMN billing_event_id TEXT",
@@ -241,11 +252,11 @@ def _migrate_request_log_columns(db) -> None:
         "billing_error": "ALTER TABLE request_logs ADD COLUMN billing_error TEXT",
         "token_finalize_attempt_count": "ALTER TABLE request_logs ADD COLUMN token_finalize_attempt_count INTEGER NOT NULL DEFAULT 0",
         "token_finalize_error": "ALTER TABLE request_logs ADD COLUMN token_finalize_error TEXT",
-        "billing_multiplier": "ALTER TABLE request_logs ADD COLUMN billing_multiplier FLOAT",
-        "channel_price_input_per_1k": "ALTER TABLE request_logs ADD COLUMN channel_price_input_per_1k FLOAT",
-        "channel_price_output_per_1k": "ALTER TABLE request_logs ADD COLUMN channel_price_output_per_1k FLOAT",
-        "channel_price_cache_per_1k": "ALTER TABLE request_logs ADD COLUMN channel_price_cache_per_1k FLOAT",
-        "api_client_balance_after": "ALTER TABLE request_logs ADD COLUMN api_client_balance_after NUMERIC",
+        "billing_multiplier": f"ALTER TABLE request_logs ADD COLUMN billing_multiplier {multiplier_type}",
+        "channel_price_input_per_1k": f"ALTER TABLE request_logs ADD COLUMN channel_price_input_per_1k {price_type}",
+        "channel_price_output_per_1k": f"ALTER TABLE request_logs ADD COLUMN channel_price_output_per_1k {price_type}",
+        "channel_price_cache_per_1k": f"ALTER TABLE request_logs ADD COLUMN channel_price_cache_per_1k {price_type}",
+        "api_client_balance_after": f"ALTER TABLE request_logs ADD COLUMN api_client_balance_after {money_type}",
         "prompt_tokens": "ALTER TABLE request_logs ADD COLUMN prompt_tokens INTEGER",
         "completion_tokens": "ALTER TABLE request_logs ADD COLUMN completion_tokens INTEGER",
         "total_tokens": "ALTER TABLE request_logs ADD COLUMN total_tokens INTEGER",
@@ -267,7 +278,7 @@ def _migrate_request_log_columns(db) -> None:
         "api_client_auth_result": "ALTER TABLE request_logs ADD COLUMN api_client_auth_result TEXT",
         "api_client_remaining_tokens": "ALTER TABLE request_logs ADD COLUMN api_client_remaining_tokens INTEGER",
         "api_client_remaining_requests_daily": "ALTER TABLE request_logs ADD COLUMN api_client_remaining_requests_daily INTEGER",
-        "api_client_remaining_cost_daily": "ALTER TABLE request_logs ADD COLUMN api_client_remaining_cost_daily NUMERIC",
+        "api_client_remaining_cost_daily": f"ALTER TABLE request_logs ADD COLUMN api_client_remaining_cost_daily {money_type}",
         "api_client_policy_snapshot_json": "ALTER TABLE request_logs ADD COLUMN api_client_policy_snapshot_json TEXT",
     }
     changed = False
@@ -286,10 +297,10 @@ def _migrate_request_log_columns(db) -> None:
     provider_model_additions = {
         "circuit_state": "ALTER TABLE provider_models ADD COLUMN circuit_state TEXT NOT NULL DEFAULT 'closed'",
         "circuit_opened_at": "ALTER TABLE provider_models ADD COLUMN circuit_opened_at DATETIME",
-        "price_multiplier": "ALTER TABLE provider_models ADD COLUMN price_multiplier FLOAT NOT NULL DEFAULT 1.0",
-        "input_price_per_1k": "ALTER TABLE provider_models ADD COLUMN input_price_per_1k FLOAT",
-        "output_price_per_1k": "ALTER TABLE provider_models ADD COLUMN output_price_per_1k FLOAT",
-        "cache_price_per_1k": "ALTER TABLE provider_models ADD COLUMN cache_price_per_1k FLOAT",
+        "price_multiplier": f"ALTER TABLE provider_models ADD COLUMN price_multiplier {multiplier_type} NOT NULL DEFAULT 1.0",
+        "input_price_per_1k": f"ALTER TABLE provider_models ADD COLUMN input_price_per_1k {price_type}",
+        "output_price_per_1k": f"ALTER TABLE provider_models ADD COLUMN output_price_per_1k {price_type}",
+        "cache_price_per_1k": f"ALTER TABLE provider_models ADD COLUMN cache_price_per_1k {price_type}",
         "supports_tools": "ALTER TABLE provider_models ADD COLUMN supports_tools BOOLEAN NOT NULL DEFAULT 0",
         "supports_chat_completions": "ALTER TABLE provider_models ADD COLUMN supports_chat_completions BOOLEAN NOT NULL DEFAULT 1",
         "supports_responses": "ALTER TABLE provider_models ADD COLUMN supports_responses BOOLEAN NOT NULL DEFAULT 1",
@@ -311,7 +322,7 @@ def _migrate_request_log_columns(db) -> None:
         for row in db.execute(text("PRAGMA table_info(model_catalogs)")).fetchall()
     }
     model_catalog_additions = {
-        "cache_price_per_1k": "ALTER TABLE model_catalogs ADD COLUMN cache_price_per_1k FLOAT",
+        "cache_price_per_1k": f"ALTER TABLE model_catalogs ADD COLUMN cache_price_per_1k {price_type}",
         "context_window_tokens": "ALTER TABLE model_catalogs ADD COLUMN context_window_tokens INTEGER",
         "supports_tools": "ALTER TABLE model_catalogs ADD COLUMN supports_tools BOOLEAN NOT NULL DEFAULT 0",
         "supports_chat_completions": "ALTER TABLE model_catalogs ADD COLUMN supports_chat_completions BOOLEAN NOT NULL DEFAULT 1",
@@ -339,14 +350,14 @@ def _migrate_request_log_columns(db) -> None:
         "environment_name": "ALTER TABLE api_client_keys ADD COLUMN environment_name TEXT",
         "request_limit_daily": "ALTER TABLE api_client_keys ADD COLUMN request_limit_daily INTEGER",
         "token_limit_daily": "ALTER TABLE api_client_keys ADD COLUMN token_limit_daily INTEGER",
-        "cost_limit_daily": "ALTER TABLE api_client_keys ADD COLUMN cost_limit_daily NUMERIC",
+        "cost_limit_daily": f"ALTER TABLE api_client_keys ADD COLUMN cost_limit_daily {money_type}",
         "qps_limit": "ALTER TABLE api_client_keys ADD COLUMN qps_limit INTEGER",
         "rpm_limit": "ALTER TABLE api_client_keys ADD COLUMN rpm_limit INTEGER",
         "tpm_limit": "ALTER TABLE api_client_keys ADD COLUMN tpm_limit INTEGER",
-        "cost_limit_total": "ALTER TABLE api_client_keys ADD COLUMN cost_limit_total NUMERIC",
-        "total_cost_used": "ALTER TABLE api_client_keys ADD COLUMN total_cost_used NUMERIC NOT NULL DEFAULT 0",
-        "balance_amount": "ALTER TABLE api_client_keys ADD COLUMN balance_amount NUMERIC",
-        "total_recharge_amount": "ALTER TABLE api_client_keys ADD COLUMN total_recharge_amount NUMERIC NOT NULL DEFAULT 0",
+        "cost_limit_total": f"ALTER TABLE api_client_keys ADD COLUMN cost_limit_total {money_type}",
+        "total_cost_used": f"ALTER TABLE api_client_keys ADD COLUMN total_cost_used {money_type} NOT NULL DEFAULT 0",
+        "balance_amount": f"ALTER TABLE api_client_keys ADD COLUMN balance_amount {money_type}",
+        "total_recharge_amount": f"ALTER TABLE api_client_keys ADD COLUMN total_recharge_amount {money_type} NOT NULL DEFAULT 0",
         "owner_user_id": "ALTER TABLE api_client_keys ADD COLUMN owner_user_id INTEGER",
         "raw_key_encrypted": "ALTER TABLE api_client_keys ADD COLUMN raw_key_encrypted TEXT",
         "allowed_model_names_json": "ALTER TABLE api_client_keys ADD COLUMN allowed_model_names_json TEXT NOT NULL DEFAULT '[]'",

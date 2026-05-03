@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from decimal import Decimal
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
@@ -14,6 +15,15 @@ from app.models.user_account import UserAccount
 from app.schemas.model_catalog import ModelCatalogCreate, ModelCatalogUpdate, ModelProviderBindingIn
 from app.services.cache_service import CacheService
 from app.services.provider_service import ProviderService
+from app.utils.decimal_utils import (
+    MULTIPLIER_QUANT,
+    PRICE_QUANT,
+    decimal_to_float,
+    decimals_equal,
+    divide_price_by_multiplier,
+    multiply_price_and_multiplier,
+    to_multiplier_decimal,
+)
 from app.utils.json_utils import dumps_json, loads_json
 
 
@@ -73,6 +83,7 @@ class ModelCatalogService:
             "total": len(payloads),
             "enabled": sum(1 for item in payloads if item["enabled"]),
             "bound_providers": sum(item["provider_count"] for item in payloads),
+            "available_providers": sum(item["available_provider_count"] for item in payloads),
             "enabled_providers": sum(item["enabled_provider_count"] for item in payloads),
         }
 
@@ -260,9 +271,9 @@ class ModelCatalogService:
                         direct_output=item.output_price_per_1k,
                         base_cache=catalog.cache_price_per_1k,
                         direct_cache=item.cache_price_per_1k,
-                        fallback=item.price_multiplier or 1.0,
+                        fallback=item.price_multiplier,
                     )
-                    if abs((item.price_multiplier or 1.0) - derived_multiplier) > 1e-9:
+                    if not decimals_equal(item.price_multiplier, derived_multiplier, quant=MULTIPLIER_QUANT):
                         item.price_multiplier = derived_multiplier
                         changed = True
                 if ModelCatalogService._sync_provider_model_shared_fields(item, catalog):
@@ -448,6 +459,9 @@ class ModelCatalogService:
             )
 
         active_bindings = [item for item in bindings if item["bound"]]
+        available_bindings = [
+            item for item in active_bindings if ModelCatalogService._is_binding_available_for_catalog_display(item)
+        ]
         enabled_bindings = [item for item in active_bindings if ModelCatalogService._is_binding_routable(item)]
         input_prices = [item["effective_input_price_per_1k"] for item in enabled_bindings if item["effective_input_price_per_1k"] is not None]
         output_prices = [item["effective_output_price_per_1k"] for item in enabled_bindings if item["effective_output_price_per_1k"] is not None]
@@ -475,6 +489,8 @@ class ModelCatalogService:
             "speed_label": catalog.speed_label,
             "remark": catalog.remark,
             "provider_count": len(active_bindings),
+            "bound_provider_count": len(active_bindings),
+            "available_provider_count": len(available_bindings),
             "enabled_provider_count": len(enabled_bindings),
             "lowest_input_price_per_1k": min(input_prices) if input_prices else catalog.input_price_per_1k,
             "lowest_output_price_per_1k": min(output_prices) if output_prices else catalog.output_price_per_1k,
@@ -494,15 +510,19 @@ class ModelCatalogService:
             "routable_price_multiplier_count": len(routable_multipliers),
             "min_bound_price_multiplier": min(bound_multipliers) if bound_multipliers else None,
             "max_bound_price_multiplier": max(bound_multipliers) if bound_multipliers else None,
-            "available_provider_names": [item["provider_name"] for item in enabled_bindings],
+            "available_provider_names": [item["provider_name"] for item in available_bindings],
             "provider_bindings": bindings,
             "created_at": catalog.created_at,
             "updated_at": catalog.updated_at,
         }
 
     @staticmethod
-    def _average_multiplier(multipliers: list[float]) -> float | None:
-        return round(sum(multipliers) / len(multipliers), 4) if multipliers else None
+    def _average_multiplier(multipliers: list[Decimal | float | int]) -> float | None:
+        normalized = [to_multiplier_decimal(item) for item in multipliers if item is not None]
+        if not normalized:
+            return None
+        average = sum(normalized, Decimal("0")) / Decimal(len(normalized))
+        return decimal_to_float(average.quantize(Decimal("0.0001")))
 
     @staticmethod
     def _apply_provider_bindings(db: Session, catalog: ModelCatalog, bindings: list[ModelProviderBindingIn]) -> None:
@@ -540,15 +560,15 @@ class ModelCatalogService:
             provider_model.max_output_tokens = catalog.max_output_tokens
             provider_model.priority = binding.priority
             provider_model.weight = binding.weight
-            provider_model.price_multiplier = binding.price_multiplier
+            provider_model.price_multiplier = to_multiplier_decimal(binding.price_multiplier)
             if catalog.input_price_per_1k is not None:
-                provider_model.input_price_per_1k = catalog.input_price_per_1k * binding.price_multiplier
+                provider_model.input_price_per_1k = multiply_price_and_multiplier(catalog.input_price_per_1k, provider_model.price_multiplier)
             if catalog.output_price_per_1k is not None:
-                provider_model.output_price_per_1k = catalog.output_price_per_1k * binding.price_multiplier
+                provider_model.output_price_per_1k = multiply_price_and_multiplier(catalog.output_price_per_1k, provider_model.price_multiplier)
             if catalog.cache_price_per_1k is not None:
-                provider_model.cache_price_per_1k = catalog.cache_price_per_1k * binding.price_multiplier
+                provider_model.cache_price_per_1k = multiply_price_and_multiplier(catalog.cache_price_per_1k, provider_model.price_multiplier)
             elif catalog.input_price_per_1k is not None:
-                provider_model.cache_price_per_1k = catalog.input_price_per_1k * binding.price_multiplier
+                provider_model.cache_price_per_1k = multiply_price_and_multiplier(catalog.input_price_per_1k, provider_model.price_multiplier)
             ProviderService.refresh_provider_state(provider)
 
         for provider in providers:
@@ -572,12 +592,12 @@ class ModelCatalogService:
         for provider_model in provider_models:
             if "input_price_per_1k" in fields:
                 if catalog.input_price_per_1k is not None:
-                    provider_model.input_price_per_1k = catalog.input_price_per_1k * provider_model.price_multiplier
+                    provider_model.input_price_per_1k = multiply_price_and_multiplier(catalog.input_price_per_1k, provider_model.price_multiplier)
                 else:
                     provider_model.input_price_per_1k = None
             if "output_price_per_1k" in fields:
                 if catalog.output_price_per_1k is not None:
-                    provider_model.output_price_per_1k = catalog.output_price_per_1k * provider_model.price_multiplier
+                    provider_model.output_price_per_1k = multiply_price_and_multiplier(catalog.output_price_per_1k, provider_model.price_multiplier)
                 else:
                     provider_model.output_price_per_1k = None
             if "cache_price_per_1k" in fields:
@@ -585,7 +605,7 @@ class ModelCatalogService:
                 if source_cache_price is None:
                     source_cache_price = catalog.input_price_per_1k
                 if source_cache_price is not None:
-                    provider_model.cache_price_per_1k = source_cache_price * provider_model.price_multiplier
+                    provider_model.cache_price_per_1k = multiply_price_and_multiplier(source_cache_price, provider_model.price_multiplier)
                 else:
                     provider_model.cache_price_per_1k = None
 
@@ -611,31 +631,19 @@ class ModelCatalogService:
             if getattr(provider_model, field) != getattr(catalog, field):
                 setattr(provider_model, field, getattr(catalog, field))
                 changed = True
-        expected_input = (
-            catalog.input_price_per_1k * provider_model.price_multiplier
-            if catalog.input_price_per_1k is not None
-            else None
-        )
-        expected_output = (
-            catalog.output_price_per_1k * provider_model.price_multiplier
-            if catalog.output_price_per_1k is not None
-            else None
-        )
+        expected_input = multiply_price_and_multiplier(catalog.input_price_per_1k, provider_model.price_multiplier)
+        expected_output = multiply_price_and_multiplier(catalog.output_price_per_1k, provider_model.price_multiplier)
         catalog_cache_price = catalog.cache_price_per_1k
         if catalog_cache_price is None:
             catalog_cache_price = catalog.input_price_per_1k
-        expected_cache = (
-            catalog_cache_price * provider_model.price_multiplier
-            if catalog_cache_price is not None
-            else None
-        )
+        expected_cache = multiply_price_and_multiplier(catalog_cache_price, provider_model.price_multiplier)
         for field, expected in (
             ("input_price_per_1k", expected_input),
             ("output_price_per_1k", expected_output),
             ("cache_price_per_1k", expected_cache),
         ):
             current = getattr(provider_model, field)
-            if not ModelCatalogService._nullable_float_equal(current, expected):
+            if not ModelCatalogService._nullable_decimal_equal(current, expected, quant=PRICE_QUANT):
                 setattr(provider_model, field, expected)
                 changed = True
         return changed
@@ -659,13 +667,13 @@ class ModelCatalogService:
             provider_model.max_output_tokens = catalog.max_output_tokens
 
     @staticmethod
-    def _nullable_float_equal(left: float | None, right: float | None) -> bool:
+    def _nullable_decimal_equal(left, right, *, quant: Decimal) -> bool:
         if left is None or right is None:
             return left is None and right is None
-        return abs(left - right) <= 1e-12
+        return decimals_equal(left, right, quant=quant)
 
     @staticmethod
-    def _pick_base_price(provider_models: list[ProviderModel], *, field_name: str) -> float | None:
+    def _pick_base_price(provider_models: list[ProviderModel], *, field_name: str):
         values = [getattr(item, field_name) for item in provider_models if getattr(item, field_name) is not None]
         return min(values) if values else None
 
@@ -677,32 +685,33 @@ class ModelCatalogService:
     @staticmethod
     def _effective_price_per_1k(
         *,
-        base_price_per_1k: float | None,
-        direct_price_per_1k: float | None,
-        price_multiplier: float,
-    ) -> float | None:
+        base_price_per_1k,
+        direct_price_per_1k,
+        price_multiplier,
+    ):
         if base_price_per_1k is not None:
-            return base_price_per_1k * price_multiplier
+            return multiply_price_and_multiplier(base_price_per_1k, price_multiplier)
         return direct_price_per_1k
 
     @staticmethod
     def _derive_multiplier(
         *,
-        base_input: float | None,
-        direct_input: float | None,
-        base_output: float | None,
-        direct_output: float | None,
-        base_cache: float | None,
-        direct_cache: float | None,
-        fallback: float,
-    ) -> float:
-        if base_input and direct_input is not None:
-            return max(direct_input / base_input, 0.000001)
-        if base_output and direct_output is not None:
-            return max(direct_output / base_output, 0.000001)
-        if base_cache and direct_cache is not None:
-            return max(direct_cache / base_cache, 0.000001)
-        return max(fallback or 1.0, 0.000001)
+        base_input,
+        direct_input,
+        base_output,
+        direct_output,
+        base_cache,
+        direct_cache,
+        fallback,
+    ) -> Decimal:
+        fallback_decimal = to_multiplier_decimal(fallback)
+        if base_input is not None and direct_input is not None:
+            return divide_price_by_multiplier(direct_input, base_input, fallback=fallback_decimal)
+        if base_output is not None and direct_output is not None:
+            return divide_price_by_multiplier(direct_output, base_output, fallback=fallback_decimal)
+        if base_cache is not None and direct_cache is not None:
+            return divide_price_by_multiplier(direct_cache, base_cache, fallback=fallback_decimal)
+        return fallback_decimal
 
     @staticmethod
     def _collect_user_route_scopes(db: Session, *, user: UserAccount) -> list[dict]:
@@ -772,4 +781,13 @@ class ModelCatalogService:
             and binding.get("provider_circuit_state") != "open"
             and binding.get("model_circuit_state") != "open"
             and binding.get("model_health_status") != "unhealthy"
+        )
+
+    @staticmethod
+    def _is_binding_available_for_catalog_display(binding: dict) -> bool:
+        return (
+            binding["bound"]
+            and binding["enabled"]
+            and binding["provider_enabled"]
+            and not binding.get("provider_maintenance_mode_enabled")
         )

@@ -110,6 +110,8 @@ class ModelCatalogBatchContextWindowUpdate(BaseModel):
 
 class ModelCatalogOut(ModelCatalogBase):
     provider_count: int = 0
+    bound_provider_count: int = 0
+    available_provider_count: int = 0
     enabled_provider_count: int = 0
     lowest_input_price_per_1k: float | None = None
     lowest_output_price_per_1k: float | None = None
@@ -130,6 +132,7 @@ class ModelCatalogSummaryOut(BaseModel):
     total: int = 0
     enabled: int = 0
     bound_providers: int = 0
+    available_providers: int = 0
     enabled_providers: int = 0
 
 

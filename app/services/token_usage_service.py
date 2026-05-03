@@ -23,6 +23,7 @@ from app.models.request_log import RequestLog
 from app.scheduler import scheduler
 from app.services.billing_service import BillingService
 from app.services.log_service import LogService
+from app.utils.decimal_utils import money_to_scaled_int
 from app.utils.json_utils import safeJsonParse
 
 
@@ -526,8 +527,8 @@ class TokenUsageService:
         if client is None:
             return
         token_delta = int(log.total_tokens or 0) - int(original_total_tokens or 0)
-        cost_delta = BillingService.to_float(billing_delta) or 0
-        if token_delta == 0 and cost_delta == 0:
+        scaled_cost_delta = money_to_scaled_int(billing_delta) if billing_delta is not None else 0
+        if token_delta == 0 and scaled_cost_delta == 0:
             return
         usage_time = log.created_at or datetime.utcnow()
         day_key = usage_time.strftime("%Y%m%d")
@@ -540,9 +541,9 @@ class TokenUsageService:
                 pipe.expire(f"quota:api_key:{log.api_client_key_id}:tokens:{day_key}", 60 * 60 * 26)
                 pipe.incrby(f"quota:api_key:{log.api_client_key_id}:tpm:{minute_key}", token_delta)
                 pipe.expire(f"quota:api_key:{log.api_client_key_id}:tpm:{minute_key}", 180)
-            if cost_delta != 0:
-                pipe.incrbyfloat(f"quota:api_key:{log.api_client_key_id}:cost:total", cost_delta)
-                pipe.incrbyfloat(f"quota:api_key:{log.api_client_key_id}:cost:{day_key}", cost_delta)
+            if scaled_cost_delta != 0:
+                pipe.incrby(f"quota:api_key:{log.api_client_key_id}:cost:total", scaled_cost_delta)
+                pipe.incrby(f"quota:api_key:{log.api_client_key_id}:cost:{day_key}", scaled_cost_delta)
                 pipe.expire(f"quota:api_key:{log.api_client_key_id}:cost:{day_key}", 60 * 60 * 26)
             owner_user_id = log.user_account_id or TokenUsageService._resolve_owner_user_id(log.api_client_key_id)
             if owner_user_id is not None:
@@ -553,11 +554,11 @@ class TokenUsageService:
                     pipe.expire(f"quota:account:{owner_user_id}:tokens:{day_key}", 60 * 60 * 26)
                     pipe.incrby(f"quota:account:{owner_user_id}:tokens:{month_key}", token_delta)
                     pipe.expire(f"quota:account:{owner_user_id}:tokens:{month_key}", 60 * 60 * 24 * 33)
-                if cost_delta != 0:
-                    pipe.incrbyfloat(f"quota:account:{owner_user_id}:cost:total", cost_delta)
-                    pipe.incrbyfloat(f"quota:account:{owner_user_id}:cost:{day_key}", cost_delta)
+                if scaled_cost_delta != 0:
+                    pipe.incrby(f"quota:account:{owner_user_id}:cost:total", scaled_cost_delta)
+                    pipe.incrby(f"quota:account:{owner_user_id}:cost:{day_key}", scaled_cost_delta)
                     pipe.expire(f"quota:account:{owner_user_id}:cost:{day_key}", 60 * 60 * 26)
-                    pipe.incrbyfloat(f"quota:account:{owner_user_id}:cost:{month_key}", cost_delta)
+                    pipe.incrby(f"quota:account:{owner_user_id}:cost:{month_key}", scaled_cost_delta)
                     pipe.expire(f"quota:account:{owner_user_id}:cost:{month_key}", 60 * 60 * 24 * 33)
             pipe.execute()
         except Exception:

@@ -1,9 +1,11 @@
 from datetime import datetime
+from decimal import Decimal
 
-from sqlalchemy import Boolean, DateTime, Float, Integer, Text
+from sqlalchemy import Boolean, DateTime, Integer, Numeric, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
+from app.utils.decimal_utils import DB_PRICE_PRECISION, DB_PRICE_SCALE
 
 
 class ModelCatalog(Base):
@@ -21,9 +23,9 @@ class ModelCatalog(Base):
     context_window_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    input_price_per_1k: Mapped[float | None] = mapped_column(Float, nullable=True)
-    output_price_per_1k: Mapped[float | None] = mapped_column(Float, nullable=True)
-    cache_price_per_1k: Mapped[float | None] = mapped_column(Float, nullable=True)
+    input_price_per_1k: Mapped[Decimal | None] = mapped_column(Numeric(DB_PRICE_PRECISION, DB_PRICE_SCALE), nullable=True)
+    output_price_per_1k: Mapped[Decimal | None] = mapped_column(Numeric(DB_PRICE_PRECISION, DB_PRICE_SCALE), nullable=True)
+    cache_price_per_1k: Mapped[Decimal | None] = mapped_column(Numeric(DB_PRICE_PRECISION, DB_PRICE_SCALE), nullable=True)
     speed_label: Mapped[str | None] = mapped_column(Text, nullable=True)
     remark: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
