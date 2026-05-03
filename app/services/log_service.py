@@ -2,7 +2,7 @@ import csv
 import io
 from datetime import datetime, timedelta
 
-from sqlalchemy import case, delete, func, not_, or_, select
+from sqlalchemy import Text, case, cast, delete, func, not_, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.provider_model import ProviderModel
@@ -242,10 +242,16 @@ class LogService:
         log_types: list[str] | None,
         provider_id: int | None,
         model_name: str | None,
+        model_query: str | None,
         conversation_key: str | None,
         api_client_key_id: int | None,
         api_client_key_query: str | None,
         user_account_id: int | None,
+        user_account_query: str | None,
+        tenant_name: str | None,
+        project_name: str | None,
+        app_name: str | None,
+        environment_name: str | None,
         success: bool | None,
         exclude_health_checks: bool = False,
         api_client_key_ids: list[int] | None = None,
@@ -268,10 +274,16 @@ class LogService:
             log_types=log_types,
             provider_id=provider_id,
             model_name=model_name,
+            model_query=model_query,
             conversation_key=conversation_key,
             api_client_key_id=api_client_key_id,
             api_client_key_query=api_client_key_query,
             user_account_id=user_account_id,
+            user_account_query=user_account_query,
+            tenant_name=tenant_name,
+            project_name=project_name,
+            app_name=app_name,
+            environment_name=environment_name,
             success=success,
             exclude_health_checks=exclude_health_checks,
             api_client_key_ids=api_client_key_ids,
@@ -282,10 +294,16 @@ class LogService:
             log_types=log_types,
             provider_id=provider_id,
             model_name=model_name,
+            model_query=model_query,
             conversation_key=conversation_key,
             api_client_key_id=api_client_key_id,
             api_client_key_query=api_client_key_query,
             user_account_id=user_account_id,
+            user_account_query=user_account_query,
+            tenant_name=tenant_name,
+            project_name=project_name,
+            app_name=app_name,
+            environment_name=environment_name,
             success=success,
             exclude_health_checks=exclude_health_checks,
             api_client_key_ids=api_client_key_ids,
@@ -296,10 +314,16 @@ class LogService:
             log_types=log_types,
             provider_id=provider_id,
             model_name=model_name,
+            model_query=model_query,
             conversation_key=conversation_key,
             api_client_key_id=api_client_key_id,
             api_client_key_query=api_client_key_query,
             user_account_id=user_account_id,
+            user_account_query=user_account_query,
+            tenant_name=tenant_name,
+            project_name=project_name,
+            app_name=app_name,
+            environment_name=environment_name,
             success=success,
             exclude_health_checks=exclude_health_checks,
             api_client_key_ids=api_client_key_ids,
@@ -331,10 +355,16 @@ class LogService:
         log_types: list[str] | None,
         provider_id: int | None,
         model_name: str | None,
+        model_query: str | None,
         conversation_key: str | None,
         api_client_key_id: int | None,
         api_client_key_query: str | None,
         user_account_id: int | None,
+        user_account_query: str | None,
+        tenant_name: str | None,
+        project_name: str | None,
+        app_name: str | None,
+        environment_name: str | None,
         success: bool | None,
         exclude_health_checks: bool,
         api_client_key_ids: list[int] | None = None,
@@ -348,7 +378,20 @@ class LogService:
         if provider_id:
             stmt = stmt.where(RequestLog.provider_id == provider_id)
         if model_name:
-            stmt = stmt.where(RequestLog.model_name == model_name)
+            stmt = stmt.where(
+                or_(
+                    RequestLog.model_name == model_name,
+                    RequestLog.requested_model == model_name,
+                )
+            )
+        if model_query:
+            keyword = f"%{model_query.strip()}%"
+            stmt = stmt.where(
+                or_(
+                    RequestLog.model_name.ilike(keyword),
+                    RequestLog.requested_model.ilike(keyword),
+                )
+            )
         if conversation_key:
             stmt = stmt.where(RequestLog.conversation_key == conversation_key)
         if api_client_key_id:
@@ -369,8 +412,25 @@ class LogService:
                 or_(
                     RequestLog.api_client_key_name.ilike(keyword),
                     RequestLog.api_client_key_prefix.ilike(keyword),
+                    cast(RequestLog.api_client_key_id, Text).ilike(keyword),
                 )
             )
+        if user_account_query:
+            keyword = f"%{user_account_query.strip()}%"
+            stmt = stmt.where(
+                or_(
+                    RequestLog.user_account_name.ilike(keyword),
+                    cast(RequestLog.user_account_id, Text).ilike(keyword),
+                )
+            )
+        if tenant_name:
+            stmt = stmt.where(RequestLog.tenant_name == tenant_name.strip())
+        if project_name:
+            stmt = stmt.where(RequestLog.project_name == project_name.strip())
+        if app_name:
+            stmt = stmt.where(RequestLog.app_name == app_name.strip())
+        if environment_name:
+            stmt = stmt.where(RequestLog.environment_name == environment_name.strip())
         if success is not None:
             stmt = stmt.where(RequestLog.success == success)
         return stmt
@@ -396,6 +456,29 @@ class LogService:
         user_account_id: int | None = None,
         api_client_key_ids: list[int] | None = None,
     ) -> dict[str, list[dict[str, str]]]:
+        def build_business_stmt(column):
+            stmt = select(column).where(column.is_not(None), column != "")
+            return LogService._apply_log_filters(
+                stmt,
+                log_type=None,
+                log_types=None,
+                provider_id=None,
+                model_name=None,
+                model_query=None,
+                conversation_key=None,
+                api_client_key_id=None,
+                api_client_key_query=None,
+                user_account_id=user_account_id,
+                user_account_query=None,
+                tenant_name=None,
+                project_name=None,
+                app_name=None,
+                environment_name=None,
+                success=None,
+                exclude_health_checks=exclude_health_checks,
+                api_client_key_ids=api_client_key_ids,
+            )
+
         provider_stmt = select(RequestLog.provider_id, RequestLog.provider_name).where(RequestLog.provider_id.is_not(None))
         model_stmt = select(RequestLog.model_name).where(RequestLog.model_name.is_not(None))
         api_key_stmt = select(
@@ -404,16 +487,26 @@ class LogService:
             RequestLog.api_client_key_prefix,
         ).where(RequestLog.api_client_key_id.is_not(None))
         user_stmt = select(RequestLog.user_account_id, RequestLog.user_account_name).where(RequestLog.user_account_id.is_not(None))
+        tenant_stmt = build_business_stmt(RequestLog.tenant_name)
+        project_stmt = build_business_stmt(RequestLog.project_name)
+        app_stmt = build_business_stmt(RequestLog.app_name)
+        environment_stmt = build_business_stmt(RequestLog.environment_name)
         provider_stmt = LogService._apply_log_filters(
             provider_stmt,
             log_type=None,
             log_types=None,
             provider_id=None,
             model_name=None,
+            model_query=None,
             conversation_key=None,
             api_client_key_id=None,
             api_client_key_query=None,
             user_account_id=user_account_id,
+            user_account_query=None,
+            tenant_name=None,
+            project_name=None,
+            app_name=None,
+            environment_name=None,
             success=None,
             exclude_health_checks=exclude_health_checks,
             api_client_key_ids=api_client_key_ids,
@@ -424,10 +517,16 @@ class LogService:
             log_types=None,
             provider_id=None,
             model_name=None,
+            model_query=None,
             conversation_key=None,
             api_client_key_id=None,
             api_client_key_query=None,
             user_account_id=user_account_id,
+            user_account_query=None,
+            tenant_name=None,
+            project_name=None,
+            app_name=None,
+            environment_name=None,
             success=None,
             exclude_health_checks=exclude_health_checks,
             api_client_key_ids=api_client_key_ids,
@@ -438,10 +537,16 @@ class LogService:
             log_types=None,
             provider_id=None,
             model_name=None,
+            model_query=None,
             conversation_key=None,
             api_client_key_id=None,
             api_client_key_query=None,
             user_account_id=user_account_id,
+            user_account_query=None,
+            tenant_name=None,
+            project_name=None,
+            app_name=None,
+            environment_name=None,
             success=None,
             exclude_health_checks=exclude_health_checks,
             api_client_key_ids=api_client_key_ids,
@@ -452,10 +557,16 @@ class LogService:
             log_types=None,
             provider_id=None,
             model_name=None,
+            model_query=None,
             conversation_key=None,
             api_client_key_id=None,
             api_client_key_query=None,
             user_account_id=user_account_id,
+            user_account_query=None,
+            tenant_name=None,
+            project_name=None,
+            app_name=None,
+            environment_name=None,
             success=None,
             exclude_health_checks=exclude_health_checks,
             api_client_key_ids=api_client_key_ids,
@@ -471,6 +582,10 @@ class LogService:
         user_rows = db.execute(
             user_stmt.distinct().order_by(RequestLog.user_account_id.asc(), RequestLog.user_account_name.asc())
         )
+        tenant_rows = db.execute(tenant_stmt.distinct().order_by(RequestLog.tenant_name.asc()))
+        project_rows = db.execute(project_stmt.distinct().order_by(RequestLog.project_name.asc()))
+        app_rows = db.execute(app_stmt.distinct().order_by(RequestLog.app_name.asc()))
+        environment_rows = db.execute(environment_stmt.distinct().order_by(RequestLog.environment_name.asc()))
 
         providers = [
             {
@@ -521,6 +636,26 @@ class LogService:
             for row in user_rows
             if row.user_account_id is not None
         ]
+        tenants = [
+            {"value": str(row.tenant_name), "label": str(row.tenant_name)}
+            for row in tenant_rows
+            if row.tenant_name
+        ]
+        projects = [
+            {"value": str(row.project_name), "label": str(row.project_name)}
+            for row in project_rows
+            if row.project_name
+        ]
+        apps = [
+            {"value": str(row.app_name), "label": str(row.app_name)}
+            for row in app_rows
+            if row.app_name
+        ]
+        environments = [
+            {"value": str(row.environment_name), "label": str(row.environment_name)}
+            for row in environment_rows
+            if row.environment_name
+        ]
 
         return {
             "providers": providers,
@@ -528,6 +663,10 @@ class LogService:
             "api_client_key_ids": api_client_key_ids,
             "api_client_key_queries": api_client_key_queries,
             "users": users,
+            "tenants": tenants,
+            "projects": projects,
+            "apps": apps,
+            "environments": environments,
         }
 
     @staticmethod
@@ -894,10 +1033,16 @@ class LogService:
         log_types: list[str] | None,
         provider_id: int | None,
         model_name: str | None,
+        model_query: str | None,
         conversation_key: str | None,
         api_client_key_id: int | None,
         api_client_key_query: str | None,
         user_account_id: int | None,
+        user_account_query: str | None,
+        tenant_name: str | None,
+        project_name: str | None,
+        app_name: str | None,
+        environment_name: str | None,
         success: bool | None,
         exclude_health_checks: bool,
         api_client_key_ids: list[int] | None = None,
@@ -910,10 +1055,16 @@ class LogService:
             log_types=log_types,
             provider_id=provider_id,
             model_name=model_name,
+            model_query=model_query,
             conversation_key=conversation_key,
             api_client_key_id=api_client_key_id,
             api_client_key_query=api_client_key_query,
             user_account_id=user_account_id,
+            user_account_query=user_account_query,
+            tenant_name=tenant_name,
+            project_name=project_name,
+            app_name=app_name,
+            environment_name=environment_name,
             success=success,
             exclude_health_checks=exclude_health_checks,
             api_client_key_ids=api_client_key_ids,

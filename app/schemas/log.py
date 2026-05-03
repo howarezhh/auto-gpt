@@ -100,6 +100,10 @@ class LogFilterOptionsResponse(BaseModel):
     api_client_key_ids: list[LogFilterOptionOut]
     api_client_key_queries: list[LogFilterOptionOut]
     users: list[LogFilterOptionOut]
+    tenants: list[LogFilterOptionOut]
+    projects: list[LogFilterOptionOut]
+    apps: list[LogFilterOptionOut]
+    environments: list[LogFilterOptionOut]
 
 
 class LogListResponse(BaseModel):

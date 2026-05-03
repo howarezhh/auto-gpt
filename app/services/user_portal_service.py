@@ -96,9 +96,14 @@ class UserPortalService:
         log_type: str | None = None,
         provider_id: int | None = None,
         model_name: str | None = None,
+        model_query: str | None = None,
         api_client_key_id: int | None = None,
         api_client_key_query: str | None = None,
         conversation_key: str | None = None,
+        tenant_name: str | None = None,
+        project_name: str | None = None,
+        app_name: str | None = None,
+        environment_name: str | None = None,
         success: bool | None = None,
         exclude_health_checks: bool = True,
     ) -> tuple[int, list[RequestLogOut], dict[str, int | float], list[dict]]:
@@ -117,10 +122,16 @@ class UserPortalService:
             log_types=list(LogService.USER_VISIBLE_LOG_TYPES),
             provider_id=provider_id,
             model_name=model_name,
+            model_query=model_query,
             conversation_key=conversation_key,
             api_client_key_id=api_client_key_id,
             api_client_key_query=api_client_key_query,
             user_account_id=user.id,
+            user_account_query=None,
+            tenant_name=tenant_name,
+            project_name=project_name,
+            app_name=app_name,
+            environment_name=environment_name,
             success=success,
             exclude_health_checks=exclude_health_checks,
             api_client_key_ids=key_ids,
@@ -143,6 +154,10 @@ class UserPortalService:
                 "api_client_key_ids": [],
                 "api_client_key_queries": [],
                 "users": [],
+                "tenants": [],
+                "projects": [],
+                "apps": [],
+                "environments": [],
             }
         all_options = LogService.get_filter_options(
             db,
@@ -175,6 +190,10 @@ class UserPortalService:
             "api_client_key_ids": owned_key_options,
             "api_client_key_queries": owned_query_options or all_options["api_client_key_queries"],
             "users": [],
+            "tenants": all_options["tenants"],
+            "projects": all_options["projects"],
+            "apps": all_options["apps"],
+            "environments": all_options["environments"],
         }
 
     @staticmethod

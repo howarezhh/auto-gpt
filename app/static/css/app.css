@@ -1906,6 +1906,20 @@ textarea.field-input {
     gap: 14px;
 }
 
+.logs-filter-group {
+    display: grid;
+    gap: 4px;
+    align-content: end;
+    padding-top: 4px;
+}
+
+.logs-filter-group h4 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--text);
+}
+
 .batch-quota-field {
     position: relative;
     padding: 16px;

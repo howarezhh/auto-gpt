@@ -68,6 +68,50 @@
                 <option value="">全部</option>
             </select>
         </label>
+        <div class="form-span-2 logs-filter-group">
+            <div class="panel-kicker">手动筛选</div>
+            <h4>用户 / 模型 / 密钥</h4>
+        </div>
+        <label>
+            <span>手动用户</span>
+            <input class="field-input" id="logs-user-account-query" type="text" placeholder="输入用户名或用户 ID">
+        </label>
+        <label>
+            <span>手动模型</span>
+            <input class="field-input" id="logs-model-query" type="text" placeholder="输入模型名关键字">
+        </label>
+        <label>
+            <span>手动密钥</span>
+            <input class="field-input" id="logs-api-client-key-query-manual" type="text" placeholder="输入密钥名称、前缀或 ID">
+        </label>
+        <div class="form-span-2 logs-filter-group">
+            <div class="panel-kicker">业务字段</div>
+            <h4>租户 / 项目 / 应用 / 环境</h4>
+        </div>
+        <label>
+            <span>租户</span>
+            <select class="field-input" id="logs-tenant-name">
+                <option value="">全部</option>
+            </select>
+        </label>
+        <label>
+            <span>项目</span>
+            <select class="field-input" id="logs-project-name">
+                <option value="">全部</option>
+            </select>
+        </label>
+        <label>
+            <span>应用</span>
+            <select class="field-input" id="logs-app-name">
+                <option value="">全部</option>
+            </select>
+        </label>
+        <label>
+            <span>环境</span>
+            <select class="field-input" id="logs-environment-name">
+                <option value="">全部</option>
+            </select>
+        </label>
         <label>
             <span>成功状态</span>
             <select class="field-input" id="logs-success">

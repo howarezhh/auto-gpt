@@ -71,6 +71,16 @@
         delete: async (url) => parseResponse(await fetch(url, { method: "DELETE" })),
     };
 
+    function debounce(callback, wait = 300) {
+        let timerId = null;
+        return (...args) => {
+            if (timerId) {
+                window.clearTimeout(timerId);
+            }
+            timerId = window.setTimeout(() => callback(...args), wait);
+        };
+    }
+
     function getResolvedTheme() {
         const storedTheme = window.localStorage.getItem("aotu-theme");
         if (storedTheme === "light" || storedTheme === "dark") {
@@ -5778,8 +5788,14 @@
         const lastRefreshLabel = document.getElementById("logs-last-refresh");
         const providerSelect = document.getElementById("logs-provider-id");
         const modelSelect = document.getElementById("logs-model-name");
+        const modelQueryInput = document.getElementById("logs-model-query");
         const apiClientKeyIdSelect = document.getElementById("logs-api-client-key-id");
         const apiClientKeyQuerySelect = document.getElementById("logs-api-client-key-query");
+        const apiClientKeyQueryManualInput = document.getElementById("logs-api-client-key-query-manual");
+        const tenantNameInput = document.getElementById("logs-tenant-name");
+        const projectNameInput = document.getElementById("logs-project-name");
+        const appNameInput = document.getElementById("logs-app-name");
+        const environmentNameInput = document.getElementById("logs-environment-name");
         const excludeHealthChecksInput = document.getElementById("logs-exclude-health-checks");
         const pageSizeSelect = document.getElementById("logs-page-size");
         const pageMeta = document.getElementById("logs-page-meta");
@@ -5788,13 +5804,21 @@
         const traceModal = document.getElementById("log-trace-modal");
         const traceContent = document.getElementById("log-trace-content");
         const closeBtn = document.getElementById("log-trace-close");
-        const filterIds = [
+        const immediateFilterIds = [
             "logs-log-type",
             "logs-provider-id",
             "logs-model-name",
             "logs-api-client-key-id",
             "logs-api-client-key-query",
             "logs-success",
+            "logs-tenant-name",
+            "logs-project-name",
+            "logs-app-name",
+            "logs-environment-name",
+        ];
+        const debouncedFilterIds = [
+            "logs-model-query",
+            "logs-api-client-key-query-manual",
             "logs-conversation-key",
         ];
         if (
@@ -5816,6 +5840,12 @@
         if (currentParams.get("conversation_key")) {
             document.getElementById("logs-conversation-key").value = currentParams.get("conversation_key");
         }
+        if (currentParams.get("model_query")) {
+            modelQueryInput.value = currentParams.get("model_query");
+        }
+        if (currentParams.get("api_client_key_query_text")) {
+            apiClientKeyQueryManualInput.value = currentParams.get("api_client_key_query_text");
+        }
         if (currentParams.get("exclude_health_checks") === "false") {
             excludeHealthChecksInput.checked = false;
         }
@@ -5825,14 +5855,20 @@
         traceModal.addEventListener("click", (event) => {
             if (event.target === traceModal) closeModal();
         });
-        for (const id of filterIds) {
+        for (const id of immediateFilterIds) {
             document.getElementById(id).addEventListener("change", () => {
                 state.page = 1;
                 loadLogs();
             });
+        }
+        const debouncedLoadLogs = debounce(() => {
+            state.page = 1;
+            loadLogs();
+        });
+        for (const id of debouncedFilterIds) {
             document.getElementById(id).addEventListener("input", () => {
                 state.page = 1;
-                loadLogs();
+                debouncedLoadLogs();
             });
         }
         pageSizeSelect.addEventListener("change", () => {
@@ -5856,17 +5892,28 @@
             const logType = document.getElementById("logs-log-type").value;
             const providerId = providerSelect.value;
             const modelName = modelSelect.value;
+            const modelQuery = modelQueryInput.value.trim();
             const apiClientKeyId = apiClientKeyIdSelect.value;
-            const apiClientKeyQuery = apiClientKeyQuerySelect.value;
+            const apiClientKeyQuery = apiClientKeyQueryManualInput.value.trim() || apiClientKeyQuerySelect.value;
             const success = document.getElementById("logs-success").value;
             const conversationKey = document.getElementById("logs-conversation-key").value.trim();
+            const tenantName = tenantNameInput.value.trim();
+            const projectName = projectNameInput.value.trim();
+            const appName = appNameInput.value.trim();
+            const environmentName = environmentNameInput.value.trim();
             if (logType) params.set("log_type", logType);
             if (providerId) params.set("provider_id", providerId);
             if (modelName) params.set("model_name", modelName);
+            if (modelQuery) params.set("model_query", modelQuery);
             if (apiClientKeyId) params.set("api_client_key_id", apiClientKeyId);
             if (apiClientKeyQuery) params.set("api_client_key_query", apiClientKeyQuery);
+            if (apiClientKeyQueryManualInput.value.trim()) params.set("api_client_key_query_text", apiClientKeyQueryManualInput.value.trim());
             if (success) params.set("success", success);
             if (conversationKey) params.set("conversation_key", conversationKey);
+            if (tenantName) params.set("tenant_name", tenantName);
+            if (projectName) params.set("project_name", projectName);
+            if (appName) params.set("app_name", appName);
+            if (environmentName) params.set("environment_name", environmentName);
             params.set("exclude_health_checks", excludeHealthChecksInput.checked ? "true" : "false");
             params.set("limit", "5000");
             setButtonTransientFeedback(exportBtn, "success", { successText: "准备导出" });
@@ -5928,6 +5975,10 @@
             renderSelectOptions(modelSelect, data.model_names);
             renderSelectOptions(apiClientKeyIdSelect, data.api_client_key_ids);
             renderSelectOptions(apiClientKeyQuerySelect, data.api_client_key_queries);
+            renderSelectOptions(tenantNameInput, data.tenants);
+            renderSelectOptions(projectNameInput, data.projects);
+            renderSelectOptions(appNameInput, data.apps);
+            renderSelectOptions(environmentNameInput, data.environments);
             if (!initialFilterValuesApplied && currentParams.get("provider_id")) {
                 providerSelect.value = currentParams.get("provider_id");
             }
@@ -5939,6 +5990,18 @@
             }
             if (!initialFilterValuesApplied && currentParams.get("api_client_key_query")) {
                 apiClientKeyQuerySelect.value = currentParams.get("api_client_key_query");
+            }
+            if (!initialFilterValuesApplied && currentParams.get("tenant_name")) {
+                tenantNameInput.value = currentParams.get("tenant_name");
+            }
+            if (!initialFilterValuesApplied && currentParams.get("project_name")) {
+                projectNameInput.value = currentParams.get("project_name");
+            }
+            if (!initialFilterValuesApplied && currentParams.get("app_name")) {
+                appNameInput.value = currentParams.get("app_name");
+            }
+            if (!initialFilterValuesApplied && currentParams.get("environment_name")) {
+                environmentNameInput.value = currentParams.get("environment_name");
             }
             if (!initialFilterValuesApplied && currentParams.get("log_type")) {
                 document.getElementById("logs-log-type").value = currentParams.get("log_type");
@@ -5969,18 +6032,28 @@
             const logType = document.getElementById("logs-log-type").value;
             const providerId = providerSelect.value;
             const modelName = modelSelect.value;
+            const modelQuery = modelQueryInput.value.trim();
             const apiClientKeyId = apiClientKeyIdSelect.value;
-            const apiClientKeyQuery = apiClientKeyQuerySelect.value;
+            const apiClientKeyQuery = apiClientKeyQueryManualInput.value.trim() || apiClientKeyQuerySelect.value;
             const success = document.getElementById("logs-success").value;
             const conversationKey = document.getElementById("logs-conversation-key").value.trim();
+            const tenantName = tenantNameInput.value.trim();
+            const projectName = projectNameInput.value.trim();
+            const appName = appNameInput.value.trim();
+            const environmentName = environmentNameInput.value.trim();
             const excludeHealthChecks = excludeHealthChecksInput.checked;
             if (logType) params.set("log_type", logType);
             if (providerId) params.set("provider_id", providerId);
             if (modelName) params.set("model_name", modelName);
+            if (modelQuery) params.set("model_query", modelQuery);
             if (apiClientKeyId) params.set("api_client_key_id", apiClientKeyId);
             if (apiClientKeyQuery) params.set("api_client_key_query", apiClientKeyQuery);
             if (success) params.set("success", success);
             if (conversationKey) params.set("conversation_key", conversationKey);
+            if (tenantName) params.set("tenant_name", tenantName);
+            if (projectName) params.set("project_name", projectName);
+            if (appName) params.set("app_name", appName);
+            if (environmentName) params.set("environment_name", environmentName);
             params.set("exclude_health_checks", excludeHealthChecks ? "true" : "false");
             params.set("_ts", Date.now().toString());
             try {
@@ -8435,9 +8508,16 @@
         const clearBtn = document.getElementById("logs-clear-btn");
         const providerSelect = document.getElementById("logs-provider-id");
         const modelSelect = document.getElementById("logs-model-name");
+        const modelQueryInput = document.getElementById("logs-model-query");
         const userAccountSelect = document.getElementById("logs-user-account-id");
+        const userAccountQueryInput = document.getElementById("logs-user-account-query");
         const apiClientKeyIdSelect = document.getElementById("logs-api-client-key-id");
         const apiClientKeyQuerySelect = document.getElementById("logs-api-client-key-query");
+        const apiClientKeyQueryManualInput = document.getElementById("logs-api-client-key-query-manual");
+        const tenantNameInput = document.getElementById("logs-tenant-name");
+        const projectNameInput = document.getElementById("logs-project-name");
+        const appNameInput = document.getElementById("logs-app-name");
+        const environmentNameInput = document.getElementById("logs-environment-name");
         const excludeHealthChecksInput = document.getElementById("logs-exclude-health-checks");
         const pageSizeSelect = document.getElementById("logs-page-size");
         const pageMeta = document.getElementById("logs-page-meta");
@@ -8445,7 +8525,7 @@
         const nextPageBtn = document.getElementById("logs-next-page-btn");
         const traceModal = document.getElementById("log-trace-modal");
         const traceContent = document.getElementById("log-trace-content");
-        const filterIds = [
+        const immediateFilterIds = [
             "logs-log-type",
             "logs-provider-id",
             "logs-model-name",
@@ -8453,6 +8533,15 @@
             "logs-api-client-key-id",
             "logs-api-client-key-query",
             "logs-success",
+            "logs-tenant-name",
+            "logs-project-name",
+            "logs-app-name",
+            "logs-environment-name",
+        ];
+        const debouncedFilterIds = [
+            "logs-model-query",
+            "logs-user-account-query",
+            "logs-api-client-key-query-manual",
             "logs-conversation-key",
         ];
         const currentParams = new URLSearchParams(window.location.search);
@@ -8467,19 +8556,34 @@
         if (currentParams.get("conversation_key")) {
             document.getElementById("logs-conversation-key").value = currentParams.get("conversation_key");
         }
+        if (currentParams.get("model_query")) {
+            modelQueryInput.value = currentParams.get("model_query");
+        }
+        if (currentParams.get("user_account_query")) {
+            userAccountQueryInput.value = currentParams.get("user_account_query");
+        }
+        if (currentParams.get("api_client_key_query_text")) {
+            apiClientKeyQueryManualInput.value = currentParams.get("api_client_key_query_text");
+        }
         if (currentParams.get("exclude_health_checks") === "false") {
             excludeHealthChecksInput.checked = false;
         }
         pageSizeSelect.value = String(state.pageSize);
 
-        for (const id of filterIds) {
+        for (const id of immediateFilterIds) {
             document.getElementById(id).addEventListener("change", () => {
                 state.page = 1;
                 loadLogs();
             });
+        }
+        const debouncedLoadLogs = debounce(() => {
+            state.page = 1;
+            loadLogs();
+        });
+        for (const id of debouncedFilterIds) {
             document.getElementById(id).addEventListener("input", () => {
                 state.page = 1;
-                loadLogs();
+                debouncedLoadLogs();
             });
         }
         pageSizeSelect.addEventListener("change", () => {
@@ -8503,19 +8607,32 @@
             const logType = document.getElementById("logs-log-type").value;
             const providerId = providerSelect.value;
             const modelName = modelSelect.value;
+            const modelQuery = modelQueryInput.value.trim();
             const userAccountId = userAccountSelect.value;
+            const userAccountQuery = userAccountQueryInput.value.trim();
             const apiClientKeyId = apiClientKeyIdSelect.value;
-            const apiClientKeyQuery = apiClientKeyQuerySelect.value;
+            const apiClientKeyQuery = apiClientKeyQueryManualInput.value.trim() || apiClientKeyQuerySelect.value;
             const success = document.getElementById("logs-success").value;
             const conversationKey = document.getElementById("logs-conversation-key").value.trim();
+            const tenantName = tenantNameInput.value.trim();
+            const projectName = projectNameInput.value.trim();
+            const appName = appNameInput.value.trim();
+            const environmentName = environmentNameInput.value.trim();
             if (logType) params.set("log_type", logType);
             if (providerId) params.set("provider_id", providerId);
             if (modelName) params.set("model_name", modelName);
+            if (modelQuery) params.set("model_query", modelQuery);
             if (userAccountId) params.set("user_account_id", userAccountId);
+            if (userAccountQuery) params.set("user_account_query", userAccountQuery);
             if (apiClientKeyId) params.set("api_client_key_id", apiClientKeyId);
             if (apiClientKeyQuery) params.set("api_client_key_query", apiClientKeyQuery);
+            if (apiClientKeyQueryManualInput.value.trim()) params.set("api_client_key_query_text", apiClientKeyQueryManualInput.value.trim());
             if (success) params.set("success", success);
             if (conversationKey) params.set("conversation_key", conversationKey);
+            if (tenantName) params.set("tenant_name", tenantName);
+            if (projectName) params.set("project_name", projectName);
+            if (appName) params.set("app_name", appName);
+            if (environmentName) params.set("environment_name", environmentName);
             params.set("exclude_health_checks", excludeHealthChecksInput.checked ? "true" : "false");
             params.set("limit", "5000");
             setButtonTransientFeedback(exportBtn, "success", { successText: "准备导出" });
@@ -8592,6 +8709,10 @@
             renderSelectOptions(userAccountSelect, data.users);
             renderSelectOptions(apiClientKeyIdSelect, data.api_client_key_ids);
             renderSelectOptions(apiClientKeyQuerySelect, data.api_client_key_queries);
+            renderSelectOptions(tenantNameInput, data.tenants);
+            renderSelectOptions(projectNameInput, data.projects);
+            renderSelectOptions(appNameInput, data.apps);
+            renderSelectOptions(environmentNameInput, data.environments);
             if (!initialFilterValuesApplied && currentParams.get("provider_id")) {
                 providerSelect.value = currentParams.get("provider_id");
             }
@@ -8606,6 +8727,24 @@
             }
             if (!initialFilterValuesApplied && currentParams.get("api_client_key_query")) {
                 apiClientKeyQuerySelect.value = currentParams.get("api_client_key_query");
+            }
+            if (!initialFilterValuesApplied && currentParams.get("tenant_name")) {
+                tenantNameInput.value = currentParams.get("tenant_name");
+            }
+            if (!initialFilterValuesApplied && currentParams.get("project_name")) {
+                projectNameInput.value = currentParams.get("project_name");
+            }
+            if (!initialFilterValuesApplied && currentParams.get("app_name")) {
+                appNameInput.value = currentParams.get("app_name");
+            }
+            if (!initialFilterValuesApplied && currentParams.get("environment_name")) {
+                environmentNameInput.value = currentParams.get("environment_name");
+            }
+            if (!initialFilterValuesApplied && currentParams.get("log_type")) {
+                document.getElementById("logs-log-type").value = currentParams.get("log_type");
+            }
+            if (!initialFilterValuesApplied && currentParams.get("success")) {
+                document.getElementById("logs-success").value = currentParams.get("success");
             }
             initialFilterValuesApplied = true;
         }
@@ -8630,20 +8769,32 @@
             const logType = document.getElementById("logs-log-type").value;
             const providerId = providerSelect.value;
             const modelName = modelSelect.value;
+            const modelQuery = modelQueryInput.value.trim();
             const userAccountId = userAccountSelect.value;
+            const userAccountQuery = userAccountQueryInput.value.trim();
             const apiClientKeyId = apiClientKeyIdSelect.value;
-            const apiClientKeyQuery = apiClientKeyQuerySelect.value;
+            const apiClientKeyQuery = apiClientKeyQueryManualInput.value.trim() || apiClientKeyQuerySelect.value;
             const success = document.getElementById("logs-success").value;
             const conversationKey = document.getElementById("logs-conversation-key").value.trim();
+            const tenantName = tenantNameInput.value.trim();
+            const projectName = projectNameInput.value.trim();
+            const appName = appNameInput.value.trim();
+            const environmentName = environmentNameInput.value.trim();
             const excludeHealthChecks = excludeHealthChecksInput.checked;
             if (logType) params.set("log_type", logType);
             if (providerId) params.set("provider_id", providerId);
             if (modelName) params.set("model_name", modelName);
+            if (modelQuery) params.set("model_query", modelQuery);
             if (userAccountId) params.set("user_account_id", userAccountId);
+            if (userAccountQuery) params.set("user_account_query", userAccountQuery);
             if (apiClientKeyId) params.set("api_client_key_id", apiClientKeyId);
             if (apiClientKeyQuery) params.set("api_client_key_query", apiClientKeyQuery);
             if (success) params.set("success", success);
             if (conversationKey) params.set("conversation_key", conversationKey);
+            if (tenantName) params.set("tenant_name", tenantName);
+            if (projectName) params.set("project_name", projectName);
+            if (appName) params.set("app_name", appName);
+            if (environmentName) params.set("environment_name", environmentName);
             params.set("exclude_health_checks", excludeHealthChecks ? "true" : "false");
             params.set("_ts", Date.now().toString());
             try {
