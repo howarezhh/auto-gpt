@@ -886,11 +886,14 @@ html[data-theme="dark"] body::before {
 .playground-copy-btn.is-loading::after {
     content: "";
     position: absolute;
+    top: 50%;
+    left: 50%;
     width: 14px;
     height: 14px;
     border-radius: 50%;
     border: 2px solid rgba(53, 106, 230, 0.18);
     border-top-color: var(--accent);
+    transform: translate(-50%, -50%);
     animation: spinLoader 0.72s linear infinite;
 }
 
@@ -1867,6 +1870,49 @@ textarea.field-input {
 .toggle-row input {
     width: 16px;
     height: 16px;
+}
+
+.logs-toggle-field {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    min-height: 54px;
+    padding: 12px 14px;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    background: color-mix(in srgb, var(--surface) 88%, transparent);
+}
+
+.logs-toggle-copy {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+}
+
+.logs-toggle-copy strong {
+    font-size: 14px;
+    line-height: 1.4;
+}
+
+.logs-toggle-copy small {
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.log-result-cell {
+    display: grid;
+    gap: 6px;
+    min-width: 0;
+}
+
+@media (max-width: 768px) {
+    .logs-toggle-field {
+        align-items: flex-start;
+        flex-direction: column;
+    }
 }
 
 .form-dual-check {

@@ -1168,6 +1168,45 @@
         `;
     }
 
+    function buildLogExceptionReason(log = {}) {
+        const detailLines = [];
+        const message = String(log.message || "").trim();
+        const errorCode = String(log.error_code || "").trim();
+        const errorType = String(log.error_type || "").trim();
+        const responseText = String(log.response_text || "").trim();
+        const billingError = String(log.billing_error || "").trim();
+        const tokenFinalizeError = String(log.token_finalize_error || "").trim();
+        const authResult = String(log.api_client_auth_result || "").trim();
+        if (errorCode) detailLines.push(`错误码：${errorCode}`);
+        if (errorType) detailLines.push(`错误类型：${errorType}`);
+        if (authResult && authResult !== "authenticated") {
+            detailLines.push(`鉴权结果：${formatApiClientAuthResultLabel(authResult)}`);
+        }
+        if (message && (!log.success || /fail|error|timeout|exceed|invalid/i.test(message))) {
+            detailLines.push(`主信息：${message}`);
+        }
+        if (!detailLines.length && !log.success && responseText) {
+            detailLines.push(`响应内容：${responseText}`);
+        }
+        if (billingError) detailLines.push(`计费补全：${billingError}`);
+        if (tokenFinalizeError) detailLines.push(`Token 补全：${tokenFinalizeError}`);
+        return Array.from(new Set(detailLines)).filter(Boolean).join("\n");
+    }
+
+    function formatLogCellMetricValue(value, suffix = "") {
+        if (value == null || Number.isNaN(Number(value))) return "-";
+        return `${formatNumber(Number(value))}${suffix}`;
+    }
+
+    function renderLogResultCell(log = {}) {
+        return `
+            <div class="log-result-cell">
+                ${renderStatusWithErrorHint(log.success ? "healthy" : "unhealthy", buildLogExceptionReason(log))}
+                <div class="table-muted">HTTP ${log.status_code ?? "-"} · 尝试 ${formatLogCellMetricValue(log.attempt_count)}</div>
+            </div>
+        `;
+    }
+
     function formatBillingCalculation(log) {
         const billing = buildBillingBreakdown(log);
         return [
@@ -6243,10 +6282,7 @@
                         <td>${escapeHtml(buildSessionValue(log))}</td>
                         <td>${escapeHtml(log.requested_model || log.model_name || "-")}</td>
                         <td>${escapeHtml(log.provider_name || "-")}</td>
-                        <td>
-                            ${log.success ? statusBadge("healthy") : statusBadge("unhealthy")}
-                            <div class="table-muted">HTTP ${log.status_code ?? "-"} · 尝试 ${formatMetricValue(log.attempt_count)}</div>
-                        </td>
+                        <td>${renderLogResultCell(log)}</td>
                         <td>${renderLogBillingCell(log)}</td>
                         <td>
                             <strong>${formatMetricValue(log.duration_ms ?? log.latency_ms, " ms")}</strong>
@@ -8985,10 +9021,7 @@
                         <td>${escapeHtml(buildSessionValue(log))}</td>
                         <td>${escapeHtml(log.requested_model || log.model_name || "-")}</td>
                         <td>${escapeHtml(log.provider_name || "-")}</td>
-                        <td>
-                            ${log.success ? statusBadge("healthy") : statusBadge("unhealthy")}
-                            <div class="table-muted">HTTP ${log.status_code ?? "-"} · 尝试 ${formatMetricValue(log.attempt_count)}</div>
-                        </td>
+                        <td>${renderLogResultCell(log)}</td>
                         <td>${renderLogBillingCell(log)}</td>
                         <td>
                             <strong>${formatMetricValue(log.duration_ms ?? log.latency_ms, " ms")}</strong>

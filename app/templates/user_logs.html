@@ -111,9 +111,15 @@
                 <span>会话键</span>
                 <input class="field-input" id="logs-conversation-key" type="text" placeholder="例如 conversation_key / session_id">
             </label>
-            <label class="toggle-row">
-                <input id="logs-exclude-health-checks" type="checkbox" checked>
-                <span>隐藏健康检查日志</span>
+            <label class="logs-toggle-field" for="logs-exclude-health-checks">
+                <span class="logs-toggle-copy">
+                    <strong>隐藏健康检查日志</strong>
+                    <small>开启后自动排除后台健康检查与测试产生的日志。</small>
+                </span>
+                <span class="settings-switch-control">
+                    <input id="logs-exclude-health-checks" type="checkbox" checked>
+                    <span class="settings-switch-slider"></span>
+                </span>
             </label>
         </div>
 </section>
