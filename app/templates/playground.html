@@ -68,19 +68,19 @@
                 <textarea class="field-input" id="playground-message" rows="8" placeholder="你好"></textarea>
             </label>
             <label>
-                <span>图片输入</span>
+                <span>图片请求设置</span>
                 <select class="field-input" id="playground-image-mode">
                     <option value="none">不附带图片</option>
-                    <option value="url">图片链接</option>
-                    <option value="upload">本地上传</option>
+                    <option value="url">使用图片链接</option>
+                    <option value="upload">上传本地图片</option>
                 </select>
             </label>
             <label>
                 <span>图片细节</span>
                 <select class="field-input" id="playground-image-detail">
-                    <option value="auto">auto</option>
-                    <option value="low">low</option>
-                    <option value="high">high</option>
+                    <option value="auto">自动（默认）</option>
+                    <option value="low">低细节（更省 Token）</option>
+                    <option value="high">高细节（更适合看小字和细节）</option>
                 </select>
             </label>
             <label class="form-span-2 hidden" id="playground-image-url-field">
@@ -89,10 +89,10 @@
             </label>
             <label class="form-span-2 hidden" id="playground-image-file-field">
                 <span>本地图片</span>
-                <input class="field-input" id="playground-image-file" type="file" accept="image/*">
+                <input class="field-input" id="playground-image-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif">
             </label>
             <div class="form-span-2 playground-image-note" id="playground-image-note">
-                当前仅发送文本。若切换为图片链接或本地上传，playground 会自动按所选内部接口拼装视觉请求；本地图片会优先上传到当前服务形成可复用地址。
+                当前只发送文本。若切换为图片链路，将按所选内部接口自动拼装视觉请求。支持 PNG/JPEG/WEBP/GIF，单图最大 10 MB。
             </div>
             <div class="form-actions form-span-2">
                 <button class="btn btn-ghost interactive-btn" id="playground-clear" type="button">清空</button>

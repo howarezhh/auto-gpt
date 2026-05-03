@@ -5356,6 +5356,40 @@
         });
     }
 
+    const SUPPORTED_IMAGE_UPLOAD_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+    const MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024;
+
+    function describeImageDetailMode(detail) {
+        if (detail === "low") {
+            return "低细节会优先压低图片理解成本，适合只看大轮廓或主物体。";
+        }
+        if (detail === "high") {
+            return "高细节会读取更多图像细节，更适合识别小字、截图和密集内容，但请求成本更高。";
+        }
+        return "自动细节会交给上游模型自行决定，是默认也最稳妥的图片请求模式。";
+    }
+
+    function getImageUploadConstraintText() {
+        return "支持 PNG/JPEG/WEBP/GIF，单图最大 10 MB。";
+    }
+
+    function validateImageUploadFile(file) {
+        if (!file) {
+            return "请先选择一张本地图片";
+        }
+        const contentType = String(file.type || "").toLowerCase();
+        if (!SUPPORTED_IMAGE_UPLOAD_TYPES.has(contentType)) {
+            return "仅支持 PNG/JPEG/WEBP/GIF 图片";
+        }
+        if (Number(file.size || 0) <= 0) {
+            return "上传文件不能为空";
+        }
+        if (Number(file.size || 0) > MAX_IMAGE_UPLOAD_BYTES) {
+            return "图片大小不能超过 10 MB";
+        }
+        return null;
+    }
+
     async function initPlayground() {
         const form = document.getElementById("playground-form");
         const clearBtn = document.getElementById("playground-clear");
@@ -5400,24 +5434,27 @@
 
         function updatePlaygroundImageFields() {
             const mode = imageModeSelect.value || "none";
+            const detailText = describeImageDetailMode(imageDetailSelect.value || "auto");
+            const constraintText = getImageUploadConstraintText();
             imageUrlField.classList.toggle("hidden", mode !== "url");
             imageFileField.classList.toggle("hidden", mode !== "upload");
             if (mode === "url") {
-                imageNote.textContent = "将按标准图片链接请求发送，适合公网可访问图片地址。";
+                imageNote.textContent = `将按标准图片链接请求发送，适合公网可访问图片地址。${detailText} ${constraintText}`;
                 return;
             }
             if (mode === "upload") {
                 const file = imageFileInput.files?.[0];
+                const fileError = file ? validateImageUploadFile(file) : null;
                 imageNote.textContent = file
-                    ? (isLocalBrowserHost()
-                        ? `当前为本地访问，将以 data URL 形式发送本地图片：${file.name}`
-                        : `将先上传到当前服务，再把可访问图片地址发送给模型：${file.name}`)
+                    ? `${isLocalBrowserHost()
+                        ? `当前为本地访问，将以 data URL 形式直接发送本地图片：${file.name}。`
+                        : `将先上传到当前服务，再把可访问图片地址发送给模型：${file.name}。`} ${fileError || detailText} ${constraintText}`
                     : (isLocalBrowserHost()
-                        ? "将把本地图片转换为 data URL 后发往内部接口，适合直接测试视觉模型。"
-                        : "将先把本地图片上传到当前服务，再把生成的图片地址发给模型。");
+                        ? `将把本地图片转换为 data URL 后发往内部接口，适合直接测试视觉模型。${detailText} ${constraintText}`
+                        : `将先把本地图片上传到当前服务，再把生成的图片地址发给模型。${detailText} ${constraintText}`);
                 return;
             }
-            imageNote.textContent = "当前仅发送文本。若切换为图片链接或本地上传，playground 会自动按所选内部接口拼装视觉请求。";
+            imageNote.textContent = `当前仅发送文本。若切换为图片链接或本地上传，playground 会自动按所选内部接口拼装视觉请求。${detailText} ${constraintText}`;
         }
 
         function buildChatMessageContent(messageText, imageInput) {
@@ -5502,8 +5539,9 @@
                 return { url, detail };
             }
             const file = imageFileInput.files?.[0];
-            if (!file) {
-                throw new Error("请先选择一张本地图片");
+            const fileError = validateImageUploadFile(file);
+            if (fileError) {
+                throw new Error(fileError);
             }
             if (isLocalBrowserHost()) {
                 return {
@@ -5599,6 +5637,7 @@
             updatePlaygroundImageFields();
             renderPlaygroundModels();
         });
+        imageDetailSelect.addEventListener("change", updatePlaygroundImageFields);
         imageFileInput.addEventListener("change", updatePlaygroundImageFields);
         document.getElementById("playground-stream").addEventListener("change", () => {
             renderPlaygroundModels();
@@ -5777,6 +5816,11 @@
             const file = fileInput.files?.[0];
             if (!file) {
                 showToast("请先选择一张图片", "error");
+                return;
+            }
+            const fileError = validateImageUploadFile(file);
+            if (fileError) {
+                showToast(fileError, "error");
                 return;
             }
             const formData = new FormData();
@@ -6818,20 +6862,23 @@
             return;
         }
         const mode = imageModeSelect.value || "none";
+        const detailText = describeImageDetailMode(imageDetailSelect.value || "auto");
+        const constraintText = getImageUploadConstraintText();
         imageUrlField.classList.toggle("hidden", mode !== "url");
         imageFileField.classList.toggle("hidden", mode !== "upload");
         if (mode === "url") {
-            imageNote.textContent = "将额外补测图片链路，并把当前图片链接按标准视觉请求发送到内部自检接口。";
+            imageNote.textContent = `将额外补测图片链路，并把当前图片链接按标准视觉请求发送到内部自检接口。${detailText} ${constraintText}`;
             return;
         }
         if (mode === "upload") {
             const file = imageFileInput.files?.[0];
+            const fileError = file ? validateImageUploadFile(file) : null;
             imageNote.textContent = file
-                ? `将把本地图片通过内部 Session 自检接口发送，并追加视觉场景探测：${file.name}`
-                : "将把本地图片通过内部 Session 自检接口发送，并追加视觉场景探测。";
+                ? `将把本地图片通过内部 Session 自检接口发送，并追加视觉场景探测：${file.name}。${fileError || detailText} ${constraintText}`
+                : `将把本地图片通过内部 Session 自检接口发送，并追加视觉场景探测。${detailText} ${constraintText}`;
             return;
         }
-        imageNote.textContent = "当前默认只测试文本链路。若切换为图片链接或本地图片，将追加图片场景自检。";
+        imageNote.textContent = `当前默认只测试文本链路。若切换为图片链接或本地图片，将追加图片场景自检。${detailText} ${constraintText}`;
     }
 
     function summarizeUserSelfTestScenarios(data = {}) {
@@ -6945,6 +6992,7 @@
         }
 
         imageModeSelect.addEventListener("change", updateUserSelfTestImageFields);
+        imageDetailSelect.addEventListener("change", updateUserSelfTestImageFields);
         imageFileInput.addEventListener("change", updateUserSelfTestImageFields);
         updateUserSelfTestImageFields();
         renderUserSelfTestScenarios(scenarioTableBody, []);
@@ -6997,6 +7045,10 @@
                     formData.append("image_url", imageUrlInput.value.trim());
                 }
                 if ((imageModeSelect.value || "none") === "upload" && imageFileInput.files?.[0]) {
+                    const fileError = validateImageUploadFile(imageFileInput.files[0]);
+                    if (fileError) {
+                        throw new Error(fileError);
+                    }
                     formData.append("image_file", imageFileInput.files[0]);
                 }
                 const response = await fetch("/api/user/self-test/run", {
@@ -7457,6 +7509,10 @@
         const tokenLimitInput = document.getElementById("api-key-token-limit-total");
         const costLimitInput = document.getElementById("api-key-cost-limit-total");
         const balanceAmountInput = document.getElementById("api-key-balance-amount");
+        const requestLimitDailyInput = document.getElementById("api-key-request-limit-daily");
+        const qpsLimitInput = document.getElementById("api-key-qps-limit");
+        const rpmLimitInput = document.getElementById("api-key-rpm-limit");
+        const tpmLimitInput = document.getElementById("api-key-tpm-limit");
         const nameInput = document.getElementById("api-key-name");
         const generationModeInput = document.getElementById("api-key-generation-mode");
         const rawApiKeyInput = document.getElementById("api-key-raw-api-key");
@@ -7528,6 +7584,10 @@
             selectedIds: new Set(),
         };
         let searchTimer = null;
+
+        function formatLimitSetting(value) {
+            return value == null ? "不限" : formatNumber(value);
+        }
 
         function renderSummary(summary) {
             document.querySelectorAll("[data-api-key-summary]").forEach((node) => {
@@ -7647,6 +7707,7 @@
                         <td>
                             <strong>${escapeHtml(quota.summary)}</strong>
                             <div class="table-muted">剩余 ${item.remaining_tokens == null ? "无限额" : formatNumber(item.remaining_tokens)}</div>
+                            <div class="table-muted">频控 QPS ${formatLimitSetting(item.qps_limit)} · RPM ${formatLimitSetting(item.rpm_limit)} · TPM ${formatLimitSetting(item.tpm_limit)}</div>
                         </td>
                         <td>
                             <strong>${escapeHtml(cost.summary)}</strong>
@@ -7963,6 +8024,10 @@
             tokenLimitInput.value = apiKey?.token_limit_total ?? "";
             costLimitInput.value = apiKey?.cost_limit_total ?? "";
             balanceAmountInput.value = isEditing ? "" : (apiKey?.balance_amount ?? "");
+            requestLimitDailyInput.value = apiKey?.request_limit_daily ?? "";
+            qpsLimitInput.value = apiKey?.qps_limit ?? "";
+            rpmLimitInput.value = apiKey?.rpm_limit ?? "";
+            tpmLimitInput.value = apiKey?.tpm_limit ?? "";
             balanceAmountInput.disabled = isEditing;
             balanceAmountInput.placeholder = isEditing ? "已创建密钥请到详情页做余额调整" : "留空表示不限制";
             populateDefaultProviderOptions(apiKey?.default_provider_id || null);
@@ -8131,6 +8196,10 @@
                 expires_at: expiresAtInput.value ? new Date(expiresAtInput.value).toISOString() : null,
                 token_limit_total: tokenLimitInput.value === "" ? null : Number(tokenLimitInput.value),
                 cost_limit_total: costLimitInput.value === "" ? null : Number(costLimitInput.value),
+                request_limit_daily: requestLimitDailyInput.value === "" ? null : Number(requestLimitDailyInput.value),
+                qps_limit: qpsLimitInput.value === "" ? null : Number(qpsLimitInput.value),
+                rpm_limit: rpmLimitInput.value === "" ? null : Number(rpmLimitInput.value),
+                tpm_limit: tpmLimitInput.value === "" ? null : Number(tpmLimitInput.value),
                 route_mode: routeModeInput.value,
                 default_provider_id: defaultProviderId,
                 owner_user_id: ownerUserSelect.value === "" ? null : Number(ownerUserSelect.value),
@@ -8614,6 +8683,8 @@
                 <div><span>密钥明文</span><strong>${detail.raw_api_key ? `${escapeHtml(detail.raw_api_key)} <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="${escapeHtml(detail.raw_api_key)}">复制</button>` : "历史密钥未存明文，可在编辑时替换为新密钥"}</strong></div>
                 <div><span>默认中转</span><strong>${escapeHtml(detail.default_provider_id ? String(detail.default_provider_id) : "-")}</strong></div>
                 <div><span>过期时间</span><strong>${formatDate(detail.expires_at)}</strong></div>
+                <div><span>每日请求上限</span><strong>${formatLimitSetting(detail.request_limit_daily)}</strong></div>
+                <div><span>QPS / RPM / TPM</span><strong>${formatLimitSetting(detail.qps_limit)} / ${formatLimitSetting(detail.rpm_limit)} / ${formatLimitSetting(detail.tpm_limit)}</strong></div>
                 <div><span>最近使用</span><strong>${formatDate(detail.last_used_at)}</strong></div>
                 <div><span>更新时间</span><strong>${formatDate(detail.updated_at)}</strong></div>
             `;
@@ -8625,6 +8696,8 @@
                 <div><span>24h Token</span><strong>${formatNumber(detail.recent_usage.recent_total_tokens)} Token</strong></div>
                 <div><span>金额额度</span><strong>${detail.cost_limit_total == null ? "不限" : formatMoney(detail.cost_limit_total)}</strong></div>
                 <div><span>当前余额</span><strong>${detail.balance_amount == null ? "不限" : formatMoney(detail.balance_amount)}</strong></div>
+                <div><span>每日请求</span><strong>${formatLimitSetting(detail.request_limit_daily)}</strong></div>
+                <div><span>QPS / RPM / TPM</span><strong>${formatLimitSetting(detail.qps_limit)} / ${formatLimitSetting(detail.rpm_limit)} / ${formatLimitSetting(detail.tpm_limit)}</strong></div>
                 <div><span>24h 消费</span><strong>${formatMoney(stats.recent_total_cost)}</strong></div>
             `;
             document.getElementById("api-key-detail-bindings").innerHTML = detail.allowed_providers.length

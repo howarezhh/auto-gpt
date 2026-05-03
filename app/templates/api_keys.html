@@ -303,6 +303,34 @@
                 <span>初始余额</span>
                 <input class="field-input" id="api-key-balance-amount" type="number" min="0" step="0.000001" placeholder="留空表示不限制">
             </label>
+            <div class="form-span-2 settings-group" aria-labelledby="api-key-throughput-group-title">
+                <div class="settings-group-head">
+                    <div class="panel-kicker">频控</div>
+                    <h4 id="api-key-throughput-group-title">请求频控与吞吐限制</h4>
+                </div>
+                <div class="form-grid settings-subgrid">
+                    <label>
+                        <span>每日请求上限</span>
+                        <input class="field-input" id="api-key-request-limit-daily" type="number" min="0" placeholder="0 或留空表示不限制">
+                    </label>
+                    <label>
+                        <span>每秒最多请求</span>
+                        <input class="field-input" id="api-key-qps-limit" type="number" min="0" placeholder="0 或留空表示不限制">
+                    </label>
+                    <label>
+                        <span>每分钟最多请求</span>
+                        <input class="field-input" id="api-key-rpm-limit" type="number" min="0" placeholder="0 或留空表示不限制">
+                    </label>
+                    <label>
+                        <span>每分钟最多 Token</span>
+                        <input class="field-input" id="api-key-tpm-limit" type="number" min="0" placeholder="0 或留空表示不限制">
+                    </label>
+                </div>
+                <div class="settings-note api-key-inline-note">
+                    <strong>计数口径</strong>
+                    <span>QPS 按秒、RPM 按自然分钟统计已进入鉴权与限流链路的请求数；TPM 按分钟累计输入与输出 Token。达到上限后，该时间窗内的新请求会直接返回限流。填 0 或留空都表示不限制。</span>
+                </div>
+            </div>
             <div class="form-dual-check form-span-2">
                 <label class="toggle-row">
                     <input id="api-key-enabled" type="checkbox" checked>
