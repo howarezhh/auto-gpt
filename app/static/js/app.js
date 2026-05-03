@@ -3968,14 +3968,14 @@
         }
 
         function formatContextWindow(value) {
-            return value == null ? "未设置" : `${formatNumber(value)} token`;
+            return value == null ? "未设置" : formatNumber(value);
         }
 
         function renderTokenLimitCell(item) {
             return `
-                <div>上下文 ${escapeHtml(formatContextWindow(item.context_window_tokens))}</div>
-                <div class="table-muted">输入 ${escapeHtml(formatContextWindow(item.max_input_tokens))}</div>
-                <div class="table-muted">输出 ${escapeHtml(formatContextWindow(item.max_output_tokens))}</div>
+                <div>上下文（Token） ${escapeHtml(formatContextWindow(item.context_window_tokens))}</div>
+                <div class="table-muted">输入（Token） ${escapeHtml(formatContextWindow(item.max_input_tokens))}</div>
+                <div class="table-muted">输出（Token） ${escapeHtml(formatContextWindow(item.max_output_tokens))}</div>
             `;
         }
 
