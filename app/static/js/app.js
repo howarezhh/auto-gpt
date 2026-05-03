@@ -278,6 +278,59 @@
     }
 
     const modalManager = createModalManager();
+    let healthCheckResultModalController = null;
+    let healthCheckResultModalNode = null;
+
+    function wait(ms) {
+        return new Promise((resolve) => window.setTimeout(resolve, ms));
+    }
+
+    function ensureHealthCheckResultModalController() {
+        const modal = document.getElementById("provider-test-result-modal");
+        const titleNode = document.getElementById("provider-test-result-modal-title");
+        const contentNode = document.getElementById("provider-test-result-modal-content");
+        if (!modal || !titleNode || !contentNode) {
+            return null;
+        }
+        if (healthCheckResultModalController && healthCheckResultModalNode === modal) {
+            return { controller: healthCheckResultModalController, titleNode, contentNode };
+        }
+        healthCheckResultModalNode = modal;
+        healthCheckResultModalController = modalManager.register({
+            modal,
+            dialog: modal.querySelector('[role="dialog"]'),
+            getInitialFocus: () => document.getElementById("provider-test-result-modal-close"),
+            afterClose: () => {
+                contentNode.innerHTML = "";
+            },
+        });
+        const closeBtn = document.getElementById("provider-test-result-modal-close");
+        if (closeBtn && closeBtn.dataset.boundHealthCheckResultClose !== "true") {
+            closeBtn.dataset.boundHealthCheckResultClose = "true";
+            closeBtn.addEventListener("click", () => {
+                healthCheckResultModalController?.close();
+            });
+        }
+        return { controller: healthCheckResultModalController, titleNode, contentNode };
+    }
+
+    function openHealthCheckResultModal(title, html, trigger = document.activeElement) {
+        const modalState = ensureHealthCheckResultModalController();
+        if (!modalState) return;
+        const { controller, titleNode, contentNode } = modalState;
+        titleNode.textContent = title;
+        contentNode.innerHTML = html;
+        if (controller.isOpen()) {
+            enhanceInteractiveButtons(contentNode);
+            return;
+        }
+        controller.open(trigger);
+        enhanceInteractiveButtons(contentNode);
+    }
+
+    function closeHealthCheckResultModal(options = {}) {
+        healthCheckResultModalController?.close(options);
+    }
 
     function withJson(method, data, extraHeaders = {}) {
         return {
@@ -742,12 +795,12 @@
         } = options;
         const state = createHealthCheckStreamState(scope, title);
         if (showModal) {
-            openTestResultModal(title, renderHealthCheckStreamModalBody(state), trigger);
+            openHealthCheckResultModal(title, renderHealthCheckStreamModalBody(state), trigger);
         }
         await streamJsonLines(url, {}, (event) => {
             applyHealthCheckStreamEvent(state, event);
             if (showModal) {
-                openTestResultModal(title, renderHealthCheckStreamModalBody(state), trigger);
+                openHealthCheckResultModal(title, renderHealthCheckStreamModalBody(state), trigger);
             }
         });
         if (state.errorMessage) {
@@ -1212,6 +1265,93 @@
         });
     }
 
+    let providerStatusTooltipLayer = null;
+    let providerStatusTooltipOwner = null;
+
+    function ensureProviderStatusTooltipLayer() {
+        if (providerStatusTooltipLayer) return providerStatusTooltipLayer;
+        providerStatusTooltipLayer = document.createElement("div");
+        providerStatusTooltipLayer.id = "provider-status-floating-tooltip";
+        providerStatusTooltipLayer.className = "provider-status-tooltip provider-status-tooltip-floating hidden";
+        providerStatusTooltipLayer.setAttribute("role", "tooltip");
+        document.body.appendChild(providerStatusTooltipLayer);
+        return providerStatusTooltipLayer;
+    }
+
+    function hideProviderStatusTooltip() {
+        const tooltip = ensureProviderStatusTooltipLayer();
+        tooltip.classList.add("hidden");
+        tooltip.innerHTML = "";
+        providerStatusTooltipOwner = null;
+    }
+
+    function positionProviderStatusTooltip(trigger) {
+        const tooltip = ensureProviderStatusTooltipLayer();
+        const triggerRect = trigger.getBoundingClientRect();
+        const tooltipRect = tooltip.getBoundingClientRect();
+        const viewportPadding = 12;
+        let top = triggerRect.top - tooltipRect.height - 12;
+        let placement = "top";
+        if (top < viewportPadding) {
+            top = Math.min(window.innerHeight - tooltipRect.height - viewportPadding, triggerRect.bottom + 12);
+            placement = "bottom";
+        }
+        let left = triggerRect.right - tooltipRect.width;
+        left = Math.max(viewportPadding, Math.min(left, window.innerWidth - tooltipRect.width - viewportPadding));
+        tooltip.style.top = `${top}px`;
+        tooltip.style.left = `${left}px`;
+        tooltip.dataset.placement = placement;
+    }
+
+    function showProviderStatusTooltip(trigger) {
+        const wrapper = trigger.closest(".provider-status-help");
+        const content = wrapper?.querySelector(".provider-status-tooltip-content");
+        if (!content) return;
+        const tooltip = ensureProviderStatusTooltipLayer();
+        providerStatusTooltipOwner = trigger;
+        tooltip.innerHTML = content.innerHTML;
+        tooltip.classList.remove("hidden");
+        positionProviderStatusTooltip(trigger);
+    }
+
+    function initProviderStatusTooltipLayer() {
+        if (document.body.dataset.providerStatusTooltipBound === "true") return;
+        document.body.dataset.providerStatusTooltipBound = "true";
+        document.addEventListener("mouseover", (event) => {
+            const trigger = event.target.closest("[data-provider-status-tooltip-trigger='true']");
+            if (!trigger) return;
+            if (providerStatusTooltipOwner === trigger) return;
+            showProviderStatusTooltip(trigger);
+        });
+        document.addEventListener("mouseout", (event) => {
+            const wrapper = event.target.closest(".provider-status-help");
+            if (!wrapper) return;
+            if (wrapper.contains(event.relatedTarget)) return;
+            hideProviderStatusTooltip();
+        });
+        document.addEventListener("focusin", (event) => {
+            const trigger = event.target.closest("[data-provider-status-tooltip-trigger='true']");
+            if (!trigger) return;
+            showProviderStatusTooltip(trigger);
+        });
+        document.addEventListener("focusout", (event) => {
+            const wrapper = event.target.closest(".provider-status-help");
+            if (!wrapper) return;
+            if (wrapper.contains(event.relatedTarget)) return;
+            hideProviderStatusTooltip();
+        });
+        window.addEventListener("scroll", () => {
+            if (providerStatusTooltipOwner) {
+                positionProviderStatusTooltip(providerStatusTooltipOwner);
+            }
+        }, true);
+        window.addEventListener("resize", () => {
+            if (providerStatusTooltipOwner) {
+                positionProviderStatusTooltip(providerStatusTooltipOwner);
+            }
+        });
+    }
+
     function formatPercent(value) {
         if (value == null || Number.isNaN(Number(value))) return "-";
         return `${Number(value).toFixed(2)}%`;
@@ -1454,7 +1594,7 @@
             <div class="provider-model-summary">
                 <div class="provider-model-summary-head">
                     <strong>${formatNumber(modelConfigs.length)} 个模型</strong>
-                    <span>${formatNumber(enabledCount)} 启用 · ${formatNumber(healthyCount)} 健康 · ${formatNumber(streamCount)} 流式 · ${formatNumber(visionCount)} 图像</span>
+                    <span>${formatNumber(enabledCount)} 启用 · ${formatNumber(healthyCount)} 状态正常 · ${formatNumber(streamCount)} 流式 · ${formatNumber(visionCount)} 图像</span>
                 </div>
                 <div class="provider-model-preview-list">
                     ${visibleModels.map((item) => `
@@ -1517,6 +1657,26 @@
     function statusBadge(value) {
         const normalized = String(value || "unknown");
         return `<span class="status-badge status-${normalized}">${escapeHtml(formatStatusBadgeLabel(normalized))}</span>`;
+    }
+
+    function renderStatusWithErrorHint(status, errorMessage) {
+        const normalizedError = String(errorMessage || "").trim();
+        return `
+            <span class="provider-status-cell">
+                ${statusBadge(status || "unknown")}
+                ${normalizedError ? `
+                    <span class="provider-status-help">
+                        <button class="provider-status-help-btn" type="button" aria-label="查看状态异常原因" data-provider-status-tooltip-trigger="true">
+                            <i class="bi bi-question-circle" aria-hidden="true"></i>
+                        </button>
+                        <div class="provider-status-tooltip-content hidden">
+                            <div class="provider-status-tooltip-title">异常原因</div>
+                            <div class="provider-status-tooltip-copy">${escapeHtml(normalizedError)}</div>
+                        </div>
+                    </span>
+                ` : ""}
+            </span>
+        `;
     }
 
     function setPlaygroundPlaceholder(message) {
@@ -2640,7 +2800,20 @@
     function setButtonLoading(button, isLoading) {
         if (!button) return;
         button.classList.toggle("is-loading", isLoading);
-        button.disabled = isLoading;
+        button.setAttribute("aria-busy", isLoading ? "true" : "false");
+        if (isLoading) {
+            if (button.dataset.loadingDisabledSnapshot == null) {
+                button.dataset.loadingDisabledSnapshot = button.disabled ? "true" : "false";
+            }
+            button.disabled = true;
+            return;
+        }
+        if (button.dataset.loadingDisabledSnapshot != null) {
+            button.disabled = button.dataset.loadingDisabledSnapshot === "true";
+            delete button.dataset.loadingDisabledSnapshot;
+        } else {
+            button.disabled = false;
+        }
     }
 
     function enhanceInteractiveButtons(scope = document) {
@@ -2666,11 +2839,15 @@
                         title: "全部中转站健康检查",
                         scope: "all",
                         trigger: checkAllBtn,
-                        showModal: false,
+                        showModal: true,
                     });
+                    setButtonLoading(checkAllBtn, false);
+                    setButtonTransientFeedback(checkAllBtn, "success", { successText: "已完成" });
                     showToast("已完成全部中转健康检查");
                     await refreshDashboard();
                 } catch (error) {
+                    setButtonLoading(checkAllBtn, false);
+                    setButtonTransientFeedback(checkAllBtn, "error", { errorText: "失败" });
                     showToast(error.message, "error");
                 } finally {
                     setButtonLoading(checkAllBtn, false);
@@ -2974,9 +3151,6 @@
         const tableBody = document.getElementById("provider-table-body");
         const modelTableBody = document.getElementById("provider-model-table-body");
         const modal = document.getElementById("provider-modal");
-        const testResultModal = document.getElementById("provider-test-result-modal");
-        const testResultModalTitle = document.getElementById("provider-test-result-modal-title");
-        const testResultModalContent = document.getElementById("provider-test-result-modal-content");
         const modelsDetailModal = document.getElementById("provider-models-detail-modal");
         const modelsDetailModalTitle = document.getElementById("provider-models-detail-modal-title");
         const modelsDetailModalContent = document.getElementById("provider-models-detail-modal-content");
@@ -3271,16 +3445,6 @@
                 credentialProviderIdInput.value = "";
             },
         });
-        const testResultModalController = modalManager.register({
-            modal: testResultModal,
-            dialog: testResultModal?.querySelector('[role="dialog"]'),
-            getInitialFocus: () => document.getElementById("provider-test-result-modal-close"),
-            afterClose: () => {
-                if (testResultModalContent) {
-                    testResultModalContent.innerHTML = "";
-                }
-            },
-        });
         const modelsDetailModalController = modalManager.register({
             modal: modelsDetailModal,
             dialog: modelsDetailModal?.querySelector('[role="dialog"]'),
@@ -3296,7 +3460,7 @@
         document.getElementById("add-provider-btn").addEventListener("click", (event) => openProviderModal(null, event.currentTarget));
         document.getElementById("provider-modal-close").addEventListener("click", closeProviderModal);
         document.getElementById("provider-form-cancel").addEventListener("click", closeProviderModal);
-        document.getElementById("provider-test-result-modal-close")?.addEventListener("click", closeTestResultModal);
+        document.getElementById("provider-test-result-modal-close")?.addEventListener("click", () => closeHealthCheckResultModal());
         document.getElementById("provider-models-detail-modal-close")?.addEventListener("click", closeModelsDetailModal);
         document.getElementById("provider-credential-modal-close")?.addEventListener("click", closeCredentialModal);
         document.getElementById("provider-credential-cancel")?.addEventListener("click", closeCredentialModal);
@@ -3440,9 +3604,13 @@
                 });
                 const providerResults = results.filter((item) => item.scope === "provider");
                 const successCount = providerResults.filter((item) => item.success).length;
+                setButtonLoading(checkAllBtn, false);
+                setButtonTransientFeedback(checkAllBtn, "success", { successText: "已完成" });
                 showToast(`已完成全部健康检查：${successCount}/${providerResults.length} 个中转站通过`);
                 await loadProviders();
             } catch (error) {
+                setButtonLoading(checkAllBtn, false);
+                setButtonTransientFeedback(checkAllBtn, "error", { errorText: "失败" });
                 showToast(error.message, "error");
             } finally {
                 setButtonLoading(checkAllBtn, false);
@@ -3671,13 +3839,12 @@
             const visionCount = modelConfigs.filter((item) => item.supports_vision).length;
             const rows = modelConfigs.map((item) => `
                 <tr>
-                    <td>
+                    <td class="provider-model-name-cell">
                         <strong class="provider-model-detail-name">${escapeHtml(item.model_name)}</strong>
-                        ${item.last_error ? `<div class="provider-model-detail-error">${escapeHtml(item.last_error)}</div>` : ""}
                     </td>
-                    <td>
+                    <td class="provider-model-status-cell">
                         <div class="provider-model-detail-badges">
-                            ${statusBadge(item.health_status)}
+                            ${renderStatusWithErrorHint(item.health_status, item.last_error)}
                             <span class="status-badge ${item.enabled ? "status-healthy" : "status-unknown"}">${item.enabled ? "已启用" : "已停用"}</span>
                         </div>
                     </td>
@@ -3709,7 +3876,7 @@
                     <div class="provider-model-detail-meta">
                         <div><span>模型总数</span><strong>${formatNumber(modelConfigs.length)}</strong></div>
                         <div><span>已启用</span><strong>${formatNumber(enabledCount)}</strong></div>
-                        <div><span>健康</span><strong>${formatNumber(healthyCount)}</strong></div>
+                        <div><span>状态正常</span><strong>${formatNumber(healthyCount)}</strong></div>
                         <div><span>流式 / 图像</span><strong>${formatNumber(streamCount)} / ${formatNumber(visionCount)}</strong></div>
                     </div>
                     <div class="table-shell provider-model-detail-table-shell">
@@ -4127,11 +4294,10 @@
                 return `
                 <tr>
                     <td>${escapeHtml(provider.name)}</td>
-                    <td>
+                    <td class="provider-model-name-cell">
                         <strong>${escapeHtml(model.model_name)}</strong>
-                        <div class="table-muted">${model.last_error ? escapeHtml(model.last_error) : "-"}</div>
                     </td>
-                    <td>${statusBadge(model.health_status)}</td>
+                    <td class="provider-model-status-cell">${renderStatusWithErrorHint(model.health_status, model.last_error)}</td>
                     <td>${model.supports_stream ? "流式" : "非流式"} / ${model.supports_vision ? "图像" : "文本"} / ${model.supports_tools ? "工具" : "无工具"}</td>
                     <td>
                         <input class="field-input" type="number" min="0.0001" step="0.0001" value="${model.price_multiplier ?? 1}" placeholder="渠道倍率" data-model-field="price_multiplier" data-provider-id="${provider.id}" data-model-id="${model.id}">
@@ -4165,6 +4331,11 @@
             setButtonLoading(trigger, true);
             try {
                 const result = await api.post(`/api/providers/${providerId}/models/${modelId}/test`, {});
+                setButtonLoading(trigger, false);
+                setButtonTransientFeedback(trigger, result.success ? "success" : "error", {
+                    successText: "成功",
+                    errorText: "失败",
+                });
                 showToast(
                     formatTestResultLabel(result, `模型 ${modelConfig.model_name}`),
                     result.success ? "success" : "error",
@@ -4172,13 +4343,15 @@
                 if (options.closeModelsDetail) {
                     closeModelsDetailModal({ force: true, reason: "test-model" });
                 }
-                openTestResultModal(
+                openHealthCheckResultModal(
                     `模型测试结果 · ${modelConfig.model_name}`,
                     renderProviderTestModalBody(result, { scope: "model", name: `${owner.name} / ${modelConfig.model_name}` }),
                     trigger,
                 );
                 await loadProviders();
             } catch (error) {
+                setButtonLoading(trigger, false);
+                setButtonTransientFeedback(trigger, "error", { errorText: "失败" });
                 showToast(error.message, "error");
             } finally {
                 setButtonLoading(trigger, false);
@@ -4214,10 +4387,16 @@
                         trigger: button,
                         showModal: true,
                     });
+                    setButtonLoading(button, false);
+                    setButtonTransientFeedback(button, result.success ? "success" : "error", {
+                        successText: "成功",
+                        errorText: "失败",
+                    });
                     showToast(
                         formatTestResultLabel(result, provider.name),
                         result.success ? "success" : "error",
                     );
+                    await wait(650);
                     await loadProviders();
                     return;
                 }
@@ -4244,6 +4423,9 @@
                     await loadProviders();
                 }
             } catch (error) {
+                if (action === "test") {
+                    setButtonTransientFeedback(button, "error", { errorText: "失败" });
+                }
                 showToast(error.message, "error");
             } finally {
                 setButtonLoading(button, false);
@@ -4385,22 +4567,6 @@
 
         function closeCredentialModal(options = {}) {
             credentialModalController.close(options);
-        }
-
-        function openTestResultModal(title, html, trigger = document.activeElement) {
-            if (!testResultModal || !testResultModalTitle || !testResultModalContent) return;
-            testResultModalTitle.textContent = title;
-            testResultModalContent.innerHTML = html;
-            if (testResultModalController.isOpen()) {
-                enhanceInteractiveButtons(testResultModalContent);
-                return;
-            }
-            testResultModalController.open(trigger);
-            enhanceInteractiveButtons(testResultModalContent);
-        }
-
-        function closeTestResultModal(options = {}) {
-            testResultModalController.close(options);
         }
 
         function openModelsDetailModal(provider, trigger = document.activeElement) {
@@ -9133,6 +9299,7 @@
             runPageCleanup();
             page = document.body.dataset.page;
             initBillingTooltipLayer();
+            initProviderStatusTooltipLayer();
             enhanceInteractiveButtons(document);
             initRawApiKeyValidationControls(document);
             scheduleResponsiveTableSync(document);
