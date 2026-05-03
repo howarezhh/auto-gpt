@@ -1,4 +1,9 @@
+import asyncio
+import json
+from collections.abc import Awaitable, Callable
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -22,6 +27,45 @@ from app.services.setting_service import SettingService
 
 
 router = APIRouter(prefix="/api/providers", tags=["providers"])
+
+
+def _health_stream_line(payload: dict) -> bytes:
+    return (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+def _health_stream_headers() -> dict[str, str]:
+    return {
+        "Cache-Control": "no-cache, no-transform",
+        "X-Accel-Buffering": "no",
+    }
+
+
+async def _stream_health_check_events(
+    worker: Callable[[Callable[[dict], Awaitable[None]]], Awaitable[object]],
+):
+    queue: asyncio.Queue[dict | None] = asyncio.Queue()
+
+    async def reporter(payload: dict) -> None:
+        await queue.put(payload)
+
+    async def run_worker() -> None:
+        try:
+            result = await worker(reporter)
+            await queue.put({"event": "completed", "result": result})
+        except Exception as exc:
+            await queue.put({"event": "error", "message": str(exc)})
+        finally:
+            await queue.put(None)
+
+    task = asyncio.create_task(run_worker())
+    try:
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            yield _health_stream_line(item)
+    finally:
+        await task
 
 
 @router.get("", response_model=list[ProviderOut])
@@ -163,7 +207,35 @@ async def test_provider(provider_id: int, db: Session = Depends(get_db)) -> dict
     provider = ProviderService.get_provider(db, provider_id)
     if not provider:
         raise HTTPException(status_code=404, detail="Provider not found")
+    try:
+        HealthService.claim_manual_check_slot(f"provider:{provider.id}", f"中转站 {provider.name}")
+    except ValueError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     return await HealthService.check_provider(db, provider)
+
+
+@router.post("/{provider_id}/test-stream")
+async def test_provider_stream(provider_id: int, db: Session = Depends(get_db)) -> StreamingResponse:
+    provider = ProviderService.get_provider(db, provider_id)
+    if not provider:
+        raise HTTPException(status_code=404, detail="Provider not found")
+    try:
+        HealthService.claim_manual_check_slot(f"provider:{provider.id}", f"中转站 {provider.name}")
+    except ValueError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+
+    async def worker(progress_reporter: Callable[[dict], Awaitable[None]]) -> dict:
+        return await HealthService.check_provider(
+            db,
+            provider,
+            progress_callback=progress_reporter,
+        )
+
+    return StreamingResponse(
+        _stream_health_check_events(worker),
+        media_type="application/x-ndjson",
+        headers=_health_stream_headers(),
+    )
 
 
 @router.post("/{provider_id}/models/{provider_model_id}/test")
@@ -191,7 +263,31 @@ async def test_provider_model(
 
 @router.post("/test-all")
 async def test_all_providers(db: Session = Depends(get_db)) -> list[dict]:
+    try:
+        HealthService.claim_manual_check_slot("all", "全部中转站")
+    except ValueError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     return await HealthService.check_all(db)
+
+
+@router.post("/test-all-stream")
+async def test_all_providers_stream(db: Session = Depends(get_db)) -> StreamingResponse:
+    try:
+        HealthService.claim_manual_check_slot("all", "全部中转站")
+    except ValueError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+
+    async def worker(progress_reporter: Callable[[dict], Awaitable[None]]) -> list[dict]:
+        return await HealthService.check_all(
+            db,
+            progress_callback=progress_reporter,
+        )
+
+    return StreamingResponse(
+        _stream_health_check_events(worker),
+        media_type="application/x-ndjson",
+        headers=_health_stream_headers(),
+    )
 
 
 @router.post("/test-connectivity")

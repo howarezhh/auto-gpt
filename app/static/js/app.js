@@ -336,6 +336,58 @@
         return data;
     }
 
+    async function parseErrorResponse(response) {
+        const text = await response.text();
+        const data = text ? safeJsonParse(text) ?? text : null;
+        const detail = typeof data === "object" && data ? data.detail ?? data : data;
+        return typeof detail === "string" ? detail : JSON.stringify(detail, null, 2);
+    }
+
+    async function streamJsonLines(url, data, onEvent) {
+        const response = await fetch(url, withJson("POST", data));
+        if (response.status === 401) {
+            window.location.href = buildLoginPath();
+            throw new Error("登录状态已失效，请重新登录");
+        }
+        if (response.status === 403 && authContext.isAuthenticated) {
+            window.location.href = getRoleHomePath();
+            throw new Error("当前账号无权访问该内容");
+        }
+        if (!response.ok) {
+            throw new Error(await parseErrorResponse(response));
+        }
+        const reader = response.body?.getReader();
+        if (!reader) {
+            throw new Error("健康检查流式响应不可用");
+        }
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            let lineBreakIndex = buffer.indexOf("\n");
+            while (lineBreakIndex >= 0) {
+                const line = buffer.slice(0, lineBreakIndex).trim();
+                buffer = buffer.slice(lineBreakIndex + 1);
+                if (line) {
+                    const payload = safeJsonParse(line);
+                    if (payload) {
+                        onEvent(payload);
+                    }
+                }
+                lineBreakIndex = buffer.indexOf("\n");
+            }
+        }
+        const tail = buffer.trim();
+        if (tail) {
+            const payload = safeJsonParse(tail);
+            if (payload) {
+                onEvent(payload);
+            }
+        }
+    }
+
     function safeJsonParse(text) {
         try {
             return JSON.parse(text);
@@ -381,6 +433,28 @@
         node.textContent = message;
         stack.appendChild(node);
         setTimeout(() => node.remove(), 2800);
+    }
+
+    function setButtonTransientFeedback(button, status = "success", options = {}) {
+        if (!button) return;
+        const {
+            successText = "已完成",
+            errorText = "失败",
+            duration = 1400,
+        } = options;
+        const nextText = status === "error" ? errorText : successText;
+        window.clearTimeout(Number(button.dataset.feedbackTimer || 0));
+        if (!button.dataset.feedbackOriginalText) {
+            button.dataset.feedbackOriginalText = button.textContent;
+        }
+        button.classList.remove("is-action-success", "is-action-error");
+        button.classList.add(status === "error" ? "is-action-error" : "is-action-success");
+        button.textContent = nextText;
+        button.dataset.feedbackTimer = String(window.setTimeout(() => {
+            button.classList.remove("is-action-success", "is-action-error");
+            button.textContent = button.dataset.feedbackOriginalText || button.textContent;
+            delete button.dataset.feedbackTimer;
+        }, duration));
     }
 
     function formatTestResultLabel(result, fallbackName) {
@@ -466,25 +540,213 @@
         return `
             <div class="provider-test-result-shell">
                 <section class="provider-test-result-card">
-                    <div class="panel-kicker">Test Summary</div>
+                    <div class="panel-kicker">测试摘要</div>
                     <div class="provider-test-summary-grid">${summaryHtml}</div>
                 </section>
                 <section class="provider-test-result-card">
-                    <div class="panel-kicker">Result Message</div>
+                    <div class="panel-kicker">结果说明</div>
                     <div class="provider-test-message">${messageHtml}</div>
                 </section>
                 <section class="provider-test-result-card">
-                    <div class="panel-kicker">Endpoint Results</div>
+                    <div class="panel-kicker">端点结果</div>
                     <div class="provider-test-model-message">${renderEndpointProbeHtml(endpointResults)}</div>
                 </section>
                 ${scope === "provider" ? `
                 <section class="provider-test-result-card">
-                    <div class="panel-kicker">Model Results</div>
+                    <div class="panel-kicker">模型结果</div>
                     <div class="provider-test-model-list">${modelHtml}</div>
                 </section>
                 ` : ""}
             </div>
         `;
+    }
+
+    function createHealthCheckStreamState(scope, title) {
+        return {
+            scope,
+            title,
+            running: true,
+            currentProviderName: "",
+            currentStageLabel: "准备开始",
+            stages: [],
+            providerSummaries: [],
+            finalResult: null,
+            errorMessage: "",
+        };
+    }
+
+    function applyHealthCheckStreamEvent(state, event) {
+        if (event.event === "provider_started") {
+            state.currentProviderName = event.provider_name || "";
+            state.currentStageLabel = `正在准备 ${event.provider_name || "当前中转站"} 的健康检查`;
+            return;
+        }
+        if (event.event === "stage_started") {
+            state.currentProviderName = event.provider_name || state.currentProviderName;
+            state.currentStageLabel = `${event.provider_name || "当前中转站"} · ${event.phase_label || event.phase_key || "检查中"}`;
+            return;
+        }
+        if (event.event === "stage_completed") {
+            const successCount = Number(event.success_count || 0);
+            const failureCount = Number(event.failure_count || 0);
+            state.stages.push({
+                providerName: event.provider_name || state.currentProviderName || "当前中转站",
+                phaseLabel: event.phase_label || event.phase_key || "检查阶段",
+                skipped: event.skipped === true,
+                modelTotal: Number(event.model_total || 0),
+                successCount,
+                failureCount,
+            });
+            state.currentStageLabel = event.skipped
+                ? `${event.provider_name || state.currentProviderName || "当前中转站"} · ${event.phase_label || "检查阶段"}已跳过`
+                : `${event.provider_name || state.currentProviderName || "当前中转站"} · ${event.phase_label || "检查阶段"}已完成`;
+            return;
+        }
+        if (event.event === "provider_completed") {
+            state.providerSummaries.push({
+                providerName: event.provider_name || "当前中转站",
+                success: event.success === true,
+                modelsTotal: Number(event.models_total || 0),
+                modelsSuccess: Number(event.models_success || 0),
+                modelsFailed: Number(event.models_failed || 0),
+            });
+            return;
+        }
+        if (event.event === "completed") {
+            state.running = false;
+            state.finalResult = event.result;
+            state.currentStageLabel = "全部检查已完成";
+            return;
+        }
+        if (event.event === "error") {
+            state.running = false;
+            state.errorMessage = event.message || "健康检查执行失败";
+        }
+    }
+
+    function renderHealthCheckStageList(stages = []) {
+        if (!stages.length) {
+            return '<div class="empty-state">当前还没有完成的阶段结果。</div>';
+        }
+        return stages.map((item) => `
+            <article class="provider-test-model-item">
+                <div class="provider-test-model-top">
+                    <strong>${escapeHtml(item.providerName)}</strong>
+                    <div>${item.skipped ? statusBadge("unknown") : statusBadge(item.failureCount > 0 ? "degraded" : "healthy")}</div>
+                </div>
+                <div class="table-muted">${escapeHtml(item.phaseLabel)}</div>
+                <div class="provider-test-model-message">
+                    ${item.skipped
+                        ? "当前阶段无可执行模型，已跳过。"
+                        : `共 ${formatNumber(item.modelTotal)} 个模型，成功 ${formatNumber(item.successCount)} 个，失败 ${formatNumber(item.failureCount)} 个。`}
+                </div>
+            </article>
+        `).join("");
+    }
+
+    function renderHealthCheckProviderSummaryList(items = []) {
+        if (!items.length) {
+            return '<div class="empty-state">当前还没有可展示的中转站结果。</div>';
+        }
+        return items.map((item) => `
+            <article class="provider-test-model-item">
+                <div class="provider-test-model-top">
+                    <strong>${escapeHtml(item.providerName)}</strong>
+                    <div>${statusBadge(item.success ? "healthy" : (item.modelsSuccess > 0 ? "degraded" : "unhealthy"))}</div>
+                </div>
+                <div class="provider-test-model-message">
+                    模型通过 ${formatNumber(item.modelsSuccess)}/${formatNumber(item.modelsTotal)}，失败 ${formatNumber(item.modelsFailed)} 个。
+                </div>
+            </article>
+        `).join("");
+    }
+
+    function renderHealthCheckStreamModalBody(state) {
+        const providerResultItems = Array.isArray(state.finalResult)
+            ? state.finalResult.filter((item) => item.scope === "provider")
+            : [];
+        const successCount = providerResultItems.filter((item) => item.success).length;
+        const totalCount = providerResultItems.length;
+        const summaryRows = [
+            ["检查范围", state.scope === "all" ? "全部中转站" : "单中转站"],
+            ["执行状态", state.errorMessage ? "失败" : (state.running ? "执行中" : "已完成")],
+            ["当前阶段", state.currentStageLabel || "准备开始"],
+        ];
+        if (state.scope === "all" && totalCount > 0) {
+            summaryRows.push(["中转站通过", `${formatNumber(successCount)}/${formatNumber(totalCount)}`]);
+        }
+        const summaryHtml = summaryRows.map(([label, value]) => `
+            <div class="provider-test-summary-item">
+                <span>${escapeHtml(String(label))}</span>
+                <strong>${escapeHtml(String(value))}</strong>
+            </div>
+        `).join("");
+        const progressHtml = `
+            <div class="provider-test-result-shell">
+                <section class="provider-test-result-card">
+                    <div class="panel-kicker">执行进度</div>
+                    <div class="provider-test-summary-grid">${summaryHtml}</div>
+                </section>
+                <section class="provider-test-result-card">
+                    <div class="panel-kicker">阶段反馈</div>
+                    <div class="provider-test-model-list">${renderHealthCheckStageList(state.stages)}</div>
+                </section>
+                ${state.scope === "all" ? `
+                <section class="provider-test-result-card">
+                    <div class="panel-kicker">中转站结果</div>
+                    <div class="provider-test-model-list">${renderHealthCheckProviderSummaryList(
+                        state.providerSummaries.length ? state.providerSummaries : providerResultItems.map((item) => ({
+                            providerName: item.provider_name || "-",
+                            success: item.success === true,
+                            modelsTotal: Number(item.models_total || 0),
+                            modelsSuccess: Number(item.models_success || 0),
+                            modelsFailed: Number(item.models_failed || 0),
+                        }))
+                    )}</div>
+                </section>
+                ` : ""}
+            </div>
+        `;
+        if (state.errorMessage) {
+            return `${progressHtml}
+                <section class="provider-test-result-card">
+                    <div class="panel-kicker">错误信息</div>
+                    <div class="provider-test-message">${escapeHtml(state.errorMessage)}</div>
+                </section>
+            `;
+        }
+        if (state.scope === "provider" && state.finalResult && !Array.isArray(state.finalResult)) {
+            return `${progressHtml}${renderProviderTestModalBody(state.finalResult, { scope: "provider", name: state.title })}`;
+        }
+        return progressHtml;
+    }
+
+    async function runHealthCheckStream(options) {
+        const {
+            url,
+            title,
+            scope,
+            trigger,
+            showModal = true,
+            onCompleted = null,
+        } = options;
+        const state = createHealthCheckStreamState(scope, title);
+        if (showModal) {
+            openTestResultModal(title, renderHealthCheckStreamModalBody(state), trigger);
+        }
+        await streamJsonLines(url, {}, (event) => {
+            applyHealthCheckStreamEvent(state, event);
+            if (showModal) {
+                openTestResultModal(title, renderHealthCheckStreamModalBody(state), trigger);
+            }
+        });
+        if (state.errorMessage) {
+            throw new Error(state.errorMessage);
+        }
+        if (typeof onCompleted === "function") {
+            await onCompleted(state.finalResult);
+        }
+        return state.finalResult;
     }
 
     function setBatchPlaceholder(message) {
@@ -688,23 +950,23 @@
         if (numeric == null) return "-";
         const tokenValue = Math.max(0, numeric);
         if (tokenValue < 1000) {
-            return `${formatNumber(Math.round(tokenValue))} token`;
+            return `${formatNumber(Math.round(tokenValue))} tok`;
         }
         const compactValue = tokenValue / 1000;
         const digits = compactValue >= 100 ? 0 : compactValue >= 10 ? 1 : 2;
-        return `${trimTrailingZeros(compactValue.toFixed(digits))}k token`;
+        return `${trimTrailingZeros(compactValue.toFixed(digits))}k tok`;
     }
 
     function formatUsdValue(value) {
         const numeric = toFiniteNumber(value);
         if (numeric == null) return "-";
-        return `$${formatAdaptiveDecimal(numeric, { maxDecimals: 9, fallback: "0" })} 美元`;
+        return `$${formatAdaptiveDecimal(numeric, { maxDecimals: 9, fallback: "0" })}`;
     }
 
-    function formatUsdPer1k(value) {
+    function formatUsdPer1M(value) {
         const numeric = toFiniteNumber(value);
         if (numeric == null) return "未设置";
-        return `$${formatAdaptiveDecimal(numeric, { maxDecimals: 12, fallback: "0" })} 美元 / 1k token`;
+        return `$${formatAdaptiveDecimal(numeric * 1000, { maxDecimals: 12, fallback: "0" })}/1M`;
     }
 
     function sumCosts(...values) {
@@ -760,19 +1022,19 @@
     function renderBillingTooltip(log) {
         const billing = buildBillingBreakdown(log);
         const originalPriceLines = [
-            `输入 ${formatUsdPer1k(billing.baseInputPrice)}`,
-            `输出 ${formatUsdPer1k(billing.baseOutputPrice)}`,
-            `缓存 ${formatUsdPer1k(billing.baseCachePrice)}`,
+            `输入 ${formatUsdPer1M(billing.baseInputPrice)}`,
+            `输出 ${formatUsdPer1M(billing.baseOutputPrice)}`,
+            `缓存 ${formatUsdPer1M(billing.baseCachePrice)}`,
         ];
         const channelPriceLines = [
-            `输入 ${formatUsdPer1k(billing.inputPrice)}`,
-            `输出 ${formatUsdPer1k(billing.outputPrice)}`,
-            `缓存 ${formatUsdPer1k(billing.cachePrice)}`,
+            `输入 ${formatUsdPer1M(billing.inputPrice)}`,
+            `输出 ${formatUsdPer1M(billing.outputPrice)}`,
+            `缓存 ${formatUsdPer1M(billing.cachePrice)}`,
         ];
         const calculationLines = [
-            `普通输入成本 = ${formatTokenDisplay(billing.regularPromptTokens)} / 1000 × ${formatUsdPer1k(billing.inputPrice)} = ${formatUsdValue(billing.inputCost)}`,
-            `缓存读成本 = ${formatTokenDisplay(billing.cacheReadTokens)} / 1000 × ${formatUsdPer1k(billing.cachePrice)} = ${formatUsdValue(billing.cacheReadCost)}`,
-            `输出成本 = ${formatTokenDisplay(billing.completionTokens)} / 1000 × ${formatUsdPer1k(billing.outputPrice)} = ${formatUsdValue(billing.outputCost)}`,
+            `输入成本 ${formatTokenDisplay(billing.regularPromptTokens)} × ${formatUsdPer1M(billing.inputPrice)} = ${formatUsdValue(billing.inputCost)}`,
+            `缓存读成本 ${formatTokenDisplay(billing.cacheReadTokens)} × ${formatUsdPer1M(billing.cachePrice)} = ${formatUsdValue(billing.cacheReadCost)}`,
+            `输出成本 ${formatTokenDisplay(billing.completionTokens)} × ${formatUsdPer1M(billing.outputPrice)} = ${formatUsdValue(billing.outputCost)}`,
             `总成本 = ${formatUsdValue(billing.totalCost)}，倍率 ${formatMultiplier(billing.multiplier)}`,
         ];
         return `
@@ -795,23 +1057,50 @@
         const billing = buildBillingBreakdown(log);
         return `
             <div class="log-billing-cell">
-                <div class="log-billing-top">
-                    <strong class="log-billing-total-cost">${escapeHtml(formatUsdValue(billing.totalCost))}</strong>
+                <div class="log-billing-row log-billing-row-primary">
+                    <div class="log-billing-pair">
+                        <span class="log-billing-label">总成本</span>
+                        <strong class="log-billing-total-cost">${escapeHtml(formatUsdValue(billing.totalCost))}</strong>
+                    </div>
+                    <div class="log-billing-pair">
+                        <span class="log-billing-label">总 tok</span>
+                        <strong class="log-billing-total-tokens">${escapeHtml(formatTokenDisplay(billing.totalTokens))}</strong>
+                    </div>
                     <span class="log-billing-help">
-                        <button class="log-billing-help-btn" type="button" aria-label="查看价格与计算过程">
+                        <button class="log-billing-help-btn" type="button" aria-label="查看价格与计算过程" data-billing-tooltip-trigger="true">
                             <i class="bi bi-question-circle" aria-hidden="true"></i>
                         </button>
-                        <div class="log-billing-tooltip" role="tooltip">
+                        <div class="log-billing-tooltip-content hidden">
                             ${renderBillingTooltip(log)}
                         </div>
                     </span>
                 </div>
-                <div class="log-billing-total-tokens">总计 ${escapeHtml(formatTokenDisplay(billing.totalTokens))}</div>
-                <div class="log-billing-meta">普通输入 ${escapeHtml(formatTokenDisplay(billing.regularPromptTokens))} · 单价 ${escapeHtml(formatUsdPer1k(billing.inputPrice))}</div>
-                <div class="log-billing-meta">输出 ${escapeHtml(formatTokenDisplay(billing.completionTokens))} · 单价 ${escapeHtml(formatUsdPer1k(billing.outputPrice))}</div>
-                <div class="log-billing-meta">缓存读 ${escapeHtml(formatTokenDisplay(billing.cacheReadTokens))} · 单价 ${escapeHtml(formatUsdPer1k(billing.cachePrice))}</div>
-                <div class="log-billing-meta">缓存写 ${escapeHtml(formatTokenDisplay(billing.cacheWriteTokens))}</div>
-                <div class="log-billing-multiplier">倍率 ${escapeHtml(formatMultiplier(billing.multiplier))}</div>
+                <div class="log-billing-row">
+                    <div class="log-billing-pair">
+                        <span class="log-billing-label">输入</span>
+                        <span class="log-billing-meta">${escapeHtml(formatTokenDisplay(billing.regularPromptTokens))}</span>
+                    </div>
+                    <div class="log-billing-pair">
+                        <span class="log-billing-label">输出</span>
+                        <span class="log-billing-meta">${escapeHtml(formatTokenDisplay(billing.completionTokens))}</span>
+                    </div>
+                </div>
+                <div class="log-billing-row">
+                    <div class="log-billing-pair">
+                        <span class="log-billing-label">缓存读</span>
+                        <span class="log-billing-meta">${escapeHtml(formatTokenDisplay(billing.cacheReadTokens))}</span>
+                    </div>
+                    <div class="log-billing-pair">
+                        <span class="log-billing-label">缓存写</span>
+                        <span class="log-billing-meta">${escapeHtml(formatTokenDisplay(billing.cacheWriteTokens))}</span>
+                    </div>
+                </div>
+                <div class="log-billing-row log-billing-row-multiplier">
+                    <div class="log-billing-pair">
+                        <span class="log-billing-label">倍率</span>
+                        <span class="log-billing-multiplier">${escapeHtml(formatMultiplier(billing.multiplier))}</span>
+                    </div>
+                </div>
             </div>
         `;
     }
@@ -819,11 +1108,98 @@
     function formatBillingCalculation(log) {
         const billing = buildBillingBreakdown(log);
         return [
-            `原始价格：输入 ${formatUsdPer1k(billing.baseInputPrice)}，输出 ${formatUsdPer1k(billing.baseOutputPrice)}，缓存 ${formatUsdPer1k(billing.baseCachePrice)}`,
-            `中转站价格：输入 ${formatUsdPer1k(billing.inputPrice)}，输出 ${formatUsdPer1k(billing.outputPrice)}，缓存 ${formatUsdPer1k(billing.cachePrice)}`,
+            `原始价格：输入 ${formatUsdPer1M(billing.baseInputPrice)}，输出 ${formatUsdPer1M(billing.baseOutputPrice)}，缓存 ${formatUsdPer1M(billing.baseCachePrice)}`,
+            `中转站价格：输入 ${formatUsdPer1M(billing.inputPrice)}，输出 ${formatUsdPer1M(billing.outputPrice)}，缓存 ${formatUsdPer1M(billing.cachePrice)}`,
             `计算：输入 ${formatTokenDisplay(billing.regularPromptTokens)} -> ${formatUsdValue(billing.inputCost)}；缓存读 ${formatTokenDisplay(billing.cacheReadTokens)} -> ${formatUsdValue(billing.cacheReadCost)}；输出 ${formatTokenDisplay(billing.completionTokens)} -> ${formatUsdValue(billing.outputCost)}`,
             `总成本 ${formatUsdValue(billing.totalCost)}；倍率 ${formatMultiplier(billing.multiplier)}`,
         ].join("；");
+    }
+
+    let billingTooltipLayer = null;
+    let billingTooltipOwner = null;
+
+    function ensureBillingTooltipLayer() {
+        if (billingTooltipLayer) return billingTooltipLayer;
+        billingTooltipLayer = document.createElement("div");
+        billingTooltipLayer.id = "log-billing-floating-tooltip";
+        billingTooltipLayer.className = "log-billing-tooltip log-billing-tooltip-floating hidden";
+        billingTooltipLayer.setAttribute("role", "tooltip");
+        document.body.appendChild(billingTooltipLayer);
+        return billingTooltipLayer;
+    }
+
+    function hideBillingTooltip() {
+        const tooltip = ensureBillingTooltipLayer();
+        tooltip.classList.add("hidden");
+        tooltip.innerHTML = "";
+        billingTooltipOwner = null;
+    }
+
+    function positionBillingTooltip(trigger) {
+        const tooltip = ensureBillingTooltipLayer();
+        const triggerRect = trigger.getBoundingClientRect();
+        const tooltipRect = tooltip.getBoundingClientRect();
+        const viewportPadding = 12;
+        let top = triggerRect.top - tooltipRect.height - 12;
+        let placement = "top";
+        if (top < viewportPadding) {
+            top = Math.min(window.innerHeight - tooltipRect.height - viewportPadding, triggerRect.bottom + 12);
+            placement = "bottom";
+        }
+        let left = triggerRect.right - tooltipRect.width;
+        left = Math.max(viewportPadding, Math.min(left, window.innerWidth - tooltipRect.width - viewportPadding));
+        tooltip.style.top = `${top}px`;
+        tooltip.style.left = `${left}px`;
+        tooltip.dataset.placement = placement;
+    }
+
+    function showBillingTooltip(trigger) {
+        const wrapper = trigger.closest(".log-billing-help");
+        const content = wrapper?.querySelector(".log-billing-tooltip-content");
+        if (!content) return;
+        const tooltip = ensureBillingTooltipLayer();
+        billingTooltipOwner = trigger;
+        tooltip.innerHTML = content.innerHTML;
+        tooltip.classList.remove("hidden");
+        positionBillingTooltip(trigger);
+    }
+
+    function initBillingTooltipLayer() {
+        if (document.body.dataset.billingTooltipBound === "true") return;
+        document.body.dataset.billingTooltipBound = "true";
+        document.addEventListener("mouseover", (event) => {
+            const trigger = event.target.closest("[data-billing-tooltip-trigger='true']");
+            if (!trigger) return;
+            if (billingTooltipOwner === trigger) return;
+            showBillingTooltip(trigger);
+        });
+        document.addEventListener("mouseout", (event) => {
+            const wrapper = event.target.closest(".log-billing-help");
+            if (!wrapper) return;
+            if (wrapper.contains(event.relatedTarget)) return;
+            hideBillingTooltip();
+        });
+        document.addEventListener("focusin", (event) => {
+            const trigger = event.target.closest("[data-billing-tooltip-trigger='true']");
+            if (!trigger) return;
+            showBillingTooltip(trigger);
+        });
+        document.addEventListener("focusout", (event) => {
+            const wrapper = event.target.closest(".log-billing-help");
+            if (!wrapper) return;
+            if (wrapper.contains(event.relatedTarget)) return;
+            hideBillingTooltip();
+        });
+        window.addEventListener("scroll", () => {
+            if (billingTooltipOwner) {
+                positionBillingTooltip(billingTooltipOwner);
+            }
+        }, true);
+        window.addEventListener("resize", () => {
+            if (billingTooltipOwner) {
+                positionBillingTooltip(billingTooltipOwner);
+            }
+        });
     }
 
     function formatPercent(value) {
@@ -2275,8 +2651,14 @@
             checkAllBtn.addEventListener("click", async () => {
                 try {
                     setButtonLoading(checkAllBtn, true);
-                    await api.post("/api/providers/test-all");
-                    showToast("已触发全部中转检查");
+                    await runHealthCheckStream({
+                        url: "/api/providers/test-all-stream",
+                        title: "全部中转站健康检查",
+                        scope: "all",
+                        trigger: checkAllBtn,
+                        showModal: false,
+                    });
+                    showToast("已完成全部中转健康检查");
                     await refreshDashboard();
                 } catch (error) {
                     showToast(error.message, "error");
@@ -2989,6 +3371,7 @@
             if (addProviderModelConfig({}, { allowBlank: true })) {
                 const rows = getProviderModelConfigRows();
                 rows.at(-1)?.querySelector('[data-model-config-field="model_name"]')?.focus();
+                setButtonTransientFeedback(addEmptyModelBtn, "success", { successText: "已添加" });
             }
         });
         discoverModelsBtn?.addEventListener("click", async () => {
@@ -3038,9 +3421,16 @@
         checkAllBtn.addEventListener("click", async () => {
             try {
                 setButtonLoading(checkAllBtn, true);
-                const results = await api.post("/api/providers/test-all");
-                const successCount = results.filter((item) => item.success).length;
-                showToast(`已完成全部健康检查：${successCount}/${results.length} 成功`);
+                const results = await runHealthCheckStream({
+                    url: "/api/providers/test-all-stream",
+                    title: "全部中转站健康检查",
+                    scope: "all",
+                    trigger: checkAllBtn,
+                    showModal: true,
+                });
+                const providerResults = results.filter((item) => item.scope === "provider");
+                const successCount = providerResults.filter((item) => item.success).length;
+                showToast(`已完成全部健康检查：${successCount}/${providerResults.length} 个中转站通过`);
                 await loadProviders();
             } catch (error) {
                 showToast(error.message, "error");
@@ -3807,15 +4197,16 @@
                 }
                 if (action === "test") {
                     setButtonLoading(button, true);
-                    const result = await api.post(`/api/providers/${id}/test`);
+                    const result = await runHealthCheckStream({
+                        url: `/api/providers/${id}/test-stream`,
+                        title: `中转站测试结果 · ${provider.name}`,
+                        scope: "provider",
+                        trigger: button,
+                        showModal: true,
+                    });
                     showToast(
                         formatTestResultLabel(result, provider.name),
                         result.success ? "success" : "error",
-                    );
-                    openTestResultModal(
-                        `中转站测试结果 · ${provider.name}`,
-                        renderProviderTestModalBody(result, { scope: "provider", name: provider.name }),
-                        button,
                     );
                     await loadProviders();
                     return;
@@ -3990,7 +4381,12 @@
             if (!testResultModal || !testResultModalTitle || !testResultModalContent) return;
             testResultModalTitle.textContent = title;
             testResultModalContent.innerHTML = html;
+            if (testResultModalController.isOpen()) {
+                enhanceInteractiveButtons(testResultModalContent);
+                return;
+            }
             testResultModalController.open(trigger);
+            enhanceInteractiveButtons(testResultModalContent);
         }
 
         function closeTestResultModal(options = {}) {
@@ -4573,6 +4969,7 @@
         const providerSelect = document.getElementById("setting-default-provider-id");
         const routeModeSelect = document.getElementById("setting-route-mode");
         const manualAllowFallbackInput = document.getElementById("setting-manual-allow-fallback");
+        const healthCheckIntervalInput = document.getElementById("setting-health-check-interval-sec");
         const [providers, settings] = await Promise.all([api.get("/api/providers"), api.get("/api/settings")]);
 
         providerSelect.innerHTML = '<option value="">未设置</option>' + providers.map((provider) => `
@@ -4592,7 +4989,8 @@
         document.getElementById("setting-stream-token-capture-max-bytes").value = settings.stream_token_capture_max_bytes ?? 1048576;
         document.getElementById("setting-max-logged-metadata-bytes").value = settings.max_logged_metadata_bytes ?? 1024;
         document.getElementById("setting-circuit-breaker-threshold").value = settings.circuit_breaker_threshold;
-        document.getElementById("setting-health-check-interval-sec").value = settings.health_check_interval_sec;
+        healthCheckIntervalInput.value = settings.health_check_interval_sec;
+        healthCheckIntervalInput.min = "300";
         document.getElementById("setting-recovery-probe-interval-sec").value = settings.recovery_probe_interval_sec;
         document.getElementById("setting-max-logged-body-bytes").value = settings.max_logged_body_bytes;
         manualAllowFallbackInput.checked = settings.manual_allow_fallback;
@@ -4646,7 +5044,7 @@
                 max_logged_metadata_bytes: Number(document.getElementById("setting-max-logged-metadata-bytes").value),
                 circuit_breaker_threshold: Number(document.getElementById("setting-circuit-breaker-threshold").value),
                 auto_health_check: document.getElementById("setting-auto-health-check").checked,
-                health_check_interval_sec: Number(document.getElementById("setting-health-check-interval-sec").value),
+                health_check_interval_sec: Math.max(300, Number(healthCheckIntervalInput.value || 300)),
                 recovery_probe_interval_sec: Number(document.getElementById("setting-recovery-probe-interval-sec").value),
                 enable_token_logging: document.getElementById("setting-enable-token-logging").checked,
                 enable_payload_logging: document.getElementById("setting-enable-payload-logging").checked,
@@ -4911,6 +5309,7 @@
             updatePlaygroundImageFields();
             meta.innerHTML = "";
             setPlaygroundPlaceholder("等待请求...");
+            setButtonTransientFeedback(clearBtn, "success", { successText: "已清空" });
         });
 
         providerSelect.addEventListener("change", () => {
@@ -5470,6 +5869,7 @@
             if (conversationKey) params.set("conversation_key", conversationKey);
             params.set("exclude_health_checks", excludeHealthChecksInput.checked ? "true" : "false");
             params.set("limit", "5000");
+            setButtonTransientFeedback(exportBtn, "success", { successText: "准备导出" });
             window.location.href = `/user/logs/export?${params.toString()}`;
         });
         refreshBtn.addEventListener("click", async (event) => {
@@ -5897,7 +6297,16 @@
             await loadConversations();
         });
         refreshBtn.addEventListener("click", async () => {
-            await loadConversations(state.activeKey);
+            try {
+                setButtonLoading(refreshBtn, true);
+                await loadConversations(state.activeKey);
+                setButtonTransientFeedback(refreshBtn, "success", { successText: "已刷新" });
+            } catch (error) {
+                showToast(error.message, "error");
+                setButtonTransientFeedback(refreshBtn, "error", { errorText: "刷新失败" });
+            } finally {
+                setButtonLoading(refreshBtn, false);
+            }
         });
 
         await loadConversations();
@@ -7541,10 +7950,12 @@
         selectPageBtn.addEventListener("click", () => {
             getVisibleApiKeyIds().forEach((id) => state.selectedIds.add(id));
             renderTable();
+            setButtonTransientFeedback(selectPageBtn, "success", { successText: "已选本页" });
         });
         clearSelectionBtn.addEventListener("click", () => {
             state.selectedIds.clear();
             renderTable();
+            setButtonTransientFeedback(clearSelectionBtn, "success", { successText: "已清空" });
         });
         batchEnableBtn.addEventListener("click", async () => {
             await runBatchAction("enable", null, "已批量启用");
@@ -8107,6 +8518,7 @@
             if (conversationKey) params.set("conversation_key", conversationKey);
             params.set("exclude_health_checks", excludeHealthChecksInput.checked ? "true" : "false");
             params.set("limit", "5000");
+            setButtonTransientFeedback(exportBtn, "success", { successText: "准备导出" });
             window.location.href = `/api/logs/export?${params.toString()}`;
         });
 
@@ -8531,7 +8943,16 @@
             await loadConversations();
         });
         refreshBtn.addEventListener("click", async () => {
-            await loadConversations(state.activeKey);
+            try {
+                setButtonLoading(refreshBtn, true);
+                await loadConversations(state.activeKey);
+                setButtonTransientFeedback(refreshBtn, "success", { successText: "已刷新" });
+            } catch (error) {
+                showToast(error.message, "error");
+                setButtonTransientFeedback(refreshBtn, "error", { errorText: "刷新失败" });
+            } finally {
+                setButtonLoading(refreshBtn, false);
+            }
         });
 
         await loadConversations();
@@ -8560,6 +8981,7 @@
         try {
             runPageCleanup();
             page = document.body.dataset.page;
+            initBillingTooltipLayer();
             enhanceInteractiveButtons(document);
             initRawApiKeyValidationControls(document);
             scheduleResponsiveTableSync(document);

@@ -30,7 +30,7 @@
             <select class="field-input" id="setting-default-provider-id"></select>
         </label>
         <label>
-            <span>全局超时毫秒</span>
+            <span>全局超时（ms）</span>
             <input class="field-input" id="setting-global-timeout-ms" type="number">
         </label>
         <label>
@@ -38,35 +38,35 @@
             <input class="field-input" id="setting-global-max-retries" type="number">
         </label>
         <label>
-            <span>全局最大请求 token</span>
+            <span>全局最大请求（tok）</span>
             <input class="field-input" id="setting-global-max-request-tokens" type="number" min="0" placeholder="0 表示不限制">
         </label>
         <label>
-            <span>/v1 请求体最大字节数</span>
+            <span>/v1 请求体最大字节数（B）</span>
             <input class="field-input" id="setting-max-v1-request-body-bytes" type="number" min="0" placeholder="0 表示不限制">
         </label>
         <label>
-            <span>Chat 请求体最大字节数</span>
+            <span>Chat 请求体最大字节数（B）</span>
             <input class="field-input" id="setting-max-v1-chat-request-body-bytes" type="number" min="0" placeholder="0 表示沿用 /v1 上限">
         </label>
         <label>
-            <span>Responses 请求体最大字节数</span>
+            <span>Responses 请求体最大字节数（B）</span>
             <input class="field-input" id="setting-max-v1-responses-request-body-bytes" type="number" min="0" placeholder="0 表示沿用 /v1 上限">
         </label>
         <label>
-            <span>长输出非流式阈值 token</span>
+            <span>长输出非流式阈值（tok）</span>
             <input class="field-input" id="setting-long-output-stream-threshold-tokens" type="number" min="0" placeholder="0 表示不强制">
         </label>
         <label>
-            <span>非流式响应最大字节数</span>
+            <span>非流式响应最大字节数（B）</span>
             <input class="field-input" id="setting-max-non-stream-response-body-bytes" type="number" min="0" placeholder="0 表示不限制">
         </label>
         <label>
-            <span>流式统计缓存字节数</span>
+            <span>流式统计缓存字节数（B）</span>
             <input class="field-input" id="setting-stream-token-capture-max-bytes" type="number" min="0" placeholder="0 表示不缓存输出文本">
         </label>
         <label>
-            <span>日志 metadata 最大字节数</span>
+            <span>日志 metadata 最大字节数（B）</span>
             <input class="field-input" id="setting-max-logged-metadata-bytes" type="number" min="0" placeholder="0 表示只保留摘要">
         </label>
         <label>
@@ -74,23 +74,23 @@
             <input class="field-input" id="setting-circuit-breaker-threshold" type="number">
         </label>
         <label>
-            <span>健康检查间隔秒</span>
-            <input class="field-input" id="setting-health-check-interval-sec" type="number">
+            <span>健康检查间隔（s）</span>
+            <input class="field-input" id="setting-health-check-interval-sec" type="number" min="300">
         </label>
         <label>
-            <span>恢复探测间隔秒</span>
+            <span>恢复探测间隔（s）</span>
             <input class="field-input" id="setting-recovery-probe-interval-sec" type="number">
         </label>
         <label>
-            <span>日志正文最大字节数</span>
+            <span>日志正文最大字节数（B）</span>
             <input class="field-input" id="setting-max-logged-body-bytes" type="number">
         </label>
         <label>
-            <span>请求日志保留天数</span>
+            <span>请求日志保留（d）</span>
             <input class="field-input" id="setting-request-log-retention-days" type="number" min="0">
         </label>
         <label>
-            <span>审计日志保留天数</span>
+            <span>审计日志保留（d）</span>
             <input class="field-input" id="setting-admin-audit-log-retention-days" type="number" min="0">
         </label>
         <label>
@@ -126,7 +126,7 @@
             <input class="field-input" id="setting-provider-max-active-streams" type="number" min="0">
         </label>
         <label>
-            <span>并发租约 TTL 秒</span>
+            <span>并发租约 TTL（s）</span>
             <input class="field-input" id="setting-concurrency-lease-ttl-seconds" type="number" min="60">
         </label>
         <div class="form-span-2 settings-switch-grid">

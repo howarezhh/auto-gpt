@@ -23,7 +23,7 @@ class SettingUpdate(BaseModel):
     max_logged_metadata_bytes: int = Field(default=1024, ge=0)
     circuit_breaker_threshold: int = Field(default=3, ge=0)
     auto_health_check: bool = True
-    health_check_interval_sec: int = Field(default=60, ge=0)
+    health_check_interval_sec: int = Field(default=300, ge=300)
     recovery_probe_interval_sec: int = Field(default=30, ge=0)
     enable_token_logging: bool = True
     enable_payload_logging: bool = False

@@ -25,7 +25,7 @@ class AppSetting(Base):
     max_logged_metadata_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=1024)
     circuit_breaker_threshold: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
     auto_health_check: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    health_check_interval_sec: Mapped[int] = mapped_column(Integer, nullable=False, default=60)
+    health_check_interval_sec: Mapped[int] = mapped_column(Integer, nullable=False, default=300)
     recovery_probe_interval_sec: Mapped[int] = mapped_column(Integer, nullable=False, default=30)
     enable_token_logging: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     enable_payload_logging: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

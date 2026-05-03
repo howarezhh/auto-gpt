@@ -26,7 +26,7 @@ DEFAULT_SETTING = {
     "max_logged_metadata_bytes": 1024,
     "circuit_breaker_threshold": 3,
     "auto_health_check": True,
-    "health_check_interval_sec": 60,
+    "health_check_interval_sec": 300,
     "recovery_probe_interval_sec": 30,
     "enable_token_logging": True,
     "enable_payload_logging": False,
@@ -61,6 +61,10 @@ class SettingService:
     def get_or_create(db: Session) -> AppSetting:
         setting = db.get(AppSetting, 1)
         if setting:
+            if setting.health_check_interval_sec < 300:
+                setting.health_check_interval_sec = 300
+                db.commit()
+                db.refresh(setting)
             return setting
         setting = AppSetting(**DEFAULT_SETTING)
         db.add(setting)

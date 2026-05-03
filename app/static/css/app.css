@@ -1009,7 +1009,9 @@ html[data-theme="dark"] body::before {
 }
 
 .interactive-btn.is-copy-success,
+.interactive-btn.is-action-success,
 .table-action-btn.is-copy-success,
+.table-action-btn.is-action-success,
 .playground-copy-btn.is-copy-success {
     color: var(--green) !important;
     background: rgba(16, 185, 129, 0.12) !important;
@@ -1017,7 +1019,9 @@ html[data-theme="dark"] body::before {
 }
 
 .interactive-btn.is-copy-error,
+.interactive-btn.is-action-error,
 .table-action-btn.is-copy-error,
+.table-action-btn.is-action-error,
 .playground-copy-btn.is-copy-error {
     color: var(--red) !important;
     background: rgba(239, 68, 68, 0.12) !important;
@@ -7237,25 +7241,52 @@ html[data-theme="dark"] .nav-link.active {
 .log-billing-cell {
     position: relative;
     display: grid;
-    gap: 4px;
+    gap: 6px;
     min-width: 0;
 }
 
-.log-billing-top {
+.log-billing-row {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 4px 12px;
+    align-items: start;
+}
+
+.log-billing-row-primary {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+    align-items: center;
+}
+
+.log-billing-row-multiplier {
+    grid-template-columns: minmax(0, 1fr);
+}
+
+.log-billing-pair {
     display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 8px;
+    align-items: baseline;
+    gap: 6px;
+    min-width: 0;
+}
+
+.log-billing-label {
+    flex: 0 0 auto;
+    font-size: 12px;
+    line-height: 1.35;
+    color: var(--text-soft);
+    white-space: nowrap;
 }
 
 .log-billing-total-cost {
+    min-width: 0;
     font-weight: 700;
     color: var(--text-strong);
     line-height: 1.3;
+    overflow-wrap: anywhere;
 }
 
 .log-billing-total-tokens,
 .log-billing-meta {
+    min-width: 0;
     font-size: 13px;
     line-height: 1.45;
     color: var(--text-soft);
@@ -7271,6 +7302,7 @@ html[data-theme="dark"] .nav-link.active {
     line-height: 1.4;
     font-weight: 700;
     color: #f4c84d;
+    overflow-wrap: anywhere;
 }
 
 .log-billing-help {
@@ -7310,17 +7342,19 @@ html[data-theme="dark"] .nav-link.active {
     line-height: 1;
 }
 
+.log-billing-tooltip-content {
+    display: none !important;
+}
+
 .log-billing-tooltip {
-    position: absolute;
-    right: -4px;
-    bottom: calc(100% + 10px);
-    z-index: 30;
+    position: fixed;
+    z-index: 220;
     width: min(360px, 42vw);
     min-width: 280px;
     padding: 12px 14px;
     border: 1px solid var(--line);
     border-radius: 8px;
-    background: var(--panel);
+    background: var(--surface-strong);
     color: var(--text-main);
     box-shadow: 0 12px 32px rgba(15, 23, 42, 0.18);
     opacity: 0;
@@ -7330,24 +7364,41 @@ html[data-theme="dark"] .nav-link.active {
     pointer-events: none;
 }
 
-.log-billing-help:hover .log-billing-tooltip,
-.log-billing-help:focus-within .log-billing-tooltip {
+.log-billing-tooltip-floating:not(.hidden) {
     opacity: 1;
     visibility: visible;
     transform: translateY(0);
 }
 
-.log-billing-tooltip::after {
+.log-billing-tooltip-floating::after {
     content: "";
     position: absolute;
-    right: 10px;
+    right: 12px;
     top: 100%;
     width: 10px;
     height: 10px;
-    background: var(--panel);
+    background: var(--surface-strong);
     border-right: 1px solid var(--line);
     border-bottom: 1px solid var(--line);
     transform: translateY(-5px) rotate(45deg);
+}
+
+.log-billing-tooltip-floating[data-placement="bottom"] {
+    transform: translateY(-6px);
+}
+
+.log-billing-tooltip-floating[data-placement="bottom"]:not(.hidden) {
+    transform: translateY(0);
+}
+
+.log-billing-tooltip-floating[data-placement="bottom"]::after {
+    top: auto;
+    bottom: 100%;
+    border-right: 0;
+    border-bottom: 0;
+    border-left: 1px solid var(--line);
+    border-top: 1px solid var(--line);
+    transform: translateY(5px) rotate(45deg);
 }
 
 .log-billing-tooltip-group {
@@ -7375,6 +7426,14 @@ html[data-theme="dark"] .nav-link.active {
     .log-billing-tooltip {
         width: min(320px, calc(100vw - 32px));
         min-width: 240px;
-        right: 0;
+    }
+
+    .log-billing-row,
+    .log-billing-row-primary {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .log-billing-help {
+        justify-content: flex-start;
     }
 }

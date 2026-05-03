@@ -1,3 +1,5 @@
+import asyncio
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 import time
 from typing import Any
@@ -17,9 +19,15 @@ from app.services.upstream_client import UpstreamClientService
 
 
 VISION_TEST_IMAGE_URL = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
+HealthProgressCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
 
 
 class HealthService:
+    MANUAL_CHECK_MIN_INTERVAL_SEC = 300
+    PROBE_RETRY_MAX_ATTEMPTS = 2
+    PROBE_RETRY_DELAY_SEC = 0.35
+    MAX_PARALLEL_MODEL_PROBES = 6
+
     @staticmethod
     def cached_provider_status_summary(db: Session) -> dict:
         setting = SettingService.get_or_create(db)
@@ -43,11 +51,16 @@ class HealthService:
         provider: Provider,
         *,
         include_disabled_models: bool = False,
+        progress_callback: HealthProgressCallback | None = None,
     ) -> dict:
         models_to_check = [item for item in provider.provider_models if include_disabled_models or item.enabled]
-        model_results: list[dict] = []
-        for provider_model in models_to_check:
-            model_results.append(await HealthService.check_provider_model(db, provider, provider_model))
+        model_results = await HealthService._run_provider_model_checks(
+            provider,
+            models_to_check,
+            progress_callback=progress_callback,
+        )
+        for provider_model, model_result in zip(models_to_check, model_results, strict=False):
+            HealthService._persist_model_health_result(db, provider, provider_model, model_result)
 
         db.refresh(provider)
         models_total = len(models_to_check)
@@ -130,69 +143,16 @@ class HealthService:
         stream_probe: bool = False,
         vision_probe: bool = False,
     ) -> dict:
-        effective_vision_probe = vision_probe
-        endpoint_results = []
-        endpoint_results.append(
-            await HealthService._probe_formal_endpoint(
+        model_result = (
+            await HealthService._run_provider_model_checks(
                 provider,
-                provider_model,
-                endpoint_path="/chat/completions",
-                payload=HealthService._build_chat_probe_payload(provider_model, vision_probe=effective_vision_probe, stream_probe=stream_probe),
+                [provider_model],
+                stream_probe=stream_probe,
+                vision_probe=vision_probe,
             )
-        )
-        endpoint_results.append(
-            await HealthService._probe_formal_endpoint(
-                provider,
-                provider_model,
-                endpoint_path="/responses",
-                payload=HealthService._build_responses_probe_payload(provider_model, vision_probe=effective_vision_probe),
-            )
-        )
-        if provider_model.supports_tools:
-            endpoint_results.append(await HealthService._probe_native_tools(provider, provider_model))
-        success = all(item["success"] for item in endpoint_results)
-        provider_success = any(item["success"] for item in endpoint_results)
-        adapted_success = any(item.get("support_mode") == "adapted" for item in endpoint_results)
-        health_status = "healthy" if success and not adapted_success else ("degraded" if provider_success else "unhealthy")
-        latency_ms = max((item["latency_ms"] for item in endpoint_results), default=0)
-        status_code = next((item.get("status_code") for item in endpoint_results if not item["success"]), 200 if success else None)
-        message = "；".join(
-            f"{item.get('support_label') or item['endpoint_label'] + ('成功' if item['success'] else '失败')}"
-            + (f"（{item['message']}）" if item.get("message") else "")
-            for item in endpoint_results
-        )
-        HealthService._apply_model_health(
-            db,
-            provider,
-            provider_model,
-            health_status=health_status,
-            latency_ms=latency_ms,
-            error_message=None if success else message,
-        )
-        LogService.create_log(
-            db,
-            log_type="health_check_model",
-            provider_id=provider.id,
-            provider_name=provider.name,
-            model_name=provider_model.model_name,
-            request_path="/proxy-test",
-            success=success,
-            status_code=status_code,
-            latency_ms=latency_ms,
-            message=message,
-            trace=HealthService._endpoint_results_to_trace(endpoint_results, provider=provider, provider_model=provider_model),
-            schedule_token_fill=False,
-        )
-        return {
-            "model_name": provider_model.model_name,
-            "success": success,
-            "provider_success": provider_success,
-            "health_status": health_status,
-            "latency_ms": latency_ms,
-            "status_code": status_code,
-            "message": message,
-            "endpoint_results": endpoint_results,
-        }
+        )[0]
+        HealthService._persist_model_health_result(db, provider, provider_model, model_result)
+        return model_result
 
     @staticmethod
     async def _probe_native_tools(provider: Provider, provider_model: ProviderModel) -> dict[str, Any]:
@@ -243,11 +203,32 @@ class HealthService:
             }
 
     @staticmethod
-    async def check_all(db: Session) -> list[dict]:
+    async def check_all(
+        db: Session,
+        *,
+        progress_callback: HealthProgressCallback | None = None,
+    ) -> list[dict]:
         providers = [provider for provider in ProviderService.list_providers(db) if provider.enabled]
         results: list[dict] = []
-        for provider in providers:
-            provider_result = await HealthService.check_provider(db, provider, include_disabled_models=False)
+        total_providers = len(providers)
+        for provider_index, provider in enumerate(providers, start=1):
+            await HealthService._emit_progress(
+                progress_callback,
+                {
+                    "event": "provider_started",
+                    "provider_index": provider_index,
+                    "provider_total": total_providers,
+                    "provider_id": provider.id,
+                    "provider_name": provider.name,
+                },
+            )
+            provider_result = await HealthService.check_provider(
+                db,
+                provider,
+                include_disabled_models=False,
+                progress_callback=progress_callback,
+            )
+            model_results = list(provider_result.get("model_results") or [])
             results.append(
                 {
                     "provider_id": provider.id,
@@ -256,10 +237,11 @@ class HealthService:
                     **provider_result,
                 }
             )
-            for provider_model in provider.provider_models:
-                if not provider_model.enabled:
-                    continue
-                model_result = await HealthService.check_provider_model(db, provider, provider_model)
+            for provider_model, model_result in zip(
+                [item for item in provider.provider_models if item.enabled],
+                model_results,
+                strict=False,
+            ):
                 results.append(
                     {
                         "provider_id": provider.id,
@@ -270,7 +252,278 @@ class HealthService:
                         **model_result,
                     }
                 )
+            await HealthService._emit_progress(
+                progress_callback,
+                {
+                    "event": "provider_completed",
+                    "provider_index": provider_index,
+                    "provider_total": total_providers,
+                    "provider_id": provider.id,
+                    "provider_name": provider.name,
+                    "success": provider_result.get("success"),
+                    "models_total": provider_result.get("models_total"),
+                    "models_success": provider_result.get("models_success"),
+                    "models_failed": provider_result.get("models_failed"),
+                },
+            )
         return results
+
+    @staticmethod
+    async def _run_provider_model_checks(
+        provider: Provider,
+        models_to_check: list[ProviderModel],
+        *,
+        stream_probe: bool = False,
+        vision_probe: bool = False,
+        progress_callback: HealthProgressCallback | None = None,
+    ) -> list[dict]:
+        phase_specs: list[dict[str, Any]] = [
+            {
+                "key": "chat_completions",
+                "label": "文字调用检查 /chat/completions",
+                "targets": lambda model: True,
+                "probe": lambda model: HealthService._probe_formal_endpoint(
+                    provider,
+                    model,
+                    endpoint_path="/chat/completions",
+                    payload=HealthService._build_chat_probe_payload(
+                        model,
+                        vision_probe=vision_probe,
+                        stream_probe=stream_probe,
+                    ),
+                ),
+            },
+            {
+                "key": "responses",
+                "label": "文字调用检查 /responses",
+                "targets": lambda model: True,
+                "probe": lambda model: HealthService._probe_formal_endpoint(
+                    provider,
+                    model,
+                    endpoint_path="/responses",
+                    payload=HealthService._build_responses_probe_payload(
+                        model,
+                        vision_probe=vision_probe,
+                    ),
+                ),
+            },
+            {
+                "key": "tools",
+                "label": "工具调用检查",
+                "targets": lambda model: bool(model.supports_tools),
+                "probe": lambda model: HealthService._probe_native_tools(provider, model),
+            },
+        ]
+        endpoint_results_by_model_id: dict[int, list[dict[str, Any]]] = {
+            provider_model.id: []
+            for provider_model in models_to_check
+        }
+        for phase_index, phase_spec in enumerate(phase_specs, start=1):
+            targets = [provider_model for provider_model in models_to_check if phase_spec["targets"](provider_model)]
+            if not targets:
+                await HealthService._emit_progress(
+                    progress_callback,
+                    {
+                        "event": "stage_completed",
+                        "phase_index": phase_index,
+                        "phase_key": phase_spec["key"],
+                        "phase_label": phase_spec["label"],
+                        "provider_id": provider.id,
+                        "provider_name": provider.name,
+                        "model_total": 0,
+                        "success_count": 0,
+                        "failure_count": 0,
+                        "skipped": True,
+                    },
+                )
+                continue
+            await HealthService._emit_progress(
+                progress_callback,
+                {
+                    "event": "stage_started",
+                    "phase_index": phase_index,
+                    "phase_key": phase_spec["key"],
+                    "phase_label": phase_spec["label"],
+                    "provider_id": provider.id,
+                    "provider_name": provider.name,
+                    "model_total": len(targets),
+                },
+            )
+            phase_results = await HealthService._run_phase_probes_in_parallel(
+                provider,
+                targets,
+                phase_spec["probe"],
+            )
+            success_count = 0
+            for provider_model, endpoint_result in phase_results:
+                endpoint_results_by_model_id.setdefault(provider_model.id, []).append(endpoint_result)
+                if endpoint_result.get("success"):
+                    success_count += 1
+            await HealthService._emit_progress(
+                progress_callback,
+                {
+                    "event": "stage_completed",
+                    "phase_index": phase_index,
+                    "phase_key": phase_spec["key"],
+                    "phase_label": phase_spec["label"],
+                    "provider_id": provider.id,
+                    "provider_name": provider.name,
+                    "model_total": len(targets),
+                    "success_count": success_count,
+                    "failure_count": max(0, len(targets) - success_count),
+                    "skipped": False,
+                },
+            )
+        return [
+            HealthService._build_model_result(
+                provider,
+                provider_model,
+                endpoint_results_by_model_id.get(provider_model.id, []),
+            )
+            for provider_model in models_to_check
+        ]
+
+    @staticmethod
+    async def _run_phase_probes_in_parallel(
+        provider: Provider,
+        provider_models: list[ProviderModel],
+        probe_factory: Callable[[ProviderModel], Awaitable[dict[str, Any]]],
+    ) -> list[tuple[ProviderModel, dict[str, Any]]]:
+        parallelism = HealthService._determine_parallel_probe_limit(provider, len(provider_models))
+        semaphore = asyncio.Semaphore(parallelism)
+
+        async def run_single(provider_model: ProviderModel) -> tuple[ProviderModel, dict[str, Any]]:
+            async with semaphore:
+                endpoint_result = await HealthService._probe_with_retry(lambda: probe_factory(provider_model))
+                return provider_model, endpoint_result
+
+        return list(await asyncio.gather(*(run_single(provider_model) for provider_model in provider_models)))
+
+    @staticmethod
+    async def _probe_with_retry(
+        probe_coro_factory: Callable[[], Awaitable[dict[str, Any]]],
+    ) -> dict[str, Any]:
+        last_result: dict[str, Any] | None = None
+        for attempt in range(1, HealthService.PROBE_RETRY_MAX_ATTEMPTS + 1):
+            current_result = await probe_coro_factory()
+            current_result["attempt_count"] = attempt
+            current_result["retried"] = attempt > 1
+            if current_result.get("success"):
+                if attempt > 1:
+                    message = str(current_result.get("message") or "ok")
+                    current_result["message"] = f"第 {attempt} 次探测成功；{message}"
+                return current_result
+            last_result = current_result
+            if attempt < HealthService.PROBE_RETRY_MAX_ATTEMPTS:
+                await asyncio.sleep(HealthService.PROBE_RETRY_DELAY_SEC)
+        if last_result is None:
+            return {"success": False, "message": "健康检查未返回结果", "attempt_count": 0, "retried": False}
+        message = str(last_result.get("message") or "请求失败")
+        if last_result.get("attempt_count", 1) > 1:
+            last_result["message"] = f"已重试 1 次仍失败；{message}"
+        return last_result
+
+    @staticmethod
+    def _build_model_result(
+        provider: Provider,
+        provider_model: ProviderModel,
+        endpoint_results: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        success = bool(endpoint_results) and all(item["success"] for item in endpoint_results)
+        provider_success = any(item["success"] for item in endpoint_results)
+        adapted_success = any(item.get("support_mode") == "adapted" for item in endpoint_results)
+        health_status = "healthy" if success and not adapted_success else ("degraded" if provider_success else "unhealthy")
+        latency_ms = max((int(item.get("latency_ms") or 0) for item in endpoint_results), default=0)
+        status_code = next((item.get("status_code") for item in endpoint_results if not item["success"]), 200 if success else None)
+        message = "；".join(
+            f"{item.get('support_label') or item['endpoint_label'] + ('成功' if item['success'] else '失败')}"
+            + (f"（{item['message']}）" if item.get("message") else "")
+            for item in endpoint_results
+        ) or "当前未执行任何探针"
+        return {
+            "model_name": provider_model.model_name,
+            "success": success,
+            "provider_success": provider_success,
+            "health_status": health_status,
+            "latency_ms": latency_ms,
+            "status_code": status_code,
+            "message": message,
+            "endpoint_results": endpoint_results,
+        }
+
+    @staticmethod
+    def _persist_model_health_result(
+        db: Session,
+        provider: Provider,
+        provider_model: ProviderModel,
+        model_result: dict[str, Any],
+    ) -> None:
+        success = bool(model_result.get("success"))
+        message = model_result.get("message")
+        HealthService._apply_model_health(
+            db,
+            provider,
+            provider_model,
+            health_status=str(model_result.get("health_status") or "unknown"),
+            latency_ms=int(model_result.get("latency_ms") or 0),
+            error_message=None if success else (str(message) if message is not None else None),
+        )
+        LogService.create_log(
+            db,
+            log_type="health_check_model",
+            provider_id=provider.id,
+            provider_name=provider.name,
+            model_name=provider_model.model_name,
+            request_path="/proxy-test",
+            success=success,
+            status_code=model_result.get("status_code"),
+            latency_ms=int(model_result.get("latency_ms") or 0),
+            message=str(message or ""),
+            trace=HealthService._endpoint_results_to_trace(
+                model_result.get("endpoint_results") or [],
+                provider=provider,
+                provider_model=provider_model,
+            ),
+            schedule_token_fill=False,
+        )
+
+    @staticmethod
+    def _determine_parallel_probe_limit(provider: Provider, target_count: int) -> int:
+        configured_limit = provider.max_active_requests or 0
+        if configured_limit <= 0:
+            configured_limit = 1
+        return max(1, min(target_count, configured_limit, HealthService.MAX_PARALLEL_MODEL_PROBES))
+
+    @staticmethod
+    async def _emit_progress(
+        progress_callback: HealthProgressCallback | None,
+        payload: dict[str, Any],
+    ) -> None:
+        if progress_callback is None:
+            return
+        maybe_awaitable = progress_callback(payload)
+        if isinstance(maybe_awaitable, Awaitable):
+            await maybe_awaitable
+
+    @staticmethod
+    def claim_manual_check_slot(scope_key: str, scope_label: str) -> None:
+        cache_key = f"health-check-slot:{scope_key}"
+        last_started = CacheService.get(cache_key)
+        if isinstance(last_started, str):
+            try:
+                started_at = datetime.fromisoformat(last_started)
+            except ValueError:
+                started_at = None
+            if started_at is not None:
+                elapsed_seconds = (datetime.utcnow() - started_at).total_seconds()
+                if elapsed_seconds < HealthService.MANUAL_CHECK_MIN_INTERVAL_SEC:
+                    remaining = max(1, int(HealthService.MANUAL_CHECK_MIN_INTERVAL_SEC - elapsed_seconds))
+                    raise ValueError(f"{scope_label} 距离上次健康检查不足 5 分钟，请在 {remaining} 秒后重试")
+        CacheService.set(
+            cache_key,
+            datetime.utcnow().isoformat(),
+            ttl_seconds=HealthService.MANUAL_CHECK_MIN_INTERVAL_SEC,
+        )
 
     @staticmethod
     async def _probe_formal_endpoint(

@@ -156,7 +156,7 @@ def scheduled_data_retention_cleanup() -> None:
 def configure_scheduler() -> None:
     db = SessionLocal()
     try:
-        interval = max(10, SettingService.get_or_create(db).health_check_interval_sec)
+        interval = max(300, SettingService.get_or_create(db).health_check_interval_sec)
     finally:
         db.close()
     scheduler.add_job(
