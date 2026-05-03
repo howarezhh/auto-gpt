@@ -37,38 +37,58 @@
             <span>全局最大重试次数</span>
             <input class="field-input" id="setting-global-max-retries" type="number">
         </label>
-        <label>
-            <span>全局最大请求（tok）</span>
-            <input class="field-input" id="setting-global-max-request-tokens" type="number" min="0" placeholder="0 表示不限制">
-        </label>
-        <label>
-            <span>/v1 请求体最大字节数（B）</span>
-            <input class="field-input" id="setting-max-v1-request-body-bytes" type="number" min="0" placeholder="0 表示不限制">
-        </label>
-        <label>
-            <span>Chat 请求体最大字节数（B）</span>
-            <input class="field-input" id="setting-max-v1-chat-request-body-bytes" type="number" min="0" placeholder="0 表示沿用 /v1 上限">
-        </label>
-        <label>
-            <span>Responses 请求体最大字节数（B）</span>
-            <input class="field-input" id="setting-max-v1-responses-request-body-bytes" type="number" min="0" placeholder="0 表示沿用 /v1 上限">
-        </label>
-        <label>
-            <span>长输出非流式阈值（tok）</span>
-            <input class="field-input" id="setting-long-output-stream-threshold-tokens" type="number" min="0" placeholder="0 表示不强制">
-        </label>
-        <label>
-            <span>非流式响应最大字节数（B）</span>
-            <input class="field-input" id="setting-max-non-stream-response-body-bytes" type="number" min="0" placeholder="0 表示不限制">
-        </label>
-        <label>
-            <span>流式统计缓存字节数（B）</span>
-            <input class="field-input" id="setting-stream-token-capture-max-bytes" type="number" min="0" placeholder="0 表示不缓存输出文本">
-        </label>
-        <label>
-            <span>日志 metadata 最大字节数（B）</span>
-            <input class="field-input" id="setting-max-logged-metadata-bytes" type="number" min="0" placeholder="0 表示只保留摘要">
-        </label>
+        <div class="form-span-2 settings-group" aria-labelledby="settings-token-group-title">
+            <div class="settings-group-head">
+                <div class="panel-kicker">tok</div>
+                <h4 id="settings-token-group-title">模型 / 路由限制（tok）</h4>
+            </div>
+            <div class="form-grid settings-subgrid">
+                <label>
+                    <span>全局最大请求（tok）</span>
+                    <input class="field-input" id="setting-global-max-request-tokens" type="number" min="0" placeholder="0 表示不限制">
+                </label>
+                <label>
+                    <span>长输出非流式阈值（tok）</span>
+                    <input class="field-input" id="setting-long-output-stream-threshold-tokens" type="number" min="0" placeholder="0 表示不强制">
+                </label>
+            </div>
+        </div>
+        <div class="form-span-2 settings-group" aria-labelledby="settings-bytes-group-title">
+            <div class="settings-group-head">
+                <div class="panel-kicker">B</div>
+                <h4 id="settings-bytes-group-title">请求 / 日志 / 缓存限制（B）</h4>
+            </div>
+            <div class="form-grid settings-subgrid">
+                <label>
+                    <span>/v1 请求体最大字节数（B）</span>
+                    <input class="field-input" id="setting-max-v1-request-body-bytes" type="number" min="0" placeholder="0 表示不限制">
+                </label>
+                <label>
+                    <span>Chat 请求体最大字节数（B）</span>
+                    <input class="field-input" id="setting-max-v1-chat-request-body-bytes" type="number" min="0" placeholder="0 表示沿用 /v1 上限">
+                </label>
+                <label>
+                    <span>Responses 请求体最大字节数（B）</span>
+                    <input class="field-input" id="setting-max-v1-responses-request-body-bytes" type="number" min="0" placeholder="0 表示沿用 /v1 上限">
+                </label>
+                <label>
+                    <span>非流式响应最大字节数（B）</span>
+                    <input class="field-input" id="setting-max-non-stream-response-body-bytes" type="number" min="0" placeholder="0 表示不限制">
+                </label>
+                <label>
+                    <span>流式统计缓存字节数（B）</span>
+                    <input class="field-input" id="setting-stream-token-capture-max-bytes" type="number" min="0" placeholder="0 表示不缓存输出文本">
+                </label>
+                <label>
+                    <span>日志 metadata 最大字节数（B）</span>
+                    <input class="field-input" id="setting-max-logged-metadata-bytes" type="number" min="0" placeholder="0 表示只保留摘要">
+                </label>
+                <label>
+                    <span>日志正文最大字节数（B）</span>
+                    <input class="field-input" id="setting-max-logged-body-bytes" type="number">
+                </label>
+            </div>
+        </div>
         <label>
             <span>熔断阈值</span>
             <input class="field-input" id="setting-circuit-breaker-threshold" type="number">
@@ -80,10 +100,6 @@
         <label>
             <span>恢复探测间隔（s）</span>
             <input class="field-input" id="setting-recovery-probe-interval-sec" type="number">
-        </label>
-        <label>
-            <span>日志正文最大字节数（B）</span>
-            <input class="field-input" id="setting-max-logged-body-bytes" type="number">
         </label>
         <label>
             <span>请求日志保留（d）</span>

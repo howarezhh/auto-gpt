@@ -1880,6 +1880,32 @@ textarea.field-input {
     line-height: 1.6;
 }
 
+.settings-group {
+    display: grid;
+    gap: 14px;
+    padding-top: 8px;
+}
+
+.settings-group + .settings-group {
+    margin-top: 4px;
+}
+
+.settings-group-head {
+    display: grid;
+    gap: 6px;
+}
+
+.settings-group-head h4 {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text);
+}
+
+.settings-subgrid {
+    gap: 14px;
+}
+
 .batch-quota-field {
     position: relative;
     padding: 16px;
