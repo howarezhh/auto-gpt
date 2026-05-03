@@ -93,21 +93,36 @@ return 1
 
     @classmethod
     def snapshot(cls, provider_id: int) -> ProviderCapacitySnapshot:
-        redis_snapshot = cls._redis_snapshot(provider_id)
-        if redis_snapshot is not None:
-            return redis_snapshot
+        try:
+            redis_snapshot = cls._redis_snapshot(provider_id)
+            if redis_snapshot is not None:
+                return redis_snapshot
+        except ProviderCapacityUnavailableError:
+            if cls._allow_local_fallback():
+                return ProviderCapacitySnapshot()
+            raise
         raise ProviderCapacityUnavailableError()
 
     @classmethod
     def snapshots(cls, provider_ids: set[int]) -> dict[int, ProviderCapacitySnapshot]:
-        redis_snapshots = cls._redis_snapshots(provider_ids)
-        if redis_snapshots is not None:
-            return redis_snapshots
+        try:
+            redis_snapshots = cls._redis_snapshots(provider_ids)
+            if redis_snapshots is not None:
+                return redis_snapshots
+        except ProviderCapacityUnavailableError:
+            if cls._allow_local_fallback():
+                return {provider_id: ProviderCapacitySnapshot() for provider_id in provider_ids}
+            raise
         raise ProviderCapacityUnavailableError()
 
     @classmethod
     async def async_snapshots(cls, provider_ids: set[int]) -> dict[int, ProviderCapacitySnapshot]:
-        return await cls._async_redis_snapshots(provider_ids)
+        try:
+            return await cls._async_redis_snapshots(provider_ids)
+        except ProviderCapacityUnavailableError:
+            if cls._allow_local_fallback():
+                return {provider_id: ProviderCapacitySnapshot() for provider_id in provider_ids}
+            raise
 
     @classmethod
     def can_accept(cls, provider: Provider, *, is_stream: bool) -> bool:
@@ -118,17 +133,30 @@ return 1
     @asynccontextmanager
     async def async_lease(cls, provider: Provider, *, is_stream: bool) -> AsyncIterator[ProviderCapacitySnapshot]:
         lease_id = uuid4().hex
-        snapshot = await cls._async_redis_acquire(provider, is_stream=is_stream, lease_id=lease_id)
+        lease_acquired = False
+        try:
+            snapshot = await cls._async_redis_acquire(provider, is_stream=is_stream, lease_id=lease_id)
+            lease_acquired = True
+        except ProviderCapacityUnavailableError:
+            if not cls._allow_local_fallback():
+                raise
+            snapshot = ProviderCapacitySnapshot()
         try:
             yield snapshot
         finally:
-            await cls.async_release(lease_id=lease_id)
+            if lease_acquired:
+                await cls.async_release(lease_id=lease_id)
 
     @classmethod
     async def async_release(cls, *, lease_id: str | None) -> bool:
         if not lease_id:
             return False
-        return await cls._async_redis_release(lease_id)
+        try:
+            return await cls._async_redis_release(lease_id)
+        except ProviderCapacityUnavailableError:
+            if cls._allow_local_fallback():
+                return False
+            raise
 
     @classmethod
     def _ensure_capacity(cls, provider: Provider, *, snapshot: ProviderCapacitySnapshot, is_stream: bool) -> None:
@@ -291,3 +319,7 @@ return 1
     @staticmethod
     def _limit_arg(value: int | float | None) -> int:
         return int(value or 0)
+
+    @staticmethod
+    def _allow_local_fallback() -> bool:
+        return not get_settings().is_production()

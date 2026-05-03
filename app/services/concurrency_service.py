@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.config import get_settings
 from app.services.redis_service import RedisService
 
 
@@ -120,7 +121,12 @@ return 1
         args: list[str | int] = [max(60, ttl_seconds), 1 if is_stream else 0, len(scoped_items)]
         for item in scoped_items:
             args.extend(item)
-        result = await RedisService.get_client().eval(cls._ACQUIRE_LUA, 1, lease_key, *args)
+        try:
+            result = await RedisService.get_client().eval(cls._ACQUIRE_LUA, 1, lease_key, *args)
+        except Exception:
+            if cls._allow_local_fallback():
+                return ConcurrencyLease(request_id=request_id, keys=[])
+            raise
         code = result[0] if isinstance(result, list) and result else result
         detail = result[1] if isinstance(result, list) and len(result) > 1 else ""
         if code != "ok":
@@ -132,18 +138,31 @@ return 1
         if lease is None or not lease.keys:
             return False
         lease_key = f"concurrency:lease:{lease.request_id}"
-        result = await RedisService.get_client().eval(cls._RELEASE_LUA, 1, lease_key)
+        try:
+            result = await RedisService.get_client().eval(cls._RELEASE_LUA, 1, lease_key)
+        except Exception:
+            if cls._allow_local_fallback():
+                return False
+            raise
         return bool(int(result or 0))
 
     @classmethod
     async def active_snapshot(cls) -> dict[str, int]:
-        client = RedisService.get_client()
-        keys = [
-            "concurrency:global:active",
-            "concurrency:global:streams",
-        ]
-        values = await client.mget(keys)
-        return {key: int(value or 0) for key, value in zip(keys, values, strict=True)}
+        try:
+            client = RedisService.get_client()
+            keys = [
+                "concurrency:global:active",
+                "concurrency:global:streams",
+            ]
+            values = await client.mget(keys)
+            return {key: int(value or 0) for key, value in zip(keys, values, strict=True)}
+        except Exception:
+            if cls._allow_local_fallback():
+                return {
+                    "concurrency:global:active": 0,
+                    "concurrency:global:streams": 0,
+                }
+            raise
 
     @staticmethod
     def _build_scoped_items(
@@ -217,3 +236,7 @@ return 1
             code="concurrency_limit_exceeded",
             scope=detail,
         )
+
+    @staticmethod
+    def _allow_local_fallback() -> bool:
+        return not get_settings().is_production()
