@@ -37,6 +37,8 @@ from app.utils.json_utils import dumps_json, loads_json
 
 class ProviderService:
     QUALITY_WINDOW_MINUTES = 24 * 60
+    VISION_MODEL_HINTS = ("gpt-4o", "gpt-4.1", "gpt-5")
+    TOOL_CAPABLE_MODEL_HINTS = ("gpt-4o", "gpt-4.1", "gpt-5", "o3", "o4", "claude", "qwen", "deepseek", "glm")
     TRACE_TERMINAL_SUCCESS_RESULTS = {"success"}
     TRACE_TERMINAL_FAILURE_RESULTS = {
         "http_error",
@@ -51,8 +53,8 @@ class ProviderService:
     @staticmethod
     def _infer_model_capabilities(model_name: str) -> dict[str, bool]:
         normalized = (model_name or "").strip().lower()
-        supports_vision = any(prefix in normalized for prefix in ("gpt-4o", "gpt-4.1", "gpt-5"))
-        supports_tools = any(prefix in normalized for prefix in ("gpt-4o", "gpt-4.1", "gpt-5", "o3", "o4", "claude", "qwen", "deepseek"))
+        supports_vision = any(prefix in normalized for prefix in ProviderService.VISION_MODEL_HINTS)
+        supports_tools = any(prefix in normalized for prefix in ProviderService.TOOL_CAPABLE_MODEL_HINTS)
         return {
             "supports_stream": True,
             "supports_vision": supports_vision,

@@ -176,6 +176,7 @@ def _migrate_cache_price_columns(db) -> None:
         },
         "request_logs": {
             "channel_price_cache_per_1k": f"ALTER TABLE request_logs ADD COLUMN channel_price_cache_per_1k {price_type}",
+            "model_reasoning_effort": "ALTER TABLE request_logs ADD COLUMN model_reasoning_effort TEXT",
         },
     }
     changed = False
@@ -809,6 +810,7 @@ async def _log_api_client_auth_failure(request: Request, exc: ApiClientAuthError
             success=False,
             status_code=exc.status_code,
             reasoning_level=LogService.extract_reasoning_level(parsed_body if isinstance(parsed_body, dict) else None),
+            model_reasoning_effort=LogService.extract_model_reasoning_effort(parsed_body if isinstance(parsed_body, dict) else None),
             request_body_json=request_body_json,
             message=exc.message,
             error_type="authentication_error" if exc.status_code in {401, 403} else "rate_limit_error",

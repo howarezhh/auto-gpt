@@ -323,6 +323,51 @@ async def responses(
     return result
 
 
+@router.get("/v1/responses/{response_id}", response_model=None)
+async def retrieve_response(
+    response_id: str,
+    request: Request,
+    response: Response,
+    api_client_auth: ApiClientAuthContext = Depends(require_api_client_auth),
+):
+    result, provider, trace, latency_ms = await ProxyService.retrieve_response(
+        response_id=response_id,
+        query_items=list(request.query_params.multi_items()),
+        route_context=api_client_auth.route_context,
+    )
+    for key, value in build_proxy_response_headers(
+        provider_id=provider.id,
+        provider_name=provider.name,
+        latency_ms=latency_ms,
+        trace_length=len(trace),
+        trace_id=getattr(request.state, "trace_id", None),
+    ).items():
+        response.headers[key] = value
+    return result
+
+
+@router.post("/v1/responses/{response_id}/cancel", response_model=None)
+async def cancel_response(
+    response_id: str,
+    request: Request,
+    response: Response,
+    api_client_auth: ApiClientAuthContext = Depends(require_api_client_auth),
+):
+    result, provider, trace, latency_ms = await ProxyService.cancel_response(
+        response_id=response_id,
+        route_context=api_client_auth.route_context,
+    )
+    for key, value in build_proxy_response_headers(
+        provider_id=provider.id,
+        provider_name=provider.name,
+        latency_ms=latency_ms,
+        trace_length=len(trace),
+        trace_id=getattr(request.state, "trace_id", None),
+    ).items():
+        response.headers[key] = value
+    return result
+
+
 @router.get("/v1/models")
 async def list_models(
     request: Request,

@@ -51,6 +51,7 @@ class LogService:
         duration_ms: int | None = None,
         tps: float | None = None,
         reasoning_level: str | None = None,
+        model_reasoning_effort: str | None = None,
         attempt_count: int | None = None,
         prompt_tokens: int | None = None,
         completion_tokens: int | None = None,
@@ -97,6 +98,11 @@ class LogService:
             provider_model = db.get(ProviderModel, resolved_provider_model_id)
         read_tokens, write_tokens = LogService.extract_cache_tokens(token_response_payload)
         normalized_reasoning_level = LogService.normalize_reasoning_level(reasoning_level)
+        normalized_model_reasoning_effort = LogService.normalize_reasoning_effort(
+            model_reasoning_effort
+            if model_reasoning_effort is not None
+            else LogService.extract_model_reasoning_effort(token_request_payload)
+        )
         effective_ttfb_ms = LogService.resolve_ttfb_ms(
             first_token_latency_ms=first_token_latency_ms,
             ttfb_ms=ttfb_ms,
@@ -139,6 +145,7 @@ class LogService:
             duration_ms=effective_duration_ms,
             tps=effective_tps,
             reasoning_level=normalized_reasoning_level,
+            model_reasoning_effort=normalized_model_reasoning_effort,
             attempt_count=effective_attempt_count,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
@@ -686,15 +693,48 @@ class LogService:
         return LogService.REASONING_LEVEL_NONE
 
     @staticmethod
+    def normalize_reasoning_effort(value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        if not normalized:
+            return None
+        lowered = normalized.lower()
+        if lowered in {"none", "null", "unset", LogService.REASONING_LEVEL_NONE}:
+            return None
+        if lowered in {"low", "medium", "high", "xhigh"}:
+            return lowered
+        return None
+
+    @staticmethod
+    def extract_model_reasoning_effort(payload: dict | None) -> str | None:
+        if not isinstance(payload, dict):
+            return None
+        for key in ("model_reasoning_effort", "reasoning_effort"):
+            value = payload.get(key)
+            if isinstance(value, str):
+                return LogService.normalize_reasoning_effort(value)
+        reasoning = payload.get("reasoning")
+        if isinstance(reasoning, dict):
+            for key in ("effort", "reasoning_effort"):
+                value = reasoning.get(key)
+                if isinstance(value, str):
+                    return LogService.normalize_reasoning_effort(value)
+        return None
+
+    @staticmethod
     def extract_reasoning_level(payload: dict | None) -> str:
         if not isinstance(payload, dict):
             return LogService.REASONING_LEVEL_NONE
-        direct_value = payload.get("reasoning_level") or payload.get("reasoning_effort")
+        effort = LogService.extract_model_reasoning_effort(payload)
+        if effort is not None:
+            return LogService.normalize_reasoning_level(effort)
+        direct_value = payload.get("reasoning_level")
         if isinstance(direct_value, str):
             return LogService.normalize_reasoning_level(direct_value)
         reasoning = payload.get("reasoning")
         if isinstance(reasoning, dict):
-            for key in ("effort", "reasoning_effort", "level"):
+            for key in ("level",):
                 value = reasoning.get(key)
                 if isinstance(value, str):
                     return LogService.normalize_reasoning_level(value)
@@ -1111,6 +1151,7 @@ class LogService:
             "total_cost",
             "billing_calculation",
             "reasoning_level",
+            "model_reasoning_effort",
             "api_client_key_name",
             "user_account_name",
             "api_client_remaining_requests_daily",
@@ -1153,6 +1194,7 @@ class LogService:
                 item.total_cost if item.total_cost is not None else "",
                 LogService.format_billing_calculation(item),
                 item.reasoning_level or "",
+                item.model_reasoning_effort or "",
                 item.api_client_key_name or "",
                 item.user_account_name or "",
                 item.api_client_remaining_requests_daily if item.api_client_remaining_requests_daily is not None else "",

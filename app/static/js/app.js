@@ -6382,7 +6382,7 @@
                         </td>
                         <td>
                             <strong>${escapeHtml(formatLogTypeLabel(log.log_type))}</strong>
-                            <div class="table-muted">思维等级 ${escapeHtml(log.reasoning_level || "无")}</div>
+                            <div class="table-muted">思维等级 ${escapeHtml(log.reasoning_level || "无")}${log.model_reasoning_effort ? ` · 参数 ${escapeHtml(log.model_reasoning_effort)}` : ""}</div>
                         </td>
                         <td>
                             <strong>${escapeHtml(log.api_client_key_name || "-")}</strong>
@@ -6457,6 +6457,7 @@
                 api_client_remaining_tokens: log.api_client_remaining_tokens,
                 http_method: log.http_method,
                 reasoning_level: log.reasoning_level,
+                model_reasoning_effort: log.model_reasoning_effort,
                 attempt_count: log.attempt_count,
                 success: log.success,
                 status_code: log.status_code,
@@ -9149,7 +9150,7 @@
                         </td>
                         <td>
                             <strong>${escapeHtml(formatLogTypeLabel(log.log_type))}</strong>
-                            <div class="table-muted">思维等级 ${escapeHtml(log.reasoning_level || "无")}</div>
+                            <div class="table-muted">思维等级 ${escapeHtml(log.reasoning_level || "无")}${log.model_reasoning_effort ? ` · 参数 ${escapeHtml(log.model_reasoning_effort)}` : ""}</div>
                         </td>
                         <td>
                             <strong>${escapeHtml(log.user_account_name || "-")}</strong>
@@ -9227,6 +9228,7 @@
                 api_client_remaining_tokens: log.api_client_remaining_tokens,
                 http_method: log.http_method,
                 reasoning_level: log.reasoning_level,
+                model_reasoning_effort: log.model_reasoning_effort,
                 attempt_count: log.attempt_count,
                 success: log.success,
                 status_code: log.status_code,

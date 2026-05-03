@@ -53,6 +53,7 @@ class RequestLog(Base):
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     tps: Mapped[float | None] = mapped_column(Float, nullable=True)
     reasoning_level: Mapped[str | None] = mapped_column(Text, nullable=True)
+    model_reasoning_effort: Mapped[str | None] = mapped_column(Text, nullable=True)
     attempt_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     prompt_cost: Mapped[Decimal | None] = mapped_column(Numeric(DB_MONEY_PRECISION, DB_MONEY_SCALE), nullable=True)
     completion_cost: Mapped[Decimal | None] = mapped_column(Numeric(DB_MONEY_PRECISION, DB_MONEY_SCALE), nullable=True)

@@ -26,8 +26,9 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 - `EXTERNAL_BASE_URL`：外部接入文档使用的统一地址，例如 `https://api.example.com`；若为空，文档页会回退到当前访问地址。
 - `APP_ENV`：当值为 `prod` 或 `production` 时，`SESSION_SECRET_KEY` 与 `API_KEY_ENCRYPTION_SECRET` 必须替换为至少 32 位的非默认高强度随机值，否则应用会拒绝启动。
 - `ENABLE_STARTUP_DB_INIT`：仅控制非生产环境 Web worker 是否自动初始化数据库；生产环境 Web worker 永不执行建表或迁移，部署时应先独立执行 `python scripts/run_startup_db_init.py`，再启动 Gunicorn 服务。
-- 当前对外提供的是 OpenAI 兼容子集，而不是完整官方能力面；正式支持的路径仅为 `/v1/chat/completions`、`/v1/responses`、`/v1/models`。
-- `/v1/responses` 当前对图片输入走适配子集。支持透传字段：`model`、`instructions`、`input`、`temperature`、`top_p`、`presence_penalty`、`frequency_penalty`、`tools`、`tool_choice`、`response_format`、`stream`、`user`、`metadata`、`seed`、`max_output_tokens`、`max_tokens`。当前不适配并会直接返回 `400` 的字段包括：`previous_response_id`、`parallel_tool_calls`、`reasoning`、`reasoning_effort`、`store`、`text`、`include`、`max_tool_calls`、`truncation`、`background`。
+- 当前对外提供的是 OpenAI 兼容入口，而不是 OpenAI 全量官方产品面；正式开放的路径为 `/v1/chat/completions`、`/v1/responses`、`/v1/responses/{response_id}`、`/v1/responses/{response_id}/cancel`、`/v1/models`。
+- 对外代理支持把 `model_reasoning_effort` 作为统一别名接入：`/v1/chat/completions` 会归一化为 `reasoning_effort`，`/v1/responses` 会归一化为 `reasoning.effort`，并在请求日志的 `model_reasoning_effort` 字段中留痕。
+- `/v1/responses` 请求会优先按原始 Responses 协议透传到命中的上游；若上游明确返回端点或模型兼容性错误，平台仅对简单文本、普通图片和基础流式请求尝试一次安全互转 fallback。只有进入 fallback 的请求才会收窄到适配子集；包含 `tools`、状态上下文、`reasoning`、结构化输出选项或复杂多模态内容的请求不会做有损互转。
 
 ## 单文件启动
 

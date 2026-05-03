@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import os
 from pathlib import Path
 from unittest.mock import patch
@@ -22,15 +23,40 @@ from app.models.request_log import RequestLog
 from app.models.user_account import UserAccount
 from app.services.log_service import LogService
 from app.services.proxy_service import ProxyService
+from app.services.user_auth_service import USER_ROLE_ADMIN, UserAuthService
+
+FORWARDED_PAYLOADS: list[dict] = []
 
 
-async def _fake_forward_json(provider, endpoint_path: str, payload: dict):
+async def _fake_forward_json_with_endpoint_fallback(provider, provider_model, endpoint_path: str, payload: dict, *, started, setting):
     await asyncio.sleep(0.01)
+    FORWARDED_PAYLOADS.append({"endpoint_path": endpoint_path, "payload": copy.deepcopy(payload)})
     session_id = (
         payload.get("metadata", {}).get("session_id")
         if isinstance(payload.get("metadata"), dict)
         else None
     ) or "unknown-session"
+    if endpoint_path == "/responses":
+        return {
+            "id": f"resp-{provider.name}-{session_id}",
+            "model": payload.get("model", "unknown"),
+            "output": [
+                {
+                    "type": "message",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": f"hello from {provider.name} for {session_id}"}],
+                }
+            ],
+            "usage": {
+                "input_tokens": 24,
+                "output_tokens": 12,
+                "total_tokens": 36,
+                "input_tokens_details": {
+                    "cached_tokens": 7,
+                    "cache_creation_tokens": 3,
+                },
+            },
+        }, f"upstream-{provider.name}-{session_id}", []
     return {
         "id": f"resp-{provider.name}-{session_id}",
         "model": payload.get("model", "unknown"),
@@ -49,7 +75,7 @@ async def _fake_forward_json(provider, endpoint_path: str, payload: dict):
                 "cache_creation_tokens": 3,
             },
         },
-    }, f"upstream-{provider.name}-{session_id}"
+    }, f"upstream-{provider.name}-{session_id}", []
 
 
 def _assert(condition: bool, message: str) -> None:
@@ -58,17 +84,17 @@ def _assert(condition: bool, message: str) -> None:
 
 
 def _bootstrap_admin(client: TestClient) -> None:
-    response = client.post(
-        "/setup-admin",
-        data={
-            "username": "stage8-admin",
-            "email": "stage8-admin@example.com",
-            "password": "Stage8Admin#123",
-            "password_confirm": "Stage8Admin#123",
-        },
-        follow_redirects=False,
-    )
-    _assert(response.status_code == 303, f"bootstrap admin failed: {response.text}")
+    with SessionLocal() as db:
+        if UserAuthService.get_user_by_login(db, "stage8-admin") is None:
+            UserAuthService.create_user(
+                db,
+                username="stage8-admin",
+                email="stage8-admin@example.com",
+                password="Stage8Admin#123",
+                role=USER_ROLE_ADMIN,
+                enabled=True,
+            )
+    _login(client, identifier="stage8-admin", password="Stage8Admin#123")
 
 
 def _create_user(client: TestClient, *, username: str, email: str, password: str) -> None:
@@ -153,7 +179,7 @@ def _login(client: TestClient, *, identifier: str, password: str) -> None:
 
 
 def main() -> None:
-    with patch.object(ProxyService, "_forward_json", side_effect=_fake_forward_json):
+    with patch.object(ProxyService, "_forward_json_with_endpoint_fallback", side_effect=_fake_forward_json_with_endpoint_fallback):
         with TestClient(app) as client:
             _bootstrap_admin(client)
             _create_user(client, username="stage8-user-a", email="stage8-user-a@example.com", password="Stage8User#123")
@@ -188,7 +214,7 @@ def main() -> None:
                     "model": "log-model",
                     "messages": [{"role": "user", "content": "hello a"}],
                     "metadata": {"session_id": "sess-u1"},
-                    "reasoning_effort": "medium",
+                    "model_reasoning_effort": "medium",
                 },
             )
             _assert(response_a.status_code == 200, f"user a request failed: {response_a.text}")
@@ -204,6 +230,18 @@ def main() -> None:
                 },
             )
             _assert(response_b.status_code == 200, f"user b request failed: {response_b.text}")
+
+            response_c = client.post(
+                "/v1/responses",
+                headers={"Authorization": f"Bearer {api_key_a['raw_api_key']}"},
+                json={
+                    "model": "log-model",
+                    "input": "hello c",
+                    "metadata": {"session_id": "sess-u3"},
+                    "model_reasoning_effort": "high",
+                },
+            )
+            _assert(response_c.status_code == 200, f"user c responses request failed: {response_c.text}")
 
             with SessionLocal() as db:
                 key_a_record = db.get(ApiClientKey, api_key_a["id"])
@@ -241,31 +279,60 @@ def main() -> None:
                 _assert(user_a_success_log.user_account_name == "stage8-user-a", f"user_account_name not persisted: {user_a_success_log.user_account_name}")
                 _assert(user_a_success_log.http_method == "POST", f"http_method not persisted: {user_a_success_log.http_method}")
                 _assert(user_a_success_log.reasoning_level == "medium", f"reasoning_level not persisted: {user_a_success_log.reasoning_level}")
+                _assert(user_a_success_log.model_reasoning_effort == "medium", f"model_reasoning_effort not persisted: {user_a_success_log.model_reasoning_effort}")
                 _assert(user_a_success_log.attempt_count == 1, f"attempt_count not persisted: {user_a_success_log.attempt_count}")
                 _assert(user_a_success_log.ttfb_ms is not None, "ttfb_ms should be persisted")
                 _assert(user_a_success_log.duration_ms is not None, "duration_ms should be persisted")
                 _assert(user_a_success_log.tps is not None, "tps should be persisted")
                 _assert(user_a_success_log.cache_read_tokens == 7, f"cache_read_tokens mismatch: {user_a_success_log.cache_read_tokens}")
                 _assert(user_a_success_log.cache_write_tokens == 3, f"cache_write_tokens mismatch: {user_a_success_log.cache_write_tokens}")
-                _assert(user_a_success_log.billing_multiplier == 1.5, f"billing_multiplier mismatch: {user_a_success_log.billing_multiplier}")
-                _assert(user_a_success_log.channel_price_input_per_1k == 0.003, f"input channel price mismatch: {user_a_success_log.channel_price_input_per_1k}")
-                _assert(user_a_success_log.channel_price_output_per_1k == 0.006, f"output channel price mismatch: {user_a_success_log.channel_price_output_per_1k}")
+                _assert(float(user_a_success_log.billing_multiplier) == 1.5, f"billing_multiplier mismatch: {user_a_success_log.billing_multiplier}")
+                _assert(float(user_a_success_log.channel_price_input_per_1k) == 0.003, f"input channel price mismatch: {user_a_success_log.channel_price_input_per_1k}")
+                _assert(float(user_a_success_log.channel_price_output_per_1k) == 0.006, f"output channel price mismatch: {user_a_success_log.channel_price_output_per_1k}")
+
+                user_b_success_log = db.scalar(
+                    select(RequestLog)
+                    .where(RequestLog.api_client_key_id == api_key_b["id"], RequestLog.log_type == "chat", RequestLog.success.is_(True))
+                    .order_by(RequestLog.id.desc())
+                )
+                _assert(user_b_success_log is not None, "user b success log missing")
+                _assert(user_b_success_log.model_reasoning_effort == "high", f"user b model_reasoning_effort mismatch: {user_b_success_log.model_reasoning_effort}")
+
+                user_c_success_log = db.scalar(
+                    select(RequestLog)
+                    .where(RequestLog.api_client_key_id == api_key_a["id"], RequestLog.log_type == "responses", RequestLog.success.is_(True))
+                    .order_by(RequestLog.id.desc())
+                )
+                _assert(user_c_success_log is not None, "user c success log missing")
+                _assert(user_c_success_log.model_reasoning_effort == "high", f"user c model_reasoning_effort mismatch: {user_c_success_log.model_reasoning_effort}")
 
             admin_logs = client.get(f"/api/logs?user_account_id={user_a_id}&exclude_health_checks=false&page=1&page_size=20")
             _assert(admin_logs.status_code == 200, f"admin logs query failed: {admin_logs.text}")
             admin_logs_payload = admin_logs.json()
-            _assert(admin_logs_payload["total"] == 2, f"admin user filter total mismatch: {admin_logs_payload}")
+            _assert(admin_logs_payload["total"] == 3, f"admin user filter total mismatch: {admin_logs_payload}")
             _assert(any(item["session_id"] == "sess-u1" for item in admin_logs_payload["items"]), f"user a session missing: {admin_logs_payload}")
             _assert(any(item["log_type"] == "health_check_model" for item in admin_logs_payload["items"]), f"health log missing from admin view: {admin_logs_payload}")
 
             admin_logs_non_health = client.get(f"/api/logs?user_account_id={user_a_id}&exclude_health_checks=true&page=1&page_size=20")
             _assert(admin_logs_non_health.status_code == 200, f"admin non-health logs query failed: {admin_logs_non_health.text}")
             admin_logs_non_health_payload = admin_logs_non_health.json()
-            _assert(admin_logs_non_health_payload["total"] == 1, f"health logs should be excluded: {admin_logs_non_health_payload}")
-            filtered_item = admin_logs_non_health_payload["items"][0]
+            _assert(admin_logs_non_health_payload["total"] == 2, f"health logs should be excluded: {admin_logs_non_health_payload}")
+            filtered_item = next((item for item in admin_logs_non_health_payload["items"] if item["session_id"] == "sess-u1"), None)
+            _assert(filtered_item is not None, f"user a filtered item missing: {admin_logs_non_health_payload}")
             _assert(filtered_item["reasoning_level"] == "medium", f"reasoning_level api mismatch: {filtered_item}")
+            _assert(filtered_item["model_reasoning_effort"] == "medium", f"model_reasoning_effort api mismatch: {filtered_item}")
             _assert(filtered_item["cache_read_tokens"] == 7 and filtered_item["cache_write_tokens"] == 3, f"cache token api mismatch: {filtered_item}")
-            _assert(filtered_item["billing_multiplier"] == 1.5, f"multiplier api mismatch: {filtered_item}")
+            _assert(float(filtered_item["billing_multiplier"]) == 1.5, f"multiplier api mismatch: {filtered_item}")
+
+            forwarded_chat = next((item for item in FORWARDED_PAYLOADS if item["endpoint_path"] == "/chat/completions" and item["payload"].get("metadata", {}).get("session_id") == "sess-u1"), None)
+            _assert(forwarded_chat is not None, f"forwarded chat payload missing: {FORWARDED_PAYLOADS}")
+            _assert(forwarded_chat["payload"].get("reasoning_effort") == "medium", f"chat reasoning_effort not forwarded: {forwarded_chat}")
+            _assert("model_reasoning_effort" not in forwarded_chat["payload"], f"chat alias should be normalized away: {forwarded_chat}")
+
+            forwarded_responses = next((item for item in FORWARDED_PAYLOADS if item["endpoint_path"] == "/responses" and item["payload"].get("metadata", {}).get("session_id") == "sess-u3"), None)
+            _assert(forwarded_responses is not None, f"forwarded responses payload missing: {FORWARDED_PAYLOADS}")
+            _assert(forwarded_responses["payload"].get("reasoning", {}).get("effort") == "high", f"responses reasoning.effort not forwarded: {forwarded_responses}")
+            _assert("model_reasoning_effort" not in forwarded_responses["payload"], f"responses alias should be normalized away: {forwarded_responses}")
 
             filter_options_response = client.get("/api/logs/filter-options?exclude_health_checks=true")
             _assert(filter_options_response.status_code == 200, f"filter options failed: {filter_options_response.text}")

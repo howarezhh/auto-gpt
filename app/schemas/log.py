@@ -32,6 +32,7 @@ class RequestLogOut(BaseModel):
     duration_ms: int | None
     tps: float | None
     reasoning_level: str | None
+    model_reasoning_effort: str | None
     attempt_count: int | None
     prompt_cost: float | None
     completion_cost: float | None

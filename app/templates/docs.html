@@ -50,7 +50,7 @@
                 <div class="docs-flow-index">2</div>
                 <div>
                     <h4>复制 Base URL 和标准路径</h4>
-                    <p>把 OpenAI 兼容入口设为 <code>{{ external_v1_base_url }}</code>，只使用当前正式支持的 <code>/v1/models</code>、<code>/v1/chat/completions</code>、<code>/v1/responses</code>；本平台当前提供的是兼容子集，不等同于 OpenAI 全量官方能力。</p>
+                    <p>把 OpenAI 兼容入口设为 <code>{{ external_v1_base_url }}</code>，只使用当前正式支持的 <code>/v1/models</code>、<code>/v1/chat/completions</code>、<code>/v1/responses</code>、<code>/v1/responses/{response_id}</code> 和 <code>/v1/responses/{response_id}/cancel</code>；本平台当前提供的是兼容子集，不等同于 OpenAI 全量官方能力。</p>
                 </div>
             </article>
             <article class="docs-flow-card">
@@ -123,6 +123,16 @@
                 <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="{{ external_v1_base_url }}/responses">复制 responses</button>
             </div>
             <div>
+                <span>Responses Retrieve</span>
+                <strong><code>{{ external_v1_base_url }}/responses/{response_id}</code></strong>
+                <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="{{ external_v1_base_url }}/responses/{response_id}">复制 retrieve</button>
+            </div>
+            <div>
+                <span>Responses Cancel</span>
+                <strong><code>{{ external_v1_base_url }}/responses/{response_id}/cancel</code></strong>
+                <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="{{ external_v1_base_url }}/responses/{response_id}/cancel">复制 cancel</button>
+            </div>
+            <div>
                 <span>鉴权头</span>
                 <strong><code>Authorization: Bearer YOUR_PLATFORM_API_KEY</code></strong>
                 <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="Authorization: Bearer YOUR_PLATFORM_API_KEY">复制 Header</button>
@@ -187,9 +197,9 @@ OPENAI_BASE_URL={{ external_v1_base_url }}</code></pre></div>
     "model": "gpt-4o-mini",
     "input": "你好，请用一句话介绍本平台"
   }'</code></pre></div>
-            <p><code>/v1/responses</code> 当前按兼容子集提供能力。端点互转仅覆盖简单文本、普通图片和基础流式；高风险能力会直接返回错误，不做有损转换。</p>
-            <p>可安全适配字段包括 <code>model</code>、<code>instructions</code>、<code>input</code>、<code>temperature</code>、<code>top_p</code>、<code>presence_penalty</code>、<code>frequency_penalty</code>、<code>stream</code>、<code>user</code>、<code>metadata</code>、<code>seed</code>、<code>max_output_tokens</code>、<code>max_tokens</code>。</p>
-            <p>工具调用、状态上下文、reasoning、结构化输出选项和复杂多模态内容不会互转，会返回明确错误码和原因。</p>
+            <p><code>/v1/responses</code> 会优先按原始 Responses 协议透传到命中的上游；只有当上游明确返回端点或模型兼容性错误时，平台才会尝试一次安全互转 fallback。</p>
+            <p>当前仅简单文本、普通图片和基础流式请求允许进入互转；这类 fallback 可安全适配字段包括 <code>model</code>、<code>instructions</code>、<code>input</code>、<code>temperature</code>、<code>top_p</code>、<code>presence_penalty</code>、<code>frequency_penalty</code>、<code>stream</code>、<code>user</code>、<code>metadata</code>、<code>seed</code>、<code>max_output_tokens</code>、<code>max_tokens</code>。</p>
+            <p>工具调用、状态上下文、reasoning、结构化输出选项和复杂多模态内容会继续按原请求优先透传；只有在确实需要互转时，平台才会因为存在这些高风险能力而直接返回明确错误码和原因。</p>
             <div class="hero-actions">
                 <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="curl {{ external_v1_base_url }}/responses &#10;  -H &quot;Content-Type: application/json&quot; &#10;  -H &quot;Authorization: Bearer YOUR_PLATFORM_API_KEY&quot; &#10;  -d '{&#10;    &quot;model&quot;: &quot;gpt-4o-mini&quot;,&#10;    &quot;input&quot;: &quot;你好，请用一句话介绍本平台&quot;&#10;  }'">复制 responses 示例</button>
             </div>
@@ -277,10 +287,10 @@ API Key: YOUR_PLATFORM_API_KEY
 
         <article class="docs-module-card">
             <h4>Codex / CLI / 自建服务</h4>
-            <p>本地开发工具链、服务端代理或脚本任务仅在支持 OpenAI 兼容 Base URL，且只使用本平台已开放的 <code>/v1/*</code> 子集时适配；工具调用、状态上下文与 reasoning 等能力还需要目标模型和命中的中转站同时原生支持。</p>
+            <p>本地开发工具链、服务端代理或脚本任务只要支持 OpenAI 兼容 Base URL，就可以优先按本平台已开放的 <code>/v1/*</code> 入口直接接入；工具调用、状态上下文、reasoning、多模态等能力是否最终可用，仍取决于目标模型与命中的中转站是否原生支持。</p>
             <div class="doc-code-block compact"><pre><code>OPENAI_API_KEY=YOUR_PLATFORM_API_KEY
 OPENAI_BASE_URL={{ external_v1_base_url }}</code></pre></div>
-            <p>Claude Code 官方主要面向 Anthropic Messages API，本平台当前不提供 Anthropic Messages API 兼容入口，因此不能作为 Claude Code 的完整后端；若第三方插件可配置 OpenAI 兼容 provider，只能按上述兼容子集尝试。</p>
+            <p>Claude Code 官方主要面向 Anthropic Messages API。本平台不提供 Anthropic Messages API 兼容入口；若通过支持 OpenAI 兼容 provider 的接入方式使用，则需确认客户端只依赖当前已开放的 OpenAI 兼容路径、工具能力和模型能力。</p>
             <div class="hero-actions">
                 <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="OPENAI_API_KEY=YOUR_PLATFORM_API_KEY&#10;OPENAI_BASE_URL={{ external_v1_base_url }}">复制 CLI 配置</button>
             </div>

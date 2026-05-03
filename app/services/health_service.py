@@ -117,6 +117,7 @@ class HealthService:
         endpoint_path = "/chat/completions"
         endpoint_label = "tools"
         payload = HealthService._build_chat_tool_probe_payload(provider_model)
+        setting = await ProxyService._get_setting_async()
         try:
             prepared = ProxyService._prepare_upstream_request(provider, endpoint_path=endpoint_path, payload=payload)
             response, _ = await ProxyService._send_prepared_json(
@@ -124,6 +125,7 @@ class HealthService:
                 prepared=prepared,
                 headers={"Authorization": f"Bearer {provider.api_key}"},
                 requested_payload=payload,
+                setting=setting,
             )
             latency_ms = int((time.perf_counter() - started) * 1000)
             has_tool_call = HealthService._response_has_tool_call(response)

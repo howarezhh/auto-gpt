@@ -15,12 +15,14 @@ from sqlalchemy import select
 from app.database import SessionLocal
 from app.main import app
 from app.models.api_client_key import ApiClientKey
+from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
 from app.models.user_account import UserAccount
 from app.services.api_key_service import ApiKeyService
 from app.services.health_service import HealthService
 from app.services.proxy_service import ProxyService
 from app.services.router_service import RoutePolicyContext, RouterService
+from app.services.user_auth_service import USER_ROLE_ADMIN, UserAuthService
 
 
 def _assert(condition: bool, message: str) -> None:
@@ -28,18 +30,27 @@ def _assert(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
-def _bootstrap_admin(client: TestClient) -> None:
+def _login(client: TestClient, *, identifier: str, password: str) -> None:
     response = client.post(
-        "/setup-admin",
-        data={
-            "username": "stage9-admin",
-            "email": "stage9-admin@example.com",
-            "password": "Stage9Admin#123",
-            "password_confirm": "Stage9Admin#123",
-        },
+        "/login",
+        data={"identifier": identifier, "password": password},
         follow_redirects=False,
     )
-    _assert(response.status_code == 303, f"bootstrap admin failed: {response.text}")
+    _assert(response.status_code == 303, f"login failed: {response.text}")
+
+
+def _bootstrap_admin(client: TestClient) -> None:
+    with SessionLocal() as db:
+        if UserAuthService.get_user_by_login(db, "stage9-admin") is None:
+            UserAuthService.create_user(
+                db,
+                username="stage9-admin",
+                email="stage9-admin@example.com",
+                password="Stage9Admin#123",
+                role=USER_ROLE_ADMIN,
+                enabled=True,
+            )
+    _login(client, identifier="stage9-admin", password="Stage9Admin#123")
 
 
 def _create_user(client: TestClient, *, username: str, email: str, password: str) -> int:
@@ -127,16 +138,16 @@ def _create_api_key(
     return response.json()
 
 
-def _assert_stream_routing_uses_supported_provider(allowed_provider_ids: list[int]) -> None:
+def _assert_stream_routing_uses_supported_provider(*, expected_provider_id: int) -> None:
     with SessionLocal() as db:
         candidates = RouterService.order_candidates(
             db,
             model_name="stream-model",
             route_context=RoutePolicyContext(
                 route_mode="failover",
-                default_provider_id=allowed_provider_ids[0],
+                default_provider_id=expected_provider_id,
                 manual_allow_fallback=True,
-                allowed_provider_ids=allowed_provider_ids,
+                allowed_provider_ids=[expected_provider_id],
             ),
             require_stream=True,
         )
@@ -144,7 +155,24 @@ def _assert_stream_routing_uses_supported_provider(allowed_provider_ids: list[in
             len(candidates) == 1,
             f"stream route should leave exactly one candidate: {[(item.provider.id, item.provider_model.supports_stream) for item in candidates]}",
         )
+        _assert(candidates[0].provider.id == expected_provider_id, f"unexpected stream provider selected: {candidates[0].provider.id}")
         _assert(candidates[0].provider_model.supports_stream is True, "stream route selected a non-stream provider")
+
+
+def _assert_non_stream_model_is_filtered(*, provider_id: int) -> None:
+    with SessionLocal() as db:
+        candidates = RouterService.order_candidates(
+            db,
+            model_name="nonstream-model",
+            route_context=RoutePolicyContext(
+                route_mode="failover",
+                default_provider_id=provider_id,
+                manual_allow_fallback=True,
+                allowed_provider_ids=[provider_id],
+            ),
+            require_stream=True,
+        )
+        _assert(candidates == [], f"non-stream model should be filtered when require_stream=true: {candidates}")
 
 
 def _assert_last_used_touch_is_batched(raw_api_key: str, api_key_id: int) -> None:
@@ -169,11 +197,11 @@ def _assert_last_used_touch_is_batched(raw_api_key: str, api_key_id: int) -> Non
         _assert(flushed is not None and flushed.last_used_at is not None, "batched last_used flush did not persist")
 
 
-def _assert_responses_image_subset_rejected(client: TestClient, raw_api_key: str) -> None:
-    response = client.post(
-        "/v1/responses",
-        headers={"Authorization": f"Bearer {raw_api_key}"},
-        json={
+def _assert_responses_image_native_passthrough(*, provider_id: int) -> None:
+    with SessionLocal() as db:
+        provider = db.get(Provider, provider_id)
+        _assert(provider is not None, f"provider missing: {provider_id}")
+        payload = {
             "model": "vision-model",
             "input": [
                 {
@@ -185,16 +213,38 @@ def _assert_responses_image_subset_rejected(client: TestClient, raw_api_key: str
                 }
             ],
             "previous_response_id": "resp_123",
-        },
-    )
-    _assert(response.status_code == 400, f"responses subset rejection expected 400: {response.status_code} {response.text}")
-    detail = response.json().get("detail")
-    _assert(isinstance(detail, dict), f"responses error detail should be dict: {response.text}")
-    _assert("previous_response_id" in detail.get("unsupported_fields", []), f"unsupported field not surfaced: {detail}")
-    _assert(
-        "previous_response_id" in detail.get("explicitly_unsupported_fields", []),
-        f"explicit unsupported field missing: {detail}",
-    )
+            "reasoning": {"effort": "medium"},
+            "store": False,
+            "include": ["output_text"],
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "vision_result",
+                    "schema": {"type": "object", "properties": {}},
+                }
+            },
+            "truncation": "disabled",
+            "background": False,
+        }
+        normalized_payload = ProxyService._normalize_reasoning_request_payload(
+            endpoint_path="/responses",
+            payload=payload,
+        )
+        prepared = ProxyService._prepare_upstream_request(
+            provider,
+            endpoint_path="/responses",
+            payload=normalized_payload,
+        )
+
+    _assert(prepared.request_path == "/responses", f"responses image request should stay on native endpoint: {prepared}")
+    request_payload = dict(prepared.request_payload)
+    _assert(request_payload.get("previous_response_id") == "resp_123", f"previous_response_id not preserved: {request_payload}")
+    _assert(isinstance(request_payload.get("reasoning"), dict), f"reasoning not preserved: {request_payload}")
+    _assert(request_payload.get("store") is False, f"store not preserved: {request_payload}")
+    _assert(request_payload.get("include") == ["output_text"], f"include not preserved: {request_payload}")
+    _assert(isinstance(request_payload.get("text"), dict), f"text config not preserved: {request_payload}")
+    _assert(request_payload.get("truncation") == "disabled", f"truncation not preserved: {request_payload}")
+    _assert(request_payload.get("background") is False, f"background not preserved: {request_payload}")
 
 
 def _assert_crlf_sse_parsing() -> None:
@@ -269,7 +319,7 @@ def main() -> None:
         stream_disabled_provider = _create_provider(
             client,
             name="stage9-stream-disabled",
-            model_name="stream-model",
+            model_name="nonstream-model",
             supports_stream=False,
             supports_vision=False,
             priority=10,
@@ -291,9 +341,8 @@ def main() -> None:
             priority=30,
         )
 
-        _assert_stream_routing_uses_supported_provider(
-            [stream_disabled_provider["id"], stream_enabled_provider["id"]]
-        )
+        _assert_stream_routing_uses_supported_provider(expected_provider_id=stream_enabled_provider["id"])
+        _assert_non_stream_model_is_filtered(provider_id=stream_disabled_provider["id"])
 
         dated_key = _create_api_key(
             client,
@@ -310,14 +359,20 @@ def main() -> None:
             allowed_provider_ids=[vision_provider["id"]],
             default_provider_id=vision_provider["id"],
         )
+        batched_touch_key = _create_api_key(
+            client,
+            name="stage9-batched-touch-key",
+            allowed_provider_ids=[vision_provider["id"]],
+            default_provider_id=vision_provider["id"],
+        )
 
         _assert_shared_wallet_balance_rejected(
             client,
             provider_id=vision_provider["id"],
             owner_user_id=shared_user_id,
         )
-        _assert_responses_image_subset_rejected(client, runtime_key["raw_api_key"])
-        _assert_last_used_touch_is_batched(runtime_key["raw_api_key"], runtime_key["id"])
+        _assert_last_used_touch_is_batched(batched_touch_key["raw_api_key"], batched_touch_key["id"])
+        _assert_responses_image_native_passthrough(provider_id=vision_provider["id"])
         _assert_crlf_sse_parsing()
         _assert_chat_stream_to_responses_adapter()
         _assert_stream_probe_payload_uses_true_flag()

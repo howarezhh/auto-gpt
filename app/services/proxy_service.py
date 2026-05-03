@@ -291,6 +291,7 @@ class ProxyService:
         is_stream: bool,
         has_image: bool,
         reasoning_level: str,
+        model_reasoning_effort: str | None,
         api_client_auth: ApiClientAuthContext | None,
         trace_id: str | None,
         source_ip: str | None,
@@ -326,6 +327,7 @@ class ProxyService:
             success=False,
             status_code=status_code,
             reasoning_level=reasoning_level,
+            model_reasoning_effort=model_reasoning_effort,
             request_body_json=None,
             message=detail.get("message"),
             error_type=ProxyService._error_type_from_status(status_code),
@@ -520,12 +522,14 @@ class ProxyService:
         trace_id: str | None = None,
         source_ip: str | None = None,
     ) -> tuple[dict[str, Any], Provider, list[dict], int]:
+        payload = ProxyService._normalize_reasoning_request_payload(endpoint_path=endpoint_path, payload=payload)
         model_name = payload.get("model")
         has_image = ProxyService._payload_has_image(payload)
         require_tools = ProxyService._payload_uses_tools(payload)
         setting = await ProxyService._get_setting_async(db)
         request_id = uuid4().hex
         reasoning_level = LogService.extract_reasoning_level(payload)
+        model_reasoning_effort = LogService.extract_model_reasoning_effort(payload)
         token_limit_error = ProxyService._build_request_token_limit_error(
             setting=setting,
             payload=payload,
@@ -545,6 +549,7 @@ class ProxyService:
                 is_stream=False,
                 has_image=has_image,
                 reasoning_level=reasoning_level,
+                model_reasoning_effort=model_reasoning_effort,
                 api_client_auth=api_client_auth,
                 trace_id=trace_id,
                 source_ip=source_ip,
@@ -569,6 +574,7 @@ class ProxyService:
                 is_stream=False,
                 has_image=has_image,
                 reasoning_level=reasoning_level,
+                model_reasoning_effort=model_reasoning_effort,
                 api_client_auth=api_client_auth,
                 trace_id=trace_id,
                 source_ip=source_ip,
@@ -585,7 +591,6 @@ class ProxyService:
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail={"message": "Requested model is not allowed for this api key", "code": "model_not_allowed"},
             )
-        ProxyService._validate_endpoint_payload(endpoint_path=endpoint_path, payload=payload)
         if payload.get("stream") is True:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -632,6 +637,7 @@ class ProxyService:
                 success=False,
                 status_code=status.HTTP_404_NOT_FOUND,
                 reasoning_level=reasoning_level,
+                model_reasoning_effort=model_reasoning_effort,
                 request_body_json=request_body_json,
                 message="No native tool-capable provider for requested model" if require_tools else "No available provider for requested model",
                 error_type="invalid_request_error",
@@ -716,6 +722,7 @@ class ProxyService:
                         latency_ms=latency_ms,
                         duration_ms=latency_ms,
                         reasoning_level=reasoning_level,
+                        model_reasoning_effort=model_reasoning_effort,
                         attempt_count=attempt_count,
                         prompt_tokens=usage_info["prompt_tokens"],
                         completion_tokens=usage_info["completion_tokens"],
@@ -873,6 +880,7 @@ class ProxyService:
             schedule_token_fill=setting.enable_token_logging,
             reasoning_level=reasoning_level,
             attempt_count=attempt_count,
+            model_reasoning_effort=model_reasoning_effort,
             api_client_auth=api_client_auth,
             trace_id=trace_id,
             source_ip=source_ip,
@@ -891,12 +899,14 @@ class ProxyService:
         trace_id: str | None = None,
         source_ip: str | None = None,
     ) -> tuple[AsyncIterator[bytes], Provider, list[dict], int]:
+        payload = ProxyService._normalize_reasoning_request_payload(endpoint_path=endpoint_path, payload=payload)
         model_name = payload.get("model")
         has_image = ProxyService._payload_has_image(payload)
         require_tools = ProxyService._payload_uses_tools(payload)
         setting = await ProxyService._get_setting_async(db)
         request_id = uuid4().hex
         reasoning_level = LogService.extract_reasoning_level(payload)
+        model_reasoning_effort = LogService.extract_model_reasoning_effort(payload)
         token_limit_error = ProxyService._build_request_token_limit_error(
             setting=setting,
             payload=payload,
@@ -916,6 +926,7 @@ class ProxyService:
                 is_stream=True,
                 has_image=has_image,
                 reasoning_level=reasoning_level,
+                model_reasoning_effort=model_reasoning_effort,
                 api_client_auth=api_client_auth,
                 trace_id=trace_id,
                 source_ip=source_ip,
@@ -940,6 +951,7 @@ class ProxyService:
                 is_stream=True,
                 has_image=has_image,
                 reasoning_level=reasoning_level,
+                model_reasoning_effort=model_reasoning_effort,
                 api_client_auth=api_client_auth,
                 trace_id=trace_id,
                 source_ip=source_ip,
@@ -956,7 +968,6 @@ class ProxyService:
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail={"message": "Requested model is not allowed for this api key", "code": "model_not_allowed"},
             )
-        ProxyService._validate_endpoint_payload(endpoint_path=endpoint_path, payload=payload)
         try:
             candidates = await RouterService.async_order_candidates(
                 db,
@@ -997,6 +1008,7 @@ class ProxyService:
                 success=False,
                 status_code=status.HTTP_404_NOT_FOUND,
                 reasoning_level=reasoning_level,
+                model_reasoning_effort=model_reasoning_effort,
                 request_body_json=request_body_json,
                 message="No native tool-capable provider for requested model" if require_tools else "No available provider for requested model",
                 error_type="invalid_request_error",
@@ -1238,6 +1250,7 @@ class ProxyService:
                                         ttfb_ms=first_chunk_latency_ms,
                                         duration_ms=total_duration_ms,
                                         reasoning_level=reasoning_level,
+                                        model_reasoning_effort=model_reasoning_effort,
                                         attempt_count=attempt_count,
                                         prompt_tokens=usage_info["prompt_tokens"],
                                         completion_tokens=usage_info["completion_tokens"],
@@ -1314,6 +1327,7 @@ class ProxyService:
                                         ttfb_ms=first_chunk_latency_ms,
                                         duration_ms=total_duration_ms,
                                         reasoning_level=reasoning_level,
+                                        model_reasoning_effort=model_reasoning_effort,
                                         attempt_count=attempt_count,
                                         prompt_tokens=usage_info["prompt_tokens"],
                                         completion_tokens=usage_info["completion_tokens"],
@@ -1441,6 +1455,7 @@ class ProxyService:
             schedule_token_fill=setting.enable_token_logging,
             reasoning_level=reasoning_level,
             attempt_count=attempt_count,
+            model_reasoning_effort=model_reasoning_effort,
             api_client_auth=api_client_auth,
             trace_id=trace_id,
             source_ip=source_ip,
@@ -1972,34 +1987,26 @@ class ProxyService:
         return timeout_seconds, timeout_code, timeout_message
 
     @staticmethod
-    def _should_adapt_responses_image_request(provider: Provider, *, endpoint_path: str, payload: dict[str, Any]) -> bool:
-        return (
-            endpoint_path == "/responses"
-            and provider.provider_type == "openai_compatible"
-            and ProxyService._payload_has_image(payload)
-        )
-
-    @staticmethod
-    def _validate_endpoint_payload(*, endpoint_path: str, payload: dict[str, Any]) -> None:
-        if endpoint_path == "/responses" and ProxyService._payload_has_image(payload):
-            safety = ProxyService._assess_endpoint_conversion_safety(
-                from_endpoint_path="/responses",
-                to_endpoint_path="/chat/completions",
-                payload=payload,
-            )
-            if not safety.safe:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail={
-                        "message": safety.message or "Responses image adapter request is not safe to convert",
-                        "code": safety.code or "endpoint_adapter_conversion_unsafe",
-                        "from_endpoint": "/responses",
-                        "to_endpoint": "/chat/completions",
-                        "unsafe_fields": safety.unsafe_fields or [],
-                        "unsafe_reasons": safety.unsafe_reasons or [],
-                    },
-            )
-            ProxyService._build_chat_payload_from_responses_payload(payload)
+    def _normalize_reasoning_request_payload(*, endpoint_path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(payload)
+        normalized.pop("model_reasoning_effort", None)
+        effort = LogService.extract_model_reasoning_effort(payload)
+        if effort is None:
+            return normalized
+        if endpoint_path == "/responses":
+            reasoning = normalized.get("reasoning")
+            if isinstance(reasoning, dict):
+                merged_reasoning = dict(reasoning)
+                if not isinstance(merged_reasoning.get("effort"), str):
+                    merged_reasoning["effort"] = effort
+                normalized["reasoning"] = merged_reasoning
+            else:
+                normalized["reasoning"] = {"effort": effort}
+            normalized.pop("reasoning_effort", None)
+            return normalized
+        if not isinstance(normalized.get("reasoning_effort"), str):
+            normalized["reasoning_effort"] = effort
+        return normalized
 
     @staticmethod
     def _assess_endpoint_conversion_safety(
@@ -2402,23 +2409,6 @@ class ProxyService:
 
     @staticmethod
     def _prepare_upstream_request(provider: Provider, *, endpoint_path: str, payload: dict[str, Any]) -> PreparedUpstreamRequest:
-        if ProxyService._should_adapt_responses_image_request(provider, endpoint_path=endpoint_path, payload=payload):
-            safety = ProxyService._assess_endpoint_conversion_safety(
-                from_endpoint_path="/responses",
-                to_endpoint_path="/chat/completions",
-                payload=payload,
-            )
-            if not safety.safe:
-                ProxyService._raise_unsafe_endpoint_conversion(
-                    from_endpoint_path="/responses",
-                    to_endpoint_path="/chat/completions",
-                    safety=safety,
-                )
-            return PreparedUpstreamRequest(
-                request_path="/chat/completions",
-                request_payload=ProxyService._build_chat_payload_from_responses_payload(payload),
-                adapt_chat_response_to_responses=True,
-            )
         return PreparedUpstreamRequest(
             request_path=endpoint_path,
             request_payload=payload,
@@ -2451,6 +2441,9 @@ class ProxyService:
             responses_payload["max_output_tokens"] = payload["max_completion_tokens"]
         elif "max_tokens" in payload:
             responses_payload["max_output_tokens"] = payload["max_tokens"]
+        reasoning_effort = LogService.extract_model_reasoning_effort(payload)
+        if reasoning_effort is not None:
+            responses_payload["reasoning"] = {"effort": reasoning_effort}
         return responses_payload
 
     @staticmethod
@@ -2535,6 +2528,9 @@ class ProxyService:
             chat_payload["max_completion_tokens"] = payload["max_output_tokens"]
         if "max_tokens" in payload and "max_completion_tokens" not in chat_payload:
             chat_payload["max_tokens"] = payload["max_tokens"]
+        reasoning_effort = LogService.extract_model_reasoning_effort(payload)
+        if reasoning_effort is not None and "reasoning_effort" not in chat_payload:
+            chat_payload["reasoning_effort"] = reasoning_effort
         return chat_payload
 
     @staticmethod
@@ -3061,6 +3057,7 @@ class ProxyService:
         schedule_token_fill: bool,
         reasoning_level: str,
         attempt_count: int,
+        model_reasoning_effort: str | None = None,
         api_client_auth: ApiClientAuthContext | None = None,
         trace_id: str | None = None,
         source_ip: str | None = None,
@@ -3091,6 +3088,7 @@ class ProxyService:
                 success=False,
                 status_code=status_code,
                 reasoning_level=reasoning_level,
+                model_reasoning_effort=model_reasoning_effort,
                 request_body_json=request_body_json,
                 message=message,
                 error_type=ProxyService._error_type_from_status(status_code),
@@ -3129,6 +3127,7 @@ class ProxyService:
                 success=False,
                 status_code=status_code,
                 reasoning_level=reasoning_level,
+                model_reasoning_effort=model_reasoning_effort,
                 request_body_json=request_body_json,
                 message=ProxyService._error_message_for_log(detail),
                 error_type=ProxyService._error_type_from_status(status_code),
@@ -3165,6 +3164,7 @@ class ProxyService:
             success=False,
             status_code=502,
             reasoning_level=reasoning_level,
+            model_reasoning_effort=model_reasoning_effort,
             request_body_json=request_body_json,
             message="All providers failed",
             error_type="server_error",
@@ -3746,6 +3746,220 @@ class ProxyService:
             route_context=route_context,
             api_client_auth=api_client_auth,
         )
+
+    @staticmethod
+    async def retrieve_response(
+        *,
+        response_id: str,
+        query_items: list[tuple[str, str]] | None = None,
+        route_context: RoutePolicyContext | None = None,
+    ) -> tuple[dict[str, Any], Provider, list[dict], int]:
+        return await ProxyService._forward_response_management_request(
+            method="GET",
+            response_id=response_id,
+            action=None,
+            query_items=query_items,
+            route_context=route_context,
+        )
+
+    @staticmethod
+    async def cancel_response(
+        *,
+        response_id: str,
+        route_context: RoutePolicyContext | None = None,
+    ) -> tuple[dict[str, Any], Provider, list[dict], int]:
+        return await ProxyService._forward_response_management_request(
+            method="POST",
+            response_id=response_id,
+            action="cancel",
+            query_items=None,
+            route_context=route_context,
+        )
+
+    @staticmethod
+    async def _forward_response_management_request(
+        *,
+        method: str,
+        response_id: str,
+        action: str | None,
+        query_items: list[tuple[str, str]] | None,
+        route_context: RoutePolicyContext | None,
+    ) -> tuple[dict[str, Any], Provider, list[dict], int]:
+        db = SessionLocal()
+        try:
+            providers = ProxyService._ordered_response_management_providers(db, route_context=route_context)
+            if not providers:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={
+                        "message": "No available provider for responses management request",
+                        "code": "response_provider_not_available",
+                    },
+                )
+        finally:
+            db.close()
+
+        last_error: tuple[int, Any] | None = None
+        trace: list[dict] = []
+        request_path = f"/responses/{response_id}"
+        if action:
+            request_path = f"{request_path}/{action}"
+
+        for provider in providers:
+            started = time.perf_counter()
+            try:
+                response_json, upstream_request_id = await ProxyService._send_response_management_request(
+                    provider,
+                    method=method,
+                    request_path=request_path,
+                    query_items=query_items,
+                )
+                latency_ms = int((time.perf_counter() - started) * 1000)
+                trace.append(
+                    {
+                        "provider_id": provider.id,
+                        "provider_name": provider.name,
+                        "request_path": f"/v1{request_path}",
+                        "result": "success",
+                        "latency_ms": latency_ms,
+                        "status_code": 200,
+                        "upstream_request_id": upstream_request_id,
+                    }
+                )
+                return response_json, provider, trace, latency_ms
+            except httpx.HTTPStatusError as exc:
+                latency_ms = int((time.perf_counter() - started) * 1000)
+                error_body = await ProxyService._extract_response_error(exc.response)
+                detail = ProxyService._normalize_error_detail(error_body)
+                trace.append(
+                    {
+                        "provider_id": provider.id,
+                        "provider_name": provider.name,
+                        "request_path": f"/v1{request_path}",
+                        "result": ProxyService._classify_http_error(exc.response.status_code),
+                        "latency_ms": latency_ms,
+                        "status_code": exc.response.status_code,
+                        "error": ProxyService._error_message_for_log(detail),
+                    }
+                )
+                last_error = (exc.response.status_code, detail)
+                if ProxyService._should_continue_response_management_lookup(exc.response.status_code, detail):
+                    continue
+                raise HTTPException(status_code=exc.response.status_code, detail=detail) from exc
+            except RequestsUpstreamHTTPError as exc:
+                latency_ms = int((time.perf_counter() - started) * 1000)
+                trace.append(
+                    {
+                        "provider_id": provider.id,
+                        "provider_name": provider.name,
+                        "request_path": f"/v1{request_path}",
+                        "result": ProxyService._classify_http_error(exc.status_code),
+                        "latency_ms": latency_ms,
+                        "status_code": exc.status_code,
+                        "error": ProxyService._error_message_for_log(exc.detail),
+                    }
+                )
+                last_error = (exc.status_code, exc.detail)
+                if ProxyService._should_continue_response_management_lookup(exc.status_code, exc.detail):
+                    continue
+                raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+        if last_error is not None:
+            status_code, detail = last_error
+            raise HTTPException(status_code=status_code, detail=detail)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "message": "Response was not found in any authorized provider",
+                "code": "response_not_found",
+                "response_id": response_id,
+            },
+        )
+
+    @staticmethod
+    def _ordered_response_management_providers(
+        db: Session,
+        *,
+        route_context: RoutePolicyContext | None,
+    ) -> list[Provider]:
+        providers = [
+            item
+            for item in ProviderService.list_providers(db)
+            if item.enabled and item.provider_type == "openai_compatible"
+        ]
+        allowed_provider_ids = (
+            set(route_context.allowed_provider_ids)
+            if route_context is not None and route_context.allowed_provider_ids is not None
+            else None
+        )
+        if allowed_provider_ids is not None:
+            providers = [item for item in providers if item.id in allowed_provider_ids]
+
+        default_provider_id = route_context.default_provider_id if route_context is not None else None
+        preferred_provider_ids = (
+            list(route_context.preferred_provider_ids)
+            if route_context is not None and route_context.preferred_provider_ids
+            else []
+        )
+        ordered_ids: list[int] = []
+        if default_provider_id is not None:
+            ordered_ids.append(default_provider_id)
+        ordered_ids.extend(item for item in preferred_provider_ids if item not in ordered_ids)
+
+        ordered: list[Provider] = []
+        seen: set[int] = set()
+        for provider_id in ordered_ids:
+            provider = next((item for item in providers if item.id == provider_id), None)
+            if provider is None or provider.id in seen:
+                continue
+            ordered.append(provider)
+            seen.add(provider.id)
+        for provider in providers:
+            if provider.id in seen:
+                continue
+            ordered.append(provider)
+            seen.add(provider.id)
+        return ordered
+
+    @staticmethod
+    async def _send_response_management_request(
+        provider: Provider,
+        *,
+        method: str,
+        request_path: str,
+        query_items: list[tuple[str, str]] | None,
+    ) -> tuple[dict[str, Any], str | None]:
+        client = UpstreamClientService.get_client()
+        response = await client.request(
+            method.upper(),
+            f"{provider.base_url}{request_path}",
+            headers={"Authorization": f"Bearer {provider.api_key}"},
+            params=query_items,
+            timeout=ProxyService._build_httpx_timeout(provider, payload={}, is_stream=False),
+        )
+        response.raise_for_status()
+        if response.content:
+            return response.json(), ProxyService._extract_upstream_request_id(response)
+        return {"id": request_path.rsplit("/", 1)[-1], "object": "response"}, ProxyService._extract_upstream_request_id(response)
+
+    @staticmethod
+    def _should_continue_response_management_lookup(status_code: int, detail: Any) -> bool:
+        if status_code == status.HTTP_404_NOT_FOUND:
+            return True
+        if status_code not in {status.HTTP_400_BAD_REQUEST, status.HTTP_409_CONFLICT}:
+            return False
+        message = ProxyService._error_message_for_log(detail).strip().lower()
+        continue_tokens = (
+            "not found",
+            "no such",
+            "unknown response",
+            "response not found",
+            "invalid response",
+            "unsupported",
+            "not support",
+            "not_supported",
+        )
+        return any(token in message for token in continue_tokens)
 
     @staticmethod
     def _error_type_from_status(status_code: int) -> str:
