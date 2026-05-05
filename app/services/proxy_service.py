@@ -32,6 +32,7 @@ from app.services.setting_service import SettingService
 from app.services.token_usage_service import TokenUsageService
 from app.services.upstream_client import UpstreamClientService
 from app.utils.json_utils import dumps_json, safeJsonParse
+from app.utils.request_body_structure import summarize_request_body_structure
 
 
 @dataclass(slots=True)
@@ -294,6 +295,7 @@ class ProxyService:
         api_client_auth: ApiClientAuthContext | None,
         trace_id: str | None,
         source_ip: str | None,
+        request_body_json: str | None,
     ) -> None:
         trace = [{
             "result": "request_token_limit_rejected",
@@ -327,7 +329,7 @@ class ProxyService:
             status_code=status_code,
             reasoning_level=reasoning_level,
             model_reasoning_effort=model_reasoning_effort,
-            request_body_json=None,
+            request_body_json=request_body_json,
             message=detail.get("message"),
             error_type=ProxyService._error_type_from_status(status_code),
             error_code=detail.get("code"),
@@ -552,6 +554,12 @@ class ProxyService:
                 api_client_auth=api_client_auth,
                 trace_id=trace_id,
                 source_ip=source_ip,
+                request_body_json=ProxyService._serialize_payload_for_logging(
+                    payload,
+                    setting=setting,
+                    preserve_request_content_when_disabled=True,
+                    structure_only=True,
+                ),
             )
         long_output_error = ProxyService._build_long_output_error(
             setting=setting,
@@ -577,6 +585,12 @@ class ProxyService:
                 api_client_auth=api_client_auth,
                 trace_id=trace_id,
                 source_ip=source_ip,
+                request_body_json=ProxyService._serialize_payload_for_logging(
+                    payload,
+                    setting=setting,
+                    preserve_request_content_when_disabled=True,
+                    structure_only=True,
+                ),
             )
         conversation_key = ProxyService._extract_conversation_key(payload, request_id)
         session_id = LogService.extract_session_id(payload, conversation_key=conversation_key, fallback=request_id)
@@ -584,6 +598,7 @@ class ProxyService:
             payload,
             setting=setting,
             preserve_request_content_when_disabled=True,
+            structure_only=True,
         )
         if api_client_auth is not None and not ApiKeyService.is_model_allowed(api_client_auth.api_client_key, model_name):
             raise HTTPException(
@@ -961,6 +976,7 @@ class ProxyService:
             payload,
             setting=setting,
             preserve_request_content_when_disabled=True,
+            structure_only=True,
         )
         if api_client_auth is not None and not ApiKeyService.is_model_allowed(api_client_auth.api_client_key, model_name):
             raise HTTPException(
@@ -3419,7 +3435,14 @@ class ProxyService:
         *,
         setting: Any,
         preserve_request_content_when_disabled: bool = False,
+        structure_only: bool = False,
     ) -> str | None:
+        if structure_only:
+            payload_to_log = summarize_request_body_structure(payload)
+            return ProxyService._truncate_serialized_json(
+                payload_to_log,
+                getattr(setting, "max_logged_body_bytes", 16384),
+            )
         should_log_full_payload = getattr(setting, "enable_payload_logging", True)
         payload_to_log: Any = payload
         if not should_log_full_payload:

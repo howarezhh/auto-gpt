@@ -12,6 +12,7 @@ from sqlalchemy import inspect, text
 from app.config import get_settings
 from app.database import Base, SessionLocal, engine
 from app.models import AppSetting
+from app.models.request_log import RequestLog
 from app.routers.auth import router as auth_router
 from app.routers.api_keys import router as api_keys_router
 from app.routers.api_key_policy_templates import router as api_key_policy_templates_router
@@ -51,6 +52,7 @@ from app.utils.decimal_utils import (
     DB_PRICE_SCALE,
 )
 from app.utils.json_utils import dumps_json, safeJsonParse
+from app.utils.request_body_structure import summarize_request_body_structure
 
 
 settings = get_settings()
@@ -596,22 +598,26 @@ async def trace_and_runtime_middleware(request: Request, call_next):
     try:
         body_limit_response = _reject_oversized_v1_request_by_content_length(request)
         if body_limit_response is not None:
+            _apply_v1_cors_headers(request, body_limit_response)
             return body_limit_response
         response = await call_next(request)
     except Exception as exc:
-        if request.url.path.startswith("/v1/"):
-            return _build_unhandled_v1_error_response(request, exc)
+        if _is_external_v1_path(request.url.path):
+            response = _build_unhandled_v1_error_response(request, exc)
+            _apply_v1_cors_headers(request, response)
+            return response
         raise
     finally:
         RuntimeStateService.leave_request()
     response.headers["X-Trace-Id"] = trace_id
     response.headers["X-Request-Id"] = trace_id
     response.headers["X-Active-Requests"] = str(RuntimeStateService.current_active_requests())
+    _apply_v1_cors_headers(request, response)
     return response
 
 
 def _reject_oversized_v1_request_by_content_length(request: Request) -> JSONResponse | None:
-    if not request.url.path.startswith("/v1/") or request.method.upper() not in {"POST", "PUT", "PATCH"}:
+    if not _is_external_v1_path(request.url.path) or request.method.upper() not in {"POST", "PUT", "PATCH"}:
         return None
     db = SessionLocal()
     try:
@@ -629,6 +635,24 @@ def _reject_oversized_v1_request_by_content_length(request: Request) -> JSONResp
     if request_bytes is None or request_bytes <= limit:
         return None
     trace_id = getattr(request.state, "trace_id", None)
+    _log_v1_request_rejected_before_route(
+        request=request,
+        status_code=413,
+        message=f"请求体大小 {request_bytes} 字节超过应用层上限 {limit} 字节",
+        error_code="request_body_too_large",
+        retryable=False,
+        request_body_json=ProxySafeHelpers.truncate_json(
+            {
+                "_summary": "request body structure omitted because Content-Length exceeds application limit",
+                "structure": {
+                    "type": "bytes",
+                    "content_length": request_bytes,
+                    "max_v1_request_body_bytes": limit,
+                },
+            },
+            4096,
+        ),
+    )
     return JSONResponse(
         status_code=413,
         content=OpenAIErrorService.build_error_payload(
@@ -657,6 +681,26 @@ def _effective_v1_body_limit(app_setting: AppSetting, request_path: str) -> int:
     return min(positive_limits) if positive_limits else 0
 
 
+def _is_external_v1_path(path: str) -> bool:
+    return path == "/v1" or path.startswith("/v1/")
+
+
+def _apply_v1_cors_headers(request: Request, response) -> None:
+    if not _is_external_v1_path(request.url.path):
+        return
+    origin = request.headers.get("origin")
+    response.headers["Access-Control-Allow-Origin"] = origin or "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = (
+        request.headers.get("access-control-request-headers")
+        or "authorization,content-type,x-request-id,x-trace-id"
+    )
+    response.headers["Access-Control-Expose-Headers"] = (
+        "x-request-id,x-trace-id,x-proxy-provider-id,x-proxy-provider-name,x-proxy-latency-ms"
+    )
+    response.headers["Vary"] = "Origin"
+
+
 @app.exception_handler(ApiClientAuthError)
 async def api_client_auth_error_handler(request: Request, exc: ApiClientAuthError):
     await _log_api_client_auth_failure(request, exc)
@@ -676,10 +720,19 @@ async def api_client_auth_error_handler(request: Request, exc: ApiClientAuthErro
 
 @app.exception_handler(RequestValidationError)
 async def request_validation_exception_handler(request: Request, exc: RequestValidationError):
-    if not request.url.path.startswith("/v1/"):
+    if not _is_external_v1_path(request.url.path):
         return JSONResponse(status_code=422, content={"detail": exc.errors()})
     trace_id = getattr(request.state, "trace_id", None)
     detail = {"errors": _make_json_safe(exc.errors())}
+    _log_v1_request_rejected_before_route(
+        request=request,
+        status_code=422,
+        message="Request validation failed",
+        error_code="request_validation_failed",
+        retryable=False,
+        detail=detail,
+        request_body_json=getattr(request.state, "v1_request_body_structure_json", None),
+    )
     return JSONResponse(
         status_code=422,
         content=OpenAIErrorService.build_error_payload(
@@ -696,7 +749,7 @@ async def request_validation_exception_handler(request: Request, exc: RequestVal
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
-    if not request.url.path.startswith("/v1/"):
+    if not _is_external_v1_path(request.url.path):
         return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
     trace_id = getattr(request.state, "trace_id", None)
     error_type, default_code, retryable = OpenAIErrorService.classify_status_code(exc.status_code)
@@ -708,6 +761,15 @@ async def http_exception_handler(request: Request, exc: HTTPException):
             error_code = detail_payload["code"]
         elif isinstance(detail_payload.get("error"), dict) and isinstance(detail_payload["error"].get("code"), str):
             error_code = detail_payload["error"]["code"]
+    _log_v1_request_rejected_before_route(
+        request=request,
+        status_code=exc.status_code,
+        message=message,
+        error_code=error_code,
+        retryable=retryable,
+        detail=detail_payload,
+        request_body_json=getattr(request.state, "v1_request_body_structure_json", None),
+    )
     content = OpenAIErrorService.build_error_payload(
         message=message,
         code=error_code,
@@ -727,7 +789,7 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
-    if request.url.path.startswith("/v1/"):
+    if _is_external_v1_path(request.url.path):
         return _build_unhandled_v1_error_response(request, exc)
     raise exc
 
@@ -739,6 +801,15 @@ def _build_unhandled_v1_error_response(request: Request, exc: Exception) -> JSON
         "exception_type": exc.__class__.__name__,
         "message": message,
     }
+    _log_v1_request_rejected_before_route(
+        request=request,
+        status_code=500,
+        message=message,
+        error_code="internal_server_error",
+        retryable=True,
+        detail=detail,
+        request_body_json=getattr(request.state, "v1_request_body_structure_json", None),
+    )
     return JSONResponse(
         status_code=500,
         content=OpenAIErrorService.build_error_payload(
@@ -753,6 +824,51 @@ def _build_unhandled_v1_error_response(request: Request, exc: Exception) -> JSON
     )
 
 
+def _log_v1_request_rejected_before_route(
+    *,
+    request: Request,
+    status_code: int,
+    message: str,
+    error_code: str,
+    retryable: bool,
+    detail: dict | None = None,
+    request_body_json: str | None = None,
+) -> None:
+    if getattr(request.state, "v1_rejection_logged", False):
+        return
+    db = SessionLocal()
+    try:
+        trace_id = getattr(request.state, "trace_id", None)
+        if trace_id:
+            existing = db.query(RequestLog.id).filter(RequestLog.trace_id == trace_id).first()
+            if existing is not None:
+                request.state.v1_rejection_logged = True
+                return
+        request.state.v1_rejection_logged = True
+        LogService.create_log(
+            db,
+            log_type="api_client_auth",
+            trace_id=trace_id,
+            request_path=request.url.path,
+            source_ip=ProxySafeHelpers.extract_source_ip(request),
+            http_method=request.method.upper(),
+            success=False,
+            status_code=status_code,
+            request_body_json=request_body_json,
+            response_body_json=ProxySafeHelpers.truncate_json({"detail": detail} if detail is not None else {"message": message}, 16384),
+            message=message,
+            error_type=OpenAIErrorService.classify_status_code(status_code)[0],
+            error_code=error_code,
+            retryable=retryable,
+            api_client_auth_result=error_code,
+            trace=[{"result": "request_rejected_before_route", "error": error_code, "latency_ms": 0}],
+            attempt_count=0,
+            schedule_token_fill=False,
+        )
+    finally:
+        db.close()
+
+
 def _make_json_safe(value):
     if isinstance(value, dict):
         return {str(key): _make_json_safe(item) for key, item in value.items()}
@@ -764,7 +880,7 @@ def _make_json_safe(value):
 
 
 async def _log_api_client_auth_failure(request: Request, exc: ApiClientAuthError) -> None:
-    if not request.url.path.startswith("/v1/"):
+    if not _is_external_v1_path(request.url.path):
         return
     db = SessionLocal()
     try:
@@ -775,26 +891,15 @@ async def _log_api_client_auth_failure(request: Request, exc: ApiClientAuthError
             content_length = int(content_length_header) if content_length_header is not None else None
         except ValueError:
             content_length = None
-        should_read_body = (
-            content_length is not None
-            and (max_body_bytes <= 0 or content_length <= max_body_bytes)
+        parsed_body, request_body_json = await _read_v1_request_body_structure_for_log(
+            request,
+            max_logged_body_bytes=int(getattr(settings, "max_logged_body_bytes", 16384) or 16384),
+            max_body_bytes=max_body_bytes,
+            content_length=content_length,
         )
-        body_bytes = await request.body() if should_read_body else b""
-        body_text = body_bytes.decode("utf-8", errors="ignore") if body_bytes else None
-        parsed_body = safeJsonParse(body_text) if body_text else None
-        request_body_json = None
         requested_model = None
         if isinstance(parsed_body, dict):
             requested_model = parsed_body.get("model") if isinstance(parsed_body.get("model"), str) else None
-            if settings.enable_payload_logging:
-                request_body_json = ProxySafeHelpers.truncate_json(parsed_body, settings.max_logged_body_bytes)
-            else:
-                request_body_json = ProxySafeHelpers.truncate_json(
-                    ProxySafeHelpers.compact_request_log_payload(parsed_body, settings),
-                    settings.max_logged_body_bytes,
-                )
-        elif body_text and settings.enable_payload_logging:
-            request_body_json = body_text[: settings.max_logged_body_bytes]
         LogService.create_log(
             db,
             log_type="api_client_auth",
@@ -833,6 +938,75 @@ async def _log_api_client_auth_failure(request: Request, exc: ApiClientAuthError
         )
     finally:
         db.close()
+
+
+async def _read_v1_request_body_structure_for_log(
+    request: Request,
+    *,
+    max_logged_body_bytes: int,
+    max_body_bytes: int,
+    content_length: int | None,
+) -> tuple[dict | None, str | None]:
+    if request.method.upper() not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return None, None
+    max_read_bytes = max_logged_body_bytes * 4
+    if max_body_bytes > 0:
+        max_read_bytes = min(max_read_bytes, max_body_bytes)
+    max_read_bytes = max(1, min(max_read_bytes, 262144))
+    if content_length is not None and content_length > max_read_bytes:
+        return None, ProxySafeHelpers.truncate_json(
+            {
+                "_summary": "request body structure omitted because Content-Length exceeds logging read limit",
+                "structure": {
+                    "type": "bytes",
+                    "content_length": content_length,
+                    "max_log_read_bytes": max_read_bytes,
+                },
+            },
+            max_logged_body_bytes,
+        )
+    body = bytearray()
+    truncated = False
+    try:
+        async for chunk in request.stream():
+            if not chunk:
+                continue
+            if len(body) + len(chunk) > max_read_bytes:
+                remaining = max_read_bytes - len(body)
+                if remaining > 0:
+                    body.extend(chunk[:remaining])
+                truncated = True
+                break
+            body.extend(chunk)
+    except RuntimeError:
+        return None, ProxySafeHelpers.truncate_json(
+            {
+                "_summary": "request body structure unavailable because request stream was already consumed",
+                "structure": {"type": "unavailable"},
+            },
+            max_logged_body_bytes,
+        )
+    if not body:
+        return None, None
+    body_text = body.decode("utf-8", errors="ignore")
+    parsed_body = safeJsonParse(body_text)
+    if isinstance(parsed_body, dict):
+        summary = summarize_request_body_structure(parsed_body)
+        if truncated:
+            summary["structure"]["truncated_body_before_parse"] = True
+        return parsed_body, ProxySafeHelpers.truncate_json(summary, max_logged_body_bytes)
+    return None, ProxySafeHelpers.truncate_json(
+        {
+            "_summary": "request body structure only; body is not valid JSON or not an object",
+            "structure": {
+                "type": "text",
+                "chars_read": len(body_text),
+                "truncated": truncated,
+                "parseable_json": parsed_body is not None,
+            },
+        },
+        max_logged_body_bytes,
+    )
 
 
 class ProxySafeHelpers:
