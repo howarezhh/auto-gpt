@@ -4612,8 +4612,8 @@
             providerWeightInput.value = provider?.weight ?? 100;
             providerTimeoutMsInput.value = provider?.timeout_ms ?? 30000;
             providerMaxRetriesInput.value = provider?.max_retries ?? 1;
-            providerMaxActiveRequestsInput.value = provider?.max_active_requests ?? 300;
-            providerMaxActiveStreamsInput.value = provider?.max_active_streams ?? 150;
+            providerMaxActiveRequestsInput.value = provider?.max_active_requests ?? 1000;
+            providerMaxActiveStreamsInput.value = provider?.max_active_streams ?? 1000;
             providerMaxQpsInput.value = provider?.max_qps ?? "";
             providerMaxErrorRateInput.value = provider?.max_error_rate ?? 80;
             providerFirstTokenTimeoutSecInput.value = provider?.first_token_timeout_sec ?? 60;

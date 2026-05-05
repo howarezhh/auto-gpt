@@ -8,6 +8,7 @@ TEMP_DB_PATH = Path("data/stage9-regression.db")
 if TEMP_DB_PATH.exists():
     TEMP_DB_PATH.unlink()
 os.environ["DATABASE_URL"] = "sqlite:///./data/stage9-regression.db"
+os.environ["ENABLE_SCHEDULER"] = "false"
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select

@@ -13,6 +13,7 @@ TEMP_DB_PATH = Path("data/stage7-regression.db")
 if TEMP_DB_PATH.exists():
     TEMP_DB_PATH.unlink()
 os.environ["DATABASE_URL"] = "sqlite:///./data/stage7-regression.db"
+os.environ["ENABLE_SCHEDULER"] = "false"
 
 from fastapi.testclient import TestClient
 
@@ -26,6 +27,7 @@ from app.services.log_service import LogService
 from app.services.proxy_service import PreparedUpstreamRequest, ProxyService
 from app.services.router_service import RoutePolicyContext, RouterService
 from app.services.token_usage_service import TokenUsageService
+from app.services.user_auth_service import USER_ROLE_ADMIN, UserAuthService
 
 
 class _FakeStreamResponse:
@@ -57,6 +59,20 @@ async def _fake_stream_request(provider, endpoint_path: str, payload: dict, **_k
         request_payload=payload,
         adapt_chat_response_to_responses=False,
     )
+
+
+class _FakeStreamContext:
+    async def __aexit__(self, exc_type, exc_value, exc_traceback) -> None:
+        return None
+
+
+async def _fake_open_stream_with_endpoint_fallback(provider, provider_model, endpoint_path: str, payload: dict, **_kwargs):
+    prepared = PreparedUpstreamRequest(
+        request_path=endpoint_path,
+        request_payload=payload,
+        adapt_chat_response_to_responses=False,
+    )
+    return _FakeStreamResponse(provider.name, payload.get("model", "unknown")), prepared, _FakeStreamContext(), []
 
 
 async def _fake_forward_json(provider, endpoint_path: str, payload: dict):
@@ -97,23 +113,33 @@ async def _fake_forward_json(provider, endpoint_path: str, payload: dict):
     }, f"upstream-{provider.name}"
 
 
+async def _fake_forward_json_with_endpoint_fallback(provider, provider_model, endpoint_path: str, payload: dict, **_kwargs):
+    response_json, upstream_request_id = await _fake_forward_json(provider, endpoint_path, payload)
+    return response_json, upstream_request_id, []
+
+
 def _assert(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
 
 
 def _bootstrap_admin(client: TestClient) -> None:
+    with SessionLocal() as db:
+        if UserAuthService.get_user_by_login(db, "stage7-admin") is None:
+            UserAuthService.create_user(
+                db,
+                username="stage7-admin",
+                email="stage7-admin@example.com",
+                password="Stage7Admin#123",
+                role=USER_ROLE_ADMIN,
+                enabled=True,
+            )
     response = client.post(
-        "/setup-admin",
-        data={
-            "username": "stage7-admin",
-            "email": "stage7-admin@example.com",
-            "password": "Stage7Admin#123",
-            "password_confirm": "Stage7Admin#123",
-        },
+        "/login",
+        data={"identifier": "stage7-admin", "password": "Stage7Admin#123"},
         follow_redirects=False,
     )
-    _assert(response.status_code == 303, f"bootstrap admin failed: {response.text}")
+    _assert(response.status_code == 303, f"bootstrap admin login failed: {response.text}")
 
 
 def _create_provider(client: TestClient, *, name: str, priority: int, weight: int, models: list[str]) -> dict:
@@ -134,6 +160,8 @@ def _create_provider(client: TestClient, *, name: str, priority: int, weight: in
                 "weight": weight,
                 "supports_stream": not (name == "stage7-provider-a" and model_name == "reg-model"),
                 "supports_vision": "vision" in model_name,
+                "supports_chat_completions": True,
+                "supports_responses": True,
                 "enabled": True,
                 "input_price_per_1k": 0.0005 if model_name == "reg-model" else 0.0008,
                 "output_price_per_1k": 0.0015 if model_name == "reg-model" else 0.002,
@@ -181,6 +209,10 @@ def _create_api_key(
 
 def main() -> None:
     with patch.object(ProxyService, "_forward_json", side_effect=_fake_forward_json), patch.object(
+        ProxyService, "_forward_json_with_endpoint_fallback", side_effect=_fake_forward_json_with_endpoint_fallback
+    ), patch.object(
+        ProxyService, "_open_stream_with_endpoint_fallback", side_effect=_fake_open_stream_with_endpoint_fallback
+    ), patch.object(
         ProxyService, "_stream_request", side_effect=_fake_stream_request
     ):
         with TestClient(app) as client:
@@ -311,7 +343,7 @@ def main() -> None:
                     "global_max_retries": 2,
                     "circuit_breaker_threshold": 3,
                     "auto_health_check": True,
-                    "health_check_interval_sec": 60,
+                    "health_check_interval_sec": 300,
                     "recovery_probe_interval_sec": 30,
                     "enable_token_logging": True,
                     "enable_payload_logging": True,
@@ -326,7 +358,10 @@ def main() -> None:
             )
 
             with SessionLocal() as db:
-                for provider_id, vision_enabled in ((provider_a["id"], False), (provider_b["id"], True)):
+                for provider_id, vision_enabled, stream_enabled in (
+                    (provider_a["id"], False, False),
+                    (provider_b["id"], True, True),
+                ):
                     target_model = db.scalar(
                         select(ProviderModel).where(
                             ProviderModel.provider_id == provider_id,
@@ -335,6 +370,7 @@ def main() -> None:
                     )
                     _assert(target_model is not None, f"reg-model missing on provider {provider_id}")
                     target_model.supports_vision = vision_enabled
+                    target_model.supports_stream = stream_enabled
                 quota_record = db.get(ApiClientKey, quota_key["id"])
                 _assert(quota_record is not None, "quota api key missing")
                 quota_record.prompt_tokens_used = 5

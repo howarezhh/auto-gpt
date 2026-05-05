@@ -330,11 +330,18 @@ async def retrieve_response(
     response: Response,
     api_client_auth: ApiClientAuthContext = Depends(require_api_client_auth),
 ):
-    result, provider, trace, latency_ms = await ProxyService.retrieve_response(
-        response_id=response_id,
-        query_items=list(request.query_params.multi_items()),
-        route_context=api_client_auth.route_context,
-    )
+    lease = await _acquire_request_concurrency(request=request, api_client_auth=api_client_auth, is_stream=False)
+    try:
+        result, provider, trace, latency_ms = await ProxyService.retrieve_response(
+            response_id=response_id,
+            query_items=list(request.query_params.multi_items()),
+            route_context=api_client_auth.route_context,
+            api_client_auth=api_client_auth,
+            trace_id=getattr(request.state, "trace_id", None),
+            source_ip=ApiKeyService.extract_source_ip(request),
+        )
+    finally:
+        await _release_request_concurrency(lease)
     for key, value in build_proxy_response_headers(
         provider_id=provider.id,
         provider_name=provider.name,
@@ -353,10 +360,17 @@ async def cancel_response(
     response: Response,
     api_client_auth: ApiClientAuthContext = Depends(require_api_client_auth),
 ):
-    result, provider, trace, latency_ms = await ProxyService.cancel_response(
-        response_id=response_id,
-        route_context=api_client_auth.route_context,
-    )
+    lease = await _acquire_request_concurrency(request=request, api_client_auth=api_client_auth, is_stream=False)
+    try:
+        result, provider, trace, latency_ms = await ProxyService.cancel_response(
+            response_id=response_id,
+            route_context=api_client_auth.route_context,
+            api_client_auth=api_client_auth,
+            trace_id=getattr(request.state, "trace_id", None),
+            source_ip=ApiKeyService.extract_source_ip(request),
+        )
+    finally:
+        await _release_request_concurrency(lease)
     for key, value in build_proxy_response_headers(
         provider_id=provider.id,
         provider_name=provider.name,

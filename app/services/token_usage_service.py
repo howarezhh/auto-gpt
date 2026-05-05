@@ -477,12 +477,29 @@ class TokenUsageService:
             should_commit = True
         if should_commit:
             db.commit()
+            TokenUsageService._invalidate_api_client_auth_cache_for_log(db, log)
         if billing_delta is not None:
             TokenUsageService._record_redis_usage_counters(
                 log,
                 original_total_tokens=original_total_tokens,
                 billing_delta=billing_delta,
             )
+
+    @staticmethod
+    def _invalidate_api_client_auth_cache_for_log(db, log: RequestLog) -> None:
+        if log.api_client_key_id is None:
+            return
+        try:
+            from app.services.api_key_auth_cache import ApiKeyAuthCache
+
+            api_key = db.get(ApiClientKey, log.api_client_key_id)
+            if api_key is None:
+                return
+            ApiKeyAuthCache.invalidate_api_key(api_key.id, api_key.key_hash)
+            if api_key.owner_user_id is not None:
+                ApiKeyAuthCache.invalidate_user(api_key.owner_user_id)
+        except Exception:
+            return
 
     @staticmethod
     def _sync_api_client_key_usage_delta(

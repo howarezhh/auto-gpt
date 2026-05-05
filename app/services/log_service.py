@@ -763,7 +763,8 @@ class LogService:
     def derive_attempt_count(trace: list[dict] | dict | None) -> int:
         if not isinstance(trace, list) or not trace:
             return 0
-        primary_markers = {
+        attempt_markers = {
+            "success",
             "http_error",
             "exception",
             "model_not_found",
@@ -771,12 +772,13 @@ class LogService:
             "request_rejected",
             "upstream_auth_error",
             "stream_opened",
+            "capacity_limited",
+            "capacity_unavailable",
+            "auth_rejected",
+            "interrupted",
+            "client_cancelled",
         }
-        fallback_markers = {"success", "auth_rejected", "interrupted", "client_cancelled"}
-        primary_count = sum(1 for item in trace if isinstance(item, dict) and item.get("result") in primary_markers)
-        if primary_count:
-            return primary_count
-        return sum(1 for item in trace if isinstance(item, dict) and item.get("result") in fallback_markers)
+        return sum(1 for item in trace if isinstance(item, dict) and item.get("result") in attempt_markers)
 
     @staticmethod
     def resolve_ttfb_ms(

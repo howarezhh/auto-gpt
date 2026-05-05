@@ -12,6 +12,9 @@ NGINX_SERVICE_NAME="${NGINX_SERVICE_NAME:-nginx}"
 BRANCH="${BRANCH:-main}"
 REMOTE="${REMOTE:-origin}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8000/ready}"
+GIT_FETCH_RETRIES="${GIT_FETCH_RETRIES:-2}"
+GIT_FETCH_TIMEOUT_SECONDS="${GIT_FETCH_TIMEOUT_SECONDS:-120}"
+GIT_MIRROR_URLS="${GIT_MIRROR_URLS:-}"
 
 log() {
   printf '[aotu-gpt-update] %s\n' "$1"
@@ -114,10 +117,111 @@ install_python_dependencies_if_needed() {
   printf '%s' "$current_hash" > "$REQUIREMENTS_HASH_FILE"
 }
 
+remote_fetch_url() {
+  git remote get-url "$REMOTE" 2>/dev/null || printf '%s' "$REMOTE"
+}
+
+github_repo_path_from_url() {
+  local url="$1"
+  local path=""
+  case "$url" in
+    https://github.com/*)
+      path="${url#https://github.com/}"
+      ;;
+    http://github.com/*)
+      path="${url#http://github.com/}"
+      ;;
+    git@github.com:*)
+      path="${url#git@github.com:}"
+      ;;
+    ssh://git@github.com/*)
+      path="${url#ssh://git@github.com/}"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  [[ -n "$path" ]] || return 1
+  [[ "$path" == *.git ]] || path="${path}.git"
+  printf '%s' "$path"
+}
+
+append_unique_fetch_url() {
+  local url="$1"
+  local existing=""
+  [[ -n "$url" ]] || return 0
+  for existing in "${FETCH_URL_CANDIDATES[@]}"; do
+    if [[ "$existing" == "$url" ]]; then
+      return 0
+    fi
+  done
+  FETCH_URL_CANDIDATES+=("$url")
+}
+
+build_fetch_url_candidates() {
+  local primary_url="$1"
+  local repo_path=""
+  local mirror_url=""
+  FETCH_URL_CANDIDATES=()
+  append_unique_fetch_url "$primary_url"
+
+  if repo_path="$(github_repo_path_from_url "$primary_url")"; then
+    append_unique_fetch_url "https://gitclone.com/github.com/${repo_path}"
+    append_unique_fetch_url "https://gh-proxy.com/https://github.com/${repo_path}"
+    append_unique_fetch_url "https://mirror.ghproxy.com/https://github.com/${repo_path}"
+  fi
+
+  for mirror_url in $GIT_MIRROR_URLS; do
+    append_unique_fetch_url "$mirror_url"
+  done
+}
+
+run_git_fetch_candidate() {
+  local fetch_url="$1"
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "${GIT_FETCH_TIMEOUT_SECONDS}s" git fetch --prune "$fetch_url" "+refs/heads/${BRANCH}:refs/remotes/${REMOTE}/${BRANCH}"
+    return $?
+  fi
+  git fetch --prune "$fetch_url" "+refs/heads/${BRANCH}:refs/remotes/${REMOTE}/${BRANCH}"
+}
+
+fetch_latest_code() {
+  local primary_url=""
+  local fetch_url=""
+  local attempt=1
+  local max_attempts=1
+
+  primary_url="$(remote_fetch_url)"
+  build_fetch_url_candidates "$primary_url"
+  max_attempts="$GIT_FETCH_RETRIES"
+  if (( max_attempts < 1 )); then
+    max_attempts=1
+  fi
+
+  for fetch_url in "${FETCH_URL_CANDIDATES[@]}"; do
+    attempt=1
+    while (( attempt <= max_attempts )); do
+      log "Fetching ${BRANCH} via ${fetch_url} (${attempt}/${max_attempts})..."
+      if run_git_fetch_candidate "$fetch_url"; then
+        log "Fetch succeeded via ${fetch_url}."
+        return 0
+      fi
+      log "Fetch failed via ${fetch_url} (${attempt}/${max_attempts})."
+      attempt=$((attempt + 1))
+      sleep 2
+    done
+  done
+
+  log "Unable to fetch ${BRANCH} from ${REMOTE} or configured mirrors."
+  log "You can override mirrors, for example:"
+  log "  sudo env GIT_MIRROR_URLS='https://gitclone.com/github.com/howarezhh/auto-gpt.git' bash update_aliyun.sh"
+  return 1
+}
+
 update_code() {
   local backup_dir=""
-  log "Fetching latest code from ${REMOTE}/${BRANCH}..."
-  git fetch "$REMOTE" "$BRANCH"
+  log "Fetching latest code for ${REMOTE}/${BRANCH}..."
+  fetch_latest_code
 
   local local_head=""
   local remote_head=""

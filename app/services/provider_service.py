@@ -744,6 +744,9 @@ class ProviderService:
         for config in model_configs:
             if config.model_name in catalogs_by_name:
                 continue
+            cache_price = config.cache_price_per_1k
+            if cache_price is None:
+                cache_price = config.input_price_per_1k
             catalog = ModelCatalog(
                 model_name=config.model_name,
                 display_name=None,
@@ -756,9 +759,9 @@ class ProviderService:
                 context_window_tokens=config.context_window_tokens,
                 max_input_tokens=config.max_input_tokens,
                 max_output_tokens=config.max_output_tokens,
-                input_price_per_1k=None,
-                output_price_per_1k=None,
-                cache_price_per_1k=None,
+                input_price_per_1k=config.input_price_per_1k,
+                output_price_per_1k=config.output_price_per_1k,
+                cache_price_per_1k=cache_price,
             )
             db.add(catalog)
             db.flush()

@@ -96,8 +96,8 @@ def _get_table_columns(db, table_name: str) -> set[str]:
 def _migrate_provider_capacity_columns(db) -> None:
     existing_columns = _get_table_columns(db, "providers")
     additions = {
-        "max_active_requests": "ALTER TABLE providers ADD COLUMN max_active_requests INTEGER DEFAULT 300",
-        "max_active_streams": "ALTER TABLE providers ADD COLUMN max_active_streams INTEGER DEFAULT 150",
+        "max_active_requests": "ALTER TABLE providers ADD COLUMN max_active_requests INTEGER DEFAULT 1000",
+        "max_active_streams": "ALTER TABLE providers ADD COLUMN max_active_streams INTEGER DEFAULT 1000",
         "max_qps": "ALTER TABLE providers ADD COLUMN max_qps INTEGER",
         "max_error_rate": "ALTER TABLE providers ADD COLUMN max_error_rate FLOAT DEFAULT 80",
         "first_token_timeout_sec": "ALTER TABLE providers ADD COLUMN first_token_timeout_sec INTEGER DEFAULT 60",
@@ -565,7 +565,7 @@ async def lifespan(_: FastAPI):
         init_database(allow_production_ddl=False)
     await RedisService.init()
     UpstreamClientService.get_client()
-    if not scheduler.running:
+    if settings.enable_scheduler and not scheduler.running:
         configure_scheduler()
         scheduler.start()
     yield

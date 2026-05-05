@@ -108,8 +108,8 @@ class ProviderBase(BaseModel):
     weight: int = 100
     timeout_ms: int = 30000
     max_retries: int = 1
-    max_active_requests: int | None = Field(default=300, ge=0)
-    max_active_streams: int | None = Field(default=150, ge=0)
+    max_active_requests: int | None = Field(default=1000, ge=0)
+    max_active_streams: int | None = Field(default=1000, ge=0)
     max_qps: int | None = Field(default=None, ge=0)
     max_error_rate: float | None = Field(default=80.0, ge=0, le=100)
     first_token_timeout_sec: int | None = Field(default=60, ge=1)

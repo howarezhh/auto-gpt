@@ -185,57 +185,44 @@ class ApiKeyService:
         cached_auth = ApiKeyAuthCache.get_by_hash(key_hash)
         if cached_auth is not None:
             api_client_key, route_context = ApiKeyAuthCache.build_auth_context(cached_auth)
-            persistent_api_key = db.scalar(
-                select(ApiClientKey)
-                .options(selectinload(ApiClientKey.owner_user))
-                .where(ApiClientKey.id == api_client_key.id)
-            )
-            if persistent_api_key is None:
-                ApiKeyAuthCache.invalidate_hash(key_hash)
-                raise ApiClientAuthError(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    code="invalid_api_key",
-                    message="Invalid api key",
-                    api_client_key_prefix=getattr(api_client_key, "key_prefix", None),
-                )
-            owner_user = persistent_api_key.owner_user
+            owner_user = api_client_key.owner_user
             owner_user_name = owner_user.username if owner_user else None
             remaining_tokens = None
-            if persistent_api_key.token_limit_total is not None:
-                remaining_tokens = max(0, persistent_api_key.token_limit_total - persistent_api_key.total_tokens_used)
+            if api_client_key.token_limit_total is not None:
+                remaining_tokens = max(0, api_client_key.token_limit_total - api_client_key.total_tokens_used)
             remaining_balance = None
             if owner_user is not None:
                 remaining_balance = float(BillingService.to_decimal(owner_user.balance_amount) - BillingService.to_decimal(owner_user.frozen_amount))
-            elif persistent_api_key.balance_amount is not None:
-                remaining_balance = float(persistent_api_key.balance_amount)
+            elif api_client_key.balance_amount is not None:
+                remaining_balance = float(api_client_key.balance_amount)
             policy_snapshot_json = str(cached_auth.get("policy_snapshot_json") or "{}")
             remaining_requests_daily = None
             remaining_cost_daily = None
-            if not persistent_api_key.enabled:
+            if not api_client_key.enabled:
                 ApiKeyAuthCache.invalidate_hash(key_hash)
                 raise ApiClientAuthError(
                     status_code=status.HTTP_403_FORBIDDEN,
                     code="key_disabled",
                     message="Api key is disabled",
-                    api_client_key_id=persistent_api_key.id,
-                    api_client_key_name=persistent_api_key.name,
-                    api_client_key_prefix=persistent_api_key.key_prefix,
-                    user_account_id=persistent_api_key.owner_user_id,
+                    api_client_key_id=api_client_key.id,
+                    api_client_key_name=api_client_key.name,
+                    api_client_key_prefix=api_client_key.key_prefix,
+                    user_account_id=api_client_key.owner_user_id,
                     user_account_name=owner_user_name,
                     remaining_tokens=remaining_tokens,
                     remaining_balance=remaining_balance,
                     policy_snapshot_json=policy_snapshot_json,
                 )
-            if persistent_api_key.expires_at is not None and persistent_api_key.expires_at <= datetime.utcnow():
+            if api_client_key.expires_at is not None and api_client_key.expires_at <= datetime.utcnow():
                 ApiKeyAuthCache.invalidate_hash(key_hash)
                 raise ApiClientAuthError(
                     status_code=status.HTTP_403_FORBIDDEN,
                     code="key_expired",
                     message="Api key is expired",
-                    api_client_key_id=persistent_api_key.id,
-                    api_client_key_name=persistent_api_key.name,
-                    api_client_key_prefix=persistent_api_key.key_prefix,
-                    user_account_id=persistent_api_key.owner_user_id,
+                    api_client_key_id=api_client_key.id,
+                    api_client_key_name=api_client_key.name,
+                    api_client_key_prefix=api_client_key.key_prefix,
+                    user_account_id=api_client_key.owner_user_id,
                     user_account_name=owner_user_name,
                     remaining_tokens=remaining_tokens,
                     remaining_balance=remaining_balance,
@@ -246,10 +233,10 @@ class ApiKeyService:
                     status_code=status.HTTP_403_FORBIDDEN,
                     code="endpoint_not_allowed",
                     message="Api key is not allowed to access this endpoint",
-                    api_client_key_id=persistent_api_key.id,
-                    api_client_key_name=persistent_api_key.name,
-                    api_client_key_prefix=persistent_api_key.key_prefix,
-                    user_account_id=persistent_api_key.owner_user_id,
+                    api_client_key_id=api_client_key.id,
+                    api_client_key_name=api_client_key.name,
+                    api_client_key_prefix=api_client_key.key_prefix,
+                    user_account_id=api_client_key.owner_user_id,
                     user_account_name=owner_user_name,
                     remaining_tokens=remaining_tokens,
                     remaining_balance=remaining_balance,
@@ -260,10 +247,10 @@ class ApiKeyService:
                     status_code=status.HTTP_403_FORBIDDEN,
                     code="source_ip_not_allowed",
                     message="Api key is not allowed to call from this source ip",
-                    api_client_key_id=persistent_api_key.id,
-                    api_client_key_name=persistent_api_key.name,
-                    api_client_key_prefix=persistent_api_key.key_prefix,
-                    user_account_id=persistent_api_key.owner_user_id,
+                    api_client_key_id=api_client_key.id,
+                    api_client_key_name=api_client_key.name,
+                    api_client_key_prefix=api_client_key.key_prefix,
+                    user_account_id=api_client_key.owner_user_id,
                     user_account_name=owner_user_name,
                     remaining_tokens=remaining_tokens,
                     remaining_balance=remaining_balance,
@@ -275,10 +262,10 @@ class ApiKeyService:
                     status_code=status.HTTP_403_FORBIDDEN,
                     code="owner_user_disabled",
                     message="Owner account is disabled",
-                    api_client_key_id=persistent_api_key.id,
-                    api_client_key_name=persistent_api_key.name,
-                    api_client_key_prefix=persistent_api_key.key_prefix,
-                    user_account_id=persistent_api_key.owner_user_id,
+                    api_client_key_id=api_client_key.id,
+                    api_client_key_name=api_client_key.name,
+                    api_client_key_prefix=api_client_key.key_prefix,
+                    user_account_id=api_client_key.owner_user_id,
                     user_account_name=owner_user_name,
                     remaining_tokens=remaining_tokens,
                     remaining_balance=remaining_balance,
@@ -289,55 +276,55 @@ class ApiKeyService:
                     status_code=status.HTTP_403_FORBIDDEN,
                     code="no_authorized_provider",
                     message="Api key has no authorized providers",
-                    api_client_key_id=persistent_api_key.id,
-                    api_client_key_name=persistent_api_key.name,
-                    api_client_key_prefix=persistent_api_key.key_prefix,
-                    user_account_id=persistent_api_key.owner_user_id,
+                    api_client_key_id=api_client_key.id,
+                    api_client_key_name=api_client_key.name,
+                    api_client_key_prefix=api_client_key.key_prefix,
+                    user_account_id=api_client_key.owner_user_id,
                     user_account_name=owner_user_name,
                     remaining_tokens=remaining_tokens,
                     remaining_balance=remaining_balance,
                     policy_snapshot_json=policy_snapshot_json,
                 )
             if (
-                persistent_api_key.token_limit_total is not None
-                and persistent_api_key.total_tokens_used >= persistent_api_key.token_limit_total
+                api_client_key.token_limit_total is not None
+                and api_client_key.total_tokens_used >= api_client_key.token_limit_total
             ):
                 raise ApiClientAuthError(
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                     code="insufficient_quota",
                     message="Api key token quota exhausted",
-                    api_client_key_id=persistent_api_key.id,
-                    api_client_key_name=persistent_api_key.name,
-                    api_client_key_prefix=persistent_api_key.key_prefix,
-                    user_account_id=persistent_api_key.owner_user_id,
+                    api_client_key_id=api_client_key.id,
+                    api_client_key_name=api_client_key.name,
+                    api_client_key_prefix=api_client_key.key_prefix,
+                    user_account_id=api_client_key.owner_user_id,
                     user_account_name=owner_user_name,
                     remaining_tokens=remaining_tokens,
                     remaining_balance=remaining_balance,
                     policy_snapshot_json=policy_snapshot_json,
                 )
-            if persistent_api_key.cost_limit_total is not None and Decimal(str(persistent_api_key.total_cost_used or 0)) >= Decimal(str(persistent_api_key.cost_limit_total)):
+            if api_client_key.cost_limit_total is not None and Decimal(str(api_client_key.total_cost_used or 0)) >= Decimal(str(api_client_key.cost_limit_total)):
                 raise ApiClientAuthError(
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                     code="insufficient_quota",
                     message="Api key billing quota exhausted",
-                    api_client_key_id=persistent_api_key.id,
-                    api_client_key_name=persistent_api_key.name,
-                    api_client_key_prefix=persistent_api_key.key_prefix,
-                    user_account_id=persistent_api_key.owner_user_id,
+                    api_client_key_id=api_client_key.id,
+                    api_client_key_name=api_client_key.name,
+                    api_client_key_prefix=api_client_key.key_prefix,
+                    user_account_id=api_client_key.owner_user_id,
                     user_account_name=owner_user_name,
                     remaining_tokens=remaining_tokens,
                     remaining_balance=remaining_balance,
                     policy_snapshot_json=policy_snapshot_json,
                 )
-            if owner_user is None and persistent_api_key.balance_amount is not None and Decimal(str(persistent_api_key.balance_amount)) <= Decimal("0"):
+            if owner_user is None and api_client_key.balance_amount is not None and Decimal(str(api_client_key.balance_amount)) <= Decimal("0"):
                 raise ApiClientAuthError(
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                     code="insufficient_balance",
                     message="Api key balance exhausted",
-                    api_client_key_id=persistent_api_key.id,
-                    api_client_key_name=persistent_api_key.name,
-                    api_client_key_prefix=persistent_api_key.key_prefix,
-                    user_account_id=persistent_api_key.owner_user_id,
+                    api_client_key_id=api_client_key.id,
+                    api_client_key_name=api_client_key.name,
+                    api_client_key_prefix=api_client_key.key_prefix,
+                    user_account_id=api_client_key.owner_user_id,
                     user_account_name=owner_user_name,
                     remaining_tokens=remaining_tokens,
                     remaining_balance=remaining_balance,
@@ -350,18 +337,18 @@ class ApiKeyService:
                         status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                         code="insufficient_balance",
                         message="Owner account available balance exhausted",
-                        api_client_key_id=persistent_api_key.id,
-                        api_client_key_name=persistent_api_key.name,
-                        api_client_key_prefix=persistent_api_key.key_prefix,
-                        user_account_id=persistent_api_key.owner_user_id,
+                        api_client_key_id=api_client_key.id,
+                        api_client_key_name=api_client_key.name,
+                        api_client_key_prefix=api_client_key.key_prefix,
+                        user_account_id=api_client_key.owner_user_id,
                         user_account_name=owner_user_name,
                         remaining_tokens=remaining_tokens,
                         remaining_balance=remaining_balance,
                         policy_snapshot_json=policy_snapshot_json,
                     )
-            ApiKeyService.enqueue_last_used_touch(persistent_api_key.id)
+            ApiKeyService.enqueue_last_used_touch(api_client_key.id)
             return ApiClientAuthContext(
-                api_client_key=persistent_api_key,
+                api_client_key=api_client_key,
                 route_context=route_context,
                 remaining_tokens=remaining_tokens,
                 remaining_balance=remaining_balance,

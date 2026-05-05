@@ -9,11 +9,13 @@ TEMP_DB_PATH = Path("data/stage11-responses-management.db")
 if TEMP_DB_PATH.exists():
     TEMP_DB_PATH.unlink()
 os.environ["DATABASE_URL"] = "sqlite:///./data/stage11-responses-management.db"
+os.environ["ENABLE_SCHEDULER"] = "false"
 
 from fastapi.testclient import TestClient
 
 from app.database import SessionLocal
 from app.main import app
+from app.models.request_log import RequestLog
 from app.services.proxy_service import ProxyService, RequestsUpstreamHTTPError
 from app.services.user_auth_service import USER_ROLE_ADMIN, UserAuthService
 
@@ -179,6 +181,20 @@ def main() -> None:
         all(item["request_path"].startswith("/responses/resp_stage11") for item in CAPTURED_CALLS),
         f"unexpected request path: {CAPTURED_CALLS}",
     )
+    with SessionLocal() as db:
+        logs = (
+            db.query(RequestLog)
+            .filter(RequestLog.log_type == "responses")
+            .filter(RequestLog.request_path.in_(["/v1/responses/resp_stage11", "/v1/responses/resp_stage11/cancel"]))
+            .order_by(RequestLog.id.asc())
+            .all()
+        )
+        _assert(len(logs) == 2, f"responses management should create two request logs: {logs}")
+        _assert(all(item.success for item in logs), f"responses management logs should be successful: {logs}")
+        _assert(all(item.provider_id == secondary["id"] for item in logs), f"logs should record selected provider: {logs}")
+        _assert({item.http_method for item in logs} == {"GET", "POST"}, f"logs should record methods: {logs}")
+        _assert(all(item.api_client_key_id is not None for item in logs), f"logs should include API Key context: {logs}")
+        _assert(all(item.attempt_count == 2 for item in logs), f"logs should include both provider attempts: {logs}")
 
     print("stage11 responses management regression passed")
 
