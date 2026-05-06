@@ -1075,7 +1075,7 @@ class ProxySafeHelpers:
             return any(ProxySafeHelpers.value_has_image(item) for item in value)
         if isinstance(value, dict):
             item_type = value.get("type")
-            if item_type in {"image_url", "input_image"}:
+            if isinstance(item_type, str) and item_type in {"image_url", "input_image"}:
                 return True
             if isinstance(value.get("image_url"), (dict, str)):
                 return True

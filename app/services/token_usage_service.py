@@ -106,7 +106,7 @@ class TokenUsageService:
             return sum(TokenUsageService._fast_count_value_tokens(item) for item in value)
         if isinstance(value, dict):
             item_type = value.get("type")
-            if item_type in {"image_url", "input_image"} or "image_url" in value:
+            if (isinstance(item_type, str) and item_type in {"image_url", "input_image"}) or "image_url" in value:
                 return TokenUsageService._estimate_image_tokens(value)
             total = 2
             for key, item in value.items():
@@ -743,9 +743,13 @@ class TokenUsageService:
             if "role" in value and "content" in value:
                 return TokenUsageService._count_chat_messages([value], model_name)
             item_type = value.get("type")
-            if item_type in {"text", "input_text", "output_text"} and isinstance(value.get("text"), str):
+            if (
+                isinstance(item_type, str)
+                and item_type in {"text", "input_text", "output_text"}
+                and isinstance(value.get("text"), str)
+            ):
                 return TokenUsageService._count_text_tokens(value["text"], model_name)
-            if item_type in {"image_url", "input_image"} or "image_url" in value:
+            if (isinstance(item_type, str) and item_type in {"image_url", "input_image"}) or "image_url" in value:
                 return TokenUsageService._estimate_image_tokens(value)
             return sum(TokenUsageService._count_response_input_tokens(item, model_name) for item in value.values())
         return 0
@@ -764,10 +768,14 @@ class TokenUsageService:
                     total += TokenUsageService._count_json_tokens(item, model_name)
                     continue
                 item_type = item.get("type")
-                if item_type in {"text", "input_text", "output_text"} and isinstance(item.get("text"), str):
+                if (
+                    isinstance(item_type, str)
+                    and item_type in {"text", "input_text", "output_text"}
+                    and isinstance(item.get("text"), str)
+                ):
                     total += TokenUsageService._count_text_tokens(item["text"], model_name)
                     continue
-                if item_type in {"image_url", "input_image"} or "image_url" in item:
+                if (isinstance(item_type, str) and item_type in {"image_url", "input_image"}) or "image_url" in item:
                     total += TokenUsageService._estimate_image_tokens(item)
                     continue
                 total += TokenUsageService._count_json_tokens(item, model_name)

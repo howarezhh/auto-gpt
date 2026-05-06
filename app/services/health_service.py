@@ -807,7 +807,8 @@ class HealthService:
         output = response.get("output")
         if isinstance(output, list):
             for item in output:
-                if isinstance(item, dict) and item.get("type") in {"function_call", "tool_call"}:
+                item_type = item.get("type") if isinstance(item, dict) else None
+                if isinstance(item_type, str) and item_type in {"function_call", "tool_call"}:
                     return True
         return False
 

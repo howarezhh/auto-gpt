@@ -365,7 +365,8 @@ class ProxyService:
         if isinstance(value, dict):
             if any(key in value for key in ("tool_calls", "tool_call_id", "function_call")):
                 return True
-            if value.get("type") in {"tool_call", "function_call", "tool_result", "function_call_output"}:
+            item_type = value.get("type")
+            if isinstance(item_type, str) and item_type in {"tool_call", "function_call", "tool_result", "function_call_output"}:
                 return True
             return any(ProxyService._value_has_tool_context(item) for item in value.values())
         return False
@@ -2093,9 +2094,13 @@ class ProxyService:
                 safe = False
                 continue
             part_type = part.get("type")
-            if part_type in {"input_text", "text", "output_text"} and isinstance(part.get("text"), str):
+            if (
+                isinstance(part_type, str)
+                and part_type in {"input_text", "text", "output_text"}
+                and isinstance(part.get("text"), str)
+            ):
                 continue
-            if part_type in {"input_image", "image_url"} or "image_url" in part:
+            if (isinstance(part_type, str) and part_type in {"input_image", "image_url"}) or "image_url" in part:
                 image_url = part.get("image_url")
                 if isinstance(image_url, (str, dict)):
                     continue
@@ -2146,9 +2151,9 @@ class ProxyService:
                 safe = False
                 continue
             part_type = part.get("type")
-            if part_type in {"text", "input_text"} and isinstance(part.get("text"), str):
+            if isinstance(part_type, str) and part_type in {"text", "input_text"} and isinstance(part.get("text"), str):
                 continue
-            if part_type in {"image_url", "input_image"} or "image_url" in part:
+            if (isinstance(part_type, str) and part_type in {"image_url", "input_image"}) or "image_url" in part:
                 image_url = part.get("image_url")
                 if isinstance(image_url, (str, dict)):
                     continue
@@ -2441,9 +2446,9 @@ class ProxyService:
         if not isinstance(part, dict):
             return None
         part_type = part.get("type")
-        if part_type in {"text", "input_text"} and isinstance(part.get("text"), str):
+        if isinstance(part_type, str) and part_type in {"text", "input_text"} and isinstance(part.get("text"), str):
             return {"type": "input_text", "text": part["text"]}
-        if part_type in {"image_url", "input_image"} or "image_url" in part:
+        if (isinstance(part_type, str) and part_type in {"image_url", "input_image"}) or "image_url" in part:
             image_url_value = part.get("image_url")
             if isinstance(image_url_value, dict):
                 image_url = image_url_value.get("url")
@@ -2531,9 +2536,13 @@ class ProxyService:
                 detail={"message": "Responses adapter content parts must be strings or objects"},
             )
         part_type = part.get("type")
-        if part_type in {"input_text", "text", "output_text"} and isinstance(part.get("text"), str):
+        if (
+            isinstance(part_type, str)
+            and part_type in {"input_text", "text", "output_text"}
+            and isinstance(part.get("text"), str)
+        ):
             return {"type": "text", "text": part["text"]}
-        if part_type in {"input_image", "image_url"} or "image_url" in part:
+        if (isinstance(part_type, str) and part_type in {"input_image", "image_url"}) or "image_url" in part:
             image_url_value = part.get("image_url")
             detail = part.get("detail")
             if isinstance(image_url_value, dict):
@@ -3268,7 +3277,7 @@ class ProxyService:
             return any(ProxyService._value_has_image(item) for item in value)
         if isinstance(value, dict):
             item_type = value.get("type")
-            if item_type in {"image_url", "input_image"}:
+            if isinstance(item_type, str) and item_type in {"image_url", "input_image"}:
                 return True
             if isinstance(value.get("image_url"), (dict, str)):
                 return True

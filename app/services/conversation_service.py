@@ -242,9 +242,9 @@ class ConversationService:
                 if not isinstance(item, dict):
                     continue
                 item_type = item.get("type")
-                if item_type in {"text", "input_text"} and isinstance(item.get("text"), str):
+                if isinstance(item_type, str) and item_type in {"text", "input_text"} and isinstance(item.get("text"), str):
                     parts.append(item["text"])
-                elif item_type in {"image_url", "input_image"}:
+                elif isinstance(item_type, str) and item_type in {"image_url", "input_image"}:
                     image_url = item.get("image_url")
                     if isinstance(image_url, dict):
                         image_url = image_url.get("url")
