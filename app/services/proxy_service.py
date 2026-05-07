@@ -21,6 +21,7 @@ from app.services.api_key_service import ApiKeyService
 from app.services.api_key_service import ApiClientAuthContext
 from app.services.cache_service import CacheService
 from app.services.log_service import LogService
+from app.services.openai_error_service import OpenAIErrorService
 from app.services.provider_capacity_service import (
     ProviderCapacityExceededError,
     ProviderCapacityService,
@@ -874,20 +875,27 @@ class ProxyService:
                     break
                 except Exception as exc:
                     latency_ms = int((time.perf_counter() - started) * 1000)
+                    error_status_code, error_detail = ProxyService._build_upstream_exception_error(exc)
                     trace.append(
                         ProxyService._build_trace_item(
                             provider,
                             provider_model,
                             ProxyService._classify_exception(exc),
                             latency_ms,
-                            error=str(exc),
+                            error=ProxyService._error_message_for_log(error_detail),
                         )
                     )
                     last_upstream_error = {
-                        "status_code": status.HTTP_502_BAD_GATEWAY,
-                        "detail": {"message": str(exc)},
+                        "status_code": error_status_code,
+                        "detail": error_detail,
                     }
-                    await ProxyService._mark_failure_async(provider, provider_model, latency_ms, str(exc), db=db)
+                    await ProxyService._mark_failure_async(
+                        provider,
+                        provider_model,
+                        latency_ms,
+                        ProxyService._error_message_for_log(error_detail),
+                        db=db,
+                    )
 
         await ProxyService._raise_final_error_async(
             db,
@@ -1463,20 +1471,27 @@ class ProxyService:
                     if capacity_lease is not None and capacity_lease_entered:
                         await capacity_lease.__aexit__(type(exc), exc, exc.__traceback__)
                     latency_ms = int((time.perf_counter() - started) * 1000)
+                    error_status_code, error_detail = ProxyService._build_upstream_exception_error(exc)
                     trace.append(
                         ProxyService._build_trace_item(
                             provider,
                             provider_model,
                             ProxyService._classify_exception(exc),
                             latency_ms,
-                            error=str(exc),
+                            error=ProxyService._error_message_for_log(error_detail),
                         )
                     )
                     last_upstream_error = {
-                        "status_code": status.HTTP_502_BAD_GATEWAY,
-                        "detail": {"message": str(exc)},
+                        "status_code": error_status_code,
+                        "detail": error_detail,
                     }
-                    await ProxyService._mark_failure_async(provider, provider_model, latency_ms, str(exc), db=db)
+                    await ProxyService._mark_failure_async(
+                        provider,
+                        provider_model,
+                        latency_ms,
+                        ProxyService._error_message_for_log(error_detail),
+                        db=db,
+                    )
 
         await ProxyService._raise_final_error_async(
             db,
@@ -2937,16 +2952,19 @@ class ProxyService:
 
     @staticmethod
     def _format_stream_error_event(*, message: str, code: str, trace_id: str | None) -> bytes:
-        payload: dict[str, Any] = {
-            "error": {
-                "message": message,
-                "type": "server_error",
-                "code": code,
-                "retryable": True,
-            }
+        payload = {
+            "error": OpenAIErrorService.build_error_payload(
+                message=message,
+                code=code,
+                trace_id=trace_id,
+                error_type="server_error",
+                retryable=True,
+                detail={
+                    "message": message,
+                    "code": code,
+                },
+            )["error"]
         }
-        if trace_id:
-            payload["error"]["trace_id"] = trace_id
         return f"event: error\ndata: {dumps_json(payload)}\n\n".encode("utf-8")
 
     @staticmethod
@@ -3138,6 +3156,11 @@ class ProxyService:
             raise HTTPException(status_code=status_code, detail=detail)
 
         detail = {"message": "All providers failed", "trace": trace}
+        if upstream_error is not None:
+            detail["last_error"] = upstream_error.get("detail")
+            detail["last_status_code"] = upstream_error.get("status_code")
+        detail["code"] = "all_providers_failed"
+        detail["attempt_count"] = attempt_count
         LogService.create_log(
             db,
             log_type=log_type,
@@ -3192,6 +3215,42 @@ class ProxyService:
             if detail.get("message"):
                 return str(detail["message"])
         return str(detail)
+
+    @staticmethod
+    def _exception_message(exc: BaseException) -> str:
+        message = str(exc).strip()
+        return message or exc.__class__.__name__
+
+    @staticmethod
+    def _build_upstream_exception_error(exc: BaseException) -> tuple[int, dict[str, Any]]:
+        message = ProxyService._exception_message(exc)
+        detail: dict[str, Any] = {
+            "message": message,
+            "exception_type": exc.__class__.__name__,
+        }
+        if isinstance(exc, httpx.ConnectTimeout):
+            detail["code"] = "upstream_connect_timeout"
+            return status.HTTP_504_GATEWAY_TIMEOUT, detail
+        if isinstance(exc, httpx.ReadTimeout):
+            detail["code"] = "upstream_read_timeout"
+            return status.HTTP_504_GATEWAY_TIMEOUT, detail
+        if isinstance(exc, httpx.WriteTimeout):
+            detail["code"] = "upstream_write_timeout"
+            return status.HTTP_504_GATEWAY_TIMEOUT, detail
+        if isinstance(exc, httpx.PoolTimeout):
+            detail["code"] = "upstream_pool_timeout"
+            return status.HTTP_504_GATEWAY_TIMEOUT, detail
+        if isinstance(exc, httpx.TimeoutException):
+            detail["code"] = "upstream_timeout"
+            return status.HTTP_504_GATEWAY_TIMEOUT, detail
+        if isinstance(exc, httpx.ConnectError):
+            detail["code"] = "upstream_connect_error"
+            return status.HTTP_502_BAD_GATEWAY, detail
+        if isinstance(exc, httpx.NetworkError):
+            detail["code"] = "upstream_network_error"
+            return status.HTTP_502_BAD_GATEWAY, detail
+        detail["code"] = "upstream_request_failed"
+        return status.HTTP_502_BAD_GATEWAY, detail
 
     @staticmethod
     def _should_mark_provider_model_unhealthy(*, status_code: int | None, detail: Any) -> bool:

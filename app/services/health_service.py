@@ -115,13 +115,12 @@ class HealthService:
     async def _probe_native_tools(provider: Provider, provider_model: ProviderModel) -> dict[str, Any]:
         started = time.perf_counter()
         endpoint_label = "tools"
+        probe_specs: list[tuple[str, dict[str, Any]]] = []
+        if provider_model.supports_responses:
+            probe_specs.append(("/responses", HealthService._build_responses_tool_probe_payload(provider_model)))
         if provider_model.supports_chat_completions:
-            endpoint_path = "/chat/completions"
-            payload = HealthService._build_chat_tool_probe_payload(provider_model)
-        elif provider_model.supports_responses:
-            endpoint_path = "/responses"
-            payload = HealthService._build_responses_tool_probe_payload(provider_model)
-        else:
+            probe_specs.append(("/chat/completions", HealthService._build_chat_tool_probe_payload(provider_model)))
+        if not probe_specs:
             return {
                 "endpoint_path": None,
                 "endpoint_label": endpoint_label,
@@ -136,48 +135,62 @@ class HealthService:
                 "trace": [],
             }
         setting = await ProxyService._get_setting_async()
-        try:
-            prepared = ProxyService._prepare_upstream_request(provider, endpoint_path=endpoint_path, payload=payload)
-            response, _ = await ProxyService._send_prepared_json(
-                provider,
-                prepared=prepared,
-                headers={"Authorization": f"Bearer {provider.api_key}"},
-                requested_payload=payload,
-                setting=setting,
-            )
-            latency_ms = int((time.perf_counter() - started) * 1000)
-            has_tool_call = HealthService._response_has_tool_call(response)
-            return {
-                "endpoint_path": endpoint_path,
-                "endpoint_label": endpoint_label,
-                "success": has_tool_call,
-                "native_success": has_tool_call,
-                "adapted_success": False,
-                "support_mode": "native" if has_tool_call else "unsupported",
-                "support_label": "原生支持 tools" if has_tool_call else "不支持 tools",
-                "latency_ms": latency_ms,
-                "status_code": 200,
-                "message": "ok" if has_tool_call else "未返回工具调用",
-                "trace": [],
-            }
-        except Exception as exc:
-            latency_ms = int((time.perf_counter() - started) * 1000)
-            status_code = getattr(exc, "status_code", None)
-            detail = getattr(exc, "detail", None)
-            message = ProxyService._error_message_for_log(detail) if detail is not None else str(exc)
-            return {
-                "endpoint_path": endpoint_path,
-                "endpoint_label": endpoint_label,
-                "success": False,
-                "native_success": False,
-                "adapted_success": False,
-                "support_mode": "unsupported",
-                "support_label": "不支持 tools",
-                "latency_ms": latency_ms,
-                "status_code": status_code,
-                "message": message,
-                "trace": [],
-            }
+        last_error: dict[str, Any] | None = None
+        for endpoint_path, payload in probe_specs:
+            try:
+                prepared = ProxyService._prepare_upstream_request(provider, endpoint_path=endpoint_path, payload=payload)
+                response, _ = await ProxyService._send_prepared_json(
+                    provider,
+                    prepared=prepared,
+                    headers={"Authorization": f"Bearer {provider.api_key}"},
+                    requested_payload=payload,
+                    setting=setting,
+                )
+                latency_ms = int((time.perf_counter() - started) * 1000)
+                has_tool_call = HealthService._response_has_tool_call(response)
+                if has_tool_call:
+                    return {
+                        "endpoint_path": endpoint_path,
+                        "endpoint_label": endpoint_label,
+                        "success": True,
+                        "native_success": True,
+                        "adapted_success": False,
+                        "support_mode": "native",
+                        "support_label": "原生支持 tools",
+                        "latency_ms": latency_ms,
+                        "status_code": 200,
+                        "message": "ok",
+                        "trace": [],
+                    }
+                last_error = {
+                    "endpoint_path": endpoint_path,
+                    "status_code": 200,
+                    "message": "未返回工具调用",
+                }
+            except Exception as exc:
+                status_code = getattr(exc, "status_code", None)
+                detail = getattr(exc, "detail", None)
+                message = ProxyService._error_message_for_log(detail) if detail is not None else str(exc)
+                last_error = {
+                    "endpoint_path": endpoint_path,
+                    "status_code": status_code,
+                    "message": message,
+                }
+                continue
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        return {
+            "endpoint_path": last_error.get("endpoint_path") if last_error else None,
+            "endpoint_label": endpoint_label,
+            "success": False,
+            "native_success": False,
+            "adapted_success": False,
+            "support_mode": "unsupported",
+            "support_label": "不支持 tools",
+            "latency_ms": latency_ms,
+            "status_code": last_error.get("status_code") if last_error else None,
+            "message": last_error.get("message") if last_error else "工具调用探测失败",
+            "trace": [],
+        }
 
     @staticmethod
     async def check_all(
