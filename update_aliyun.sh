@@ -15,6 +15,9 @@ HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8000/ready}"
 GIT_FETCH_RETRIES="${GIT_FETCH_RETRIES:-2}"
 GIT_FETCH_TIMEOUT_SECONDS="${GIT_FETCH_TIMEOUT_SECONDS:-120}"
 GIT_MIRROR_URLS="${GIT_MIRROR_URLS:-}"
+GIT_HTTP_VERSION="${GIT_HTTP_VERSION:-HTTP/1.1}"
+GIT_LOW_SPEED_LIMIT="${GIT_LOW_SPEED_LIMIT:-1024}"
+GIT_LOW_SPEED_TIME="${GIT_LOW_SPEED_TIME:-20}"
 
 log() {
   printf '[aotu-gpt-update] %s\n' "$1"
@@ -169,6 +172,8 @@ build_fetch_url_candidates() {
     append_unique_fetch_url "https://gitclone.com/github.com/${repo_path}"
     append_unique_fetch_url "https://gh-proxy.com/https://github.com/${repo_path}"
     append_unique_fetch_url "https://mirror.ghproxy.com/https://github.com/${repo_path}"
+    append_unique_fetch_url "https://gh.llkk.cc/https://github.com/${repo_path}"
+    append_unique_fetch_url "https://hub.gitmirror.com/https://github.com/${repo_path}"
   fi
 
   for mirror_url in $GIT_MIRROR_URLS; do
@@ -178,11 +183,18 @@ build_fetch_url_candidates() {
 
 run_git_fetch_candidate() {
   local fetch_url="$1"
+  local -a git_args=(
+    -c "http.version=${GIT_HTTP_VERSION}"
+    -c "http.lowSpeedLimit=${GIT_LOW_SPEED_LIMIT}"
+    -c "http.lowSpeedTime=${GIT_LOW_SPEED_TIME}"
+    fetch --prune --no-tags "$fetch_url" "+refs/heads/${BRANCH}:refs/remotes/${REMOTE}/${BRANCH}"
+  )
+
   if command -v timeout >/dev/null 2>&1; then
-    timeout "${GIT_FETCH_TIMEOUT_SECONDS}s" git fetch --prune "$fetch_url" "+refs/heads/${BRANCH}:refs/remotes/${REMOTE}/${BRANCH}"
+    GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false timeout "${GIT_FETCH_TIMEOUT_SECONDS}s" git "${git_args[@]}"
     return $?
   fi
-  git fetch --prune "$fetch_url" "+refs/heads/${BRANCH}:refs/remotes/${REMOTE}/${BRANCH}"
+  GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false git "${git_args[@]}"
 }
 
 fetch_latest_code() {
