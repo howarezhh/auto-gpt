@@ -695,7 +695,7 @@
             <article class="provider-test-model-item">
                 <div class="provider-test-model-top">
                     <strong>${escapeHtml(item.providerName)}</strong>
-                    <div>${item.skipped ? statusBadge("unknown") : statusBadge(item.failureCount > 0 ? "degraded" : "healthy")}</div>
+                    <div>${item.skipped ? statusBadge("unknown") : statusBadge(item.successCount > 0 ? (item.failureCount > 0 ? "degraded" : "healthy") : "unhealthy")}</div>
                 </div>
                 <div class="table-muted">${escapeHtml(item.phaseLabel)}</div>
                 <div class="provider-test-model-message">

@@ -3,6 +3,7 @@ import math
 import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Any
 
 from sqlalchemy import update
 from sqlalchemy.orm import Session
@@ -62,6 +63,7 @@ class RoutePolicyContext:
 
 class RouterService:
     RECENT_WINDOW_MINUTES = 5
+    ROUTE_DIAGNOSTIC_SAMPLE_LIMIT = 8
 
     @staticmethod
     def get_available_candidates(
@@ -219,6 +221,32 @@ class RouterService:
         )
 
     @staticmethod
+    async def async_diagnose_candidate_unavailability(
+        *,
+        model_name: str | None = None,
+        forced_provider_id: int | None = None,
+        route_context: RoutePolicyContext | None = None,
+        require_vision: bool = False,
+        require_stream: bool = False,
+        require_tools: bool = False,
+        require_chat_completions: bool = False,
+        require_responses: bool = False,
+        is_stream: bool = False,
+    ) -> dict[str, Any]:
+        return await run_in_threadpool(
+            RouterService._diagnose_candidate_unavailability_with_scoped_session,
+            model_name=model_name,
+            forced_provider_id=forced_provider_id,
+            route_context=route_context,
+            require_vision=require_vision,
+            require_stream=require_stream,
+            require_tools=require_tools,
+            require_chat_completions=require_chat_completions,
+            require_responses=require_responses,
+            is_stream=is_stream,
+        )
+
+    @staticmethod
     def _get_available_candidates_with_scoped_session(
         *,
         model_name: str | None = None,
@@ -261,6 +289,188 @@ class RouterService:
             )
         finally:
             db.close()
+
+    @staticmethod
+    def _diagnose_candidate_unavailability_with_scoped_session(
+        *,
+        model_name: str | None = None,
+        forced_provider_id: int | None = None,
+        route_context: RoutePolicyContext | None = None,
+        require_vision: bool = False,
+        require_stream: bool = False,
+        require_tools: bool = False,
+        require_chat_completions: bool = False,
+        require_responses: bool = False,
+        is_stream: bool = False,
+    ) -> dict[str, Any]:
+        db = SessionLocal()
+        try:
+            return RouterService.diagnose_candidate_unavailability(
+                db,
+                model_name=model_name,
+                forced_provider_id=forced_provider_id,
+                route_context=route_context,
+                require_vision=require_vision,
+                require_stream=require_stream,
+                require_tools=require_tools,
+                require_chat_completions=require_chat_completions,
+                require_responses=require_responses,
+                is_stream=is_stream,
+            )
+        finally:
+            db.close()
+
+    @staticmethod
+    def diagnose_candidate_unavailability(
+        db: Session,
+        *,
+        model_name: str | None = None,
+        forced_provider_id: int | None = None,
+        route_context: RoutePolicyContext | None = None,
+        require_vision: bool = False,
+        require_stream: bool = False,
+        require_tools: bool = False,
+        require_chat_completions: bool = False,
+        require_responses: bool = False,
+        is_stream: bool = False,
+    ) -> dict[str, Any]:
+        providers = ProviderService.list_providers(db)
+        enabled_model_names = ModelCatalogService.enabled_model_name_set(db)
+        metrics = LogService.route_metric_summary(db, window_minutes=RouterService.RECENT_WINDOW_MINUTES, requested_model=model_name)
+        now = datetime.utcnow()
+        effective_forced_provider_id = route_context.forced_provider_id if route_context and route_context.forced_provider_id is not None else forced_provider_id
+        allowed_provider_ids = set(route_context.allowed_provider_ids) if route_context and route_context.allowed_provider_ids is not None else None
+        diagnostics: dict[str, Any] = {
+            "requested_model": model_name,
+            "require_stream": require_stream,
+            "require_vision": require_vision,
+            "require_tools": require_tools,
+            "require_chat_completions": require_chat_completions,
+            "require_responses": require_responses,
+            "is_stream_request": is_stream,
+            "forced_provider_id": effective_forced_provider_id,
+            "allowed_provider_ids": sorted(allowed_provider_ids) if allowed_provider_ids is not None else None,
+            "provider_total": len(providers),
+            "provider_scanned": 0,
+            "mounted_model_total": 0,
+            "matching_model_mount_count": 0,
+            "pre_capacity_candidate_count": 0,
+            "final_candidate_count": 0,
+            "reason_counts": {},
+            "samples": [],
+        }
+        provider_id_set = {provider.id for provider in providers}
+        if effective_forced_provider_id is not None and effective_forced_provider_id not in provider_id_set:
+            RouterService._record_diagnostic_reason(
+                diagnostics,
+                "forced_provider_not_found",
+                extra={"provider_id": effective_forced_provider_id},
+            )
+        pre_capacity_candidates: list[RouteCandidate] = []
+        for provider in providers:
+            if effective_forced_provider_id is not None and provider.id != effective_forced_provider_id:
+                continue
+            diagnostics["provider_scanned"] += 1
+            if not provider.provider_models:
+                RouterService._record_diagnostic_reason(diagnostics, "provider_without_models", provider=provider)
+                continue
+            if not provider.enabled:
+                RouterService._record_diagnostic_reason(diagnostics, "provider_disabled", provider=provider)
+                continue
+            if provider.circuit_state == "open":
+                RouterService._record_diagnostic_reason(diagnostics, "provider_circuit_open", provider=provider)
+                continue
+            if provider.maintenance_mode_enabled:
+                RouterService._record_diagnostic_reason(diagnostics, "provider_maintenance_mode", provider=provider)
+                continue
+            if allowed_provider_ids is not None and provider.id not in allowed_provider_ids:
+                RouterService._record_diagnostic_reason(diagnostics, "provider_not_authorized", provider=provider)
+                continue
+            for provider_model in provider.provider_models:
+                diagnostics["mounted_model_total"] += 1
+                if model_name and provider_model.model_name == model_name:
+                    diagnostics["matching_model_mount_count"] += 1
+                if not provider_model.enabled:
+                    RouterService._record_diagnostic_reason(diagnostics, "model_disabled", provider=provider, provider_model=provider_model)
+                    continue
+                if provider_model.model_name not in enabled_model_names:
+                    RouterService._record_diagnostic_reason(diagnostics, "model_globally_disabled", provider=provider, provider_model=provider_model)
+                    continue
+                if model_name and provider_model.model_name != model_name:
+                    RouterService._record_diagnostic_reason(diagnostics, "model_name_mismatch", provider=provider, provider_model=provider_model)
+                    continue
+                if require_stream and not provider_model.supports_stream:
+                    RouterService._record_diagnostic_reason(diagnostics, "stream_not_supported", provider=provider, provider_model=provider_model)
+                    continue
+                if require_vision and not provider_model.supports_vision:
+                    RouterService._record_diagnostic_reason(diagnostics, "vision_not_supported", provider=provider, provider_model=provider_model)
+                    continue
+                if require_tools and not provider_model.supports_tools:
+                    RouterService._record_diagnostic_reason(diagnostics, "tools_not_supported", provider=provider, provider_model=provider_model)
+                    continue
+                if require_chat_completions and not provider_model.supports_chat_completions:
+                    RouterService._record_diagnostic_reason(diagnostics, "chat_not_supported", provider=provider, provider_model=provider_model)
+                    continue
+                if require_responses and not provider_model.supports_responses:
+                    RouterService._record_diagnostic_reason(diagnostics, "responses_not_supported", provider=provider, provider_model=provider_model)
+                    continue
+                if provider_model.circuit_state == "open" and not RouterService._should_probe_open_model(
+                    provider=provider,
+                    provider_model=provider_model,
+                    recovery_interval_sec=ProviderService.get_effective_recovery_probe_interval_sec(db, provider),
+                    now=now,
+                ):
+                    RouterService._record_diagnostic_reason(diagnostics, "model_circuit_open", provider=provider, provider_model=provider_model)
+                    continue
+                if provider_model.health_status == "unhealthy" and provider_model.circuit_state not in {"half_open"}:
+                    RouterService._record_diagnostic_reason(diagnostics, "model_unhealthy", provider=provider, provider_model=provider_model)
+                    continue
+                pre_capacity_candidates.append(
+                    RouteCandidate(
+                        provider=provider,
+                        provider_model=provider_model,
+                        recent_failure_rate=float(metrics.get((provider.id, provider_model.model_name), {}).get("failure_rate", 0.0)),
+                    )
+                )
+        diagnostics["pre_capacity_candidate_count"] = len(pre_capacity_candidates)
+        if not pre_capacity_candidates:
+            diagnostics["summary"] = RouterService._build_diagnostic_summary(diagnostics)
+            return diagnostics
+
+        snapshots = ProviderCapacityService.snapshots({item.provider.id for item in pre_capacity_candidates})
+        for candidate in pre_capacity_candidates:
+            snapshot = snapshots.get(candidate.provider.id)
+            if snapshot is None:
+                RouterService._record_diagnostic_reason(
+                    diagnostics,
+                    "capacity_snapshot_unavailable",
+                    provider=candidate.provider,
+                    provider_model=candidate.provider_model,
+                )
+                continue
+            if not ProviderCapacityService._has_capacity(candidate.provider, snapshot=snapshot, is_stream=is_stream):
+                RouterService._record_diagnostic_reason(
+                    diagnostics,
+                    "provider_capacity_exceeded",
+                    provider=candidate.provider,
+                    provider_model=candidate.provider_model,
+                )
+                continue
+            if (
+                candidate.provider.max_error_rate is not None
+                and candidate.provider.max_error_rate > 0
+                and candidate.recent_failure_rate * 100 >= candidate.provider.max_error_rate
+            ):
+                RouterService._record_diagnostic_reason(
+                    diagnostics,
+                    "provider_failure_rate_limited",
+                    provider=candidate.provider,
+                    provider_model=candidate.provider_model,
+                )
+                continue
+            diagnostics["final_candidate_count"] += 1
+        diagnostics["summary"] = RouterService._build_diagnostic_summary(diagnostics)
+        return diagnostics
 
     @staticmethod
     def _order_filtered_candidates(
@@ -383,6 +593,69 @@ class RouterService:
                 continue
             filtered.append(candidate)
         return filtered
+
+    @staticmethod
+    def _record_diagnostic_reason(
+        diagnostics: dict[str, Any],
+        reason_code: str,
+        *,
+        provider: Provider | None = None,
+        provider_model: ProviderModel | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        counts = diagnostics.setdefault("reason_counts", {})
+        counts[reason_code] = int(counts.get(reason_code, 0) or 0) + 1
+        samples = diagnostics.setdefault("samples", [])
+        if len(samples) >= RouterService.ROUTE_DIAGNOSTIC_SAMPLE_LIMIT:
+            return
+        sample: dict[str, Any] = {
+            "reason": reason_code,
+            "reason_label": RouterService._diagnostic_reason_label(reason_code),
+        }
+        if provider is not None:
+            sample["provider_id"] = provider.id
+            sample["provider_name"] = provider.name
+        if provider_model is not None:
+            sample["provider_model_id"] = provider_model.id
+            sample["model_name"] = provider_model.model_name
+        if extra:
+            sample.update(extra)
+        samples.append(sample)
+
+    @staticmethod
+    def _diagnostic_reason_label(reason_code: str) -> str:
+        return {
+            "forced_provider_not_found": "指定中转站不存在",
+            "provider_without_models": "中转站未挂载模型",
+            "provider_disabled": "中转站已禁用",
+            "provider_circuit_open": "中转站已熔断",
+            "provider_maintenance_mode": "中转站维护中",
+            "provider_not_authorized": "当前密钥未授权该中转站",
+            "model_disabled": "中转站模型已禁用",
+            "model_globally_disabled": "模型管理中已禁用",
+            "model_name_mismatch": "模型名不匹配",
+            "stream_not_supported": "模型不支持流式",
+            "vision_not_supported": "模型不支持图像",
+            "tools_not_supported": "模型不支持工具调用",
+            "chat_not_supported": "模型不支持 chat/completions",
+            "responses_not_supported": "模型不支持 responses",
+            "model_circuit_open": "模型已熔断",
+            "model_unhealthy": "模型健康状态异常",
+            "capacity_snapshot_unavailable": "未获取到容量快照",
+            "provider_capacity_exceeded": "中转站容量已满",
+            "provider_failure_rate_limited": "中转站失败率超限",
+        }.get(reason_code, reason_code)
+
+    @staticmethod
+    def _build_diagnostic_summary(diagnostics: dict[str, Any]) -> str:
+        counts = diagnostics.get("reason_counts") or {}
+        if not counts:
+            return "当前未记录到明确的候选筛除原因"
+        ordered = sorted(counts.items(), key=lambda item: (-int(item[1] or 0), item[0]))
+        return "；".join(
+            f"{RouterService._diagnostic_reason_label(reason_code)} {count}"
+            for reason_code, count in ordered[:5]
+        )
 
     @staticmethod
     def _build_candidate_cache_key(

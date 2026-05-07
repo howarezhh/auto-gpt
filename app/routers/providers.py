@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.database import get_db
+from app.database import SessionLocal, get_db
 from app.schemas.provider import (
     ProviderBatchConnectivityTestRequest,
     ProviderAvailabilityResponse,
@@ -225,11 +225,18 @@ async def test_provider_stream(provider_id: int, db: Session = Depends(get_db)) 
         raise HTTPException(status_code=429, detail=str(exc)) from exc
 
     async def worker(progress_reporter: Callable[[dict], Awaitable[None]]) -> dict:
-        return await HealthService.check_provider(
-            db,
-            provider,
-            progress_callback=progress_reporter,
-        )
+        stream_db = SessionLocal()
+        try:
+            stream_provider = ProviderService.get_provider(stream_db, provider_id)
+            if not stream_provider:
+                raise RuntimeError("Provider not found")
+            return await HealthService.check_provider(
+                stream_db,
+                stream_provider,
+                progress_callback=progress_reporter,
+            )
+        finally:
+            stream_db.close()
 
     return StreamingResponse(
         _stream_health_check_events(worker),
@@ -278,10 +285,14 @@ async def test_all_providers_stream(db: Session = Depends(get_db)) -> StreamingR
         raise HTTPException(status_code=429, detail=str(exc)) from exc
 
     async def worker(progress_reporter: Callable[[dict], Awaitable[None]]) -> list[dict]:
-        return await HealthService.check_all(
-            db,
-            progress_callback=progress_reporter,
-        )
+        stream_db = SessionLocal()
+        try:
+            return await HealthService.check_all(
+                stream_db,
+                progress_callback=progress_reporter,
+            )
+        finally:
+            stream_db.close()
 
     return StreamingResponse(
         _stream_health_check_events(worker),

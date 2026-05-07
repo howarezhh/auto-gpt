@@ -114,9 +114,27 @@ class HealthService:
     @staticmethod
     async def _probe_native_tools(provider: Provider, provider_model: ProviderModel) -> dict[str, Any]:
         started = time.perf_counter()
-        endpoint_path = "/chat/completions"
         endpoint_label = "tools"
-        payload = HealthService._build_chat_tool_probe_payload(provider_model)
+        if provider_model.supports_chat_completions:
+            endpoint_path = "/chat/completions"
+            payload = HealthService._build_chat_tool_probe_payload(provider_model)
+        elif provider_model.supports_responses:
+            endpoint_path = "/responses"
+            payload = HealthService._build_responses_tool_probe_payload(provider_model)
+        else:
+            return {
+                "endpoint_path": None,
+                "endpoint_label": endpoint_label,
+                "success": False,
+                "native_success": False,
+                "adapted_success": False,
+                "support_mode": "unsupported",
+                "support_label": "不支持 tools",
+                "latency_ms": 0,
+                "status_code": None,
+                "message": "模型未启用原生 chat/completions 或 responses 工具调用探测",
+                "trace": [],
+            }
         setting = await ProxyService._get_setting_async()
         try:
             prepared = ProxyService._prepare_upstream_request(provider, endpoint_path=endpoint_path, payload=payload)
@@ -454,10 +472,11 @@ class HealthService:
         models_to_check: list[ProviderModel],
         model_results: list[dict[str, Any]],
     ) -> dict[str, Any]:
+        provider_id = provider.id
+        provider_name = provider.name
         for provider_model, model_result in zip(models_to_check, model_results, strict=False):
             HealthService._persist_model_health_result(db, provider, provider_model, model_result)
-
-        db.refresh(provider)
+        provider = db.get(Provider, provider_id) or provider
         models_total = len(models_to_check)
         models_success = sum(1 for item in model_results if item.get("success"))
         models_failed = max(0, models_total - models_success)
@@ -476,8 +495,8 @@ class HealthService:
         LogService.create_log(
             db,
             log_type="health_check_provider",
-            provider_id=provider.id,
-            provider_name=provider.name,
+            provider_id=provider_id,
+            provider_name=provider_name,
             request_path="/proxy-test",
             success=provider_success,
             status_code=status_code,
@@ -790,6 +809,32 @@ class HealthService:
             ],
             "tool_choice": {"type": "function", "function": {"name": "get_time"}},
             "max_tokens": 16,
+        }
+
+    @staticmethod
+    def _build_responses_tool_probe_payload(provider_model: ProviderModel) -> dict[str, Any]:
+        return {
+            "model": provider_model.model_name,
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "调用 get_time 工具。"}],
+                }
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "get_time",
+                    "description": "返回当前时间。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": False,
+                    },
+                }
+            ],
+            "tool_choice": "required",
+            "max_output_tokens": 16,
         }
 
     @staticmethod

@@ -631,6 +631,18 @@ class ProxyService:
                 detail={"message": str(exc), "code": exc.code},
             ) from exc
         if not candidates:
+            route_diagnostics = await RouterService.async_diagnose_candidate_unavailability(
+                model_name=model_name,
+                forced_provider_id=forced_provider_id,
+                route_context=route_context,
+                require_vision=has_image,
+                require_stream=False,
+                require_tools=require_tools,
+                require_chat_completions=endpoint_path == "/chat/completions",
+                require_responses=endpoint_path == "/responses",
+                is_stream=False,
+            )
+            route_message = "No native tool-capable provider for requested model" if require_tools else "No available provider for requested model"
             await ProxyService._run_db_write(
                 LogService.create_log,
                 log_type=log_type,
@@ -654,12 +666,12 @@ class ProxyService:
                 reasoning_level=reasoning_level,
                 model_reasoning_effort=model_reasoning_effort,
                 request_body_json=request_body_json,
-                message="No native tool-capable provider for requested model" if require_tools else "No available provider for requested model",
+                message=route_message,
                 error_type="invalid_request_error",
                 error_code="model_tools_not_available" if require_tools else "model_not_available",
                 retryable=False,
                 **ProxyService._build_api_client_log_kwargs(api_client_auth, auth_result="authenticated"),
-                trace=[],
+                trace=[{"result": "route_candidates_exhausted", "diagnostic": route_diagnostics}],
                 attempt_count=0,
                 token_request_payload=payload,
                 schedule_token_fill=setting.enable_token_logging,
@@ -667,9 +679,10 @@ class ProxyService:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={
-                    "message": "No native tool-capable provider for requested model" if require_tools else "No available provider for requested model",
+                    "message": route_message,
                     "code": "model_tools_not_available" if require_tools else "model_not_available",
                     "requires_tools": require_tools,
+                    "route_diagnostics": route_diagnostics,
                 },
             )
 
@@ -1003,6 +1016,18 @@ class ProxyService:
                 detail={"message": str(exc), "code": exc.code},
             ) from exc
         if not candidates:
+            route_diagnostics = await RouterService.async_diagnose_candidate_unavailability(
+                model_name=model_name,
+                forced_provider_id=forced_provider_id,
+                route_context=route_context,
+                require_vision=has_image,
+                require_stream=True,
+                require_tools=require_tools,
+                require_chat_completions=endpoint_path == "/chat/completions",
+                require_responses=endpoint_path == "/responses",
+                is_stream=True,
+            )
+            route_message = "No native tool-capable provider for requested model" if require_tools else "No available provider for requested model"
             await ProxyService._run_db_write(
                 LogService.create_log,
                 log_type=log_type,
@@ -1026,12 +1051,12 @@ class ProxyService:
                 reasoning_level=reasoning_level,
                 model_reasoning_effort=model_reasoning_effort,
                 request_body_json=request_body_json,
-                message="No native tool-capable provider for requested model" if require_tools else "No available provider for requested model",
+                message=route_message,
                 error_type="invalid_request_error",
                 error_code="model_tools_not_available" if require_tools else "model_not_available",
                 retryable=False,
                 **ProxyService._build_api_client_log_kwargs(api_client_auth, auth_result="authenticated"),
-                trace=[],
+                trace=[{"result": "route_candidates_exhausted", "diagnostic": route_diagnostics}],
                 attempt_count=0,
                 token_request_payload=payload,
                 schedule_token_fill=setting.enable_token_logging,
@@ -1039,9 +1064,10 @@ class ProxyService:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={
-                    "message": "No native tool-capable provider for requested model" if require_tools else "No available provider for requested model",
+                    "message": route_message,
                     "code": "model_tools_not_available" if require_tools else "model_not_available",
                     "requires_tools": require_tools,
+                    "route_diagnostics": route_diagnostics,
                 },
             )
 
