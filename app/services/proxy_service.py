@@ -360,6 +360,25 @@ class ProxyService:
         return ProxyService._value_has_tool_context(payload.get("messages")) or ProxyService._value_has_tool_context(payload.get("input"))
 
     @staticmethod
+    def _payload_uses_image_generation(payload: dict[str, Any]) -> bool:
+        return ProxyService._value_has_image_generation_tool(payload.get("tools"))
+
+    @staticmethod
+    def _value_has_image_generation_tool(value: Any) -> bool:
+        if isinstance(value, list):
+            return any(ProxyService._value_has_image_generation_tool(item) for item in value)
+        if isinstance(value, dict):
+            item_type = value.get("type")
+            if isinstance(item_type, str) and item_type == "image_generation":
+                return True
+            return any(ProxyService._value_has_image_generation_tool(item) for item in value.values())
+        return False
+
+    @staticmethod
+    def _payload_needs_image_transport(payload: dict[str, Any]) -> bool:
+        return ProxyService._payload_has_image(payload) or ProxyService._payload_uses_image_generation(payload)
+
+    @staticmethod
     def _value_has_tool_context(value: Any) -> bool:
         if isinstance(value, list):
             return any(ProxyService._value_has_tool_context(item) for item in value)
@@ -527,8 +546,10 @@ class ProxyService:
     ) -> tuple[dict[str, Any], Provider, list[dict], int]:
         payload = ProxyService._normalize_reasoning_request_payload(endpoint_path=endpoint_path, payload=payload)
         model_name = payload.get("model")
-        has_image = ProxyService._payload_has_image(payload)
+        has_image_input = ProxyService._payload_has_image(payload)
+        has_image = ProxyService._payload_needs_image_transport(payload)
         require_tools = ProxyService._payload_uses_tools(payload)
+        require_image_generation = ProxyService._payload_uses_image_generation(payload)
         setting = await ProxyService._get_setting_async(db)
         request_id = uuid4().hex
         reasoning_level = LogService.extract_reasoning_level(payload)
@@ -620,9 +641,10 @@ class ProxyService:
                 sticky_key=ProxyService._extract_sticky_key(payload),
                 forced_provider_id=forced_provider_id,
                 route_context=route_context,
-                require_vision=has_image,
+                require_vision=has_image_input,
                 require_stream=False,
                 require_tools=require_tools,
+                require_image_generation=require_image_generation,
                 require_chat_completions=endpoint_path == "/chat/completions",
                 require_responses=endpoint_path == "/responses",
             )
@@ -636,14 +658,23 @@ class ProxyService:
                 model_name=model_name,
                 forced_provider_id=forced_provider_id,
                 route_context=route_context,
-                require_vision=has_image,
+                require_vision=has_image_input,
                 require_stream=False,
                 require_tools=require_tools,
+                require_image_generation=require_image_generation,
                 require_chat_completions=endpoint_path == "/chat/completions",
                 require_responses=endpoint_path == "/responses",
                 is_stream=False,
             )
-            route_message = "No native tool-capable provider for requested model" if require_tools else "No available provider for requested model"
+            if require_image_generation:
+                route_message = "No native image-generation-capable provider for requested model"
+                error_code = "model_image_generation_not_available"
+            elif require_tools:
+                route_message = "No native tool-capable provider for requested model"
+                error_code = "model_tools_not_available"
+            else:
+                route_message = "No available provider for requested model"
+                error_code = "model_not_available"
             await ProxyService._run_db_write(
                 LogService.create_log,
                 log_type=log_type,
@@ -669,7 +700,7 @@ class ProxyService:
                 request_body_json=request_body_json,
                 message=route_message,
                 error_type="invalid_request_error",
-                error_code="model_tools_not_available" if require_tools else "model_not_available",
+                error_code=error_code,
                 retryable=False,
                 **ProxyService._build_api_client_log_kwargs(api_client_auth, auth_result="authenticated"),
                 trace=[{"result": "route_candidates_exhausted", "diagnostic": route_diagnostics}],
@@ -681,8 +712,9 @@ class ProxyService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={
                     "message": route_message,
-                    "code": "model_tools_not_available" if require_tools else "model_not_available",
+                    "code": error_code,
                     "requires_tools": require_tools,
+                    "requires_image_generation": require_image_generation,
                     "route_diagnostics": route_diagnostics,
                 },
             )
@@ -719,7 +751,7 @@ class ProxyService:
                     finish_reason = ProxyService._extract_finish_reason(response)
                     response_body_json = ProxyService._serialize_payload_for_logging(response, setting=setting)
                     response_text = (
-                        ProxyService._extract_response_text(response, limit_bytes=setting.max_logged_body_bytes)
+                        ProxyService._extract_response_display_text(response, limit_bytes=setting.max_logged_body_bytes)
                         if setting.enable_payload_logging
                         else None
                     )
@@ -937,8 +969,10 @@ class ProxyService:
     ) -> tuple[AsyncIterator[bytes], Provider, list[dict], int]:
         payload = ProxyService._normalize_reasoning_request_payload(endpoint_path=endpoint_path, payload=payload)
         model_name = payload.get("model")
-        has_image = ProxyService._payload_has_image(payload)
+        has_image_input = ProxyService._payload_has_image(payload)
+        has_image = ProxyService._payload_needs_image_transport(payload)
         require_tools = ProxyService._payload_uses_tools(payload)
+        require_image_generation = ProxyService._payload_uses_image_generation(payload)
         setting = await ProxyService._get_setting_async(db)
         request_id = uuid4().hex
         reasoning_level = LogService.extract_reasoning_level(payload)
@@ -1012,9 +1046,10 @@ class ProxyService:
                 sticky_key=ProxyService._extract_sticky_key(payload),
                 forced_provider_id=forced_provider_id,
                 route_context=route_context,
-                require_vision=has_image,
+                require_vision=has_image_input,
                 require_stream=True,
                 require_tools=require_tools,
+                require_image_generation=require_image_generation,
                 require_chat_completions=endpoint_path == "/chat/completions",
                 require_responses=endpoint_path == "/responses",
             )
@@ -1028,14 +1063,23 @@ class ProxyService:
                 model_name=model_name,
                 forced_provider_id=forced_provider_id,
                 route_context=route_context,
-                require_vision=has_image,
+                require_vision=has_image_input,
                 require_stream=True,
                 require_tools=require_tools,
+                require_image_generation=require_image_generation,
                 require_chat_completions=endpoint_path == "/chat/completions",
                 require_responses=endpoint_path == "/responses",
                 is_stream=True,
             )
-            route_message = "No native tool-capable provider for requested model" if require_tools else "No available provider for requested model"
+            if require_image_generation:
+                route_message = "No native image-generation-capable provider for requested model"
+                error_code = "model_image_generation_not_available"
+            elif require_tools:
+                route_message = "No native tool-capable provider for requested model"
+                error_code = "model_tools_not_available"
+            else:
+                route_message = "No available provider for requested model"
+                error_code = "model_not_available"
             await ProxyService._run_db_write(
                 LogService.create_log,
                 log_type=log_type,
@@ -1061,7 +1105,7 @@ class ProxyService:
                 request_body_json=request_body_json,
                 message=route_message,
                 error_type="invalid_request_error",
-                error_code="model_tools_not_available" if require_tools else "model_not_available",
+                error_code=error_code,
                 retryable=False,
                 **ProxyService._build_api_client_log_kwargs(api_client_auth, auth_result="authenticated"),
                 trace=[{"result": "route_candidates_exhausted", "diagnostic": route_diagnostics}],
@@ -1073,8 +1117,9 @@ class ProxyService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={
                     "message": route_message,
-                    "code": "model_tools_not_available" if require_tools else "model_not_available",
+                    "code": error_code,
                     "requires_tools": require_tools,
+                    "requires_image_generation": require_image_generation,
                     "route_diagnostics": route_diagnostics,
                 },
             )
@@ -1655,7 +1700,7 @@ class ProxyService:
         requested_payload: dict[str, Any],
         setting: Any,
     ) -> tuple[dict[str, Any], str | None]:
-        if ProxyService._payload_has_image(prepared.request_payload):
+        if ProxyService._payload_needs_image_transport(prepared.request_payload):
             return await ProxyService._forward_json_image_request(provider, prepared=prepared, headers=headers, setting=setting)
         client = ProxyService._select_upstream_client(payload=prepared.request_payload)
         response = await ProxyService._post_json_with_response_size_limit(
@@ -1879,7 +1924,7 @@ class ProxyService:
 
     @staticmethod
     def _select_upstream_client(*, payload: dict[str, Any]) -> httpx.AsyncClient:
-        if ProxyService._payload_has_image(payload):
+        if ProxyService._payload_needs_image_transport(payload):
             return UpstreamClientService.get_http1_client()
         return UpstreamClientService.get_client()
 
@@ -1907,7 +1952,7 @@ class ProxyService:
                 else None
             )
             read_timeout = None
-        elif ProxyService._payload_has_image(payload):
+        elif ProxyService._payload_needs_image_transport(payload):
             read_timeout = max(base_timeout_seconds, 180.0)
         else:
             read_timeout = base_timeout_seconds
@@ -3524,6 +3569,123 @@ class ProxyService:
         return "".join(parts) or None
 
     @staticmethod
+    def _normalize_image_mime_type(mime_type: str | None) -> str:
+        normalized = str(mime_type or "").strip().lower().lstrip(".")
+        if normalized in {"jpg", "jpeg"}:
+            return "image/jpeg"
+        if normalized in {"png", "gif", "webp"}:
+            return f"image/{normalized}"
+        if "/" in normalized:
+            return normalized
+        return "image/png"
+
+    @staticmethod
+    def _build_data_url_from_base64(base64_value: str, *, mime_type: str | None = None) -> str:
+        return f"data:{ProxyService._normalize_image_mime_type(mime_type)};base64,{base64_value}"
+
+    @staticmethod
+    def _normalize_generated_image_candidate(value: Any, *, mime_type: str | None = None) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        if isinstance(value, list):
+            for item in value:
+                results.extend(ProxyService._normalize_generated_image_candidate(item, mime_type=mime_type))
+            return results
+        if isinstance(value, str):
+            current = value.strip()
+            if not current:
+                return results
+            if current.startswith(("http://", "https://", "data:")):
+                results.append({"url": current, "mime_type": mime_type})
+            else:
+                results.append(
+                    {
+                        "url": ProxyService._build_data_url_from_base64(current, mime_type=mime_type),
+                        "mime_type": ProxyService._normalize_image_mime_type(mime_type),
+                    }
+                )
+            return results
+        if not isinstance(value, dict):
+            return results
+
+        candidate_mime = value.get("mime_type") or value.get("output_format") or mime_type
+        image_url_value = value.get("image_url") or value.get("url")
+        if isinstance(image_url_value, dict):
+            image_url_value = image_url_value.get("url")
+        if isinstance(image_url_value, str) and image_url_value.strip():
+            results.append({"url": image_url_value.strip(), "mime_type": candidate_mime})
+            return results
+
+        for key in ("b64_json", "image_base64", "base64", "partial_image_b64", "result"):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                results.append(
+                    {
+                        "url": ProxyService._build_data_url_from_base64(candidate.strip(), mime_type=candidate_mime),
+                        "mime_type": ProxyService._normalize_image_mime_type(candidate_mime),
+                    }
+                )
+                return results
+        return results
+
+    @staticmethod
+    def _extract_generated_images(response_json: dict[str, Any], *, limit_images: int = 8) -> list[dict[str, Any]]:
+        images: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        def append_candidate(candidate: Any, *, mime_type: str | None = None) -> None:
+            if len(images) >= limit_images:
+                return
+            for item in ProxyService._normalize_generated_image_candidate(candidate, mime_type=mime_type):
+                url = item.get("url")
+                if not isinstance(url, str) or not url:
+                    continue
+                if url in seen:
+                    continue
+                seen.add(url)
+                images.append(item)
+                if len(images) >= limit_images:
+                    break
+
+        def walk(value: Any) -> None:
+            if len(images) >= limit_images:
+                return
+            if isinstance(value, list):
+                for item in value:
+                    walk(item)
+                    if len(images) >= limit_images:
+                        break
+                return
+            if not isinstance(value, dict):
+                return
+
+            item_type = value.get("type")
+            if isinstance(item_type, str) and item_type == "image_generation_call":
+                append_candidate(value.get("result"), mime_type=value.get("mime_type") or value.get("output_format"))
+            if isinstance(item_type, str) and item_type == "response.image_generation_call.partial_image":
+                append_candidate(value.get("partial_image_b64"), mime_type=value.get("mime_type") or value.get("output_format"))
+            if isinstance(item_type, str) and item_type == "image_generation.partial_image":
+                append_candidate(value.get("b64_json"), mime_type=value.get("mime_type") or value.get("output_format"))
+
+            if any(key in value for key in ("b64_json", "image_base64", "base64", "partial_image_b64")):
+                append_candidate(value, mime_type=value.get("mime_type") or value.get("output_format"))
+
+            for nested in value.values():
+                walk(nested)
+
+        walk(response_json)
+        return images
+
+    @staticmethod
+    def _extract_response_display_text(response_json: dict[str, Any], *, limit_bytes: int) -> str | None:
+        text = ProxyService._extract_response_text(response_json, limit_bytes=limit_bytes)
+        if text:
+            return text
+        generated_images = ProxyService._extract_generated_images(response_json)
+        if not generated_images:
+            return None
+        return f"[生成了 {len(generated_images)} 张图片]"
+
+    @staticmethod
     def _serialize_payload_for_logging(
         payload: dict[str, Any],
         *,
@@ -3598,13 +3760,18 @@ class ProxyService:
     def _sanitize_for_logging(value: Any, *, mask_sensitive: bool) -> Any:
         if isinstance(value, dict):
             sanitized: dict[str, Any] = {}
+            container_type = value.get("type") if isinstance(value.get("type"), str) else None
             for key, item in value.items():
                 lowered = key.lower()
                 if mask_sensitive and any(token in lowered for token in ("api_key", "authorization", "secret", "password", "token")):
                     sanitized[key] = "***"
                     continue
-                if lowered in {"image", "image_base64", "b64_json"} and isinstance(item, str):
+                if lowered in {"image", "image_base64", "b64_json", "partial_image_b64"} and isinstance(item, str):
                     sanitized[key] = f"[omitted binary payload: {len(item)} chars]"
+                    continue
+                if lowered == "result" and container_type == "image_generation_call":
+                    generated_images = ProxyService._extract_generated_images({"type": container_type, "result": item}, limit_images=4)
+                    sanitized[key] = f"[omitted generated image payload: {len(generated_images)} images]" if generated_images else "[omitted generated image payload]"
                     continue
                 sanitized[key] = ProxyService._sanitize_for_logging(item, mask_sensitive=mask_sensitive)
             return sanitized

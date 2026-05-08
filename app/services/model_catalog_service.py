@@ -29,6 +29,14 @@ from app.utils.json_utils import dumps_json, loads_json
 
 class ModelCatalogService:
     @staticmethod
+    def _catalog_supports_image_generation(catalog: ModelCatalog) -> bool:
+        return bool(
+            catalog.supports_responses
+            and catalog.supports_tools
+            and (catalog.supports_vision or ProviderService.model_name_supports_image_generation(catalog.model_name))
+        )
+
+    @staticmethod
     def list_catalogs(db: Session) -> list[ModelCatalog]:
         return list(db.scalars(select(ModelCatalog).order_by(ModelCatalog.model_name.asc())))
 
@@ -334,6 +342,7 @@ class ModelCatalogService:
                     "supports_stream": catalog.supports_stream,
                     "supports_vision": catalog.supports_vision,
                     "supports_tools": catalog.supports_tools,
+                    "supports_image_generation": ModelCatalogService._catalog_supports_image_generation(catalog),
                     "supports_chat_completions": catalog.supports_chat_completions,
                     "supports_responses": catalog.supports_responses,
                     "context_window_tokens": catalog.context_window_tokens,
@@ -478,6 +487,7 @@ class ModelCatalogService:
             "supports_stream": catalog.supports_stream,
             "supports_vision": catalog.supports_vision,
             "supports_tools": catalog.supports_tools,
+            "supports_image_generation": ModelCatalogService._catalog_supports_image_generation(catalog),
             "supports_chat_completions": catalog.supports_chat_completions,
             "supports_responses": catalog.supports_responses,
             "context_window_tokens": catalog.context_window_tokens,

@@ -25,7 +25,7 @@ DEFAULT_SETTING = {
     "stream_token_capture_max_bytes": 1048576,
     "max_logged_metadata_bytes": 1024,
     "circuit_breaker_threshold": 3,
-    "auto_health_check": True,
+    "auto_health_check": False,
     "health_check_interval_sec": 300,
     "recovery_probe_interval_sec": 30,
     "enable_token_logging": True,

@@ -1966,6 +1966,27 @@ textarea.field-input {
     gap: 14px;
 }
 
+.settings-health-grid .settings-health-switch-card {
+    grid-column: 1 / -1;
+}
+
+.settings-field-label,
+.settings-switch-title-row {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+
+.settings-switch-title-row {
+    flex-wrap: wrap;
+}
+
+.settings-field-label > span:first-child,
+.settings-switch-title-row strong {
+    min-width: 0;
+}
+
 .logs-filter-group {
     display: grid;
     gap: 4px;
@@ -2621,6 +2642,13 @@ html[data-theme="dark"] .settings-switch-card {
     line-height: 1.45;
 }
 
+.settings-switch-copy small {
+    margin-top: 6px;
+    color: var(--muted);
+    font-size: 13px;
+    line-height: 1.55;
+}
+
 html[data-theme="dark"] .settings-switch-copy strong {
     color: #f7fbf8;
 }
@@ -3258,11 +3286,13 @@ html[data-theme="dark"] .settings-switch-control input:checked + .settings-switc
     flex-wrap: wrap;
 }
 
-.provider-status-help {
+.provider-status-help,
+.settings-help {
     display: inline-flex;
 }
 
-.provider-status-help-btn {
+.provider-status-help-btn,
+.settings-help-btn {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -3278,23 +3308,28 @@ html[data-theme="dark"] .settings-switch-control input:checked + .settings-switc
 }
 
 .provider-status-help-btn:hover,
-.provider-status-help-btn:focus-visible {
+.provider-status-help-btn:focus-visible,
+.settings-help-btn:hover,
+.settings-help-btn:focus-visible {
     background: color-mix(in srgb, var(--surface-soft) 82%, transparent);
     color: var(--text-strong);
     outline: 1px solid color-mix(in srgb, var(--accent) 38%, var(--line));
     outline-offset: 2px;
 }
 
-.provider-status-help-btn i {
+.provider-status-help-btn i,
+.settings-help-btn i {
     font-size: 14px;
     line-height: 1;
 }
 
-.provider-status-tooltip-content {
+.provider-status-tooltip-content,
+.settings-tooltip-content {
     display: none !important;
 }
 
-.provider-status-tooltip {
+.provider-status-tooltip,
+.settings-tooltip {
     position: fixed;
     z-index: 220;
     width: min(420px, calc(100vw - 32px));
@@ -3312,13 +3347,15 @@ html[data-theme="dark"] .settings-switch-control input:checked + .settings-switc
     pointer-events: none;
 }
 
-.provider-status-tooltip-floating:not(.hidden) {
+.provider-status-tooltip-floating:not(.hidden),
+.settings-tooltip-floating:not(.hidden) {
     opacity: 1;
     visibility: visible;
     transform: translateY(0);
 }
 
-.provider-status-tooltip-floating::after {
+.provider-status-tooltip-floating::after,
+.settings-tooltip-floating::after {
     content: "";
     position: absolute;
     right: 12px;
@@ -3331,15 +3368,18 @@ html[data-theme="dark"] .settings-switch-control input:checked + .settings-switc
     transform: translateY(-5px) rotate(45deg);
 }
 
-.provider-status-tooltip-floating[data-placement="bottom"] {
+.provider-status-tooltip-floating[data-placement="bottom"],
+.settings-tooltip-floating[data-placement="bottom"] {
     transform: translateY(-6px);
 }
 
-.provider-status-tooltip-floating[data-placement="bottom"]:not(.hidden) {
+.provider-status-tooltip-floating[data-placement="bottom"]:not(.hidden),
+.settings-tooltip-floating[data-placement="bottom"]:not(.hidden) {
     transform: translateY(0);
 }
 
-.provider-status-tooltip-floating[data-placement="bottom"]::after {
+.provider-status-tooltip-floating[data-placement="bottom"]::after,
+.settings-tooltip-floating[data-placement="bottom"]::after {
     top: auto;
     bottom: 100%;
     border-right: 0;
@@ -3349,13 +3389,15 @@ html[data-theme="dark"] .settings-switch-control input:checked + .settings-switc
     transform: translateY(5px) rotate(45deg);
 }
 
-.provider-status-tooltip-title {
+.provider-status-tooltip-title,
+.settings-tooltip-title {
     font-size: 12px;
     font-weight: 800;
     color: var(--text-strong);
 }
 
-.provider-status-tooltip-copy {
+.provider-status-tooltip-copy,
+.settings-tooltip-copy {
     margin-top: 8px;
     font-size: 12px;
     line-height: 1.55;
@@ -3782,6 +3824,36 @@ html[data-theme="dark"] .settings-switch-control input:checked + .settings-switc
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 12px;
+}
+
+.playground-image-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+}
+
+.playground-image-card {
+    margin: 0;
+    display: grid;
+    gap: 8px;
+    padding: 12px;
+    border-radius: 12px;
+    border: 1px solid var(--line);
+    background: #f7f8fa;
+}
+
+.playground-generated-image {
+    width: 100%;
+    aspect-ratio: 1 / 1;
+    object-fit: contain;
+    border-radius: 10px;
+    background: #fff;
+}
+
+.playground-image-card figcaption {
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.6;
 }
 
 .playground-token-item {

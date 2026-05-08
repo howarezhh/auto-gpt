@@ -40,9 +40,10 @@ from app.utils.json_utils import safeJsonParse
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
 
-SELF_TEST_IMAGE_MODES = {"none", "url", "upload"}
+SELF_TEST_IMAGE_MODES = {"none", "url", "upload", "generate"}
 SELF_TEST_TEXT_PROMPT = "请只回复 pong"
 SELF_TEST_IMAGE_PROMPT = "请确认你已看到这张测试图片，并用一句中文概括图片主体。"
+SELF_TEST_IMAGE_GENERATION_PROMPT = "请生成一张用于链路检测的简单图片，不要输出文字说明。"
 
 
 def require_user_html(request: Request, db: Session):
@@ -214,7 +215,7 @@ async def _resolve_self_test_image_input(
     if normalized_mode not in SELF_TEST_IMAGE_MODES:
         raise HTTPException(status_code=400, detail="图片模式不合法")
     normalized_detail = (image_detail or "auto").strip().lower() or "auto"
-    if normalized_mode == "none":
+    if normalized_mode in {"none", "generate"}:
         return None
     if normalized_mode == "url":
         normalized_url = (image_url or "").strip()
@@ -239,6 +240,8 @@ async def _consume_self_test_stream(stream: AsyncIterator[bytes]) -> dict:
     event_buffer = bytearray()
     output_parts: list[str] = []
     event_preview: list[dict | str] = []
+    generated_images: list[dict] = []
+    seen_generated_image_urls: set[str] = set()
 
     async for chunk in stream:
         if not chunk:
@@ -264,14 +267,24 @@ async def _consume_self_test_stream(stream: AsyncIterator[bytes]) -> dict:
                     continue
                 parsed = safeJsonParse(data)
                 if len(event_preview) < 20:
-                    event_preview.append(parsed if parsed is not None else data)
+                    if isinstance(parsed, dict):
+                        event_preview.append(ProxyService._sanitize_for_logging(parsed, mask_sensitive=True))
+                    else:
+                        event_preview.append(data)
                 if isinstance(parsed, dict):
-                    text = ProxyService._extract_response_text(parsed, limit_bytes=600)
+                    text = ProxyService._extract_response_display_text(parsed, limit_bytes=600)
                     if text and (not output_parts or output_parts[-1] != text):
                         output_parts.append(text)
+                    for image in ProxyService._extract_generated_images(parsed, limit_images=4):
+                        url = image.get("url")
+                        if not isinstance(url, str) or not url or url in seen_generated_image_urls:
+                            continue
+                        seen_generated_image_urls.add(url)
+                        generated_images.append(image)
     return {
         "output_text": "".join(output_parts) or None,
         "stream_event_preview": event_preview,
+        "generated_images": generated_images,
     }
 
 
@@ -292,21 +305,28 @@ async def _run_user_self_test_probe(
     endpoint_path: str,
     stream: bool,
     image_input: dict | None,
+    image_generation: bool = False,
 ) -> dict:
     normalized_endpoint_path = endpoint_path if endpoint_path == "/responses" else "/chat/completions"
     has_image = image_input is not None
+    has_image_generation = image_generation and normalized_endpoint_path == "/responses"
     payload = {
         "model": model_name,
         "stream": stream,
     }
     prompt_text = SELF_TEST_IMAGE_PROMPT if has_image else SELF_TEST_TEXT_PROMPT
+    if has_image_generation:
+        prompt_text = SELF_TEST_IMAGE_GENERATION_PROMPT
     if normalized_endpoint_path == "/responses":
         payload["input"] = _build_self_test_responses_input(prompt_text, image_input)
-        payload["max_output_tokens"] = 64 if has_image else 16
+        payload["max_output_tokens"] = 64 if has_image or has_image_generation else 16
+        if has_image_generation:
+            payload["tools"] = [{"type": "image_generation"}]
+            payload["tool_choice"] = {"type": "image_generation"}
         log_type = "responses"
         endpoint_label = "/v1/responses"
-        scenario_key = f"{'image' if has_image else 'text'}_{'stream' if stream else 'json'}_responses"
-        scenario_label = f"{'图片' if has_image else '文本'} · {'流式' if stream else '非流式'} · responses"
+        scenario_key = f"{'imagegen' if has_image_generation else ('image' if has_image else 'text')}_{'stream' if stream else 'json'}_responses"
+        scenario_label = f"{'生成图' if has_image_generation else ('图片' if has_image else '文本')} · {'流式' if stream else '非流式'} · responses"
     else:
         payload["messages"] = [
             {
@@ -330,21 +350,32 @@ async def _run_user_self_test_probe(
                 api_client_auth=auth_context,
             )
             stream_result = await _consume_self_test_stream(response_stream)
+            generated_images = list(stream_result.get("generated_images") or [])
+            generated_images_count = len(generated_images)
+            success = True
+            status_code = 200
+            message = "stream success"
+            if has_image_generation and generated_images_count <= 0:
+                success = False
+                status_code = 502
+                message = "请求已返回，但未提取到图片生成结果"
             return {
                 "scenario_key": scenario_key,
                 "scenario_label": scenario_label,
                 "endpoint_path": endpoint_label,
                 "stream": True,
                 "has_image": has_image,
-                "success": True,
+                "has_image_generation": has_image_generation,
+                "success": success,
                 "provider_name": provider.name,
                 "model_name": model_name,
-                "status_code": 200,
+                "status_code": status_code,
                 "latency_ms": latency_ms,
                 "output_text": stream_result["output_text"],
                 "response_preview": stream_result["stream_event_preview"],
+                "generated_images_count": generated_images_count,
                 "trace": trace,
-                "message": "stream success",
+                "message": message,
             }
 
         response, provider, trace, latency_ms = await ProxyService.forward_json_request(
@@ -354,21 +385,32 @@ async def _run_user_self_test_probe(
             route_context=auth_context.route_context,
             api_client_auth=auth_context,
         )
+        generated_images = ProxyService._extract_generated_images(response, limit_images=4)
+        generated_images_count = len(generated_images)
+        success = True
+        status_code = 200
+        message = "json success"
+        if has_image_generation and generated_images_count <= 0:
+            success = False
+            status_code = 502
+            message = "请求已返回，但未提取到图片生成结果"
         return {
             "scenario_key": scenario_key,
             "scenario_label": scenario_label,
             "endpoint_path": endpoint_label,
             "stream": False,
             "has_image": has_image,
-            "success": True,
+            "has_image_generation": has_image_generation,
+            "success": success,
             "provider_name": provider.name,
             "model_name": model_name,
-            "status_code": 200,
+            "status_code": status_code,
             "latency_ms": latency_ms,
-            "output_text": ProxyService._extract_response_text(response, limit_bytes=600),
-            "response_preview": response,
+            "output_text": ProxyService._extract_response_display_text(response, limit_bytes=600),
+            "response_preview": ProxyService._sanitize_for_logging(response, mask_sensitive=True),
+            "generated_images_count": generated_images_count,
             "trace": trace,
-            "message": "json success",
+            "message": message,
         }
     except HTTPException as exc:
         detail = exc.detail
@@ -379,6 +421,7 @@ async def _run_user_self_test_probe(
             "endpoint_path": endpoint_label,
             "stream": stream,
             "has_image": has_image,
+            "has_image_generation": has_image_generation,
             "success": False,
             "provider_name": _self_test_provider_name_from_trace(trace),
             "model_name": model_name,
@@ -396,6 +439,7 @@ async def _run_user_self_test_probe(
             "endpoint_path": endpoint_label,
             "stream": stream,
             "has_image": has_image,
+            "has_image_generation": has_image_generation,
             "success": False,
             "provider_name": None,
             "model_name": model_name,
@@ -1094,8 +1138,9 @@ async def run_user_self_test(
         return JSONResponse({"success": False, "message": "当前密钥无法回显明文，请先轮换后再测试"}, status_code=400)
     try:
         normalized_model_name = model_name.strip()
+        normalized_image_mode = (image_mode or "none").strip().lower()
         image_input = await _resolve_self_test_image_input(
-            image_mode=image_mode,
+            image_mode=normalized_image_mode,
             image_detail=image_detail,
             image_url=image_url,
             image_file=image_file,
@@ -1107,11 +1152,18 @@ async def run_user_self_test(
             {"endpoint_path": "/responses", "stream": False, "image_input": None},
             {"endpoint_path": "/responses", "stream": True, "image_input": None},
         ]
-        if image_input is not None:
+        if normalized_image_mode == "generate":
             scenario_specs.extend(
                 [
-                    {"endpoint_path": "/chat/completions", "stream": False, "image_input": image_input},
-                    {"endpoint_path": "/responses", "stream": False, "image_input": image_input},
+                    {"endpoint_path": "/responses", "stream": False, "image_input": None, "image_generation": True},
+                    {"endpoint_path": "/responses", "stream": True, "image_input": None, "image_generation": True},
+                ]
+            )
+        elif image_input is not None:
+            scenario_specs.extend(
+                [
+                    {"endpoint_path": "/chat/completions", "stream": False, "image_input": image_input, "image_generation": False},
+                    {"endpoint_path": "/responses", "stream": False, "image_input": image_input, "image_generation": False},
                 ]
             )
         scenarios = []
@@ -1124,6 +1176,7 @@ async def run_user_self_test(
                     endpoint_path=item["endpoint_path"],
                     stream=item["stream"],
                     image_input=item["image_input"],
+                    image_generation=bool(item.get("image_generation")),
                 )
             )
         success_count = sum(1 for item in scenarios if item["success"])
@@ -1161,6 +1214,8 @@ async def run_user_self_test(
                     "success_scenarios": success_count,
                     "failed_scenarios": failed_count,
                     "image_enabled": image_input is not None,
+                    "image_generation_enabled": normalized_image_mode == "generate",
+                    "image_mode": normalized_image_mode,
                 },
                 "image_input": image_input_summary,
                 "scenarios": scenarios,

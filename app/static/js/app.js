@@ -847,6 +847,7 @@
         const {
             requireStream = false,
             requireVision = false,
+            requireImageGeneration = false,
             allowedModelNameSet = null,
         } = options;
         const seen = new Set();
@@ -859,6 +860,7 @@
                     if (allowedModelNameSet && !allowedModelNameSet.has(modelConfig.model_name)) return;
                     if (requireStream && !modelConfig.supports_stream) return;
                     if (requireVision && !modelConfig.supports_vision) return;
+                    if (requireImageGeneration && !supportsImageGeneration(modelConfig)) return;
                     if (seen.has(modelConfig.model_name)) return;
                     seen.add(modelConfig.model_name);
                     models.push(modelConfig.model_name);
@@ -871,6 +873,7 @@
         const {
             requireStream = false,
             requireVision = false,
+            requireImageGeneration = false,
             allowedModelNameSet = null,
         } = options;
         if (!provider?.enabled) return [];
@@ -881,9 +884,34 @@
                 && (!allowedModelNameSet || allowedModelNameSet.has(modelConfig.model_name))
                 && (!requireStream || modelConfig.supports_stream)
                 && (!requireVision || modelConfig.supports_vision)
+                && (!requireImageGeneration || supportsImageGeneration(modelConfig))
             ))
             .map((modelConfig) => modelConfig.model_name)
             .sort((a, b) => a.localeCompare(b, "zh-CN"));
+    }
+
+    function supportsImageGeneration(modelConfig) {
+        if (!modelConfig || typeof modelConfig !== "object") return false;
+        if (modelConfig.supports_image_generation === true) return true;
+        const modelName = String(modelConfig.model_name || "").toLowerCase();
+        const inferred = ["gpt-4o", "gpt-4.1", "gpt-5"].some((token) => modelName.includes(token));
+        return Boolean(
+            modelConfig.supports_responses
+            && modelConfig.supports_tools
+            && (modelConfig.supports_vision || inferred)
+        );
+    }
+
+    function formatModelCapabilitySummary(modelConfig) {
+        const parts = [
+            modelConfig?.supports_stream ? "流式" : "非流式",
+            modelConfig?.supports_vision ? "图像" : "文本",
+            modelConfig?.supports_tools ? "工具" : "无工具",
+        ];
+        if (supportsImageGeneration(modelConfig)) {
+            parts.push("图片生成");
+        }
+        return parts.join(" / ");
     }
 
     function summarizeProviders(providers = []) {
@@ -896,6 +924,7 @@
         const unhealthyProviderCount = providers.filter((provider) => provider.health_status === "unhealthy").length;
         const streamModelCount = modelConfigs.filter((model) => model.supports_stream).length;
         const visionModelCount = modelConfigs.filter((model) => model.supports_vision).length;
+        const imageGenerationModelCount = modelConfigs.filter((model) => supportsImageGeneration(model)).length;
         const pricedModelCount = modelConfigs.filter((model) => model.input_price_per_1k != null || model.output_price_per_1k != null).length;
         const healthyModelCount = modelConfigs.filter((model) => model.health_status === "healthy").length;
         const unhealthyModelCount = modelConfigs.filter((model) => model.health_status === "unhealthy").length;
@@ -912,6 +941,7 @@
             unhealthyProviderCount,
             streamModelCount,
             visionModelCount,
+            imageGenerationModelCount,
             pricedModelCount,
             healthyModelCount,
             unhealthyModelCount,
@@ -1306,6 +1336,8 @@
 
     let providerStatusTooltipLayer = null;
     let providerStatusTooltipOwner = null;
+    let settingsTooltipLayer = null;
+    let settingsTooltipOwner = null;
 
     function ensureProviderStatusTooltipLayer() {
         if (providerStatusTooltipLayer) return providerStatusTooltipLayer;
@@ -1387,6 +1419,90 @@
         window.addEventListener("resize", () => {
             if (providerStatusTooltipOwner) {
                 positionProviderStatusTooltip(providerStatusTooltipOwner);
+            }
+        });
+    }
+
+    function ensureSettingsTooltipLayer() {
+        if (settingsTooltipLayer) return settingsTooltipLayer;
+        settingsTooltipLayer = document.createElement("div");
+        settingsTooltipLayer.id = "settings-floating-tooltip";
+        settingsTooltipLayer.className = "settings-tooltip settings-tooltip-floating hidden";
+        settingsTooltipLayer.setAttribute("role", "tooltip");
+        document.body.appendChild(settingsTooltipLayer);
+        return settingsTooltipLayer;
+    }
+
+    function hideSettingsTooltip() {
+        const tooltip = ensureSettingsTooltipLayer();
+        tooltip.classList.add("hidden");
+        tooltip.innerHTML = "";
+        settingsTooltipOwner = null;
+    }
+
+    function positionSettingsTooltip(trigger) {
+        const tooltip = ensureSettingsTooltipLayer();
+        const triggerRect = trigger.getBoundingClientRect();
+        const tooltipRect = tooltip.getBoundingClientRect();
+        const viewportPadding = 12;
+        let top = triggerRect.top - tooltipRect.height - 12;
+        let placement = "top";
+        if (top < viewportPadding) {
+            top = Math.min(window.innerHeight - tooltipRect.height - viewportPadding, triggerRect.bottom + 12);
+            placement = "bottom";
+        }
+        let left = triggerRect.right - tooltipRect.width;
+        left = Math.max(viewportPadding, Math.min(left, window.innerWidth - tooltipRect.width - viewportPadding));
+        tooltip.style.top = `${top}px`;
+        tooltip.style.left = `${left}px`;
+        tooltip.dataset.placement = placement;
+    }
+
+    function showSettingsTooltip(trigger) {
+        const wrapper = trigger.closest(".settings-help");
+        const content = wrapper?.querySelector(".settings-tooltip-content");
+        if (!content) return;
+        const tooltip = ensureSettingsTooltipLayer();
+        settingsTooltipOwner = trigger;
+        tooltip.innerHTML = content.innerHTML;
+        tooltip.classList.remove("hidden");
+        positionSettingsTooltip(trigger);
+    }
+
+    function initSettingsTooltipLayer() {
+        if (document.body.dataset.settingsTooltipBound === "true") return;
+        document.body.dataset.settingsTooltipBound = "true";
+        document.addEventListener("mouseover", (event) => {
+            const trigger = event.target.closest("[data-settings-tooltip-trigger='true']");
+            if (!trigger) return;
+            if (settingsTooltipOwner === trigger) return;
+            showSettingsTooltip(trigger);
+        });
+        document.addEventListener("mouseout", (event) => {
+            const wrapper = event.target.closest(".settings-help");
+            if (!wrapper) return;
+            if (wrapper.contains(event.relatedTarget)) return;
+            hideSettingsTooltip();
+        });
+        document.addEventListener("focusin", (event) => {
+            const trigger = event.target.closest("[data-settings-tooltip-trigger='true']");
+            if (!trigger) return;
+            showSettingsTooltip(trigger);
+        });
+        document.addEventListener("focusout", (event) => {
+            const wrapper = event.target.closest(".settings-help");
+            if (!wrapper) return;
+            if (wrapper.contains(event.relatedTarget)) return;
+            hideSettingsTooltip();
+        });
+        window.addEventListener("scroll", () => {
+            if (settingsTooltipOwner) {
+                positionSettingsTooltip(settingsTooltipOwner);
+            }
+        }, true);
+        window.addEventListener("resize", () => {
+            if (settingsTooltipOwner) {
+                positionSettingsTooltip(settingsTooltipOwner);
             }
         });
     }
@@ -2509,6 +2625,100 @@
         return "";
     }
 
+    function normalizeGeneratedImageMimeType(value) {
+        const normalized = String(value || "").trim().toLowerCase().replace(/^\./, "");
+        if (normalized === "jpg" || normalized === "jpeg") return "image/jpeg";
+        if (normalized === "png" || normalized === "gif" || normalized === "webp") return `image/${normalized}`;
+        if (normalized.includes("/")) return normalized;
+        return "image/png";
+    }
+
+    function buildGeneratedImageDataUrl(base64Value, mimeType) {
+        return `data:${normalizeGeneratedImageMimeType(mimeType)};base64,${base64Value}`;
+    }
+
+    function normalizeGeneratedImageCandidate(value, mimeType) {
+        if (Array.isArray(value)) {
+            return value.flatMap((item) => normalizeGeneratedImageCandidate(item, mimeType));
+        }
+        if (typeof value === "string") {
+            const current = value.trim();
+            if (!current) return [];
+            if (current.startsWith("http://") || current.startsWith("https://") || current.startsWith("data:")) {
+                return [{ url: current, mimeType: normalizeGeneratedImageMimeType(mimeType) }];
+            }
+            return [{ url: buildGeneratedImageDataUrl(current, mimeType), mimeType: normalizeGeneratedImageMimeType(mimeType) }];
+        }
+        if (!value || typeof value !== "object") {
+            return [];
+        }
+        const candidateMimeType = value.mime_type || value.output_format || mimeType;
+        const rawUrl = typeof value.url === "string"
+            ? value.url
+            : (typeof value.image_url === "string"
+                ? value.image_url
+                : (value.image_url && typeof value.image_url.url === "string" ? value.image_url.url : ""));
+        if (rawUrl) {
+            return [{ url: rawUrl, mimeType: normalizeGeneratedImageMimeType(candidateMimeType) }];
+        }
+        for (const key of ["b64_json", "image_base64", "base64", "partial_image_b64", "result"]) {
+            if (typeof value[key] === "string" && value[key].trim()) {
+                return [{
+                    url: buildGeneratedImageDataUrl(value[key].trim(), candidateMimeType),
+                    mimeType: normalizeGeneratedImageMimeType(candidateMimeType),
+                }];
+            }
+        }
+        return [];
+    }
+
+    function extractGeneratedImages(data, limit = 6) {
+        const images = [];
+        const seen = new Set();
+
+        function appendCandidate(value, mimeType) {
+            for (const item of normalizeGeneratedImageCandidate(value, mimeType)) {
+                if (!item?.url || seen.has(item.url)) continue;
+                seen.add(item.url);
+                images.push(item);
+                if (images.length >= limit) break;
+            }
+        }
+
+        function walk(value) {
+            if (images.length >= limit || value == null) return;
+            if (Array.isArray(value)) {
+                value.forEach((item) => {
+                    if (images.length < limit) walk(item);
+                });
+                return;
+            }
+            if (typeof value !== "object") return;
+            if (Array.isArray(value._generated_images)) {
+                appendCandidate(value._generated_images);
+            }
+            const itemType = typeof value.type === "string" ? value.type : "";
+            if (itemType === "image_generation_call") {
+                appendCandidate(value.result, value.mime_type || value.output_format);
+            }
+            if (itemType === "response.image_generation_call.partial_image") {
+                appendCandidate(value.partial_image_b64, value.mime_type || value.output_format);
+            }
+            if (itemType === "image_generation.partial_image") {
+                appendCandidate(value.b64_json, value.mime_type || value.output_format);
+            }
+            if ("b64_json" in value || "image_base64" in value || "base64" in value || "partial_image_b64" in value) {
+                appendCandidate(value, value.mime_type || value.output_format);
+            }
+            Object.values(value).forEach((item) => {
+                if (images.length < limit) walk(item);
+            });
+        }
+
+        walk(data);
+        return images;
+    }
+
     function extractReasoningText(data) {
         if (!data || typeof data !== "object") return "";
         if (Array.isArray(data.choices) && data.choices.length) {
@@ -2566,6 +2776,7 @@
             usage,
             finishReason,
             reply: replyParts.join(""),
+            images: extractGeneratedImages({ response: latestResponse, events }),
         };
     }
 
@@ -2632,6 +2843,25 @@
         return segments.join("") || `<div class="reply-rich-text">${renderTextParagraphs(source)}</div>`;
     }
 
+    function renderGeneratedImageGallery(images = []) {
+        if (!Array.isArray(images) || !images.length) {
+            return "";
+        }
+        return `
+            <section class="playground-result-card">
+                <div class="playground-card-title">生成图片</div>
+                <div class="playground-image-grid">
+                    ${images.map((item, index) => `
+                        <figure class="playground-image-card">
+                            <img class="playground-generated-image" src="${escapeHtml(item.url || "")}" alt="生成图片 ${index + 1}">
+                            <figcaption>图片 ${index + 1}</figcaption>
+                        </figure>
+                    `).join("")}
+                </div>
+            </section>
+        `;
+    }
+
     function renderPlaygroundStatusMeta(context) {
         return `
             <div class="playground-status-bar">
@@ -2643,13 +2873,14 @@
         `;
     }
 
-    function renderStreamingPlaygroundResponse(replyText, context = {}, statusText = "流式输出中...") {
+    function renderStreamingPlaygroundResponse(replyText, context = {}, statusText = "流式输出中...", images = []) {
         return `
             ${renderPlaygroundStatusMeta(context)}
             <section class="playground-result-card">
                 <div class="playground-card-title">${escapeHtml(statusText)}</div>
                 <div class="playground-reply-content">${renderReplyContent(replyText || "等待首个分片...")}</div>
             </section>
+            ${renderGeneratedImageGallery(images)}
         `;
     }
 
@@ -2686,6 +2917,7 @@
         const decoder = new TextDecoder("utf-8");
         let aggregatedText = "";
         let renderedReply = "";
+        let renderedImagesKey = "";
 
         showPlaygroundRendered(renderStreamingPlaygroundResponse("", context));
         meta.innerHTML = "";
@@ -2696,9 +2928,12 @@
             aggregatedText += decoder.decode(value, { stream: true });
             const parsed = parseSsePayload(aggregatedText);
             const nextReply = parsed.reply || "";
-            if (nextReply !== renderedReply) {
+            const nextImages = Array.isArray(parsed.images) ? parsed.images : [];
+            const nextImagesKey = nextImages.map((item) => item.url || "").join("|");
+            if (nextReply !== renderedReply || nextImagesKey !== renderedImagesKey) {
                 renderedReply = nextReply;
-                showPlaygroundRendered(renderStreamingPlaygroundResponse(renderedReply, context));
+                renderedImagesKey = nextImagesKey;
+                showPlaygroundRendered(renderStreamingPlaygroundResponse(renderedReply, context, "流式输出中...", nextImages));
             }
         }
 
@@ -2710,6 +2945,7 @@
                 model: finalParsed.model || payload.model,
                 created: finalParsed.created,
                 usage: finalParsed.usage,
+                _generated_images: finalParsed.images,
                 choices: [{
                     message: { content: finalParsed.reply || renderedReply },
                     finish_reason: finalParsed.finishReason,
@@ -2746,14 +2982,15 @@
             `;
         }
 
-        const replyText = extractAssistantText(data) || "未提取到可显示的回复内容";
+        const generatedImages = extractGeneratedImages(data);
+        const replyText = extractAssistantText(data) || (generatedImages.length ? `已生成 ${generatedImages.length} 张图片` : "未提取到可显示的回复内容");
         const reasoningText = extractReasoningText(data);
         const usage = extractUsageDetails(data.usage);
         const finishReason = data?.choices?.[0]?.finish_reason || data?.output?.[0]?.finish_reason || null;
         const statusText = formatStatusText(finishReason);
         const modelName = data?.model || context.model || "-";
         const responseId = data?.id || "-";
-        const createdAt = formatTimestamp(data?.created);
+        const createdAt = formatTimestamp(data?.created_at || data?.created);
 
         const tokenCard = usage ? `
             <section class="playground-result-card">
@@ -2802,6 +3039,7 @@
                 <div class="playground-card-title">模型回复</div>
                 <div class="playground-reply-content">${renderReplyContent(replyText)}</div>
             </section>
+            ${renderGeneratedImageGallery(generatedImages)}
             ${tokenCard}
             ${reasoningCard}
         `;
@@ -3888,7 +4126,7 @@
                             <span class="status-badge ${item.enabled ? "status-healthy" : "status-unknown"}">${item.enabled ? "已启用" : "已停用"}</span>
                         </div>
                     </td>
-                    <td>${item.supports_stream ? "流式" : "非流式"} / ${item.supports_vision ? "图像" : "文本"} / ${item.supports_tools ? "工具" : "无工具"}</td>
+                    <td>${formatModelCapabilitySummary(item)}</td>
                     <td>
                         <strong>${escapeHtml(item.price_multiplier ?? 1)}x</strong>
                         <div class="table-muted">输入 ${escapeHtml(formatPrice(item.input_price_per_1k))}</div>
@@ -3996,7 +4234,7 @@
                     <td>
                         <strong>${escapeHtml(item.model_name)}</strong>
                     </td>
-                    <td>${item.supports_stream ? "流式" : "非流式"} / ${item.supports_vision ? "图像" : "文本"} / ${item.supports_tools ? "工具" : "无工具"}</td>
+                    <td>${formatModelCapabilitySummary(item)}</td>
                     <td>${item.already_configured ? "已在当前配置中" : "可导入"}</td>
                 </tr>
             `).join("") : '<tr><td colspan="4"><div class="empty-state">当前没有可导入的上游模型。</div></td></tr>';
@@ -4049,7 +4287,7 @@
                         <strong>${escapeHtml(item.model_name)}</strong>
                         ${item.display_name ? `<div class="table-muted">${escapeHtml(item.display_name)}</div>` : ""}
                     </td>
-                    <td>${item.supports_stream ? "流式" : "非流式"} / ${item.supports_vision ? "图像" : "文本"} / ${item.supports_tools ? "工具" : "无工具"}</td>
+                    <td>${formatModelCapabilitySummary(item)}</td>
                     <td>
                         <span>输入 ${escapeHtml(formatPrice(item.input_price_per_1k))}</span>
                         <div class="table-muted">输出 ${escapeHtml(formatPrice(item.output_price_per_1k))} · 缓存 ${escapeHtml(formatPrice(item.cache_price_per_1k))}</div>
@@ -4377,7 +4615,7 @@
                         <strong>${escapeHtml(model.model_name)}</strong>
                     </td>
                     <td class="provider-model-status-cell">${renderStatusWithErrorHint(model.health_status, model.last_error)}</td>
-                    <td>${model.supports_stream ? "流式" : "非流式"} / ${model.supports_vision ? "图像" : "文本"} / ${model.supports_tools ? "工具" : "无工具"}</td>
+                    <td>${formatModelCapabilitySummary(model)}</td>
                     <td>
                         <input class="field-input" type="number" min="0.0001" step="0.0001" value="${model.price_multiplier ?? 1}" placeholder="渠道倍率" data-model-field="price_multiplier" data-provider-id="${provider.id}" data-model-id="${model.id}">
                         <div class="table-muted">输入 ${escapeHtml(formatPrice(model.input_price_per_1k))}</div>
@@ -4815,7 +5053,7 @@
             if (item.supports_chat_completions) endpointLabels.push("Chat");
             if (item.supports_responses) endpointLabels.push("Responses");
             return `
-                <div>${item.supports_stream ? "流式" : "非流式"} / ${item.supports_vision ? "图像" : "文本"} / ${item.supports_tools ? "工具" : "无工具"}</div>
+                <div>${formatModelCapabilitySummary(item)}</div>
                 <div class="table-muted">${escapeHtml(endpointLabels.join("、") || "未配置原生端点")}</div>
             `;
         }
@@ -5250,6 +5488,7 @@
         const routeModeSelect = document.getElementById("setting-route-mode");
         const manualAllowFallbackInput = document.getElementById("setting-manual-allow-fallback");
         const healthCheckIntervalInput = document.getElementById("setting-health-check-interval-sec");
+        initSettingsTooltipLayer();
         const [providers, settings] = await Promise.all([api.get("/api/providers"), api.get("/api/settings")]);
 
         providerSelect.innerHTML = '<option value="">未设置</option>' + providers.map((provider) => `
@@ -5423,6 +5662,10 @@
             pageSize: 10,
         };
 
+        function isPlaygroundImageGenerationMode() {
+            return (imageModeSelect.value || "none") === "generate";
+        }
+
         function renderBatchResultsView() {
             if (!batchResultsState.results.length) {
                 setBatchPlaceholder("等待批量测试...");
@@ -5438,6 +5681,12 @@
             const constraintText = getImageUploadConstraintText();
             imageUrlField.classList.toggle("hidden", mode !== "url");
             imageFileField.classList.toggle("hidden", mode !== "upload");
+            imageDetailSelect.disabled = mode === "generate";
+            if (mode === "generate") {
+                endpointSelect.value = "responses";
+                imageNote.textContent = "将通过 Responses API 的 image_generation 工具发起生图请求，使用上面的用户消息作为提示词，并在结果区直接显示生成图片。";
+                return;
+            }
             if (mode === "url") {
                 imageNote.textContent = `将按标准图片链接请求发送，适合公网可访问图片地址。${detailText} ${constraintText}`;
                 return;
@@ -5573,15 +5822,16 @@
                 ? providerOptions.find((provider) => provider.id === selectedProviderId)
                 : null;
             const requireStream = document.getElementById("playground-stream").checked;
-            const requireVision = (imageModeSelect.value || "none") !== "none";
+            const requireImageGeneration = isPlaygroundImageGenerationMode();
+            const requireVision = !requireImageGeneration && (imageModeSelect.value || "none") !== "none";
             const enabledModelNameSet = new Set(
                 modelCatalogOptions
                     .filter((model) => model.enabled && (model.enabled_provider_count || 0) > 0)
                     .map((model) => model.model_name)
             );
             const models = selectedProvider
-                ? collectProviderConfiguredModels(selectedProvider, { requireStream, requireVision, allowedModelNameSet: enabledModelNameSet })
-                : collectConfiguredModels(providerOptions, { requireStream, requireVision, allowedModelNameSet: enabledModelNameSet });
+                ? collectProviderConfiguredModels(selectedProvider, { requireStream, requireVision, requireImageGeneration, allowedModelNameSet: enabledModelNameSet })
+                : collectConfiguredModels(providerOptions, { requireStream, requireVision, requireImageGeneration, allowedModelNameSet: enabledModelNameSet });
             const previousModel = modelSelect.value;
             modelSelect.innerHTML = '<option value="">请先选择一个已配置模型</option>' + models.map((modelName) => (
                 `<option value="${escapeHtml(modelName)}">${escapeHtml(modelName)}</option>`
@@ -5594,6 +5844,7 @@
             if (!models.length) {
                 const requirementLabels = [];
                 if (requireVision) requirementLabels.push("图片");
+                if (requireImageGeneration) requirementLabels.push("图片生成");
                 if (requireStream) requirementLabels.push("stream");
                 const requirementText = requirementLabels.length ? `（需支持 ${requirementLabels.join(" + ")}）` : "";
                 const message = selectedProvider
@@ -5653,16 +5904,25 @@
                 model: modelSelect.value,
                 stream: document.getElementById("playground-stream").checked,
             };
-            const endpointValue = endpointSelect.value === "responses" ? "responses" : "chat-completions";
+            const imageGenerationMode = isPlaygroundImageGenerationMode();
+            let endpointValue = endpointSelect.value === "responses" ? "responses" : "chat-completions";
+            if (imageGenerationMode) {
+                endpointValue = "responses";
+                endpointSelect.value = "responses";
+            }
             const endpointLabel = endpointValue === "responses" ? "responses" : "chat/completions";
             try {
                 const messageValue = document.getElementById("playground-message").value.trim();
-                const imageInput = await resolvePlaygroundImageInput();
+                const imageInput = imageGenerationMode ? null : await resolvePlaygroundImageInput();
                 if (!messageValue && !imageInput) {
-                    showToast("请至少填写文本或附带一张图片", "error");
+                    showToast(imageGenerationMode ? "请先填写生图提示词" : "请至少填写文本或附带一张图片", "error");
                     return;
                 }
-                if (endpointValue === "responses") {
+                if (imageGenerationMode) {
+                    payload.input = [{ role: "user", content: [{ type: "input_text", text: messageValue }] }];
+                    payload.tools = [{ type: "image_generation" }];
+                    payload.tool_choice = { type: "image_generation" };
+                } else if (endpointValue === "responses") {
                     payload.input = imageInput
                         ? [{ role: "user", content: buildResponsesInputContent(messageValue, imageInput) }]
                         : messageValue;
@@ -6865,8 +7125,13 @@
         const mode = imageModeSelect.value || "none";
         const detailText = describeImageDetailMode(imageDetailSelect.value || "auto");
         const constraintText = getImageUploadConstraintText();
+        imageDetailSelect.disabled = mode === "generate";
         imageUrlField.classList.toggle("hidden", mode !== "url");
         imageFileField.classList.toggle("hidden", mode !== "upload");
+        if (mode === "generate") {
+            imageNote.textContent = "将额外补测 Responses 原生生成图片链路，并校验返回中是否真的包含生成图片结果。该模式不使用图片细节参数。";
+            return;
+        }
         if (mode === "url") {
             imageNote.textContent = `将额外补测图片链路，并把当前图片链接按标准视觉请求发送到内部自检接口。${detailText} ${constraintText}`;
             return;
@@ -6882,6 +7147,42 @@
         imageNote.textContent = `当前默认只测试文本链路。若切换为图片链接或本地图片，将追加图片场景自检。${detailText} ${constraintText}`;
     }
 
+    function getUserSelfTestImageMode(summary = {}) {
+        if (typeof summary.image_mode === "string" && summary.image_mode.trim()) {
+            return summary.image_mode.trim();
+        }
+        if (summary.image_generation_enabled) {
+            return "generate";
+        }
+        if (summary.image_enabled) {
+            return "upload";
+        }
+        return "none";
+    }
+
+    function getUserSelfTestImageModeLabel(mode) {
+        switch (mode) {
+            case "url":
+                return "图片链接";
+            case "upload":
+                return "本地图片";
+            case "generate":
+                return "生成图片";
+            default:
+                return "仅文本";
+        }
+    }
+
+    function getUserSelfTestScenarioTypeLabel(item = {}) {
+        if (item.has_image_generation) {
+            return "生成图";
+        }
+        if (item.has_image) {
+            return "图片";
+        }
+        return "文本";
+    }
+
     function summarizeUserSelfTestScenarios(data = {}) {
         const summary = data.summary || {};
         const scenarios = Array.isArray(data.scenarios) ? data.scenarios : [];
@@ -6890,6 +7191,8 @@
             success: Number(summary.success_scenarios || scenarios.filter((item) => item?.success).length || 0),
             failed: Number(summary.failed_scenarios || scenarios.filter((item) => item && item.success === false).length || 0),
             imageEnabled: Boolean(summary.image_enabled),
+            imageGenerationEnabled: Boolean(summary.image_generation_enabled),
+            imageMode: getUserSelfTestImageMode(summary),
         };
     }
 
@@ -6903,7 +7206,7 @@
             <tr>
                 <td>${escapeHtml(item.scenario_label || "-")}</td>
                 <td>${escapeHtml(item.endpoint_path || "-")}</td>
-                <td>${item.has_image ? "图片" : "文本"} / ${item.stream ? "流式" : "非流式"}</td>
+                <td>${getUserSelfTestScenarioTypeLabel(item)} / ${item.stream ? "流式" : "非流式"}</td>
                 <td>${item.success ? "成功" : "失败"}</td>
                 <td>${escapeHtml(item.provider_name || "-")}</td>
                 <td>${item.latency_ms ?? "-"}</td>
@@ -6922,7 +7225,7 @@
             `- 生成时间：${formatDate(new Date().toISOString())}`,
             `- API Key：${options.apiKeyLabel || "-"}`,
             `- 模型：${options.modelName || data.model_name || "-"}`,
-            `- 图片链路：${summary.imageEnabled ? "已启用" : "未启用"}`,
+            `- 自检模式：${getUserSelfTestImageModeLabel(summary.imageMode)}`,
             `- 场景总数：${summary.total}`,
             `- 成功场景：${summary.success}`,
             `- 失败场景：${summary.failed}`,
@@ -6934,12 +7237,15 @@
         scenarios.forEach((item, index) => {
             lines.push(`### ${index + 1}. ${item.scenario_label || item.endpoint_path || "未命名场景"}`);
             lines.push(`- 端点：${item.endpoint_path || "-"}`);
-            lines.push(`- 类型：${item.has_image ? "图片" : "文本"} / ${item.stream ? "流式" : "非流式"}`);
+            lines.push(`- 类型：${getUserSelfTestScenarioTypeLabel(item)} / ${item.stream ? "流式" : "非流式"}`);
             lines.push(`- 状态：${item.success ? "成功" : "失败"}`);
             lines.push(`- 渠道：${item.provider_name || "-"}`);
             lines.push(`- 状态码：${item.status_code ?? "-"}`);
             lines.push(`- 耗时：${item.latency_ms ?? "-"} ms`);
             lines.push(`- 摘要：${item.message || "-"}`);
+            if (typeof item.generated_images_count === "number") {
+                lines.push(`- 生成图片数：${item.generated_images_count}`);
+            }
             if (item.output_text) {
                 lines.push("- 输出预览：");
                 lines.push("```text");
@@ -7067,7 +7373,7 @@
                         <div><span>状态</span><strong>失败</strong></div>
                         <div><span>模型</span><strong>${escapeHtml(data.model_name || modelSelect.value)}</strong></div>
                         <div><span>成功 / 失败</span><strong>${summaryValue.success} / ${summaryValue.failed}</strong></div>
-                        <div><span>代表渠道</span><strong>${escapeHtml(data.provider_name || "-")}</strong></div>
+                        <div><span>图片链路</span><strong>${escapeHtml(getUserSelfTestImageModeLabel(summaryValue.imageMode))}</strong></div>
                     `;
                     renderResolution(failure, resolution.failure);
                     renderResolution(fixes, resolution.fixes);
@@ -7085,7 +7391,7 @@
                     <div><span>状态</span><strong>${data.success ? "成功" : "失败"}</strong></div>
                     <div><span>模型</span><strong>${escapeHtml(data.model_name || modelSelect.value)}</strong></div>
                     <div><span>场景通过</span><strong>${summaryValue.success} / ${summaryValue.total}</strong></div>
-                    <div><span>图片链路</span><strong>${summaryValue.imageEnabled ? "已覆盖" : "未覆盖"}</strong></div>
+                    <div><span>图片链路</span><strong>${escapeHtml(getUserSelfTestImageModeLabel(summaryValue.imageMode))}</strong></div>
                 `;
                 renderResolution(failure, resolution.failure);
                 renderResolution(fixes, resolution.fixes);

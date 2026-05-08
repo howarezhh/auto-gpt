@@ -4,7 +4,7 @@
     <div>
         <div class="eyebrow">路由设置</div>
         <h2>路由设置</h2>
-        <p>统一配置默认路由模式、重试策略、熔断阈值与自动健康检查参数。</p>
+        <p>统一配置默认路由模式、重试策略、熔断阈值，以及自动健康检查与恢复探测参数。</p>
     </div>
 </section>
 
@@ -37,6 +37,65 @@
             <span>全局最大重试次数</span>
             <input class="field-input" id="setting-global-max-retries" type="number">
         </label>
+        <div class="form-span-2 settings-group" aria-labelledby="settings-health-group-title">
+            <div class="settings-group-head">
+                <div class="panel-kicker">健康治理</div>
+                <h4 id="settings-health-group-title">自动健康检查</h4>
+            </div>
+            <div class="form-grid settings-subgrid settings-health-grid">
+                <label class="settings-switch-card settings-health-switch-card">
+                    <span class="settings-switch-copy">
+                        <span class="settings-switch-title-row">
+                            <strong>启用自动健康检查</strong>
+                            <span class="settings-help">
+                                <button class="settings-help-btn" type="button" aria-label="查看自动健康检查说明" data-settings-tooltip-trigger="true">
+                                    <i class="bi bi-question-circle" aria-hidden="true"></i>
+                                </button>
+                                <div class="settings-tooltip-content hidden">
+                                    <div class="settings-tooltip-title">自动健康检查说明</div>
+                                    <div class="settings-tooltip-copy">开启后，后台定时任务会按设定间隔主动巡检已启用中转站及其模型可用性，并同步更新健康状态、最近检查时间与相关健康检查日志。默认关闭，建议仅在你需要后台持续巡检并接受额外上游探测流量时启用。</div>
+                                </div>
+                            </span>
+                        </span>
+                        <small>默认关闭；需要后台持续巡检时再开启。</small>
+                    </span>
+                    <span class="settings-switch-control">
+                        <input id="setting-auto-health-check" type="checkbox">
+                        <span class="settings-switch-slider"></span>
+                    </span>
+                </label>
+                <label>
+                    <span class="settings-field-label">
+                        <span>自动健康检查间隔（s）</span>
+                        <span class="settings-help">
+                            <button class="settings-help-btn" type="button" aria-label="查看自动健康检查间隔说明" data-settings-tooltip-trigger="true">
+                                <i class="bi bi-question-circle" aria-hidden="true"></i>
+                            </button>
+                            <div class="settings-tooltip-content hidden">
+                                <div class="settings-tooltip-title">自动健康检查间隔说明</div>
+                                <div class="settings-tooltip-copy">表示后台两轮自动巡检之间的最小间隔。当前系统下限为 300 s，用于避免高频探测上游接口、放大失败噪声或产生不必要的 token 与请求消耗。值越小，状态更新越及时；值越大，对上游更温和。</div>
+                            </div>
+                        </span>
+                    </span>
+                    <input class="field-input" id="setting-health-check-interval-sec" type="number" min="300">
+                </label>
+                <label>
+                    <span class="settings-field-label">
+                        <span>恢复探测间隔（s）</span>
+                        <span class="settings-help">
+                            <button class="settings-help-btn" type="button" aria-label="查看恢复探测间隔说明" data-settings-tooltip-trigger="true">
+                                <i class="bi bi-question-circle" aria-hidden="true"></i>
+                            </button>
+                            <div class="settings-tooltip-content hidden">
+                                <div class="settings-tooltip-title">恢复探测间隔说明</div>
+                                <div class="settings-tooltip-copy">当中转站或模型因失败被标记为不可用后，系统会按这里的间隔安排恢复性探测，判断它是否可以重新回到候选路由。这个值越短，恢复更积极；越长则更保守，适合波动较大的上游。</div>
+                            </div>
+                        </span>
+                    </span>
+                    <input class="field-input" id="setting-recovery-probe-interval-sec" type="number">
+                </label>
+            </div>
+        </div>
         <div class="form-span-2 settings-group" aria-labelledby="settings-token-group-title">
             <div class="settings-group-head">
                 <div class="panel-kicker">tok</div>
@@ -94,14 +153,6 @@
             <input class="field-input" id="setting-circuit-breaker-threshold" type="number">
         </label>
         <label>
-            <span>健康检查间隔（s）</span>
-            <input class="field-input" id="setting-health-check-interval-sec" type="number" min="300">
-        </label>
-        <label>
-            <span>恢复探测间隔（s）</span>
-            <input class="field-input" id="setting-recovery-probe-interval-sec" type="number">
-        </label>
-        <label>
             <span>请求日志保留（d）</span>
             <input class="field-input" id="setting-request-log-retention-days" type="number" min="0">
         </label>
@@ -152,15 +203,6 @@
                 </span>
                 <span class="settings-switch-control">
                     <input id="setting-manual-allow-fallback" type="checkbox">
-                    <span class="settings-switch-slider"></span>
-                </span>
-            </label>
-            <label class="settings-switch-card">
-                <span class="settings-switch-copy">
-                    <strong>启用自动健康检查</strong>
-                </span>
-                <span class="settings-switch-control">
-                    <input id="setting-auto-health-check" type="checkbox">
                     <span class="settings-switch-slider"></span>
                 </span>
             </label>

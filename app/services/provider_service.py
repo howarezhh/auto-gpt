@@ -39,6 +39,7 @@ class ProviderService:
     QUALITY_WINDOW_MINUTES = 24 * 60
     VISION_MODEL_HINTS = ("gpt-4o", "gpt-4.1", "gpt-5")
     TOOL_CAPABLE_MODEL_HINTS = ("gpt-4o", "gpt-4.1", "gpt-5", "o3", "o4", "claude", "qwen", "deepseek", "glm")
+    IMAGE_GENERATION_MODEL_HINTS = ("gpt-4o", "gpt-4.1", "gpt-5")
     TRACE_TERMINAL_SUCCESS_RESULTS = {"success"}
     TRACE_TERMINAL_FAILURE_RESULTS = {
         "http_error",
@@ -55,13 +56,28 @@ class ProviderService:
         normalized = (model_name or "").strip().lower()
         supports_vision = any(prefix in normalized for prefix in ProviderService.VISION_MODEL_HINTS)
         supports_tools = any(prefix in normalized for prefix in ProviderService.TOOL_CAPABLE_MODEL_HINTS)
+        supports_image_generation = any(prefix in normalized for prefix in ProviderService.IMAGE_GENERATION_MODEL_HINTS)
         return {
             "supports_stream": True,
             "supports_vision": supports_vision,
             "supports_tools": supports_tools,
+            "supports_image_generation": supports_image_generation,
             "supports_chat_completions": True,
             "supports_responses": True,
         }
+
+    @staticmethod
+    def model_name_supports_image_generation(model_name: str) -> bool:
+        return ProviderService._infer_model_capabilities(model_name).get("supports_image_generation", False)
+
+    @staticmethod
+    def provider_model_supports_image_generation(provider_model: ProviderModel) -> bool:
+        inferred = ProviderService._infer_model_capabilities(provider_model.model_name)
+        return bool(
+            provider_model.supports_responses
+            and provider_model.supports_tools
+            and (provider_model.supports_vision or inferred.get("supports_image_generation", False))
+        )
 
     @staticmethod
     def _build_model_config_input_from_name(model_name: str) -> ProviderModelConfigInput:
@@ -565,6 +581,7 @@ class ProviderService:
             "supports_stream": provider_model.supports_stream,
             "supports_vision": provider_model.supports_vision,
             "supports_tools": provider_model.supports_tools,
+            "supports_image_generation": ProviderService.provider_model_supports_image_generation(provider_model),
             "supports_chat_completions": provider_model.supports_chat_completions,
             "supports_responses": provider_model.supports_responses,
             "context_window_tokens": provider_model.context_window_tokens,

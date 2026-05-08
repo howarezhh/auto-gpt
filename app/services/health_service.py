@@ -193,6 +193,72 @@ class HealthService:
         }
 
     @staticmethod
+    async def _probe_native_image_generation(provider: Provider, provider_model: ProviderModel) -> dict[str, Any]:
+        started = time.perf_counter()
+        endpoint_label = "image_generation"
+        if not ProviderService.provider_model_supports_image_generation(provider_model):
+            return {
+                "endpoint_path": "/responses",
+                "endpoint_label": endpoint_label,
+                "success": False,
+                "native_success": False,
+                "adapted_success": False,
+                "support_mode": "unsupported",
+                "support_label": "不支持 image_generation",
+                "latency_ms": 0,
+                "status_code": None,
+                "message": "模型未满足 Responses + Tools + 图片生成探测条件",
+                "trace": [],
+            }
+        setting = await ProxyService._get_setting_async()
+        payload = HealthService._build_responses_image_generation_probe_payload(provider_model)
+        try:
+            prepared = ProxyService._prepare_upstream_request(provider, endpoint_path="/responses", payload=payload)
+            response, _ = await ProxyService._send_prepared_json(
+                provider,
+                prepared=prepared,
+                headers={"Authorization": f"Bearer {provider.api_key}"},
+                requested_payload=payload,
+                setting=setting,
+            )
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            has_generated_image = HealthService._response_has_generated_image(response)
+            return {
+                "endpoint_path": "/responses",
+                "endpoint_label": endpoint_label,
+                "success": has_generated_image,
+                "native_success": has_generated_image,
+                "adapted_success": False,
+                "support_mode": "native" if has_generated_image else "unsupported",
+                "support_label": "原生支持 image_generation" if has_generated_image else "不支持 image_generation",
+                "latency_ms": latency_ms,
+                "status_code": 200,
+                "message": (
+                    ProxyService._extract_response_display_text(response, limit_bytes=160)
+                    or ("ok" if has_generated_image else "未返回图片生成结果")
+                ),
+                "trace": [],
+            }
+        except Exception as exc:
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            status_code = getattr(exc, "status_code", None)
+            detail = getattr(exc, "detail", None)
+            message = ProxyService._error_message_for_log(detail) if detail is not None else str(exc)
+            return {
+                "endpoint_path": "/responses",
+                "endpoint_label": endpoint_label,
+                "success": False,
+                "native_success": False,
+                "adapted_success": False,
+                "support_mode": "unsupported",
+                "support_label": "不支持 image_generation",
+                "latency_ms": latency_ms,
+                "status_code": status_code,
+                "message": message,
+                "trace": [],
+            }
+
+    @staticmethod
     async def check_all(
         db: Session,
         *,
@@ -376,6 +442,17 @@ class HealthService:
                     {
                         "key": "tools",
                         "probe": lambda model: HealthService._probe_native_tools(provider, model),
+                    }
+                ],
+            },
+            {
+                "key": "image_generation",
+                "label": "图片生成检查",
+                "targets": lambda model: ProviderService.provider_model_supports_image_generation(model),
+                "probes": [
+                    {
+                        "key": "image_generation",
+                        "probe": lambda model: HealthService._probe_native_image_generation(provider, model),
                     }
                 ],
             },
@@ -681,7 +758,7 @@ class HealthService:
                 setting=setting,
             )
             latency_ms = int((time.perf_counter() - started) * 1000)
-            output_text = ProxyService._extract_response_text(response, limit_bytes=160)
+            output_text = ProxyService._extract_response_display_text(response, limit_bytes=160)
             adapted = any(item.get("result") == "endpoint_fallback_success" for item in fallback_trace)
             return {
                 "endpoint_path": endpoint_path,
@@ -871,6 +948,10 @@ class HealthService:
         return False
 
     @staticmethod
+    def _response_has_generated_image(response: dict[str, Any]) -> bool:
+        return bool(ProxyService._extract_generated_images(response, limit_images=1))
+
+    @staticmethod
     def _build_responses_probe_payload(provider_model: ProviderModel, *, vision_probe: bool) -> dict[str, Any]:
         input_value: Any = "ping"
         if vision_probe and provider_model.supports_vision:
@@ -887,6 +968,25 @@ class HealthService:
             "model": provider_model.model_name,
             "input": input_value,
             "max_output_tokens": 16,
+        }
+
+    @staticmethod
+    def _build_responses_image_generation_probe_payload(provider_model: ProviderModel) -> dict[str, Any]:
+        return {
+            "model": provider_model.model_name,
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "请生成一张最简单的链路检测图片，不要输出额外文字。",
+                        }
+                    ],
+                }
+            ],
+            "tools": [{"type": "image_generation"}],
+            "tool_choice": {"type": "image_generation"},
         }
 
     @staticmethod

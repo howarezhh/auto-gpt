@@ -73,6 +73,7 @@ class RouterService:
         require_vision: bool = False,
         require_stream: bool = False,
         require_tools: bool = False,
+        require_image_generation: bool = False,
         require_chat_completions: bool = False,
         require_responses: bool = False,
     ) -> list[RouteCandidate]:
@@ -82,6 +83,7 @@ class RouterService:
             require_vision=require_vision,
             require_stream=require_stream,
             require_tools=require_tools,
+            require_image_generation=require_image_generation,
             require_chat_completions=require_chat_completions,
             require_responses=require_responses,
         )
@@ -109,6 +111,8 @@ class RouterService:
                 if require_vision and not provider_model.supports_vision:
                     continue
                 if require_tools and not provider_model.supports_tools:
+                    continue
+                if require_image_generation and not ProviderService.provider_model_supports_image_generation(provider_model):
                     continue
                 if require_chat_completions and not provider_model.supports_chat_completions:
                     continue
@@ -162,6 +166,7 @@ class RouterService:
         require_vision: bool = False,
         require_stream: bool = False,
         require_tools: bool = False,
+        require_image_generation: bool = False,
         require_chat_completions: bool = False,
         require_responses: bool = False,
     ) -> list[RouteCandidate]:
@@ -172,6 +177,7 @@ class RouterService:
             require_vision=require_vision,
             require_stream=require_stream,
             require_tools=require_tools,
+            require_image_generation=require_image_generation,
             require_chat_completions=require_chat_completions,
             require_responses=require_responses,
         )
@@ -196,6 +202,7 @@ class RouterService:
         require_vision: bool = False,
         require_stream: bool = False,
         require_tools: bool = False,
+        require_image_generation: bool = False,
         require_chat_completions: bool = False,
         require_responses: bool = False,
     ) -> list[RouteCandidate]:
@@ -206,6 +213,7 @@ class RouterService:
             require_vision=require_vision,
             require_stream=require_stream,
             require_tools=require_tools,
+            require_image_generation=require_image_generation,
             require_chat_completions=require_chat_completions,
             require_responses=require_responses,
         )
@@ -229,6 +237,7 @@ class RouterService:
         require_vision: bool = False,
         require_stream: bool = False,
         require_tools: bool = False,
+        require_image_generation: bool = False,
         require_chat_completions: bool = False,
         require_responses: bool = False,
         is_stream: bool = False,
@@ -241,6 +250,7 @@ class RouterService:
             require_vision=require_vision,
             require_stream=require_stream,
             require_tools=require_tools,
+            require_image_generation=require_image_generation,
             require_chat_completions=require_chat_completions,
             require_responses=require_responses,
             is_stream=is_stream,
@@ -254,6 +264,7 @@ class RouterService:
         require_vision: bool = False,
         require_stream: bool = False,
         require_tools: bool = False,
+        require_image_generation: bool = False,
         require_chat_completions: bool = False,
         require_responses: bool = False,
     ) -> list[RouteCandidate]:
@@ -266,6 +277,7 @@ class RouterService:
                 require_vision=require_vision,
                 require_stream=require_stream,
                 require_tools=require_tools,
+                require_image_generation=require_image_generation,
                 require_chat_completions=require_chat_completions,
                 require_responses=require_responses,
             )
@@ -299,6 +311,7 @@ class RouterService:
         require_vision: bool = False,
         require_stream: bool = False,
         require_tools: bool = False,
+        require_image_generation: bool = False,
         require_chat_completions: bool = False,
         require_responses: bool = False,
         is_stream: bool = False,
@@ -313,6 +326,7 @@ class RouterService:
                 require_vision=require_vision,
                 require_stream=require_stream,
                 require_tools=require_tools,
+                require_image_generation=require_image_generation,
                 require_chat_completions=require_chat_completions,
                 require_responses=require_responses,
                 is_stream=is_stream,
@@ -330,6 +344,7 @@ class RouterService:
         require_vision: bool = False,
         require_stream: bool = False,
         require_tools: bool = False,
+        require_image_generation: bool = False,
         require_chat_completions: bool = False,
         require_responses: bool = False,
         is_stream: bool = False,
@@ -345,6 +360,7 @@ class RouterService:
             "require_stream": require_stream,
             "require_vision": require_vision,
             "require_tools": require_tools,
+            "require_image_generation": require_image_generation,
             "require_chat_completions": require_chat_completions,
             "require_responses": require_responses,
             "is_stream_request": is_stream,
@@ -407,6 +423,9 @@ class RouterService:
                     continue
                 if require_tools and not provider_model.supports_tools:
                     RouterService._record_diagnostic_reason(diagnostics, "tools_not_supported", provider=provider, provider_model=provider_model)
+                    continue
+                if require_image_generation and not ProviderService.provider_model_supports_image_generation(provider_model):
+                    RouterService._record_diagnostic_reason(diagnostics, "image_generation_not_supported", provider=provider, provider_model=provider_model)
                     continue
                 if require_chat_completions and not provider_model.supports_chat_completions:
                     RouterService._record_diagnostic_reason(diagnostics, "chat_not_supported", provider=provider, provider_model=provider_model)
@@ -637,6 +656,7 @@ class RouterService:
             "stream_not_supported": "模型不支持流式",
             "vision_not_supported": "模型不支持图像",
             "tools_not_supported": "模型不支持工具调用",
+            "image_generation_not_supported": "模型不支持图片生成工具",
             "chat_not_supported": "模型不支持 chat/completions",
             "responses_not_supported": "模型不支持 responses",
             "model_circuit_open": "模型已熔断",
@@ -665,6 +685,7 @@ class RouterService:
         require_vision: bool,
         require_stream: bool,
         require_tools: bool,
+        require_image_generation: bool,
         require_chat_completions: bool,
         require_responses: bool,
     ) -> str:
@@ -674,6 +695,7 @@ class RouterService:
             "vision" if require_vision else "text",
             "stream" if require_stream else "json",
             "tools" if require_tools else "no-tools",
+            "imagegen" if require_image_generation else "no-imagegen",
             "chat" if require_chat_completions else "any-chat",
             "responses" if require_responses else "any-responses",
         ]
