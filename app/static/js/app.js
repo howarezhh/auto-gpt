@@ -69,6 +69,7 @@
     const API_KEY_RAW_MIN_LENGTH = 24;
     const API_KEY_RAW_MAX_LENGTH = 128;
     const API_KEY_RAW_PATTERN = /^[A-Za-z0-9\-_]+$/;
+    const IMAGE_GENERATION_TOOL_MODEL = "gpt-image-2";
 
     const api = {
         get: async (url) => parseResponse(await fetch(url, { cache: "no-store", headers: { "Cache-Control": "no-cache" } })),
@@ -5978,7 +5979,7 @@
                 }
                 if (imageGenerationMode) {
                     payload.input = [{ role: "user", content: [{ type: "input_text", text: messageValue }] }];
-                    payload.tools = [{ type: "image_generation" }];
+                    payload.tools = [{ type: "image_generation", model: IMAGE_GENERATION_TOOL_MODEL, action: "generate" }];
                     payload.tool_choice = { type: "image_generation" };
                 } else if (endpointValue === "responses") {
                     payload.input = imageInput

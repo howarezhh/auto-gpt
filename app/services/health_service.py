@@ -985,7 +985,13 @@ class HealthService:
                     ],
                 }
             ],
-            "tools": [{"type": "image_generation"}],
+            "tools": [
+                {
+                    "type": "image_generation",
+                    "model": ProxyService.LEGACY_IMAGE_DEFAULT_TOOL_MODEL,
+                    "action": "generate",
+                }
+            ],
             "tool_choice": {"type": "image_generation"},
         }
 

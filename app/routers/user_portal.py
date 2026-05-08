@@ -342,7 +342,13 @@ async def _run_user_self_test_probe(
         payload["input"] = _build_self_test_responses_input(prompt_text, image_input)
         payload["max_output_tokens"] = 64 if has_image or has_image_generation else 16
         if has_image_generation:
-            payload["tools"] = [{"type": "image_generation"}]
+            payload["tools"] = [
+                {
+                    "type": "image_generation",
+                    "model": ProxyService.LEGACY_IMAGE_DEFAULT_TOOL_MODEL,
+                    "action": "generate",
+                }
+            ]
             payload["tool_choice"] = {"type": "image_generation"}
         log_type = "responses"
         endpoint_label = "/v1/responses"
