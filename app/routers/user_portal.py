@@ -4,6 +4,7 @@ import base64
 from collections.abc import AsyncIterator
 from datetime import datetime
 from math import ceil
+from typing import Any
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
@@ -267,10 +268,7 @@ async def _consume_self_test_stream(stream: AsyncIterator[bytes]) -> dict:
                     continue
                 parsed = safeJsonParse(data)
                 if len(event_preview) < 20:
-                    if isinstance(parsed, dict):
-                        event_preview.append(ProxyService._sanitize_for_logging(parsed, mask_sensitive=True))
-                    else:
-                        event_preview.append(data)
+                    event_preview.append(_build_self_test_safe_preview(parsed if parsed is not None else data))
                 if isinstance(parsed, dict):
                     text = ProxyService._extract_response_display_text(parsed, limit_bytes=600)
                     if text and (not output_parts or output_parts[-1] != text):
@@ -286,6 +284,29 @@ async def _consume_self_test_stream(stream: AsyncIterator[bytes]) -> dict:
         "stream_event_preview": event_preview,
         "generated_images": generated_images,
     }
+
+
+def _build_self_test_safe_preview(value: Any) -> Any:
+    if isinstance(value, str):
+        if len(value) <= 240:
+            return value
+        return f"{value[:240]}...[truncated]"
+    if not isinstance(value, dict):
+        return value
+    sanitized = ProxyService._sanitize_for_logging(value, mask_sensitive=True)
+    generated_images = ProxyService._extract_generated_images(value, limit_images=8)
+    if generated_images and isinstance(sanitized, dict):
+        sanitized["_generated_image_summary"] = {
+            "image_count": len(generated_images),
+            "mime_types": sorted(
+                {
+                    str(item.get("mime_type") or "image/png")
+                    for item in generated_images
+                    if isinstance(item, dict)
+                }
+            ),
+        }
+    return sanitized
 
 
 def _self_test_provider_name_from_trace(trace) -> str | None:
@@ -407,7 +428,7 @@ async def _run_user_self_test_probe(
             "status_code": status_code,
             "latency_ms": latency_ms,
             "output_text": ProxyService._extract_response_display_text(response, limit_bytes=600),
-            "response_preview": ProxyService._sanitize_for_logging(response, mask_sensitive=True),
+            "response_preview": _build_self_test_safe_preview(response),
             "generated_images_count": generated_images_count,
             "trace": trace,
             "message": message,
@@ -1213,9 +1234,14 @@ async def run_user_self_test(
                     "total_scenarios": len(scenarios),
                     "success_scenarios": success_count,
                     "failed_scenarios": failed_count,
-                    "image_enabled": image_input is not None,
+                    "image_enabled": image_input is not None or normalized_image_mode == "generate",
                     "image_generation_enabled": normalized_image_mode == "generate",
                     "image_mode": normalized_image_mode,
+                    "image_mode_label": (
+                        "图片生成"
+                        if normalized_image_mode == "generate"
+                        else ("图片理解" if image_input is not None else "仅文本")
+                    ),
                 },
                 "image_input": image_input_summary,
                 "scenarios": scenarios,

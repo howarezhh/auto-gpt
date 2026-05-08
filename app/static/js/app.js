@@ -59,6 +59,12 @@
         balance_exhausted: "余额耗尽",
         unbound: "未绑定渠道",
     };
+    const ENDPOINT_PROBE_LABELS = {
+        "chat/completions": "Chat 调用检查",
+        responses: "Responses 调用检查",
+        tools: "工具调用检查",
+        image_generation: "图片生成检查",
+    };
     const API_KEY_RAW_PREFIX = "sk-aotu-";
     const API_KEY_RAW_MIN_LENGTH = 24;
     const API_KEY_RAW_MAX_LENGTH = 128;
@@ -542,16 +548,30 @@
         }
         return items.map((item) => `
             <div class="playground-info-row">
-                <div class="playground-info-label">${escapeHtml(item.endpoint_label || item.endpoint_path || "-")}</div>
+                <div class="playground-info-label">${escapeHtml(formatEndpointProbeLabel(item.endpoint_label || item.endpoint_path || "-"))}</div>
                 <div class="playground-info-value">
                     ${item.success ? '<span class="playground-status-success">成功</span>' : '<span class="playground-status-danger">失败</span>'}
-                    · ${escapeHtml(item.support_label || formatEndpointSupportMode(item.support_mode))}
+                    · ${escapeHtml(formatEndpointProbeSupportLabel(item.support_label || formatEndpointSupportMode(item.support_mode)))}
                     · 状态码 ${escapeHtml(String(item.status_code ?? "-"))}
                     · 耗时 ${escapeHtml(String(item.latency_ms ?? "-"))} ms
                     · ${escapeHtml(item.message || "-")}
                 </div>
             </div>
         `).join("");
+    }
+
+    function formatEndpointProbeLabel(value) {
+        const normalized = String(value || "").trim();
+        if (!normalized) return "-";
+        return ENDPOINT_PROBE_LABELS[normalized] || normalized;
+    }
+
+    function formatEndpointProbeSupportLabel(value) {
+        const normalized = String(value || "").trim();
+        if (!normalized) return "支持状态未知";
+        return normalized
+            .replaceAll("image_generation", "图片生成（image_generation）")
+            .replaceAll("tools", "工具调用");
     }
 
     function formatEndpointSupportMode(mode) {
@@ -905,8 +925,8 @@
     function formatModelCapabilitySummary(modelConfig) {
         const parts = [
             modelConfig?.supports_stream ? "流式" : "非流式",
-            modelConfig?.supports_vision ? "图像" : "文本",
-            modelConfig?.supports_tools ? "工具" : "无工具",
+            modelConfig?.supports_vision ? "图像理解" : "仅文本",
+            modelConfig?.supports_tools ? "工具调用" : "无工具",
         ];
         if (supportsImageGeneration(modelConfig)) {
             parts.push("图片生成");
@@ -1228,11 +1248,43 @@
         return `${formatNumber(Number(value))}${suffix}`;
     }
 
+    function formatRequestModalityLabel(value) {
+        switch ((value || "").toLowerCase()) {
+            case "text":
+                return "文本";
+            case "vision":
+                return "识图";
+            case "image_generation":
+                return "生图";
+            case "image_edit":
+                return "图片编辑";
+            case "mixed":
+                return "混合";
+            default:
+                return value || "";
+        }
+    }
+
+    function buildLogModeSummary(log = {}) {
+        const parts = [];
+        const modalityLabel = formatRequestModalityLabel(log.request_modality);
+        if (modalityLabel) parts.push(modalityLabel);
+        if (typeof log.generated_images_count === "number" && log.generated_images_count > 0) {
+            parts.push(`生成 ${log.generated_images_count} 张`);
+        }
+        if (log.upstream_usage_missing === true) {
+            parts.push("上游未返回 usage");
+        }
+        return parts.join(" · ");
+    }
+
     function renderLogResultCell(log = {}) {
+        const modeSummary = buildLogModeSummary(log);
         return `
             <div class="log-result-cell">
                 ${renderStatusWithErrorHint(log.success ? "healthy" : "unhealthy", buildLogExceptionReason(log))}
                 <div class="table-muted">HTTP ${log.status_code ?? "-"} · 尝试 ${formatLogCellMetricValue(log.attempt_count)}</div>
+                ${modeSummary ? `<div class="table-muted">${escapeHtml(modeSummary)}</div>` : ""}
             </div>
         `;
     }
@@ -1744,12 +1796,13 @@
         const healthyCount = modelConfigs.filter((item) => item.health_status === "healthy").length;
         const streamCount = modelConfigs.filter((item) => item.supports_stream).length;
         const visionCount = modelConfigs.filter((item) => item.supports_vision).length;
+        const imageGenerationCount = modelConfigs.filter((item) => supportsImageGeneration(item)).length;
         const hiddenCount = Math.max(modelConfigs.length - visibleModels.length, 0);
         return `
             <div class="provider-model-summary">
                 <div class="provider-model-summary-head">
                     <strong>${formatNumber(modelConfigs.length)} 个模型</strong>
-                    <span>${formatNumber(enabledCount)} 启用 · ${formatNumber(healthyCount)} 状态正常 · ${formatNumber(streamCount)} 流式 · ${formatNumber(visionCount)} 图像</span>
+                    <span>${formatNumber(enabledCount)} 启用 · ${formatNumber(healthyCount)} 状态正常 · ${formatNumber(streamCount)} 流式 · ${formatNumber(visionCount)} 识图 · ${formatNumber(imageGenerationCount)} 生图</span>
                 </div>
                 <div class="provider-model-preview-list">
                     ${visibleModels.map((item) => `
@@ -1930,7 +1983,10 @@
             return "-";
         }
         return endpointResults
-            .map((item) => `${item.support_label || `${item.endpoint_label || item.endpoint_path || "-"}${item.success ? "成功" : "失败"}`}`)
+            .map((item) => {
+                const rawLabel = item.support_label || `${item.endpoint_label || item.endpoint_path || "-"}${item.success ? "成功" : "失败"}`;
+                return formatEndpointProbeSupportLabel(rawLabel);
+            })
             .join(" / ");
     }
 
@@ -4043,6 +4099,7 @@
             document.querySelector('[data-provider-stat="model_count"]').textContent = summary.modelCount;
             document.querySelector('[data-provider-stat="stream_model_count"]').textContent = summary.streamModelCount;
             document.querySelector('[data-provider-stat="vision_model_count"]').textContent = summary.visionModelCount;
+            document.querySelector('[data-provider-stat="image_generation_model_count"]').textContent = summary.imageGenerationModelCount;
             document.querySelector('[data-provider-stat="priced_model_count"]').textContent = summary.pricedModelCount;
             document.querySelector('[data-provider-stat="avg_stability_score"]').textContent = formatScore(summary.avgStabilityScore);
 
@@ -4056,7 +4113,7 @@
                     <div class="cockpit-health-bar"><span style="width:${healthyRatio}%"></span></div>
                     <div class="cockpit-aside-meta">
                         <span>挂载 ${summary.modelCount}</span>
-                        <span>支持流式 ${summary.streamModelCount}</span>
+                        <span>生图 ${summary.imageGenerationModelCount}</span>
                     </div>
                 `;
             }
@@ -4115,6 +4172,7 @@
             const healthyCount = modelConfigs.filter((item) => item.health_status === "healthy").length;
             const streamCount = modelConfigs.filter((item) => item.supports_stream).length;
             const visionCount = modelConfigs.filter((item) => item.supports_vision).length;
+            const imageGenerationCount = modelConfigs.filter((item) => supportsImageGeneration(item)).length;
             const rows = modelConfigs.map((item) => `
                 <tr>
                     <td class="provider-model-name-cell">
@@ -4155,7 +4213,7 @@
                         <div><span>模型总数</span><strong>${formatNumber(modelConfigs.length)}</strong></div>
                         <div><span>已启用</span><strong>${formatNumber(enabledCount)}</strong></div>
                         <div><span>状态正常</span><strong>${formatNumber(healthyCount)}</strong></div>
-                        <div><span>流式 / 图像</span><strong>${formatNumber(streamCount)} / ${formatNumber(visionCount)}</strong></div>
+                        <div><span>流式 / 识图 / 生图</span><strong>${formatNumber(streamCount)} / ${formatNumber(visionCount)} / ${formatNumber(imageGenerationCount)}</strong></div>
                     </div>
                     <div class="table-shell provider-model-detail-table-shell">
                         <table class="data-table provider-model-detail-table">
@@ -6716,6 +6774,16 @@
                 api_client_auth_result: log.api_client_auth_result,
                 api_client_remaining_tokens: log.api_client_remaining_tokens,
                 http_method: log.http_method,
+                has_image_input: log.has_image_input,
+                uses_image_generation: log.uses_image_generation,
+                request_modality: log.request_modality,
+                generated_images_count: log.generated_images_count,
+                generated_image_mime_types: log.generated_image_mime_types,
+                generated_image_approx_bytes: log.generated_image_approx_bytes,
+                has_partial_generated_image: log.has_partial_generated_image,
+                generated_image_result_truncated: log.generated_image_result_truncated,
+                image_response_mode: log.image_response_mode,
+                upstream_usage_missing: log.upstream_usage_missing,
                 reasoning_level: log.reasoning_level,
                 model_reasoning_effort: log.model_reasoning_effort,
                 attempt_count: log.attempt_count,
@@ -6967,6 +7035,7 @@
         const scenarios = Array.isArray(result.scenarios) ? result.scenarios : [];
         const failedScenarios = scenarios.filter((item) => item && item.success === false);
         const failedLabels = failedScenarios.slice(0, 3).map((item) => item.scenario_label || item.endpoint_path || "未命名场景");
+        const hasImageGenerationFailure = failedScenarios.some((item) => item?.has_image_generation);
 
         if (success) {
             return {
@@ -6993,7 +7062,7 @@
                 ],
                 fixes: [
                     { label: "修复建议", value: "先看下方“场景明细”，确认是仅某个端点失败，还是文本、流式、图片整体都失败。" },
-                    { label: "补充检查", value: "若只有图片链路失败，优先排查模型视觉能力和图片输入格式；若流式单独失败，优先排查渠道对 SSE 的兼容性。" },
+                    { label: "补充检查", value: hasImageGenerationFailure ? "若失败场景包含生成图片，优先排查模型是否原生支持 Responses + image_generation，以及上游是否真的返回了图片结果；若流式单独失败，再排查渠道对 SSE 的兼容性。" : "若只有图片链路失败，优先排查模型视觉能力和图片输入格式；若流式单独失败，优先排查渠道对 SSE 的兼容性。" },
                 ],
                 next: [
                     { label: "下一步", value: "下载本次自检报告，带着失败场景和调度链路去日志页或联系管理员定位。" },
@@ -7144,7 +7213,7 @@
                 : `将把本地图片通过内部 Session 自检接口发送，并追加视觉场景探测。${detailText} ${constraintText}`;
             return;
         }
-        imageNote.textContent = `当前默认只测试文本链路。若切换为图片链接或本地图片，将追加图片场景自检。${detailText} ${constraintText}`;
+        imageNote.textContent = `当前默认只测试文本链路。若切换为图片链接、本地图片或生成图片，将追加对应多模态场景自检。${detailText} ${constraintText}`;
     }
 
     function getUserSelfTestImageMode(summary = {}) {
@@ -9533,6 +9602,16 @@
                 api_client_auth_result: log.api_client_auth_result,
                 api_client_remaining_tokens: log.api_client_remaining_tokens,
                 http_method: log.http_method,
+                has_image_input: log.has_image_input,
+                uses_image_generation: log.uses_image_generation,
+                request_modality: log.request_modality,
+                generated_images_count: log.generated_images_count,
+                generated_image_mime_types: log.generated_image_mime_types,
+                generated_image_approx_bytes: log.generated_image_approx_bytes,
+                has_partial_generated_image: log.has_partial_generated_image,
+                generated_image_result_truncated: log.generated_image_result_truncated,
+                image_response_mode: log.image_response_mode,
+                upstream_usage_missing: log.upstream_usage_missing,
                 reasoning_level: log.reasoning_level,
                 model_reasoning_effort: log.model_reasoning_effort,
                 attempt_count: log.attempt_count,

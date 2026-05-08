@@ -73,7 +73,7 @@ def list_logs(
     )
     return LogListResponse(
         total=total,
-        items=[RequestLogOut.model_validate(item) for item in items],
+        items=[RequestLogOut.model_validate(item) for item in LogService.serialize_logs(items)],
         summary=LogSummaryOut.model_validate(summary),
     )
 

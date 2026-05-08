@@ -60,6 +60,7 @@ def _build_provider_page_content(provider_dicts: list[dict]) -> dict:
     enabled_models = [item for item in model_configs if item.get("enabled")]
     stream_model_count = sum(1 for item in enabled_models if item.get("supports_stream"))
     vision_model_count = sum(1 for item in enabled_models if item.get("supports_vision"))
+    image_generation_model_count = sum(1 for item in enabled_models if item.get("supports_image_generation"))
     priced_model_count = sum(
         1
         for item in enabled_models
@@ -75,6 +76,7 @@ def _build_provider_page_content(provider_dicts: list[dict]) -> dict:
             "model_count": len(enabled_models),
             "stream_model_count": stream_model_count,
             "vision_model_count": vision_model_count,
+            "image_generation_model_count": image_generation_model_count,
             "priced_model_count": priced_model_count,
             "avg_stability_score": average_stability,
         },
@@ -83,7 +85,8 @@ def _build_provider_page_content(provider_dicts: list[dict]) -> dict:
             {"id": "enabled_provider_count", "label": "已启用中转站", "value": enabled_provider_count},
             {"id": "model_count", "label": "挂载模型数", "value": len(enabled_models)},
             {"id": "stream_model_count", "label": "支持 Stream", "value": stream_model_count},
-            {"id": "vision_model_count", "label": "支持 Vision", "value": vision_model_count},
+            {"id": "vision_model_count", "label": "支持图像理解", "value": vision_model_count},
+            {"id": "image_generation_model_count", "label": "支持图片生成", "value": image_generation_model_count},
             {"id": "priced_model_count", "label": "已同步价格", "value": priced_model_count},
             {"id": "avg_stability_score", "label": "平均稳定性", "value": average_stability},
         ],

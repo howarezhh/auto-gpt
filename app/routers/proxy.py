@@ -1,6 +1,8 @@
+import base64
 from collections.abc import AsyncIterator
 from json import JSONDecodeError
 import json
+import time
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -8,6 +10,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from app.database import SessionLocal
+from app.services.asset_service import AssetService
 from app.services.api_key_service import ApiClientAuthContext, ApiClientAuthError, ApiKeyService, require_api_client_auth
 from app.services.concurrency_service import (
     ConcurrencyLease,
@@ -103,7 +106,7 @@ def _effective_request_body_limit(setting, endpoint_path: str) -> int:
     endpoint_limit = 0
     if endpoint_path == "/chat/completions":
         endpoint_limit = int(getattr(setting, "max_v1_chat_request_body_bytes", 0) or 0)
-    elif endpoint_path == "/responses":
+    elif endpoint_path in {"/responses", "/images/generations", "/images/edits", "/images/variations"}:
         endpoint_limit = int(getattr(setting, "max_v1_responses_request_body_bytes", 0) or 0)
     positive_limits = [item for item in (global_limit, endpoint_limit) if item > 0]
     return min(positive_limits) if positive_limits else 0
@@ -212,6 +215,224 @@ async def _read_limited_v1_json_payload(request: Request, *, endpoint_path: str)
         max_logged_body_bytes,
     )
     return payload
+
+
+async def _prepare_v1_body_limit_context(request: Request, *, endpoint_path: str) -> tuple[object, int, int]:
+    setting = await run_in_threadpool(_get_setting_with_scoped_session)
+    limit = _effective_request_body_limit(setting, endpoint_path)
+    max_logged_body_bytes = int(getattr(setting, "max_logged_body_bytes", 16384) or 16384)
+    content_length = request.headers.get("content-length")
+    try:
+        content_length_bytes = int(content_length) if content_length is not None else None
+    except ValueError:
+        content_length_bytes = None
+    if limit > 0 and content_length_bytes is not None and content_length_bytes > limit:
+        request.state.v1_request_body_structure_json = _truncate_json_for_log(
+            {
+                "_summary": "request body structure omitted because Content-Length exceeds application limit",
+                "structure": {
+                    "type": "bytes",
+                    "content_length": content_length_bytes,
+                    "max_v1_request_body_bytes": limit,
+                },
+            },
+            max_logged_body_bytes,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail={
+                "message": f"请求体大小 {content_length_bytes} 字节超过应用层上限 {limit} 字节",
+                "code": "request_body_too_large",
+                "request_body_bytes": content_length_bytes,
+                "max_v1_request_body_bytes": limit,
+                "endpoint_path": f"/v1{endpoint_path}",
+            },
+        )
+    return setting, limit, max_logged_body_bytes
+
+
+async def _upload_to_data_url(upload_file, *, field_name: str) -> dict[str, object]:
+    content_type = (getattr(upload_file, "content_type", None) or "").strip().lower()
+    if content_type not in AssetService.IMAGE_CONTENT_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"message": f"{field_name} 仅支持 PNG/JPEG/WEBP/GIF 图片", "code": "invalid_image_file"},
+        )
+    content = await upload_file.read(AssetService.MAX_IMAGE_BYTES + 1)
+    if not content:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"message": f"{field_name} 上传文件不能为空", "code": "empty_image_file"},
+        )
+    if len(content) > AssetService.MAX_IMAGE_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"message": f"{field_name} 图片大小不能超过 10 MB", "code": "image_file_too_large"},
+        )
+    encoded = base64.b64encode(content).decode("ascii")
+    return {
+        "url": f"data:{content_type};base64,{encoded}",
+        "filename": getattr(upload_file, "filename", None) or f"{field_name}.png",
+        "content_type": content_type,
+        "file_size_bytes": len(content),
+    }
+
+
+def _normalize_legacy_image_values(value, *, field_name: str) -> list[dict[str, object]]:
+    normalized: list[dict[str, object]] = []
+    candidates = value if isinstance(value, list) else [value]
+    for item in candidates:
+        if item in (None, ""):
+            continue
+        if isinstance(item, str):
+            current = item.strip()
+            if current:
+                normalized.append({"url": current, "source": "text"})
+            continue
+        image_candidates = ProxyService._normalize_generated_image_candidate(item)
+        for candidate in image_candidates:
+            url = candidate.get("url")
+            if isinstance(url, str) and url.strip():
+                normalized.append({"url": url.strip(), "source": "json"})
+    if not normalized:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"message": f"{field_name} 不能为空", "code": f"missing_{field_name}_input"},
+        )
+    return normalized
+
+
+async def _read_legacy_image_edit_form_payload(request: Request) -> tuple[dict, list[str], list[str], str]:
+    _setting, _limit, max_logged_body_bytes = await _prepare_v1_body_limit_context(request, endpoint_path="/images/edits")
+    form = await request.form()
+    image_items = list(form.getlist("image")) or list(form.getlist("image[]"))
+    mask_items = list(form.getlist("mask")) or list(form.getlist("mask[]"))
+    image_entries: list[dict[str, object]] = []
+    mask_entries: list[dict[str, object]] = []
+    for item in image_items:
+        if isinstance(item, str):
+            image_entries.extend(_normalize_legacy_image_values(item, field_name="image"))
+        else:
+            upload_entry = await _upload_to_data_url(item, field_name="image")
+            upload_entry["source"] = "upload"
+            image_entries.append(upload_entry)
+    for item in mask_items:
+        if isinstance(item, str):
+            mask_entries.extend(_normalize_legacy_image_values(item, field_name="mask"))
+        else:
+            upload_entry = await _upload_to_data_url(item, field_name="mask")
+            upload_entry["source"] = "upload"
+            mask_entries.append(upload_entry)
+    payload = {
+        "prompt": form.get("prompt"),
+        "model": form.get("model"),
+        "n": form.get("n"),
+        "size": form.get("size"),
+        "quality": form.get("quality"),
+        "background": form.get("background"),
+        "output_format": form.get("output_format"),
+        "output_compression": form.get("output_compression"),
+        "moderation": form.get("moderation"),
+        "response_format": form.get("response_format"),
+        "user": form.get("user"),
+    }
+    summary_payload = {
+        **{key: value for key, value in payload.items() if value not in (None, "")},
+        "image": [
+            {
+                "type": "input_image",
+                "source": entry.get("source"),
+                "filename": entry.get("filename"),
+                "content_type": entry.get("content_type"),
+                "file_size_bytes": entry.get("file_size_bytes"),
+            }
+            for entry in image_entries
+        ],
+        "mask": [
+            {
+                "type": "input_image",
+                "source": entry.get("source"),
+                "filename": entry.get("filename"),
+                "content_type": entry.get("content_type"),
+                "file_size_bytes": entry.get("file_size_bytes"),
+            }
+            for entry in mask_entries
+        ],
+    }
+    request.state.v1_request_body_structure_json = _truncate_json_for_log(
+        summarize_request_body_structure(summary_payload),
+        max_logged_body_bytes,
+    )
+    return (
+        payload,
+        [str(entry["url"]) for entry in image_entries if isinstance(entry.get("url"), str)],
+        [str(entry["url"]) for entry in mask_entries if isinstance(entry.get("url"), str)],
+        "multipart",
+    )
+
+
+def _merge_legacy_image_api_results(results: list[dict], *, response_format: str) -> dict:
+    merged = {"created": int(time.time()), "data": []}
+    for item in results:
+        data_items = item.get("data")
+        if isinstance(data_items, list):
+            merged["data"].extend(data_items)
+    if not merged["data"]:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={
+                "message": f"legacy Images 兼容层未返回可解析的 {response_format} 图片结果",
+                "code": "legacy_image_result_missing",
+            },
+        )
+    return merged
+
+
+async def _forward_legacy_image_batch(
+    *,
+    request: Request,
+    api_client_auth: ApiClientAuthContext,
+    source_ip: str | None,
+    responses_payload: dict,
+    requested_count: int,
+    request_path_for_log: str,
+    public_endpoint_path: str,
+    response_format: str,
+) -> tuple[dict, object, list[dict], int]:
+    merged_results: list[dict] = []
+    provider = None
+    trace: list[dict] = []
+    latency_ms_total = 0
+    for index in range(requested_count):
+        result, current_provider, current_trace, current_latency_ms = await ProxyService.forward_json_request(
+            endpoint_path="/responses",
+            payload=responses_payload,
+            log_type="responses",
+            route_context=api_client_auth.route_context,
+            api_client_auth=api_client_auth,
+            trace_id=getattr(request.state, "trace_id", None),
+            source_ip=source_ip,
+            request_path_for_log=request_path_for_log,
+            public_endpoint_path=public_endpoint_path,
+            response_transform=lambda upstream: ProxyService.adapt_responses_to_legacy_image_response(
+                upstream,
+                response_format=response_format,
+            ),
+        )
+        merged_results.append(result)
+        provider = current_provider
+        latency_ms_total += current_latency_ms
+        if requested_count == 1:
+            trace = current_trace
+        else:
+            trace.extend(
+                {
+                    **item,
+                    "legacy_batch_index": index,
+                }
+                for item in current_trace
+            )
+    return _merge_legacy_image_api_results(merged_results, response_format=response_format), provider, trace, latency_ms_total
 
 
 async def _release_after_stream(
@@ -374,6 +595,142 @@ async def responses(
     return result
 
 
+@router.post("/v1/images/generations", response_model=None)
+async def image_generations(
+    request: Request,
+    response: Response,
+    api_client_auth: ApiClientAuthContext = Depends(require_api_client_auth),
+):
+    source_ip = ApiKeyService.extract_source_ip(request)
+    legacy_payload = await _read_limited_v1_json_payload(request, endpoint_path="/images/generations")
+    requested_count = ProxyService.parse_legacy_image_count(legacy_payload.get("n"))
+    responses_payload, response_format = ProxyService.build_legacy_image_generation_responses_payload(
+        legacy_payload,
+        api_client_auth=api_client_auth,
+        route_context=api_client_auth.route_context,
+    )
+    lease = await _acquire_request_concurrency(request=request, api_client_auth=api_client_auth, is_stream=False)
+    try:
+        result, provider, trace, latency_ms = await _forward_legacy_image_batch(
+            request=request,
+            api_client_auth=api_client_auth,
+            source_ip=source_ip,
+            responses_payload=responses_payload,
+            requested_count=requested_count,
+            request_path_for_log="/v1/images/generations",
+            public_endpoint_path="/images/generations",
+            response_format=response_format,
+        )
+    finally:
+        await _release_request_concurrency(lease)
+    for key, value in build_proxy_response_headers(
+        provider_id=provider.id,
+        provider_name=provider.name,
+        latency_ms=latency_ms,
+        trace_length=len(trace),
+        trace_id=getattr(request.state, "trace_id", None),
+    ).items():
+        response.headers[key] = value
+    return result
+
+
+@router.post("/v1/images/edits", response_model=None)
+async def image_edits(
+    request: Request,
+    response: Response,
+    api_client_auth: ApiClientAuthContext = Depends(require_api_client_auth),
+):
+    source_ip = ApiKeyService.extract_source_ip(request)
+    content_type = (request.headers.get("content-type") or "").strip().lower()
+    if "application/json" in content_type:
+        legacy_payload = await _read_limited_v1_json_payload(request, endpoint_path="/images/edits")
+        image_source_value = legacy_payload.get("images") if legacy_payload.get("images") not in (None, "") else legacy_payload.get("image")
+        image_entries = _normalize_legacy_image_values(image_source_value, field_name="image")
+        mask_entries = _normalize_legacy_image_values(legacy_payload.get("mask"), field_name="mask") if legacy_payload.get("mask") not in (None, "") else []
+        image_urls = [str(entry["url"]) for entry in image_entries if isinstance(entry.get("url"), str)]
+        mask_urls = [str(entry["url"]) for entry in mask_entries if isinstance(entry.get("url"), str)]
+    else:
+        legacy_payload, image_urls, mask_urls, _payload_mode = await _read_legacy_image_edit_form_payload(request)
+    requested_count = ProxyService.parse_legacy_image_count(legacy_payload.get("n"))
+    responses_payload, response_format = ProxyService.build_legacy_image_edit_responses_payload(
+        legacy_payload,
+        image_urls=image_urls,
+        mask_urls=mask_urls,
+        api_client_auth=api_client_auth,
+        route_context=api_client_auth.route_context,
+    )
+    lease = await _acquire_request_concurrency(request=request, api_client_auth=api_client_auth, is_stream=False)
+    try:
+        result, provider, trace, latency_ms = await _forward_legacy_image_batch(
+            request=request,
+            api_client_auth=api_client_auth,
+            source_ip=source_ip,
+            responses_payload=responses_payload,
+            requested_count=requested_count,
+            request_path_for_log="/v1/images/edits",
+            public_endpoint_path="/images/edits",
+            response_format=response_format,
+        )
+    finally:
+        await _release_request_concurrency(lease)
+    for key, value in build_proxy_response_headers(
+        provider_id=provider.id,
+        provider_name=provider.name,
+        latency_ms=latency_ms,
+        trace_length=len(trace),
+        trace_id=getattr(request.state, "trace_id", None),
+    ).items():
+        response.headers[key] = value
+    return result
+
+
+@router.post("/v1/images/variations", response_model=None)
+async def image_variations(
+    request: Request,
+    response: Response,
+    api_client_auth: ApiClientAuthContext = Depends(require_api_client_auth),
+):
+    source_ip = ApiKeyService.extract_source_ip(request)
+    content_type = (request.headers.get("content-type") or "").strip().lower()
+    if "application/json" in content_type:
+        legacy_payload = await _read_limited_v1_json_payload(request, endpoint_path="/images/variations")
+        image_source_value = legacy_payload.get("images") if legacy_payload.get("images") not in (None, "") else legacy_payload.get("image")
+        image_entries = _normalize_legacy_image_values(image_source_value, field_name="image")
+        image_urls = [str(entry["url"]) for entry in image_entries if isinstance(entry.get("url"), str)]
+    else:
+        legacy_payload, image_urls, _mask_urls, _payload_mode = await _read_legacy_image_edit_form_payload(request)
+    requested_count = ProxyService.parse_legacy_image_count(legacy_payload.get("n"))
+    responses_payload, response_format = ProxyService.build_legacy_image_variation_responses_payload(
+        legacy_payload,
+        image_urls=image_urls,
+        api_client_auth=api_client_auth,
+        route_context=api_client_auth.route_context,
+    )
+    lease = await _acquire_request_concurrency(request=request, api_client_auth=api_client_auth, is_stream=False)
+    try:
+        result, provider, trace, latency_ms = await _forward_legacy_image_batch(
+            request=request,
+            api_client_auth=api_client_auth,
+            source_ip=source_ip,
+            responses_payload=responses_payload,
+            requested_count=requested_count,
+            request_path_for_log="/v1/images/variations",
+            public_endpoint_path="/images/variations",
+            response_format=response_format,
+        )
+    finally:
+        await _release_request_concurrency(lease)
+    for key, value in build_proxy_response_headers(
+        provider_id=provider.id,
+        provider_name=provider.name,
+        latency_ms=latency_ms,
+        trace_length=len(trace),
+        trace_id=getattr(request.state, "trace_id", None),
+    ).items():
+        response.headers[key] = value
+    return result
+
+
 @router.get("/v1/responses/{response_id}", response_model=None)
 async def retrieve_response(
     response_id: str,
@@ -478,9 +835,21 @@ async def unsupported_v1_endpoint(
         "GET /v1/models",
         "POST /v1/chat/completions",
         "POST /v1/responses",
+        "POST /v1/images/generations",
+        "POST /v1/images/edits",
+        "POST /v1/images/variations",
         "GET /v1/responses/{response_id}",
         "POST /v1/responses/{response_id}/cancel",
     ]
+    legacy_images_hint = None
+    if request_path.startswith("/v1/images/"):
+        legacy_images_hint = {
+            "message": "本平台正式推荐的生图入口仍是 POST /v1/responses + tools=[{\"type\":\"image_generation\"}]；如客户端仍使用旧版 Images API，目前兼容 /v1/images/generations、/v1/images/edits 和 /v1/images/variations。",
+            "recommended_endpoint": "POST /v1/responses",
+            "recommended_tool": {"type": "image_generation", "model": "gpt-image-2"},
+            "edit_hint": "图片编辑也应继续走 /v1/responses，并把源图放进 input 内容，工具 action 设为 edit。",
+            "variation_hint": "图片变体当前通过兼容适配层映射到同一条 Responses 图片编辑内核，建议优先迁移到 /v1/responses 自行控制提示词。",
+        }
     message = (
         f"Unsupported OpenAI-compatible endpoint: {request.method.upper()} {request_path}. "
         f"Supported endpoints: {', '.join(supported_endpoints)}."
@@ -491,6 +860,8 @@ async def unsupported_v1_endpoint(
         "supported_endpoints": supported_endpoints,
         "hint": "Use the base URL ending in /v1 only when the client appends a supported endpoint path.",
     }
+    if legacy_images_hint is not None:
+        detail["legacy_images_hint"] = legacy_images_hint
     await run_in_threadpool(
         _log_unsupported_v1_endpoint,
         request_path=request_path,

@@ -110,6 +110,86 @@ resp = client.responses.create(
 )
 print(resp.output_text)</pre>
             </article>
+            <article class="api-key-chip-card form-span-2">
+                <strong>文生图示例（Responses + image_generation）</strong>
+                <pre class="code-block">curl {{ external_base_url }}/v1/responses \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer {{ api_key.raw_api_key or 'YOUR_KEY' }}" \
+  -d '{
+    "model": "gpt-5.4",
+    "input": "生成一张极简风格的蓝色纸鸢图标，白底，单主体",
+    "tools": [
+      {
+        "type": "image_generation",
+        "model": "gpt-image-2",
+        "action": "generate",
+        "output_format": "png"
+      }
+    ],
+    "tool_choice": {"type": "image_generation"}
+  }'</pre>
+            </article>
+            <article class="api-key-chip-card form-span-2">
+                <strong>编辑图示例（Responses + image_generation）</strong>
+                <pre class="code-block">curl {{ external_base_url }}/v1/responses \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer {{ api_key.raw_api_key or 'YOUR_KEY' }}" \
+  -d '{
+    "model": "gpt-5.4",
+    "input": [
+      {
+        "role": "user",
+        "content": [
+          {"type": "input_text", "text": "只修改背景，把背景换成干净的浅灰摄影棚，主体不要变化"},
+          {"type": "input_image", "image_url": "data:image/png;base64,REPLACE_WITH_BASE64"}
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "type": "image_generation",
+        "model": "gpt-image-2",
+        "action": "edit",
+        "output_format": "png"
+      }
+    ],
+    "tool_choice": {"type": "image_generation"}
+  }'</pre>
+            </article>
+            <article class="api-key-chip-card form-span-2">
+                <strong>旧版文生图兼容示例（/v1/images/generations）</strong>
+                <pre class="code-block">curl {{ external_base_url }}/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer {{ api_key.raw_api_key or 'YOUR_KEY' }}" \
+  -d '{
+    "model": "gpt-image-2",
+    "prompt": "生成一张极简风格的蓝色纸鸢图标，白底，单主体",
+    "response_format": "b64_json"
+  }'</pre>
+                <span>支持 <code>n=1..10</code>，平台会把多次生成结果合并回旧版 <code>data[]</code>。</span>
+            </article>
+            <article class="api-key-chip-card form-span-2">
+                <strong>旧版编辑图兼容示例（/v1/images/edits）</strong>
+                <pre class="code-block">curl {{ external_base_url }}/v1/images/edits \
+  -H "Authorization: Bearer {{ api_key.raw_api_key or 'YOUR_KEY' }}" \
+  -F "model=gpt-image-2" \
+  -F "prompt=只修改背景，把背景换成干净的浅灰摄影棚，主体不要变化" \
+  -F "response_format=b64_json" \
+  -F "image=@/path/to/source.png"</pre>
+                <span>JSON 调用时既兼容单个 <code>image</code>，也兼容新版常见的 <code>images</code> 数组。</span>
+            </article>
+            <article class="api-key-chip-card form-span-2">
+                <strong>旧版变体兼容示例（/v1/images/variations）</strong>
+                <pre class="code-block">curl {{ external_base_url }}/v1/images/variations \
+  -H "Authorization: Bearer {{ api_key.raw_api_key or 'YOUR_KEY' }}" \
+  -F "model=gpt-image-2" \
+  -F "response_format=b64_json" \
+  -F "image=@/path/to/source.png"</pre>
+            </article>
+            <article class="api-key-chip-card form-span-2">
+                <strong>兼容说明</strong>
+                <span>正式推荐入口仍是 <code>{{ external_base_url }}/v1/responses</code>。<code>/v1/images/generations</code>、<code>/v1/images/edits</code> 和 <code>/v1/images/variations</code> 主要用于兼容旧客户端；<code>response_format=url</code> 返回的是 data URL，而不是公网文件地址。</span>
+            </article>
         </div>
     </div>
 

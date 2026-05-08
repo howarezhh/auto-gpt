@@ -136,7 +136,7 @@ class UserPortalService:
             exclude_health_checks=exclude_health_checks,
             api_client_key_ids=key_ids,
         )
-        return total, [RequestLogOut.model_validate(item) for item in items], summary, [ApiKeyAdminService.serialize_api_key(item) for item in owned_keys]
+        return total, [RequestLogOut.model_validate(item) for item in LogService.serialize_logs(items)], summary, [ApiKeyAdminService.serialize_api_key(item) for item in owned_keys]
 
     @staticmethod
     def get_log_filter_options(
@@ -325,7 +325,7 @@ class UserPortalService:
             "totals": overview["totals"],
             "account_summary": overview["account_summary"],
             "conversation_count": conversation_count,
-            "recent_logs": [RequestLogOut.model_validate(item) for item in recent_logs],
+            "recent_logs": [RequestLogOut.model_validate(item) for item in LogService.serialize_logs(recent_logs)],
             "recent_billing": [BillingService.serialize_user_billing_record(item) for item in recent_billing],
         }
 
@@ -406,7 +406,7 @@ class UserPortalService:
             "api_key": detail,
             "analytics": analytics,
             "billing_summary": billing_summary,
-            "recent_logs": [RequestLogOut.model_validate(item) for item in recent_logs],
+            "recent_logs": [RequestLogOut.model_validate(item) for item in LogService.serialize_logs(recent_logs)],
         }
 
     @staticmethod
@@ -422,7 +422,7 @@ class UserPortalService:
         )
         if log is None:
             return None
-        return RequestLogOut.model_validate(log)
+        return RequestLogOut.model_validate(LogService.serialize_log(log))
 
     @staticmethod
     def export_billing_csv(

@@ -411,6 +411,11 @@ class TokenUsageService:
         request_data = request_payload if isinstance(request_payload, dict) else TokenUsageService._parse_json_object(log.request_body_json)
         response_data = response_payload if isinstance(response_payload, dict) else TokenUsageService._parse_json_object(log.response_body_json)
         effective_response_text = response_text if isinstance(response_text, str) else log.response_text
+        is_image_generation_context = TokenUsageService._is_image_generation_context(
+            request_data=request_data,
+            response_data=response_data,
+            response_text=effective_response_text,
+        )
 
         usage_from_upstream = TokenUsageService._extract_usage_from_response(response_data)
         prompt_tokens = log.prompt_tokens if log.prompt_tokens is not None else usage_from_upstream["prompt_tokens"]
@@ -426,7 +431,7 @@ class TokenUsageService:
                 request_path=effective_path,
             )
 
-        if enable_usage_fill and tiktoken is not None and completion_tokens is None:
+        if enable_usage_fill and tiktoken is not None and completion_tokens is None and not is_image_generation_context:
             response_text_value = effective_response_text or TokenUsageService._extract_response_text(response_data)
             if response_text_value:
                 completion_tokens = TokenUsageService._count_text_tokens(response_text_value, effective_model)
@@ -629,6 +634,61 @@ class TokenUsageService:
             "cache_read_tokens": cache_read_tokens,
             "cache_write_tokens": cache_write_tokens,
         }
+
+    @staticmethod
+    def _is_image_generation_context(
+        *,
+        request_data: dict[str, Any] | None,
+        response_data: dict[str, Any] | None,
+        response_text: str | None,
+    ) -> bool:
+        if TokenUsageService._payload_contains_type_value(request_data, {"image_generation"}):
+            return True
+        if TokenUsageService._response_contains_generated_image(response_data):
+            return True
+        return TokenUsageService._extract_generated_image_count_from_text(response_text) is not None
+
+    @staticmethod
+    def _payload_contains_type_value(payload: Any, targets: set[str]) -> bool:
+        if isinstance(payload, dict):
+            direct_type = payload.get("type")
+            if isinstance(direct_type, str) and direct_type in targets:
+                return True
+            if payload.get("type") == "string" and isinstance(payload.get("value"), str) and payload.get("value") in targets:
+                return True
+            return any(TokenUsageService._payload_contains_type_value(item, targets) for item in payload.values())
+        if isinstance(payload, list):
+            return any(TokenUsageService._payload_contains_type_value(item, targets) for item in payload)
+        return False
+
+    @staticmethod
+    def _response_contains_generated_image(payload: Any) -> bool:
+        if isinstance(payload, dict):
+            summary_kind = payload.get("summary_kind")
+            if summary_kind == "generated_image_result" and isinstance(payload.get("image_count"), int):
+                return payload.get("image_count", 0) > 0
+            item_type = payload.get("type")
+            if isinstance(item_type, str) and item_type == "image_generation_call" and payload.get("result") is not None:
+                return True
+            if any(key in payload for key in ("b64_json", "image_base64", "partial_image_b64")):
+                return True
+            return any(TokenUsageService._response_contains_generated_image(item) for item in payload.values())
+        if isinstance(payload, list):
+            return any(TokenUsageService._response_contains_generated_image(item) for item in payload)
+        return False
+
+    @staticmethod
+    def _extract_generated_image_count_from_text(value: str | None) -> int | None:
+        if not isinstance(value, str):
+            return None
+        prefix = "[生成了 "
+        suffix = " 张图片]"
+        if value.startswith(prefix) and value.endswith(suffix):
+            try:
+                return max(0, int(value[len(prefix):-len(suffix)]))
+            except ValueError:
+                return None
+        return None
 
     @staticmethod
     def _coerce_non_negative_int(value: Any) -> int | None:

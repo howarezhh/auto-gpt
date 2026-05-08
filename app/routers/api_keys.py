@@ -28,6 +28,7 @@ from app.schemas.api_key import (
 from app.schemas.log import LogListResponse, RequestLogOut
 from app.services.admin_audit_service import AdminAuditService
 from app.services.api_key_admin_service import ApiKeyAdminService
+from app.services.log_service import LogService
 from app.services.user_auth_service import require_admin_api_user
 
 
@@ -441,7 +442,7 @@ def api_key_logs(
         log_type=log_type,
         success=success,
     )
-    return LogListResponse(total=total, items=[RequestLogOut.model_validate(item) for item in items], summary=None)
+    return LogListResponse(total=total, items=[RequestLogOut.model_validate(item) for item in LogService.serialize_logs(items)], summary=None)
 
 
 @router.get("/{api_key_id}/stats", response_model=ApiKeyStatsOut)

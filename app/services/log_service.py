@@ -1,5 +1,6 @@
 import csv
 import io
+from typing import Any
 from datetime import datetime, timedelta
 
 from sqlalchemy import Text, case, cast, delete, func, not_, or_, select
@@ -238,6 +239,183 @@ class LogService:
         if payload_bytes > LogService.TOKEN_JOB_MAX_PAYLOAD_BYTES:
             return None
         return payload
+
+    @staticmethod
+    def serialize_log(log: RequestLog) -> dict[str, Any]:
+        data = {column.name: getattr(log, column.name) for column in RequestLog.__table__.columns}
+        data.update(LogService._derive_image_observability(log))
+        return data
+
+    @staticmethod
+    def serialize_logs(logs: list[RequestLog]) -> list[dict[str, Any]]:
+        return [LogService.serialize_log(item) for item in logs]
+
+    @staticmethod
+    def _derive_image_observability(log: RequestLog) -> dict[str, Any]:
+        request_payload = safeJsonParse(log.request_body_json) if log.request_body_json else None
+        response_payload = safeJsonParse(log.response_body_json) if log.response_body_json else None
+        has_image_input = LogService._payload_has_image_input(request_payload)
+        uses_image_generation = LogService._payload_uses_image_generation(request_payload)
+        generated_summary = LogService._extract_generated_image_summary(response_payload)
+        generated_images_count = generated_summary.get("image_count")
+        if generated_images_count is None:
+            generated_images_count = LogService._extract_generated_image_count_from_text(log.response_text)
+        if not uses_image_generation and generated_images_count and generated_images_count > 0:
+            uses_image_generation = True
+        if not has_image_input and log.has_image and not uses_image_generation:
+            has_image_input = True
+        request_modality = LogService._resolve_request_modality(
+            has_image_input=has_image_input,
+            uses_image_generation=uses_image_generation,
+        )
+        generated_image_mime_types = generated_summary.get("mime_types") or None
+        generated_image_approx_bytes = generated_summary.get("approx_bytes")
+        has_partial_generated_image = generated_summary.get("has_partial")
+        generated_image_result_truncated = generated_summary.get("result_truncated")
+        has_upstream_usage = LogService._response_has_usage(response_payload)
+        imagegen_related = bool(uses_image_generation or (generated_images_count and generated_images_count > 0))
+        return {
+            "has_image_input": has_image_input,
+            "uses_image_generation": uses_image_generation,
+            "request_modality": request_modality,
+            "generated_images_count": generated_images_count,
+            "generated_image_mime_types": generated_image_mime_types,
+            "generated_image_approx_bytes": generated_image_approx_bytes,
+            "has_partial_generated_image": has_partial_generated_image,
+            "generated_image_result_truncated": generated_image_result_truncated,
+            "image_response_mode": ("stream" if log.is_stream else "json") if imagegen_related else None,
+            "upstream_usage_missing": (not has_upstream_usage) if imagegen_related else None,
+        }
+
+    @staticmethod
+    def _resolve_request_modality(*, has_image_input: bool, uses_image_generation: bool) -> str:
+        if uses_image_generation and has_image_input:
+            return "image_edit"
+        if uses_image_generation:
+            return "image_generation"
+        if has_image_input:
+            return "vision"
+        return "text"
+
+    @staticmethod
+    def _payload_has_image_input(payload: Any) -> bool:
+        return LogService._payload_contains_type_value(payload, {"image_url", "input_image"}) or LogService._payload_contains_key(
+            payload,
+            {"image_url", "input_image"},
+        )
+
+    @staticmethod
+    def _payload_uses_image_generation(payload: Any) -> bool:
+        return LogService._payload_contains_type_value(payload, {"image_generation"})
+
+    @staticmethod
+    def _payload_contains_type_value(payload: Any, targets: set[str]) -> bool:
+        if isinstance(payload, dict):
+            direct_type = payload.get("type")
+            if isinstance(direct_type, str) and direct_type in targets:
+                return True
+            if payload.get("type") == "string" and isinstance(payload.get("value"), str) and payload.get("value") in targets:
+                return True
+            return any(LogService._payload_contains_type_value(item, targets) for item in payload.values())
+        if isinstance(payload, list):
+            return any(LogService._payload_contains_type_value(item, targets) for item in payload)
+        return False
+
+    @staticmethod
+    def _payload_contains_key(payload: Any, targets: set[str]) -> bool:
+        if isinstance(payload, dict):
+            if any(str(key) in targets for key in payload.keys()):
+                return True
+            return any(LogService._payload_contains_key(item, targets) for item in payload.values())
+        if isinstance(payload, list):
+            return any(LogService._payload_contains_key(item, targets) for item in payload)
+        return False
+
+    @staticmethod
+    def _extract_generated_image_summary(payload: Any) -> dict[str, Any]:
+        result = {
+            "image_count": None,
+            "mime_types": [],
+            "approx_bytes": None,
+            "has_partial": False,
+            "result_truncated": False,
+        }
+        if not isinstance(payload, (dict, list)):
+            return result
+
+        summaries: list[dict[str, Any]] = []
+        binary_summaries: list[dict[str, Any]] = []
+
+        def walk(value: Any) -> None:
+            if isinstance(value, dict):
+                summary_kind = value.get("summary_kind")
+                if summary_kind == "generated_image_result":
+                    summaries.append(value)
+                elif summary_kind == "binary_image":
+                    binary_summaries.append(value)
+                for item in value.values():
+                    walk(item)
+            elif isinstance(value, list):
+                for item in value:
+                    walk(item)
+
+        walk(payload)
+        source_items = summaries or binary_summaries
+        if not source_items:
+            return result
+
+        image_count = 0
+        approx_bytes = 0
+        has_approx_bytes = False
+        mime_types: list[str] = []
+        seen_mime_types: set[str] = set()
+        has_partial = False
+        result_truncated = False
+        for item in source_items:
+            count_value = item.get("image_count")
+            if isinstance(count_value, int):
+                image_count += max(0, count_value)
+            approx_value = item.get("approx_bytes")
+            if isinstance(approx_value, int):
+                approx_bytes += max(0, approx_value)
+                has_approx_bytes = True
+            for mime_type in item.get("mime_types") or []:
+                if isinstance(mime_type, str) and mime_type not in seen_mime_types:
+                    seen_mime_types.add(mime_type)
+                    mime_types.append(mime_type)
+            if item.get("has_partial") is True:
+                has_partial = True
+            if item.get("result_truncated") is True:
+                result_truncated = True
+        result["image_count"] = image_count
+        result["mime_types"] = mime_types
+        result["approx_bytes"] = approx_bytes if has_approx_bytes else None
+        result["has_partial"] = has_partial
+        result["result_truncated"] = result_truncated
+        return result
+
+    @staticmethod
+    def _extract_generated_image_count_from_text(value: str | None) -> int | None:
+        if not isinstance(value, str):
+            return None
+        prefix = "[生成了 "
+        suffix = " 张图片]"
+        if value.startswith(prefix) and value.endswith(suffix):
+            try:
+                return max(0, int(value[len(prefix):-len(suffix)]))
+            except ValueError:
+                return None
+        return None
+
+    @staticmethod
+    def _response_has_usage(payload: Any) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        usage = payload.get("usage")
+        if isinstance(usage, dict):
+            return True
+        nested = payload.get("response")
+        return isinstance(nested, dict) and isinstance(nested.get("usage"), dict)
 
     @staticmethod
     def list_logs(
@@ -1140,6 +1318,15 @@ class LogService:
             "retryable",
             "is_stream",
             "has_image",
+            "request_modality",
+            "uses_image_generation",
+            "generated_images_count",
+            "generated_image_mime_types",
+            "generated_image_approx_bytes",
+            "has_partial_generated_image",
+            "generated_image_result_truncated",
+            "image_response_mode",
+            "upstream_usage_missing",
             "latency_ms",
             "ttfb_ms",
             "duration_ms",
@@ -1161,6 +1348,7 @@ class LogService:
             "message",
         ])
         for item in rows:
+            serialized = LogService.serialize_log(item)
             writer.writerow([
                 item.created_at.isoformat() if item.created_at else "",
                 item.log_type,
@@ -1183,6 +1371,15 @@ class LogService:
                 "" if item.retryable is None else ("true" if item.retryable else "false"),
                 "true" if item.is_stream else "false",
                 "true" if item.has_image else "false",
+                serialized.get("request_modality") or "",
+                "" if serialized.get("uses_image_generation") is None else ("true" if serialized.get("uses_image_generation") else "false"),
+                serialized.get("generated_images_count") if serialized.get("generated_images_count") is not None else "",
+                ",".join(serialized.get("generated_image_mime_types") or []),
+                serialized.get("generated_image_approx_bytes") if serialized.get("generated_image_approx_bytes") is not None else "",
+                "" if serialized.get("has_partial_generated_image") is None else ("true" if serialized.get("has_partial_generated_image") else "false"),
+                "" if serialized.get("generated_image_result_truncated") is None else ("true" if serialized.get("generated_image_result_truncated") else "false"),
+                serialized.get("image_response_mode") or "",
+                "" if serialized.get("upstream_usage_missing") is None else ("true" if serialized.get("upstream_usage_missing") else "false"),
                 item.latency_ms if item.latency_ms is not None else "",
                 item.ttfb_ms if item.ttfb_ms is not None else "",
                 item.duration_ms if item.duration_ms is not None else "",

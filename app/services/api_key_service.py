@@ -592,7 +592,11 @@ class ApiKeyService:
         if not allowed_paths:
             return True
         normalized_path = request_path.strip()
-        return normalized_path in allowed_paths
+        if normalized_path in allowed_paths:
+            return True
+        if normalized_path in {"/v1/images/generations", "/v1/images/edits", "/v1/images/variations"} and "/v1/responses" in allowed_paths:
+            return True
+        return False
 
     @staticmethod
     def is_source_ip_allowed(api_client_key: ApiClientKey, source_ip: str) -> bool:

@@ -29,10 +29,14 @@ from app.utils.json_utils import dumps_json, loads_json
 
 class ModelCatalogService:
     @staticmethod
+    def _catalog_supports_tools(catalog: ModelCatalog) -> bool:
+        return bool(catalog.supports_tools or ProviderService.model_name_supports_tools(catalog.model_name))
+
+    @staticmethod
     def _catalog_supports_image_generation(catalog: ModelCatalog) -> bool:
         return bool(
             catalog.supports_responses
-            and catalog.supports_tools
+            and ModelCatalogService._catalog_supports_tools(catalog)
             and (catalog.supports_vision or ProviderService.model_name_supports_image_generation(catalog.model_name))
         )
 
@@ -341,7 +345,7 @@ class ModelCatalogService:
                     "remark": catalog.remark,
                     "supports_stream": catalog.supports_stream,
                     "supports_vision": catalog.supports_vision,
-                    "supports_tools": catalog.supports_tools,
+                    "supports_tools": ModelCatalogService._catalog_supports_tools(catalog),
                     "supports_image_generation": ModelCatalogService._catalog_supports_image_generation(catalog),
                     "supports_chat_completions": catalog.supports_chat_completions,
                     "supports_responses": catalog.supports_responses,
@@ -486,7 +490,7 @@ class ModelCatalogService:
             "enabled": catalog.enabled,
             "supports_stream": catalog.supports_stream,
             "supports_vision": catalog.supports_vision,
-            "supports_tools": catalog.supports_tools,
+            "supports_tools": ModelCatalogService._catalog_supports_tools(catalog),
             "supports_image_generation": ModelCatalogService._catalog_supports_image_generation(catalog),
             "supports_chat_completions": catalog.supports_chat_completions,
             "supports_responses": catalog.supports_responses,

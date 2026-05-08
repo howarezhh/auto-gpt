@@ -110,7 +110,7 @@ class RouterService:
                     continue
                 if require_vision and not provider_model.supports_vision:
                     continue
-                if require_tools and not provider_model.supports_tools:
+                if require_tools and not ProviderService.provider_model_supports_tools(provider_model):
                     continue
                 if require_image_generation and not ProviderService.provider_model_supports_image_generation(provider_model):
                     continue
@@ -421,7 +421,7 @@ class RouterService:
                 if require_vision and not provider_model.supports_vision:
                     RouterService._record_diagnostic_reason(diagnostics, "vision_not_supported", provider=provider, provider_model=provider_model)
                     continue
-                if require_tools and not provider_model.supports_tools:
+                if require_tools and not ProviderService.provider_model_supports_tools(provider_model):
                     RouterService._record_diagnostic_reason(diagnostics, "tools_not_supported", provider=provider, provider_model=provider_model)
                     continue
                 if require_image_generation and not ProviderService.provider_model_supports_image_generation(provider_model):

@@ -74,6 +74,16 @@ class RequestLogOut(BaseModel):
     api_client_remaining_cost_daily: float | None
     api_client_policy_snapshot_json: str | None
     trace_json: str | None
+    has_image_input: bool | None = None
+    uses_image_generation: bool | None = None
+    request_modality: str | None = None
+    generated_images_count: int | None = None
+    generated_image_mime_types: list[str] | None = None
+    generated_image_approx_bytes: int | None = None
+    has_partial_generated_image: bool | None = None
+    generated_image_result_truncated: bool | None = None
+    image_response_mode: str | None = None
+    upstream_usage_missing: bool | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}

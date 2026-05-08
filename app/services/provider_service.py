@@ -71,11 +71,20 @@ class ProviderService:
         return ProviderService._infer_model_capabilities(model_name).get("supports_image_generation", False)
 
     @staticmethod
+    def model_name_supports_tools(model_name: str) -> bool:
+        return ProviderService._infer_model_capabilities(model_name).get("supports_tools", False)
+
+    @staticmethod
+    def provider_model_supports_tools(provider_model: ProviderModel) -> bool:
+        inferred = ProviderService._infer_model_capabilities(provider_model.model_name)
+        return bool(provider_model.supports_tools or inferred.get("supports_tools", False))
+
+    @staticmethod
     def provider_model_supports_image_generation(provider_model: ProviderModel) -> bool:
         inferred = ProviderService._infer_model_capabilities(provider_model.model_name)
         return bool(
             provider_model.supports_responses
-            and provider_model.supports_tools
+            and ProviderService.provider_model_supports_tools(provider_model)
             and (provider_model.supports_vision or inferred.get("supports_image_generation", False))
         )
 
@@ -580,7 +589,7 @@ class ProviderService:
             "last_error": provider_model.last_error,
             "supports_stream": provider_model.supports_stream,
             "supports_vision": provider_model.supports_vision,
-            "supports_tools": provider_model.supports_tools,
+            "supports_tools": ProviderService.provider_model_supports_tools(provider_model),
             "supports_image_generation": ProviderService.provider_model_supports_image_generation(provider_model),
             "supports_chat_completions": provider_model.supports_chat_completions,
             "supports_responses": provider_model.supports_responses,

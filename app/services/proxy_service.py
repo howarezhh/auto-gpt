@@ -1,6 +1,6 @@
 import asyncio
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -32,7 +32,7 @@ from app.services.router_service import RoutePolicyContext, RouterService
 from app.services.setting_service import SettingService
 from app.services.token_usage_service import TokenUsageService
 from app.services.upstream_client import UpstreamClientService
-from app.utils.json_utils import dumps_json, safeJsonParse
+from app.utils.json_utils import dumps_json, loads_json, safeJsonParse
 from app.utils.request_body_structure import summarize_request_body_structure
 
 
@@ -80,6 +80,8 @@ class StreamTimeoutError(Exception):
 
 
 class ProxyService:
+    LEGACY_IMAGE_OUTER_MODEL_CANDIDATES = ("gpt-5.4", "gpt-5", "gpt-5-mini", "gpt-4.1", "gpt-4o", "gpt-4o-mini")
+    LEGACY_IMAGE_DEFAULT_TOOL_MODEL = "gpt-image-2"
     RESPONSES_CHAT_ADAPTER_SAFE_FIELDS = {
         "model",
         "instructions",
@@ -297,6 +299,7 @@ class ProxyService:
         trace_id: str | None,
         source_ip: str | None,
         request_body_json: str | None,
+        request_path_for_log: str | None = None,
     ) -> None:
         trace = [{
             "result": "request_token_limit_rejected",
@@ -321,7 +324,7 @@ class ProxyService:
             request_id=request_id,
             conversation_key=None,
             session_id=None,
-            request_path=f"/v1{endpoint_path}",
+            request_path=request_path_for_log or f"/v1{endpoint_path}",
             source_ip=source_ip,
             http_method="POST",
             is_stream=is_stream,
@@ -377,6 +380,280 @@ class ProxyService:
     @staticmethod
     def _payload_needs_image_transport(payload: dict[str, Any]) -> bool:
         return ProxyService._payload_has_image(payload) or ProxyService._payload_uses_image_generation(payload)
+
+    @staticmethod
+    def _resolve_legacy_image_outer_model(
+        legacy_payload: dict[str, Any],
+        *,
+        api_client_auth: ApiClientAuthContext | None = None,
+        route_context: RoutePolicyContext | None = None,
+    ) -> str:
+        for key in ("response_model", "outer_model"):
+            candidate = legacy_payload.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        allowed_models: list[str] = []
+        if api_client_auth is not None:
+            loaded_allowed_models = loads_json(api_client_auth.api_client_key.allowed_model_names_json, [])
+            if isinstance(loaded_allowed_models, list):
+                allowed_models = [str(item).strip() for item in loaded_allowed_models if str(item).strip()]
+        allowed_provider_ids = (
+            set(route_context.allowed_provider_ids)
+            if route_context is not None and route_context.allowed_provider_ids is not None
+            else None
+        )
+        available_model_names: list[str] = []
+        db = SessionLocal()
+        try:
+            for provider in ProviderService.list_providers(db):
+                if not provider.enabled or provider.provider_type != "openai_compatible":
+                    continue
+                if allowed_provider_ids is not None and provider.id not in allowed_provider_ids:
+                    continue
+                for provider_model in provider.provider_models:
+                    if not provider_model.enabled:
+                        continue
+                    if getattr(provider_model, "circuit_state", "closed") == "open":
+                        continue
+                    if not ProviderService.provider_model_supports_image_generation(provider_model):
+                        continue
+                    model_name = str(provider_model.model_name or "").strip()
+                    if not model_name:
+                        continue
+                    if allowed_models and model_name not in allowed_models:
+                        continue
+                    if model_name not in available_model_names:
+                        available_model_names.append(model_name)
+        finally:
+            db.close()
+        for candidate in ProxyService.LEGACY_IMAGE_OUTER_MODEL_CANDIDATES:
+            if candidate in available_model_names:
+                return candidate
+        if available_model_names:
+            return available_model_names[0]
+        if allowed_models:
+            for candidate in ProxyService.LEGACY_IMAGE_OUTER_MODEL_CANDIDATES:
+                if candidate in allowed_models:
+                    return candidate
+            return allowed_models[0]
+        return ProxyService.LEGACY_IMAGE_OUTER_MODEL_CANDIDATES[0]
+
+    @staticmethod
+    def _normalize_legacy_image_tool_model(value: Any) -> str:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return ProxyService.LEGACY_IMAGE_DEFAULT_TOOL_MODEL
+
+    @staticmethod
+    def _normalize_legacy_image_output_format(value: Any) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized in {"", "auto"}:
+            return "png"
+        if normalized == "jpg":
+            return "jpeg"
+        if normalized not in {"png", "jpeg", "webp"}:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "message": "response_format 不支持该 output_format，仅支持 png、jpeg、webp",
+                    "code": "invalid_image_output_format",
+                },
+            )
+        return normalized
+
+    @staticmethod
+    def _normalize_legacy_image_response_format(value: Any) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized in {"", "b64_json"}:
+            return "b64_json"
+        if normalized == "url":
+            return "url"
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "message": "legacy Images 兼容层当前仅支持 response_format=b64_json 或 url",
+                "code": "invalid_image_response_format",
+            },
+        )
+
+    @staticmethod
+    def parse_legacy_image_count(value: Any) -> int:
+        if value in (None, "", False):
+            return 1
+        try:
+            count = int(str(value).strip())
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"message": "n 必须是 1 到 10 的整数", "code": "invalid_image_count"},
+            ) from exc
+        if count < 1 or count > 10:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"message": "n 必须是 1 到 10 的整数", "code": "invalid_image_count"},
+            )
+        return count
+
+    @staticmethod
+    def _assert_legacy_images_not_streaming(legacy_payload: dict[str, Any]) -> None:
+        if legacy_payload.get("stream") is True:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "message": "legacy /v1/images/* 兼容入口不支持 stream=true；如需流式生图，请改用 /v1/responses",
+                    "code": "legacy_images_stream_not_supported",
+                },
+            )
+
+    @staticmethod
+    def build_legacy_image_generation_responses_payload(
+        legacy_payload: dict[str, Any],
+        *,
+        api_client_auth: ApiClientAuthContext | None = None,
+        route_context: RoutePolicyContext | None = None,
+    ) -> tuple[dict[str, Any], str]:
+        ProxyService._assert_legacy_images_not_streaming(legacy_payload)
+        prompt = str(legacy_payload.get("prompt") or "").strip()
+        if not prompt:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"message": "prompt 不能为空", "code": "invalid_image_prompt"},
+            )
+        response_format = ProxyService._normalize_legacy_image_response_format(legacy_payload.get("response_format"))
+        tool: dict[str, Any] = {
+            "type": "image_generation",
+            "model": ProxyService._normalize_legacy_image_tool_model(legacy_payload.get("model")),
+            "action": "generate",
+            "output_format": ProxyService._normalize_legacy_image_output_format(legacy_payload.get("output_format")),
+        }
+        ProxyService.parse_legacy_image_count(legacy_payload.get("n"))
+        for key in ("size", "quality", "background", "moderation"):
+            value = legacy_payload.get(key)
+            if isinstance(value, str) and value.strip():
+                tool[key] = value.strip()
+        compression = legacy_payload.get("output_compression")
+        if compression not in (None, ""):
+            try:
+                tool["output_compression"] = int(str(compression).strip())
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"message": "output_compression 必须是整数", "code": "invalid_image_output_compression"},
+                ) from exc
+        payload: dict[str, Any] = {
+            "model": ProxyService._resolve_legacy_image_outer_model(
+                legacy_payload,
+                api_client_auth=api_client_auth,
+                route_context=route_context,
+            ),
+            "input": prompt,
+            "tools": [tool],
+            "tool_choice": {"type": "image_generation"},
+        }
+        user_value = legacy_payload.get("user")
+        if isinstance(user_value, str) and user_value.strip():
+            payload["user"] = user_value.strip()
+        metadata_value = legacy_payload.get("metadata")
+        if isinstance(metadata_value, dict):
+            payload["metadata"] = metadata_value
+        return payload, response_format
+
+    @staticmethod
+    def build_legacy_image_edit_responses_payload(
+        legacy_payload: dict[str, Any],
+        *,
+        image_urls: list[str],
+        mask_urls: list[str] | None = None,
+        api_client_auth: ApiClientAuthContext | None = None,
+        route_context: RoutePolicyContext | None = None,
+    ) -> tuple[dict[str, Any], str]:
+        ProxyService._assert_legacy_images_not_streaming(legacy_payload)
+        prompt = str(legacy_payload.get("prompt") or "").strip()
+        if not prompt:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"message": "prompt 不能为空", "code": "invalid_image_prompt"},
+            )
+        if not image_urls:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"message": "image 不能为空", "code": "missing_image_input"},
+            )
+        response_format = ProxyService._normalize_legacy_image_response_format(legacy_payload.get("response_format"))
+        tool: dict[str, Any] = {
+            "type": "image_generation",
+            "model": ProxyService._normalize_legacy_image_tool_model(legacy_payload.get("model")),
+            "action": "edit",
+            "output_format": ProxyService._normalize_legacy_image_output_format(legacy_payload.get("output_format")),
+        }
+        ProxyService.parse_legacy_image_count(legacy_payload.get("n"))
+        for key in ("size", "quality", "background", "moderation"):
+            value = legacy_payload.get(key)
+            if isinstance(value, str) and value.strip():
+                tool[key] = value.strip()
+        compression = legacy_payload.get("output_compression")
+        if compression not in (None, ""):
+            try:
+                tool["output_compression"] = int(str(compression).strip())
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"message": "output_compression 必须是整数", "code": "invalid_image_output_compression"},
+                ) from exc
+        content: list[dict[str, Any]] = [{"type": "input_text", "text": prompt}]
+        for image_url in image_urls:
+            content.append({"type": "input_image", "image_url": image_url})
+        if mask_urls:
+            content[0]["text"] = (
+                f"{prompt}\n\n附加约束：最后附带的是遮罩参考图，请优先只修改遮罩覆盖区域，未遮罩区域尽量保持不变。"
+            )
+            for mask_url in mask_urls:
+                content.append({"type": "input_image", "image_url": mask_url})
+        payload: dict[str, Any] = {
+            "model": ProxyService._resolve_legacy_image_outer_model(
+                legacy_payload,
+                api_client_auth=api_client_auth,
+                route_context=route_context,
+            ),
+            "input": [{"role": "user", "content": content}],
+            "tools": [tool],
+            "tool_choice": {"type": "image_generation"},
+        }
+        user_value = legacy_payload.get("user")
+        if isinstance(user_value, str) and user_value.strip():
+            payload["user"] = user_value.strip()
+        metadata_value = legacy_payload.get("metadata")
+        if isinstance(metadata_value, dict):
+            payload["metadata"] = metadata_value
+        return payload, response_format
+
+    @staticmethod
+    def build_legacy_image_variation_responses_payload(
+        legacy_payload: dict[str, Any],
+        *,
+        image_urls: list[str],
+        api_client_auth: ApiClientAuthContext | None = None,
+        route_context: RoutePolicyContext | None = None,
+    ) -> tuple[dict[str, Any], str]:
+        if not image_urls:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"message": "image 不能为空", "code": "missing_image_input"},
+            )
+        variation_prompt = str(legacy_payload.get("prompt") or "").strip() or (
+            "基于输入图片生成一个高保真变体：保留主体语义、主要构图和整体风格，但在细节、纹理、光线或小元素上做自然变化；不要添加无关文字。"
+        )
+        payload_for_edit = {
+            **legacy_payload,
+            "prompt": variation_prompt,
+        }
+        return ProxyService.build_legacy_image_edit_responses_payload(
+            payload_for_edit,
+            image_urls=image_urls,
+            mask_urls=None,
+            api_client_auth=api_client_auth,
+            route_context=route_context,
+        )
 
     @staticmethod
     def _value_has_tool_context(value: Any) -> bool:
@@ -543,6 +820,9 @@ class ProxyService:
         api_client_auth: ApiClientAuthContext | None = None,
         trace_id: str | None = None,
         source_ip: str | None = None,
+        request_path_for_log: str | None = None,
+        public_endpoint_path: str | None = None,
+        response_transform: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     ) -> tuple[dict[str, Any], Provider, list[dict], int]:
         payload = ProxyService._normalize_reasoning_request_payload(endpoint_path=endpoint_path, payload=payload)
         model_name = payload.get("model")
@@ -550,6 +830,8 @@ class ProxyService:
         has_image = ProxyService._payload_needs_image_transport(payload)
         require_tools = ProxyService._payload_uses_tools(payload)
         require_image_generation = ProxyService._payload_uses_image_generation(payload)
+        effective_public_endpoint_path = public_endpoint_path or endpoint_path
+        effective_log_request_path = request_path_for_log or f"/v1{effective_public_endpoint_path}"
         setting = await ProxyService._get_setting_async(db)
         request_id = uuid4().hex
         reasoning_level = LogService.extract_reasoning_level(payload)
@@ -558,7 +840,7 @@ class ProxyService:
             setting=setting,
             payload=payload,
             model_name=model_name,
-            endpoint_path=endpoint_path,
+            endpoint_path=effective_public_endpoint_path,
         )
         if token_limit_error is not None:
             reject_status_code, reject_detail = token_limit_error
@@ -577,6 +859,7 @@ class ProxyService:
                 api_client_auth=api_client_auth,
                 trace_id=trace_id,
                 source_ip=source_ip,
+                request_path_for_log=effective_log_request_path,
                 request_body_json=ProxyService._serialize_payload_for_logging(
                     payload,
                     setting=setting,
@@ -588,7 +871,7 @@ class ProxyService:
             setting=setting,
             payload=payload,
             model_name=model_name,
-            endpoint_path=endpoint_path,
+            endpoint_path=effective_public_endpoint_path,
             is_stream=False,
         )
         if long_output_error is not None:
@@ -608,6 +891,7 @@ class ProxyService:
                 api_client_auth=api_client_auth,
                 trace_id=trace_id,
                 source_ip=source_ip,
+                request_path_for_log=effective_log_request_path,
                 request_body_json=ProxyService._serialize_payload_for_logging(
                     payload,
                     setting=setting,
@@ -631,7 +915,7 @@ class ProxyService:
         if payload.get("stream") is True:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail={"message": f"Use stream endpoint handler for {endpoint_path}", "code": "invalid_stream_mode"},
+                detail={"message": f"Use stream endpoint handler for {effective_public_endpoint_path}", "code": "invalid_stream_mode"},
             )
 
         try:
@@ -688,7 +972,7 @@ class ProxyService:
                 request_id=request_id,
                 conversation_key=conversation_key,
                 session_id=session_id,
-                request_path=f"/v1{endpoint_path}",
+                request_path=effective_log_request_path,
                 source_ip=source_ip,
                 http_method="POST",
                 is_stream=False,
@@ -748,10 +1032,11 @@ class ProxyService:
                         "cache_read_tokens": None,
                         "cache_write_tokens": None,
                     }
+                    client_response = response_transform(response) if response_transform is not None else response
                     finish_reason = ProxyService._extract_finish_reason(response)
-                    response_body_json = ProxyService._serialize_payload_for_logging(response, setting=setting)
+                    response_body_json = ProxyService._serialize_payload_for_logging(client_response, setting=setting)
                     response_text = (
-                        ProxyService._extract_response_display_text(response, limit_bytes=setting.max_logged_body_bytes)
+                        ProxyService._extract_response_display_text(client_response, limit_bytes=setting.max_logged_body_bytes)
                         if setting.enable_payload_logging
                         else None
                     )
@@ -773,7 +1058,7 @@ class ProxyService:
                         conversation_key=conversation_key,
                         session_id=session_id,
                         resolved_provider_model_id=provider_model.id,
-                        request_path=f"/v1{endpoint_path}",
+                        request_path=effective_log_request_path,
                         source_ip=source_ip,
                         http_method="POST",
                         is_stream=False,
@@ -805,7 +1090,7 @@ class ProxyService:
                         token_response_text=response_text,
                         schedule_token_fill=setting.enable_token_logging,
                     )
-                    return response, provider, trace, latency_ms
+                    return client_response, provider, trace, latency_ms
                 except ProviderCapacityExceededError as exc:
                     latency_ms = int((time.perf_counter() - started) * 1000)
                     trace.append(
@@ -952,6 +1237,7 @@ class ProxyService:
             api_client_auth=api_client_auth,
             trace_id=trace_id,
             source_ip=source_ip,
+            request_path_for_log=effective_log_request_path,
         )
 
     @staticmethod
@@ -966,6 +1252,8 @@ class ProxyService:
         api_client_auth: ApiClientAuthContext | None = None,
         trace_id: str | None = None,
         source_ip: str | None = None,
+        request_path_for_log: str | None = None,
+        public_endpoint_path: str | None = None,
     ) -> tuple[AsyncIterator[bytes], Provider, list[dict], int]:
         payload = ProxyService._normalize_reasoning_request_payload(endpoint_path=endpoint_path, payload=payload)
         model_name = payload.get("model")
@@ -973,6 +1261,8 @@ class ProxyService:
         has_image = ProxyService._payload_needs_image_transport(payload)
         require_tools = ProxyService._payload_uses_tools(payload)
         require_image_generation = ProxyService._payload_uses_image_generation(payload)
+        effective_public_endpoint_path = public_endpoint_path or endpoint_path
+        effective_log_request_path = request_path_for_log or f"/v1{effective_public_endpoint_path}"
         setting = await ProxyService._get_setting_async(db)
         request_id = uuid4().hex
         reasoning_level = LogService.extract_reasoning_level(payload)
@@ -981,7 +1271,7 @@ class ProxyService:
             setting=setting,
             payload=payload,
             model_name=model_name,
-            endpoint_path=endpoint_path,
+            endpoint_path=effective_public_endpoint_path,
         )
         if token_limit_error is not None:
             reject_status_code, reject_detail = token_limit_error
@@ -1000,12 +1290,13 @@ class ProxyService:
                 api_client_auth=api_client_auth,
                 trace_id=trace_id,
                 source_ip=source_ip,
+                request_path_for_log=effective_log_request_path,
             )
         long_output_error = ProxyService._build_long_output_error(
             setting=setting,
             payload=payload,
             model_name=model_name,
-            endpoint_path=endpoint_path,
+            endpoint_path=effective_public_endpoint_path,
             is_stream=True,
         )
         if long_output_error is not None:
@@ -1025,6 +1316,7 @@ class ProxyService:
                 api_client_auth=api_client_auth,
                 trace_id=trace_id,
                 source_ip=source_ip,
+                request_path_for_log=effective_log_request_path,
             )
         conversation_key = ProxyService._extract_conversation_key(payload, request_id)
         session_id = LogService.extract_session_id(payload, conversation_key=conversation_key, fallback=request_id)
@@ -1093,7 +1385,7 @@ class ProxyService:
                 request_id=request_id,
                 conversation_key=conversation_key,
                 session_id=session_id,
-                request_path=f"/v1{endpoint_path}",
+                request_path=effective_log_request_path,
                 source_ip=source_ip,
                 http_method="POST",
                 is_stream=True,
@@ -1178,6 +1470,7 @@ class ProxyService:
                         response_text_bytes = 0
                         token_response_parts: list[str] = []
                         token_response_bytes = 0
+                        generated_image_summary: dict[str, Any] = {}
                         event_buffer = bytearray()
                         downstream_transform_state = ProxyService._create_responses_stream_state(payload=payload)
                         chat_stream_transform_state = ProxyService._create_chat_stream_state(payload=payload)
@@ -1211,6 +1504,7 @@ class ProxyService:
                                             token_response_bytes=token_response_bytes,
                                             finish_reason=finish_reason,
                                             usage_info=usage_info,
+                                            generated_image_summary=generated_image_summary,
                                             capture_text=setting.enable_stream_response_persist,
                                             capture_usage=setting.enable_token_logging,
                                             limit_bytes=setting.max_logged_body_bytes,
@@ -1333,7 +1627,7 @@ class ProxyService:
                                         conversation_key=conversation_key,
                                         session_id=session_id,
                                         resolved_provider_model_id=provider_model.id,
-                                        request_path=f"/v1{endpoint_path}",
+                                        request_path=effective_log_request_path,
                                         source_ip=source_ip,
                                         http_method="POST",
                                         is_stream=True,
@@ -1355,6 +1649,10 @@ class ProxyService:
                                         finish_reason=finish_reason,
                                         upstream_request_id=upstream_request_id,
                                         request_body_json=request_body_json,
+                                        response_body_json=ProxyService._serialize_stream_response_summary_for_logging(
+                                            generated_image_summary,
+                                            setting=setting,
+                                        ),
                                         response_text=ProxyService._finalize_text_capture(response_text_parts),
                                         message=f"stream {log_type} success",
                                         retryable=False,
@@ -1410,7 +1708,7 @@ class ProxyService:
                                         conversation_key=conversation_key,
                                         session_id=session_id,
                                         resolved_provider_model_id=provider_model.id,
-                                        request_path=f"/v1{endpoint_path}",
+                                        request_path=effective_log_request_path,
                                         source_ip=source_ip,
                                         http_method="POST",
                                         is_stream=True,
@@ -1432,6 +1730,10 @@ class ProxyService:
                                         finish_reason=finish_reason,
                                         upstream_request_id=upstream_request_id,
                                         request_body_json=request_body_json,
+                                        response_body_json=ProxyService._serialize_stream_response_summary_for_logging(
+                                            generated_image_summary,
+                                            setting=setting,
+                                        ),
                                         response_text=ProxyService._finalize_text_capture(response_text_parts),
                                         message=error_message or f"stream {log_type} failed",
                                         error_type="server_error" if not client_cancelled else "client_error",
@@ -1561,6 +1863,7 @@ class ProxyService:
             api_client_auth=api_client_auth,
             trace_id=trace_id,
             source_ip=source_ip,
+            request_path_for_log=effective_log_request_path,
         )
 
     @staticmethod
@@ -3120,7 +3423,9 @@ class ProxyService:
         api_client_auth: ApiClientAuthContext | None = None,
         trace_id: str | None = None,
         source_ip: str | None = None,
+        request_path_for_log: str | None = None,
     ) -> None:
+        effective_request_path = request_path_for_log or f"/v1{endpoint_path}"
         if ProxyService._attempt_count(trace) <= 1 and upstream_error is not None:
             status_code = upstream_error["status_code"]
             detail = upstream_error["detail"]
@@ -3139,7 +3444,7 @@ class ProxyService:
                 conversation_key=conversation_key,
                 session_id=session_id,
                 resolved_provider_model_id=resolved_provider_model_id,
-                request_path=f"/v1{endpoint_path}",
+                request_path=effective_request_path,
                 source_ip=source_ip,
                 http_method="POST",
                 is_stream=is_stream,
@@ -3178,7 +3483,7 @@ class ProxyService:
                 conversation_key=conversation_key,
                 session_id=session_id,
                 resolved_provider_model_id=resolved_provider_model_id,
-                request_path=f"/v1{endpoint_path}",
+                request_path=effective_request_path,
                 source_ip=source_ip,
                 http_method="POST",
                 is_stream=is_stream,
@@ -3220,7 +3525,7 @@ class ProxyService:
             conversation_key=conversation_key,
             session_id=session_id,
             resolved_provider_model_id=resolved_provider_model_id,
-            request_path=f"/v1{endpoint_path}",
+            request_path=effective_request_path,
             source_ip=source_ip,
             http_method="POST",
             is_stream=is_stream,
@@ -3584,6 +3889,90 @@ class ProxyService:
         return f"data:{ProxyService._normalize_image_mime_type(mime_type)};base64,{base64_value}"
 
     @staticmethod
+    def _extract_base64_from_data_url(value: str | None) -> tuple[str | None, str | None]:
+        if not isinstance(value, str):
+            return None, None
+        current = value.strip()
+        if not current.startswith("data:"):
+            return None, None
+        header, separator, payload = current.partition(",")
+        if separator != "," or ";base64" not in header.lower():
+            return None, None
+        mime_type = header[5:].split(";", 1)[0].strip() or None
+        return payload.strip() or None, ProxyService._normalize_image_mime_type(mime_type)
+
+    @staticmethod
+    def _extract_revised_prompt(value: Any) -> str | None:
+        if isinstance(value, dict):
+            revised_prompt = value.get("revised_prompt")
+            if isinstance(revised_prompt, str) and revised_prompt.strip():
+                return revised_prompt.strip()
+            for item in value.values():
+                nested = ProxyService._extract_revised_prompt(item)
+                if nested:
+                    return nested
+            return None
+        if isinstance(value, list):
+            for item in value:
+                nested = ProxyService._extract_revised_prompt(item)
+                if nested:
+                    return nested
+        return None
+
+    @staticmethod
+    def adapt_responses_to_legacy_image_response(
+        response_json: dict[str, Any],
+        *,
+        response_format: str,
+        created: int | None = None,
+    ) -> dict[str, Any]:
+        normalized_response_format = ProxyService._normalize_legacy_image_response_format(response_format)
+        generated_images = ProxyService._extract_generated_images(response_json, limit_images=16)
+        if not generated_images:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail={
+                    "message": "上游图片响应未返回可解析的生成结果",
+                    "code": "image_result_missing",
+                },
+            )
+        revised_prompt = ProxyService._extract_revised_prompt(response_json)
+        data: list[dict[str, Any]] = []
+        for item in generated_images:
+            image_url = item.get("url")
+            if not isinstance(image_url, str) or not image_url.strip():
+                continue
+            entry: dict[str, Any]
+            if normalized_response_format == "url":
+                entry = {"url": image_url.strip()}
+            else:
+                base64_value, _mime_type = ProxyService._extract_base64_from_data_url(image_url)
+                if not base64_value:
+                    raise HTTPException(
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                        detail={
+                            "message": "legacy Images 兼容层无法把上游图片结果转换成 b64_json",
+                            "code": "image_result_b64_unavailable",
+                        },
+                    )
+                entry = {"b64_json": base64_value}
+            if revised_prompt:
+                entry["revised_prompt"] = revised_prompt
+            data.append(entry)
+        if not data:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail={
+                    "message": "上游图片响应未返回可解析的生成结果",
+                    "code": "image_result_missing",
+                },
+            )
+        return {
+            "created": int(created or time.time()),
+            "data": data,
+        }
+
+    @staticmethod
     def _normalize_generated_image_candidate(value: Any, *, mime_type: str | None = None) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         if isinstance(value, list):
@@ -3757,6 +4146,228 @@ class ProxyService:
         return summary
 
     @staticmethod
+    def _estimate_base64_binary_bytes(value: str | None) -> int | None:
+        if not isinstance(value, str):
+            return None
+        payload = value.strip()
+        if not payload:
+            return 0
+        if payload.startswith("data:") and "," in payload:
+            payload = payload.split(",", 1)[1].strip()
+        payload = "".join(payload.split())
+        if not payload:
+            return 0
+        padding = len(payload) - len(payload.rstrip("="))
+        return max(0, (len(payload) * 3) // 4 - padding)
+
+    @staticmethod
+    def _collect_generated_image_payload_stats(value: Any, *, include_raw_string: bool = False) -> dict[str, Any]:
+        approx_bytes = 0
+        has_approx_bytes = False
+        has_partial = False
+
+        def add_base64(candidate: str | None) -> None:
+            nonlocal approx_bytes, has_approx_bytes
+            estimated = ProxyService._estimate_base64_binary_bytes(candidate)
+            if estimated is None:
+                return
+            approx_bytes += estimated
+            has_approx_bytes = True
+
+        def walk(node: Any) -> None:
+            nonlocal has_partial
+            if isinstance(node, dict):
+                for key, item in node.items():
+                    lowered = str(key).lower()
+                    if lowered == "partial_image_b64":
+                        has_partial = True
+                    if lowered in {"image", "image_base64", "b64_json", "partial_image_b64", "base64"} and isinstance(item, str):
+                        add_base64(item)
+                        continue
+                    if lowered == "result" and isinstance(item, str):
+                        add_base64(item)
+                        continue
+                    walk(item)
+                return
+            if isinstance(node, list):
+                for item in node:
+                    walk(item)
+                return
+            if include_raw_string and isinstance(node, str):
+                add_base64(node)
+
+        walk(value)
+        return {
+            "approx_bytes": approx_bytes if has_approx_bytes else None,
+            "has_partial": has_partial,
+        }
+
+    @staticmethod
+    def _build_generated_image_log_summary(
+        candidate: Any,
+        *,
+        mime_type: str | None = None,
+        summary_kind: str,
+        has_partial: bool = False,
+    ) -> dict[str, Any]:
+        wrapper: dict[str, Any]
+        if summary_kind == "generated_image_result":
+            wrapper = {"type": "image_generation_call", "result": candidate, "mime_type": mime_type}
+        else:
+            wrapper = {"b64_json": candidate, "mime_type": mime_type}
+            if has_partial:
+                wrapper["type"] = "response.image_generation_call.partial_image"
+        images = ProxyService._extract_generated_images(wrapper, limit_images=16)
+        mime_types: list[str] = []
+        seen_mime_types: set[str] = set()
+        for item in images:
+            current_mime = item.get("mime_type")
+            if isinstance(current_mime, str) and current_mime not in seen_mime_types:
+                seen_mime_types.add(current_mime)
+                mime_types.append(current_mime)
+        stats = ProxyService._collect_generated_image_payload_stats(candidate, include_raw_string=True)
+        image_count = len(images)
+        if image_count <= 0 and isinstance(candidate, str) and candidate.strip():
+            image_count = 1
+        return {
+            "_summary": "generated image payload omitted from logs",
+            "summary_kind": summary_kind,
+            "image_count": image_count,
+            "mime_types": mime_types,
+            "approx_bytes": stats.get("approx_bytes"),
+            "has_partial": bool(has_partial or stats.get("has_partial")),
+            "result_truncated": True,
+        }
+
+    @staticmethod
+    def _merge_generated_image_log_summaries(summaries: list[dict[str, Any]]) -> dict[str, Any] | None:
+        if not summaries:
+            return None
+        image_count = 0
+        approx_bytes = 0
+        has_approx_bytes = False
+        has_partial = False
+        result_truncated = False
+        mime_types: list[str] = []
+        seen_mime_types: set[str] = set()
+        summary_kind = "binary_image"
+        for item in summaries:
+            if item.get("summary_kind") == "generated_image_result":
+                summary_kind = "generated_image_result"
+            count_value = item.get("image_count")
+            if isinstance(count_value, int):
+                image_count += max(0, count_value)
+            approx_value = item.get("approx_bytes")
+            if isinstance(approx_value, int):
+                approx_bytes += max(0, approx_value)
+                has_approx_bytes = True
+            if item.get("has_partial") is True:
+                has_partial = True
+            if item.get("result_truncated") is True:
+                result_truncated = True
+            for mime_type in item.get("mime_types") or []:
+                if isinstance(mime_type, str) and mime_type not in seen_mime_types:
+                    seen_mime_types.add(mime_type)
+                    mime_types.append(mime_type)
+        return {
+            "_summary": "generated image payload omitted from logs",
+            "summary_kind": summary_kind,
+            "image_count": image_count,
+            "mime_types": mime_types,
+            "approx_bytes": approx_bytes if has_approx_bytes else None,
+            "has_partial": has_partial,
+            "result_truncated": result_truncated,
+        }
+
+    @staticmethod
+    def _extract_stream_generated_image_log_summary(event_json: dict[str, Any]) -> dict[str, Any] | None:
+        result_candidates: list[dict[str, Any]] = []
+        partial_candidates: list[dict[str, Any]] = []
+
+        def walk(value: Any) -> None:
+            if isinstance(value, dict):
+                item_type = value.get("type")
+                if isinstance(item_type, str) and item_type == "image_generation_call" and value.get("result") is not None:
+                    result_candidates.append(
+                        {
+                            "candidate": value.get("result"),
+                            "mime_type": value.get("mime_type") or value.get("output_format"),
+                        }
+                    )
+                elif isinstance(item_type, str) and item_type in {"response.image_generation_call.partial_image", "image_generation.partial_image"}:
+                    partial_candidates.append(
+                        {
+                            "candidate": value.get("partial_image_b64") or value.get("b64_json"),
+                            "mime_type": value.get("mime_type") or value.get("output_format"),
+                        }
+                    )
+                for item in value.values():
+                    walk(item)
+            elif isinstance(value, list):
+                for item in value:
+                    walk(item)
+
+        walk(event_json)
+        summaries: list[dict[str, Any]] = []
+        for item in result_candidates:
+            summaries.append(
+                ProxyService._build_generated_image_log_summary(
+                    item.get("candidate"),
+                    mime_type=item.get("mime_type"),
+                    summary_kind="generated_image_result",
+                )
+            )
+        if not summaries:
+            for item in partial_candidates:
+                summaries.append(
+                    ProxyService._build_generated_image_log_summary(
+                        item.get("candidate"),
+                        mime_type=item.get("mime_type"),
+                        summary_kind="binary_image",
+                        has_partial=True,
+                    )
+                )
+        merged = ProxyService._merge_generated_image_log_summaries(summaries)
+        if merged and partial_candidates:
+            merged["has_partial"] = True
+        return merged
+
+    @staticmethod
+    def _merge_stream_generated_image_summary(target: dict[str, Any], incoming: dict[str, Any]) -> None:
+        if not incoming:
+            return
+        if not target:
+            target.update(incoming)
+            return
+        target_count = int(target.get("image_count") or 0)
+        incoming_count = int(incoming.get("image_count") or 0)
+        target_bytes = int(target.get("approx_bytes") or 0)
+        incoming_bytes = int(incoming.get("approx_bytes") or 0)
+        if incoming_count > target_count or (incoming_count == target_count and incoming_bytes > target_bytes):
+            preserved_partial = bool(target.get("has_partial") or incoming.get("has_partial"))
+            preserved_result_truncated = bool(target.get("result_truncated") or incoming.get("result_truncated"))
+            target.clear()
+            target.update(incoming)
+            target["has_partial"] = preserved_partial
+            target["result_truncated"] = preserved_result_truncated
+            return
+        target["has_partial"] = bool(target.get("has_partial") or incoming.get("has_partial"))
+        target["result_truncated"] = bool(target.get("result_truncated") or incoming.get("result_truncated"))
+        existing_mime_types = [item for item in target.get("mime_types") or [] if isinstance(item, str)]
+        for mime_type in incoming.get("mime_types") or []:
+            if isinstance(mime_type, str) and mime_type not in existing_mime_types:
+                existing_mime_types.append(mime_type)
+        if existing_mime_types:
+            target["mime_types"] = existing_mime_types
+
+    @staticmethod
+    def _serialize_stream_response_summary_for_logging(summary: dict[str, Any] | None, *, setting: Any) -> str | None:
+        if not isinstance(summary, dict) or not summary:
+            return None
+        payload = {"_summary": "stream response summary only", "generated_image": summary}
+        return ProxyService._truncate_serialized_json(payload, getattr(setting, "max_logged_body_bytes", 16384))
+
+    @staticmethod
     def _sanitize_for_logging(value: Any, *, mask_sensitive: bool) -> Any:
         if isinstance(value, dict):
             sanitized: dict[str, Any] = {}
@@ -3767,11 +4378,26 @@ class ProxyService:
                     sanitized[key] = "***"
                     continue
                 if lowered in {"image", "image_base64", "b64_json", "partial_image_b64"} and isinstance(item, str):
-                    sanitized[key] = f"[omitted binary payload: {len(item)} chars]"
+                    sanitized[key] = ProxyService._build_generated_image_log_summary(
+                        item,
+                        mime_type=value.get("mime_type") or value.get("output_format"),
+                        summary_kind="binary_image",
+                        has_partial=lowered == "partial_image_b64",
+                    )
+                    continue
+                if lowered in {"url", "image_url"} and isinstance(item, str) and item.strip().startswith("data:image/"):
+                    sanitized[key] = ProxyService._build_generated_image_log_summary(
+                        item,
+                        mime_type=value.get("mime_type") or value.get("output_format"),
+                        summary_kind="binary_image",
+                    )
                     continue
                 if lowered == "result" and container_type == "image_generation_call":
-                    generated_images = ProxyService._extract_generated_images({"type": container_type, "result": item}, limit_images=4)
-                    sanitized[key] = f"[omitted generated image payload: {len(generated_images)} images]" if generated_images else "[omitted generated image payload]"
+                    sanitized[key] = ProxyService._build_generated_image_log_summary(
+                        item,
+                        mime_type=value.get("mime_type") or value.get("output_format"),
+                        summary_kind="generated_image_result",
+                    )
                     continue
                 sanitized[key] = ProxyService._sanitize_for_logging(item, mask_sensitive=mask_sensitive)
             return sanitized
@@ -3799,6 +4425,7 @@ class ProxyService:
         token_response_bytes: int,
         finish_reason: str | None,
         usage_info: dict[str, int | None],
+        generated_image_summary: dict[str, Any] | None,
         capture_text: bool,
         capture_usage: bool,
         limit_bytes: int,
@@ -3823,6 +4450,21 @@ class ProxyService:
                             usage_info[key] = value
                 if finish_reason is None:
                     finish_reason = ProxyService._extract_finish_reason(event_json)
+                if generated_image_summary is not None:
+                    event_generated_image_summary = ProxyService._extract_stream_generated_image_log_summary(event_json)
+                    if event_generated_image_summary is not None:
+                        ProxyService._merge_stream_generated_image_summary(generated_image_summary, event_generated_image_summary)
+                        if not capture_text:
+                            summary_text = f"[生成了 {int(generated_image_summary.get('image_count') or 0)} 张图片]"
+                            if generated_image_summary.get("image_count") and (
+                                not response_text_parts or response_text_parts[-1] != summary_text
+                            ):
+                                response_text_bytes = ProxyService._append_limited_text(
+                                    response_text_parts,
+                                    summary_text,
+                                    current_bytes=response_text_bytes,
+                                    limit_bytes=limit_bytes,
+                                )
                 if capture_text or token_response_parts is not None:
                     delta_text = ProxyService._extract_response_text(event_json, limit_bytes=max(limit_bytes, 1_048_576))
                     if delta_text and capture_text:

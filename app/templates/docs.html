@@ -26,6 +26,7 @@
     <a class="page-anchor-link" href="#docs-step-flow">步骤流</a>
     <a class="page-anchor-link" href="#docs-copy-flow">复制流</a>
     <a class="page-anchor-link" href="#docs-example-flow">示例流</a>
+    <a class="page-anchor-link" href="#docs-image-flow">生图流</a>
     <a class="page-anchor-link" href="#docs-error-flow">错误返回</a>
     <a class="page-anchor-link" href="#docs-client-flow">客户端配置流</a>
 </nav>
@@ -65,6 +66,13 @@
                 <div>
                     <h4>按客户端类型填配置</h4>
                     <p>支持 OpenAI 兼容 Base URL 且仅使用本平台 <code>/v1/*</code> 兼容子集的客户端，可以按 OpenAI 兼容方式配置 Base URL、API Key 和模型名。</p>
+                </div>
+            </article>
+            <article class="docs-flow-card">
+                <div class="docs-flow-index">5</div>
+                <div>
+                    <h4>图片生成优先走 Responses，旧客户端走兼容层</h4>
+                    <p>本平台对外正式支持的生图工作流，是 <code>POST {{ external_v1_base_url }}/responses</code> 配合 <code>tools=[{"type":"image_generation"}]</code>。若你的老客户端仍固定使用 <code>/v1/images/generations</code> 或 <code>/v1/images/edits</code>，平台也提供兼容层，但正式推荐口径仍然是 Responses。</p>
                 </div>
             </article>
         </div>
@@ -203,6 +211,161 @@ OPENAI_BASE_URL={{ external_v1_base_url }}</code></pre></div>
             <div class="hero-actions">
                 <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="curl {{ external_v1_base_url }}/responses &#10;  -H &quot;Content-Type: application/json&quot; &#10;  -H &quot;Authorization: Bearer YOUR_PLATFORM_API_KEY&quot; &#10;  -d '{&#10;    &quot;model&quot;: &quot;gpt-4o-mini&quot;,&#10;    &quot;input&quot;: &quot;你好，请用一句话介绍本平台&quot;&#10;  }'">复制 responses 示例</button>
             </div>
+        </article>
+    </div>
+</section>
+
+<section class="panel-card section-shell anchor-section-offset" id="docs-image-flow">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">生图流</div>
+            <h3>官方 Responses 生图工作流</h3>
+        </div>
+    </div>
+    <div class="docs-client-grid">
+        <article class="docs-module-card">
+            <h4>兼容边界</h4>
+            <p>本平台当前正式兼容的是 OpenAI 官方 <code>Responses + image_generation</code> 工作流，也就是你给客户端设置同一个 <code>{{ external_v1_base_url }}</code>，然后把图片生成、图片编辑都发到 <code>/v1/responses</code>。</p>
+            <p>推荐做法：外层 <code>model</code> 使用可路由的 Responses 模型，工具层显式写 <code>{"type":"image_generation","model":"gpt-image-2"}</code>；若是编辑图，再补 <code>"action":"edit"</code> 并把输入图放进 <code>input</code> 内容里。</p>
+            <p>如果你的客户端还停留在旧版 Images API，平台现在也兼容 <code>/v1/images/generations</code> 和 <code>/v1/images/edits</code>；但它们只是对现有 Responses 生图内核的一层适配，正式公网主口径仍然是 <code>/v1/responses</code>。</p>
+        </article>
+        <article class="docs-module-card">
+            <h4>文生图 · 非流式</h4>
+            <div class="doc-code-block compact"><pre><code>curl {{ external_v1_base_url }}/responses \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_PLATFORM_API_KEY" \
+  -d '{
+    "model": "gpt-5.4",
+    "input": "生成一张极简风格的蓝色纸鸢图标，白底，单主体",
+    "tools": [
+      {
+        "type": "image_generation",
+        "model": "gpt-image-2",
+        "action": "generate",
+        "background": "opaque",
+        "output_format": "png",
+        "size": "1024x1024",
+        "quality": "high"
+      }
+    ],
+    "tool_choice": {"type": "image_generation"}
+  }'</code></pre></div>
+            <p>成功响应里重点看 <code>output</code> 数组中的 <code>image_generation_call</code>；最终图片通常在 <code>item.result</code> 里，是 base64 编码后的图片数据。</p>
+        </article>
+        <article class="docs-module-card">
+            <h4>文生图 · 流式</h4>
+            <div class="doc-code-block compact"><pre><code>curl {{ external_v1_base_url }}/responses \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_PLATFORM_API_KEY" \
+  -N \
+  -d '{
+    "model": "gpt-5.4",
+    "stream": true,
+    "input": "生成一张暖色调的产品海报背景，不要文字",
+    "tools": [
+      {
+        "type": "image_generation",
+        "model": "gpt-image-2",
+        "action": "auto",
+        "output_format": "png"
+      }
+    ],
+    "tool_choice": {"type": "image_generation"}
+  }'</code></pre></div>
+            <p>流式场景建议优先监听 <code>response.output_item.done</code>；当事件里的 <code>item.type == "image_generation_call"</code> 且 <code>item.result</code> 存在时，说明拿到了最终图片。若上游支持 partial image，中途还可能出现 <code>response.image_generation_call.partial_image</code>。</p>
+        </article>
+        <article class="docs-module-card">
+            <h4>图片编辑 · Responses</h4>
+            <div class="doc-code-block compact"><pre><code>curl {{ external_v1_base_url }}/responses \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_PLATFORM_API_KEY" \
+  -d '{
+    "model": "gpt-5.4",
+    "input": [
+      {
+        "role": "user",
+        "content": [
+          {"type": "input_text", "text": "只修改背景，把背景换成干净的浅灰摄影棚，主体不要变化"},
+          {"type": "input_image", "image_url": "data:image/png;base64,REPLACE_WITH_BASE64"}
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "type": "image_generation",
+        "model": "gpt-image-2",
+        "action": "edit",
+        "output_format": "png",
+        "quality": "high"
+      }
+    ],
+    "tool_choice": {"type": "image_generation"}
+  }'</code></pre></div>
+            <p>编辑图时不要切回旧版 Images API；直接把源图作为 <code>input_image</code> 放进 <code>/v1/responses</code>，并把工具动作固定成 <code>edit</code>，这也是你给出的 <code>imagegen</code> skill 当前采用的正式逻辑。</p>
+        </article>
+        <article class="docs-module-card">
+            <h4>旧客户端兼容 · images/generations</h4>
+            <div class="doc-code-block compact"><pre><code>curl {{ external_v1_base_url }}/images/generations \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_PLATFORM_API_KEY" \
+  -d '{
+    "model": "gpt-image-2",
+    "prompt": "生成一张极简风格的蓝色纸鸢图标，白底，单主体",
+    "response_format": "b64_json"
+  }'</code></pre></div>
+            <p>这个兼容入口会在平台内部自动改写成 <code>/v1/responses + image_generation</code>。当前兼容层支持 <code>n=1..10</code>，多图会由平台在内部聚合成旧版 Images API 的 <code>data[]</code> 返回；若需要流式或更完整的原生 Responses 字段，请直接走 <code>/v1/responses</code>。</p>
+        </article>
+        <article class="docs-module-card">
+            <h4>旧客户端兼容 · images/edits</h4>
+            <div class="doc-code-block compact"><pre><code>curl {{ external_v1_base_url }}/images/edits \
+  -H "Authorization: Bearer YOUR_PLATFORM_API_KEY" \
+  -F "model=gpt-image-2" \
+  -F "prompt=只修改背景，把背景换成干净的浅灰摄影棚，主体不要变化" \
+  -F "response_format=b64_json" \
+  -F "image=@/path/to/source.png"</code></pre></div>
+            <p>旧版编辑图兼容入口支持 <code>multipart/form-data</code>，也支持 JSON 里直接传 data URL。JSON 请求既兼容单个 <code>image</code>，也兼容官方新版常见的 <code>images</code> 数组；若额外传了 <code>mask</code>，平台会把它当成遮罩参考图一并转入现有 Responses 编辑链路。</p>
+        </article>
+        <article class="docs-module-card">
+            <h4>旧客户端兼容 · images/variations</h4>
+            <div class="doc-code-block compact"><pre><code>curl {{ external_v1_base_url }}/images/variations \
+  -H "Authorization: Bearer YOUR_PLATFORM_API_KEY" \
+  -F "model=gpt-image-2" \
+  -F "response_format=b64_json" \
+  -F "image=@/path/to/source.png"</code></pre></div>
+            <p>这个兼容入口会把“生成相近变体”的旧版调用方式适配到当前的 Responses 图片编辑内核。它适合旧客户端保持接口不变时继续可用，但语义上仍属于兼容适配，不应替代你在 <code>/v1/responses</code> 里显式控制变体提示词的正式做法。</p>
+        </article>
+        <article class="docs-module-card">
+            <h4>兼容细节 · response_format=url</h4>
+            <p>当旧版 Images API 请求使用 <code>response_format=url</code> 时，平台当前返回的是 <code>data:image/...;base64,...</code> 形式的 data URL 兼容值，而不是临时 CDN 文件地址。</p>
+            <p>如果你的客户端需要真实可下载的公网 URL，请优先自己把返回图片保存到对象存储，或直接走 <code>/v1/responses</code> 后自行落地文件。</p>
+        </article>
+        <article class="docs-module-card">
+            <h4>OpenAI Python SDK 示例</h4>
+            <div class="doc-code-block compact"><pre><code>from openai import OpenAI
+
+client = OpenAI(
+    base_url="{{ external_v1_base_url }}",
+    api_key="YOUR_PLATFORM_API_KEY",
+)
+
+resp = client.responses.create(
+    model="gpt-5.4",
+    input="生成一张极简风格的蓝色纸鸢图标，白底，单主体",
+    tools=[
+        {
+            "type": "image_generation",
+            "model": "gpt-image-2",
+            "action": "generate",
+            "output_format": "png",
+        }
+    ],
+    tool_choice={"type": "image_generation"},
+)
+
+for item in resp.output:
+    if getattr(item, "type", None) == "image_generation_call" and getattr(item, "result", None):
+        image_base64 = item.result
+        break</code></pre></div>
         </article>
     </div>
 </section>
