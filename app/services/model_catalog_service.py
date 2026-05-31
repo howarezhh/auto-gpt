@@ -28,12 +28,16 @@ from app.utils.json_utils import dumps_json, loads_json
 
 
 class ModelCatalogService:
+    """负责模型目录管理、provider 绑定和目录同步。"""
+
     @staticmethod
     def _catalog_supports_tools(catalog: ModelCatalog) -> bool:
+        """判断目录模型是否支持工具调用。"""
         return bool(catalog.supports_tools or ProviderService.model_name_supports_tools(catalog.model_name))
 
     @staticmethod
     def _catalog_supports_image_generation(catalog: ModelCatalog) -> bool:
+        """判断目录模型是否适合图像生成链路。"""
         return bool(
             catalog.supports_responses
             and ModelCatalogService._catalog_supports_tools(catalog)
@@ -42,14 +46,17 @@ class ModelCatalogService:
 
     @staticmethod
     def list_catalogs(db: Session) -> list[ModelCatalog]:
+        """返回全部模型目录项。"""
         return list(db.scalars(select(ModelCatalog).order_by(ModelCatalog.model_name.asc())))
 
     @staticmethod
     def get_catalog(db: Session, model_name: str) -> ModelCatalog | None:
+        """按模型名读取目录项。"""
         return db.scalar(select(ModelCatalog).where(ModelCatalog.model_name == model_name))
 
     @staticmethod
     def list_model_dicts(db: Session) -> list[dict]:
+        """返回模型目录的序列化结果列表。"""
         catalogs, providers = ModelCatalogService._load_catalogs_and_providers(db)
         return [ModelCatalogService._serialize_catalog(catalog, providers) for catalog in catalogs]
 
@@ -63,6 +70,7 @@ class ModelCatalogService:
         page: int = 1,
         page_size: int = 20,
     ) -> dict:
+        """分页返回模型目录列表。"""
         page = max(int(page or 1), 1)
         page_size = min(max(int(page_size or 20), 10), 100)
         query = ModelCatalogService._model_filter_query(keyword=keyword, enabled=enabled, provider_id=provider_id)
@@ -89,6 +97,7 @@ class ModelCatalogService:
 
     @staticmethod
     def model_summary(db: Session) -> dict:
+        """汇总模型目录的数量和可用性统计。"""
         catalogs, providers = ModelCatalogService._load_catalogs_and_providers(db)
         payloads = [ModelCatalogService._serialize_catalog(catalog, providers) for catalog in catalogs]
         return {
@@ -101,6 +110,7 @@ class ModelCatalogService:
 
     @staticmethod
     def get_model_detail(db: Session, model_name: str) -> dict | None:
+        """返回单个模型目录的详细视图。"""
         catalogs, providers = ModelCatalogService._load_catalogs_and_providers(db)
         catalog = next((item for item in catalogs if item.model_name == model_name), None)
         if catalog is None:
@@ -109,6 +119,7 @@ class ModelCatalogService:
 
     @staticmethod
     def create_model(db: Session, payload: ModelCatalogCreate) -> ModelCatalog:
+        """创建模型目录项并同步 provider 绑定。"""
         if ModelCatalogService.get_catalog(db, payload.model_name) is not None:
             raise ValueError("模型已存在")
         catalog = ModelCatalog(
@@ -143,6 +154,7 @@ class ModelCatalogService:
 
     @staticmethod
     def update_model(db: Session, catalog: ModelCatalog, payload: ModelCatalogUpdate) -> ModelCatalog:
+        """更新模型目录项，并联动同步价格、能力和绑定关系。"""
         data = payload.model_dump(exclude_unset=True, exclude={"provider_bindings"})
         provider_bindings = payload.provider_bindings if "provider_bindings" in payload.model_fields_set else None
         if "cache_price_per_1k" in data and data["cache_price_per_1k"] is None:
@@ -177,6 +189,7 @@ class ModelCatalogService:
         model_names: list[str],
         context_window_tokens: int | None,
     ) -> list[ModelCatalog]:
+        """批量更新模型的上下文窗口。"""
         normalized_names = [item.strip() for item in model_names if isinstance(item, str) and item.strip()]
         if not normalized_names:
             raise ValueError("请选择要更新的模型")
@@ -202,6 +215,7 @@ class ModelCatalogService:
 
     @staticmethod
     def delete_model(db: Session, catalog: ModelCatalog) -> None:
+        """删除模型目录项，并清理 provider 绑定和授权范围。"""
         model_name = catalog.model_name
         providers = ProviderService.list_providers(db)
         for provider in providers:
@@ -216,6 +230,7 @@ class ModelCatalogService:
 
     @staticmethod
     def sync_model_catalogs(db: Session) -> None:
+        """根据 provider model 挂载情况同步模型目录。"""
         catalogs = {item.model_name: item for item in ModelCatalogService.list_catalogs(db)}
         provider_models = list(
             db.scalars(
@@ -233,6 +248,7 @@ class ModelCatalogService:
             catalog = catalogs.get(model_name)
             catalog_created = False
             if catalog is None:
+                # 新发现的模型自动进入目录，减少后台手工维护成本。
                 catalog = ModelCatalog(
                     model_name=model_name,
                     display_name=None,
@@ -371,12 +387,20 @@ class ModelCatalogService:
 
     @staticmethod
     def enabled_model_name_set(db: Session) -> set[str]:
-        return set(db.scalars(select(ModelCatalog.model_name).where(ModelCatalog.enabled.is_(True))))
+        cache_key = "model-enabled-names"
+        cached = CacheService.get(cache_key)
+        if isinstance(cached, list):
+            return {str(item) for item in cached if isinstance(item, str)}
+        names = set(db.scalars(select(ModelCatalog.model_name).where(ModelCatalog.enabled.is_(True))))
+        CacheService.set(cache_key, sorted(names), ttl_seconds=15)
+        return names
 
     @staticmethod
     def invalidate_model_runtime_cache() -> None:
         CacheService.invalidate_prefix("route-candidates")
         CacheService.invalidate_prefix("v1-models")
+        CacheService.invalidate_prefix("model-enabled-names")
+        CacheService.invalidate_prefix("model-catalog-limits")
 
     @staticmethod
     def _load_catalogs_and_providers(db: Session) -> tuple[list[ModelCatalog], list[Provider]]:

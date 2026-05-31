@@ -31,6 +31,7 @@ from app.services.api_key_service import ApiClientAuthError, ApiKeyService
 from app.services.asset_service import AssetService
 from app.services.log_service import LogService
 from app.services.model_catalog_service import ModelCatalogService
+from app.services.openai_error_service import OpenAIErrorService
 from app.services.provider_service import ProviderService
 from app.services.proxy_service import ProxyService
 from app.services.user_auth_service import USER_ROLE_ADMIN, UserAuthService
@@ -1254,19 +1255,43 @@ async def run_user_self_test(
             }
         )
     except ApiClientAuthError as exc:
+        trace_id = getattr(request.state, "trace_id", None)
         return JSONResponse(
             {
                 "success": False,
                 "message": exc.message,
                 "code": exc.code,
                 "status_code": exc.status_code,
-            }
+                "error": OpenAIErrorService.build_error_payload(
+                    message=exc.message,
+                    code=exc.code,
+                    trace_id=trace_id,
+                    error_type="authentication_error" if exc.status_code in {401, 403} else "rate_limit_error",
+                    retryable=exc.status_code == 429,
+                )["error"],
+            },
+            status_code=exc.status_code,
         )
     except HTTPException as exc:
+        trace_id = getattr(request.state, "trace_id", None)
+        detail_payload = exc.detail if isinstance(exc.detail, dict) else None
+        message = OpenAIErrorService.extract_message(exc.detail, fallback="Request failed")
+        error_type, error_code, retryable = OpenAIErrorService.classify_status_code(exc.status_code)
+        if isinstance(detail_payload, dict) and isinstance(detail_payload.get("code"), str):
+            error_code = detail_payload["code"]
         return JSONResponse(
             {
                 "success": False,
-                "message": str(exc.detail),
+                "message": message,
                 "status_code": exc.status_code,
-            }
+                "error": OpenAIErrorService.build_error_payload(
+                    message=message,
+                    code=error_code,
+                    trace_id=trace_id,
+                    error_type=error_type,
+                    retryable=retryable,
+                    detail=detail_payload,
+                )["error"],
+            },
+            status_code=exc.status_code,
         )

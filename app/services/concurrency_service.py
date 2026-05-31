@@ -8,6 +8,8 @@ from app.services.redis_service import RedisService
 
 @dataclass(slots=True)
 class ConcurrencyLimits:
+    """描述不同维度的并发上限配置。"""
+
     global_max_active_requests: int | None = None
     global_max_active_streams: int | None = None
     api_key_max_active_requests: int | None = None
@@ -20,11 +22,15 @@ class ConcurrencyLimits:
 
 @dataclass(slots=True)
 class ConcurrencyLease:
+    """表示一次已成功申请的并发租约。"""
+
     request_id: str
     keys: list[str]
 
 
 class ConcurrencyLimitExceededError(Exception):
+    """表示并发控制命中上限。"""
+
     def __init__(self, message: str, *, code: str, scope: str) -> None:
         super().__init__(message)
         self.code = code
@@ -33,6 +39,8 @@ class ConcurrencyLimitExceededError(Exception):
 
 
 class ConcurrencyService:
+    """基于 Redis Lua 脚本实现请求并发租约控制。"""
+
     _ACQUIRE_LUA = """
 local lease_key = KEYS[1]
 local ttl = tonumber(ARGV[1])
@@ -109,6 +117,7 @@ return 1
         account_id: int | None = None,
         provider_id: int | None = None,
     ) -> ConcurrencyLease:
+        """申请并发租约，命中上限时抛出结构化异常。"""
         scoped_items = cls._build_scoped_items(
             limits=limits,
             api_key_id=api_key_id,
@@ -135,6 +144,7 @@ return 1
 
     @classmethod
     async def release(cls, lease: ConcurrencyLease | None) -> bool:
+        """释放先前申请的并发租约。"""
         if lease is None or not lease.keys:
             return False
         lease_key = f"concurrency:lease:{lease.request_id}"
@@ -148,6 +158,7 @@ return 1
 
     @classmethod
     async def active_snapshot(cls) -> dict[str, int]:
+        """返回当前全局并发计数快照。"""
         try:
             client = RedisService.get_client()
             keys = [
@@ -172,6 +183,7 @@ return 1
         account_id: int | None,
         provider_id: int | None,
     ) -> list[list[str | int]]:
+        """构造 Lua 脚本所需的各作用域计数项。"""
         items: list[list[str | int]] = [
             [
                 "concurrency:global:active",
@@ -215,10 +227,12 @@ return 1
 
     @staticmethod
     def _limit_value(value: int | None) -> int:
+        """把空值上限归一化为 0。"""
         return int(value or 0)
 
     @staticmethod
     def _build_error(code: str, detail: str) -> ConcurrencyLimitExceededError:
+        """把 Redis 返回码转换为业务异常。"""
         if code == "stream_concurrency_exceeded":
             return ConcurrencyLimitExceededError(
                 "Stream concurrency limit exceeded",
@@ -239,4 +253,5 @@ return 1
 
     @staticmethod
     def _allow_local_fallback() -> bool:
+        """非生产环境允许 Redis 不可用时降级为本地放行。"""
         return not get_settings().is_production()

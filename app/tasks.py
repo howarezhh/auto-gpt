@@ -16,6 +16,8 @@ from app.services.token_usage_service import TokenUsageService
 
 
 logger = logging.getLogger(__name__)
+PROVIDER_L0_HEALTH_CHECK_INTERVAL_SEC = 120
+MODEL_L2_CAPABILITY_CHECK_MIN_INTERVAL_SEC = 60 * 30
 
 _RELEASE_LOCK_LUA = """
 if redis.call('GET', KEYS[1]) == ARGV[1] then
@@ -121,10 +123,37 @@ def distributed_job_lock(job_name: str, *, ttl_seconds: int) -> Callable:
 
 @distributed_job_lock("provider_health_check", ttl_seconds=300)
 async def scheduled_health_check() -> None:
+    """兼容旧调度入口：不再执行全量模型探针，避免自动任务放大上游压力。"""
+    await scheduled_provider_l0_health_check()
+    await scheduled_model_l1_text_health_check()
+
+
+@distributed_job_lock("provider_l0_health_check", ttl_seconds=120)
+async def scheduled_provider_l0_health_check() -> None:
     db = SessionLocal()
     try:
         if SettingService.get_or_create(db).auto_health_check:
-            await HealthService.check_all(db)
+            await HealthService.check_provider_connectivity_all(db)
+    finally:
+        db.close()
+
+
+@distributed_job_lock("model_l1_text_health_check", ttl_seconds=300)
+async def scheduled_model_l1_text_health_check() -> None:
+    db = SessionLocal()
+    try:
+        if SettingService.get_or_create(db).auto_health_check:
+            await HealthService.check_scheduled_text_models(db)
+    finally:
+        db.close()
+
+
+@distributed_job_lock("model_l2_capability_health_check", ttl_seconds=MODEL_L2_CAPABILITY_CHECK_MIN_INTERVAL_SEC)
+async def scheduled_model_l2_capability_health_check() -> None:
+    db = SessionLocal()
+    try:
+        if SettingService.get_or_create(db).auto_health_check:
+            await HealthService.check_scheduled_capability_models(db)
     finally:
         db.close()
 
@@ -159,11 +188,29 @@ def configure_scheduler() -> None:
         interval = max(300, SettingService.get_or_create(db).health_check_interval_sec)
     finally:
         db.close()
+    try:
+        scheduler.remove_job("provider_health_check")
+    except Exception:
+        pass
     scheduler.add_job(
-        scheduled_health_check,
+        scheduled_provider_l0_health_check,
+        "interval",
+        seconds=PROVIDER_L0_HEALTH_CHECK_INTERVAL_SEC,
+        id="provider_l0_health_check",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        scheduled_model_l1_text_health_check,
         "interval",
         seconds=interval,
-        id="provider_health_check",
+        id="model_l1_text_health_check",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        scheduled_model_l2_capability_health_check,
+        "interval",
+        seconds=max(MODEL_L2_CAPABILITY_CHECK_MIN_INTERVAL_SEC, interval * 3),
+        id="model_l2_capability_health_check",
         replace_existing=True,
     )
     scheduler.add_job(

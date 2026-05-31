@@ -20,6 +20,7 @@ from app.services.log_service import LogService
 from app.services.provider_service import ProviderService
 from app.services.setting_service import SettingService
 from app.services.user_auth_service import USER_ROLE_ADMIN, UserAuthService
+from app.utils.json_utils import to_jsonable
 
 
 router = APIRouter()
@@ -323,7 +324,7 @@ def alerts_feed(request: Request, db: Session = Depends(get_db)):
     payload = AlertService.build_dashboard_payload(db)
     subscription = AlertService.get_or_create_subscription(db, user=current_user)
     return JSONResponse(
-        {
+        to_jsonable({
             **payload,
             "subscription": {
                 "enabled": subscription.enabled,
@@ -335,7 +336,7 @@ def alerts_feed(request: Request, db: Session = Depends(get_db)):
                 "browser_notifications_enabled": subscription.browser_notifications_enabled,
                 "poll_interval_seconds": subscription.poll_interval_seconds,
             },
-        }
+        })
     )
 
 

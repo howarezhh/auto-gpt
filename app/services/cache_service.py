@@ -5,26 +5,40 @@ from dataclasses import dataclass
 from threading import Lock
 from typing import Any
 
+from app.config import get_settings
 from app.services.redis_service import RedisService
 from app.utils.json_utils import dumps_json, loads_json
 
 
 @dataclass
 class CacheEntry:
+    """表示内存缓存中的单条记录。"""
+
     expires_at: float
     value: Any
 
 
 class CacheService:
+    """提供 Redis + 进程内存的双层缓存能力。"""
+
     _lock = Lock()
     _store: dict[str, CacheEntry] = {}
     _redis_prefix = "shared-cache:"
 
     @classmethod
     def get(cls, key: str) -> Any | None:
+        """优先读取短 TTL 本地缓存，再回退到 Redis，降低热路径网络往返。"""
+        memory_value = cls._memory_get(key)
+        if memory_value is not None:
+            return memory_value
         redis_value = cls._redis_get(key)
         if redis_value is not None:
+            cls._memory_set(key, redis_value, ttl_seconds=cls._local_ttl_seconds(default_ttl=1))
             return redis_value
+        return None
+
+    @classmethod
+    def _memory_get(cls, key: str) -> Any | None:
         now = time.time()
         with cls._lock:
             entry = cls._store.get(key)
@@ -37,17 +51,31 @@ class CacheService:
 
     @classmethod
     def set(cls, key: str, value: Any, *, ttl_seconds: int) -> Any:
+        """写入缓存；可 JSON 序列化值进入 Redis，所有值都进入短 TTL L1。"""
         if ttl_seconds <= 0:
             return value
+        cls._memory_set(key, value, ttl_seconds=cls._local_ttl_seconds(default_ttl=ttl_seconds))
         if cls._is_redis_safe_value(value) and cls._redis_set(key, value, ttl_seconds=ttl_seconds):
-            cls._memory_delete(key)
             return value
-        with cls._lock:
-            cls._store[key] = CacheEntry(expires_at=time.time() + ttl_seconds, value=value)
         return value
 
     @classmethod
+    def _memory_set(cls, key: str, value: Any, *, ttl_seconds: float) -> None:
+        if ttl_seconds <= 0:
+            return
+        with cls._lock:
+            cls._store[key] = CacheEntry(expires_at=time.time() + ttl_seconds, value=value)
+
+    @staticmethod
+    def _local_ttl_seconds(*, default_ttl: int | float) -> float:
+        cap = float(getattr(get_settings(), "cache_l1_ttl_cap_seconds", 1.0) or 0)
+        if cap <= 0:
+            return 0.0
+        return max(0.0, min(float(default_ttl), cap))
+
+    @classmethod
     def invalidate_prefix(cls, prefix: str) -> None:
+        """按前缀失效内存与 Redis 中的缓存项。"""
         with cls._lock:
             keys = [key for key in cls._store.keys() if key.startswith(prefix)]
             for key in keys:
@@ -56,15 +84,18 @@ class CacheService:
 
     @classmethod
     def _memory_delete(cls, key: str) -> None:
+        """删除进程内存中的单条缓存。"""
         with cls._lock:
             cls._store.pop(key, None)
 
     @classmethod
     def _redis_key(cls, key: str) -> str:
+        """生成 Redis 中使用的真实缓存键名。"""
         return f"{cls._redis_prefix}{key}"
 
     @classmethod
     def _redis_get(cls, key: str) -> Any | None:
+        """从 Redis 读取缓存值。"""
         try:
             client = RedisService.get_sync_client()
             raw_value = client.get(cls._redis_key(key))
@@ -76,6 +107,7 @@ class CacheService:
 
     @classmethod
     def _redis_set(cls, key: str, value: Any, *, ttl_seconds: int) -> bool:
+        """写入 Redis 缓存。"""
         try:
             RedisService.get_sync_client().setex(cls._redis_key(key), int(ttl_seconds), dumps_json(value))
             return True
@@ -84,6 +116,7 @@ class CacheService:
 
     @classmethod
     def _redis_invalidate_prefix(cls, prefix: str) -> None:
+        """删除 Redis 中指定前缀的缓存项。"""
         try:
             client = RedisService.get_sync_client()
             pattern = cls._redis_key(prefix) + "*"
@@ -95,6 +128,7 @@ class CacheService:
 
     @staticmethod
     def _is_redis_safe_value(value: Any) -> bool:
+        """判断值是否适合直接以 JSON 形式写入 Redis。"""
         if value is None or isinstance(value, (str, int, float, bool)):
             return True
         if isinstance(value, list):

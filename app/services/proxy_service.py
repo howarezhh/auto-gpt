@@ -1,4 +1,6 @@
 import asyncio
+import logging
+import threading
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -7,7 +9,10 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
+import aiohttp
 import httpx
+import requests
+from requests.adapters import HTTPAdapter
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
@@ -27,17 +32,24 @@ from app.services.provider_capacity_service import (
     ProviderCapacityService,
     ProviderCapacityUnavailableError,
 )
+from app.services.provider_health_state_service import ProviderHealthStateService
 from app.services.provider_service import ProviderService
+from app.services.request_log_queue_service import RequestLogQueueService
 from app.services.router_service import RoutePolicyContext, RouterService
 from app.services.setting_service import SettingService
 from app.services.token_usage_service import TokenUsageService
-from app.services.upstream_client import UpstreamClientService
+from app.services.upstream_client import AiohttpJsonResponse, AiohttpStreamResponse, UpstreamClientService
 from app.utils.json_utils import dumps_json, loads_json, safeJsonParse
 from app.utils.request_body_structure import summarize_request_body_structure
 
 
+logger = logging.getLogger(__name__)
+
+
 @dataclass(slots=True)
 class PreparedUpstreamRequest:
+    """描述准备发送到上游模型服务的请求。"""
+
     request_path: str
     request_payload: dict[str, Any]
     adapt_chat_response_to_responses: bool = False
@@ -47,18 +59,24 @@ class PreparedUpstreamRequest:
 
 @dataclass(slots=True)
 class RequestsUpstreamHTTPError(Exception):
+    """表示上游 HTTP 错误及其响应详情。"""
+
     status_code: int
     detail: Any
 
 
 @dataclass(slots=True)
 class NonStreamResponseTooLarge(Exception):
+    """表示非流式响应超过系统允许的大小限制。"""
+
     status_code: int
     detail: dict[str, Any]
 
 
 @dataclass(slots=True)
 class EndpointConversionSafety:
+    """描述端点协议转换是否安全。"""
+
     safe: bool
     code: str | None = None
     message: str | None = None
@@ -68,20 +86,34 @@ class EndpointConversionSafety:
 
 @dataclass(slots=True)
 class StreamTimeoutPolicy:
+    """定义流式请求的各阶段超时策略。"""
+
     first_token_timeout_seconds: int
     idle_timeout_seconds: int
     max_duration_seconds: int
 
 
 class StreamTimeoutError(Exception):
+    """表示流式请求超时，并携带业务错误码。"""
+
     def __init__(self, *, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
 
 
+UpstreamStreamResponse = httpx.Response | AiohttpStreamResponse
+UpstreamJsonResponse = httpx.Response | AiohttpJsonResponse
+
+
 class ProxyService:
+    """处理鉴权、路由、转发、限流和响应适配的核心代理服务。"""
+
     LEGACY_IMAGE_OUTER_MODEL_CANDIDATES = ("gpt-5.4", "gpt-5", "gpt-5-mini", "gpt-4.1", "gpt-4o", "gpt-4o-mini")
     LEGACY_IMAGE_DEFAULT_TOOL_MODEL = "gpt-image-2"
+    _provider_success_update_at: dict[tuple[int, int], float] = {}
+    _requests_session_local = threading.local()
+    _model_catalog_limit_locks: dict[str, threading.Lock] = {}
+    _model_catalog_limit_locks_guard = threading.Lock()
     RESPONSES_CHAT_ADAPTER_SAFE_FIELDS = {
         "model",
         "instructions",
@@ -134,20 +166,21 @@ class ProxyService:
 
     @staticmethod
     def _get_setting_with_scoped_session():
-        db = SessionLocal()
-        try:
-            return SettingService.get_or_create(db)
-        finally:
-            db.close()
+        """在独立数据库会话中读取系统设置。"""
+        return SettingService.get_cached()
 
     @staticmethod
     async def _get_setting_async(db: Session | None = None):
+        """异步读取系统设置，兼容复用外部会话或自建会话。"""
         if db is not None:
             return await run_in_threadpool(SettingService.get_or_create, db)
-        return await run_in_threadpool(ProxyService._get_setting_with_scoped_session)
+        return ProxyService._get_setting_with_scoped_session()
 
     @staticmethod
     def _run_db_write_sync(operation, *args, **kwargs):
+        """在独立事务中执行同步数据库写操作。"""
+        if ProxyService._try_enqueue_request_log(operation, args=args, kwargs=kwargs):
+            return None
         db = SessionLocal()
         try:
             result = operation(db, *args, **kwargs)
@@ -161,6 +194,7 @@ class ProxyService:
 
     @staticmethod
     def _raise_final_error_with_scoped_session(**kwargs) -> None:
+        """在独立事务里构造并抛出最终业务异常。"""
         db = SessionLocal()
         try:
             ProxyService._raise_final_error(db, **kwargs)
@@ -174,20 +208,82 @@ class ProxyService:
 
     @staticmethod
     async def _run_db_write(operation, *args, db: Session | None = None, **kwargs):
+        """异步包装数据库写操作，避免阻塞事件循环。"""
         if db is not None:
             return await run_in_threadpool(operation, db, *args, **kwargs)
         return await run_in_threadpool(ProxyService._run_db_write_sync, operation, *args, **kwargs)
 
     @staticmethod
+    def _try_enqueue_request_log(operation, *, args: tuple, kwargs: dict[str, Any]) -> bool:
+        if args:
+            return False
+        if operation is LogService.create_log:
+            return RequestLogQueueService.enqueue(**kwargs)
+        if operation is ProxyService._create_success_log_with_provider_status:
+            if not RequestLogQueueService.enqueue(**kwargs):
+                return False
+            ProxyService._try_mark_success_for_enqueued_log(kwargs)
+            return True
+        return False
+
+    @staticmethod
+    def _try_mark_success_for_enqueued_log(kwargs: dict[str, Any]) -> None:
+        resolved_provider_model_id = kwargs.get("resolved_provider_model_id")
+        provider_id = kwargs.get("provider_id")
+        latency_ms = kwargs.get("latency_ms")
+        if provider_id is None or resolved_provider_model_id is None or latency_ms is None:
+            return
+        if not ProxyService._should_update_provider_success(int(provider_id), int(resolved_provider_model_id)):
+            return
+        db = SessionLocal()
+        try:
+            ProxyService._mark_success_by_id(db, int(provider_id), int(resolved_provider_model_id), int(latency_ms))
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            logger.warning("Failed to update provider success status for enqueued log: %s", exc)
+        finally:
+            db.close()
+
+    @staticmethod
+    def _queue_or_create_request_log(db: Session, **kwargs):
+        if RequestLogQueueService.enqueue(**kwargs):
+            return None
+        kwargs["auto_commit"] = False
+        return LogService.create_log(db, **kwargs)
+
+    @staticmethod
     def _get_model_catalog_limits(model_name: str | None) -> dict[str, int | bool | None]:
+        """查询模型目录中的上下文窗口与能力上限。"""
         if not model_name:
             return {}
+        cache_key = f"model-catalog-limits:{model_name}"
+        cached = CacheService.get(cache_key)
+        if isinstance(cached, dict):
+            return cached
+        with ProxyService._model_catalog_limit_lock(cache_key):
+            cached = CacheService.get(cache_key)
+            if isinstance(cached, dict):
+                return cached
+            return ProxyService._load_model_catalog_limits_uncached(model_name, cache_key=cache_key)
+
+    @staticmethod
+    def _model_catalog_limit_lock(cache_key: str) -> threading.Lock:
+        with ProxyService._model_catalog_limit_locks_guard:
+            lock = ProxyService._model_catalog_limit_locks.get(cache_key)
+            if lock is None:
+                lock = threading.Lock()
+                ProxyService._model_catalog_limit_locks[cache_key] = lock
+            return lock
+
+    @staticmethod
+    def _load_model_catalog_limits_uncached(model_name: str, *, cache_key: str) -> dict[str, int | bool | None]:
         db = SessionLocal()
         try:
             catalog = db.query(ModelCatalog).filter(ModelCatalog.model_name == model_name).first()
             if catalog is None:
-                return {}
-            return {
+                return CacheService.set(cache_key, {}, ttl_seconds=300)
+            limits = {
                 "context_window_tokens": catalog.context_window_tokens,
                 "max_input_tokens": catalog.max_input_tokens,
                 "max_output_tokens": catalog.max_output_tokens,
@@ -195,6 +291,7 @@ class ProxyService:
                 "supports_responses": catalog.supports_responses,
                 "supports_tools": catalog.supports_tools,
             }
+            return CacheService.set(cache_key, limits, ttl_seconds=300)
         finally:
             db.close()
 
@@ -206,6 +303,7 @@ class ProxyService:
         request_path: str,
         nearest_limit: int,
     ) -> tuple[int | None, str]:
+        """在正式转发前估算请求 Token，用于限额预检。"""
         fast_estimate = TokenUsageService.fast_estimate_request_tokens(payload, request_path=request_path)
         if fast_estimate is None:
             return None, "fast_failed"
@@ -214,6 +312,7 @@ class ProxyService:
         if nearest_limit > 0 and fast_estimate < int(nearest_limit * 0.75):
             return fast_estimate, "fast"
         try:
+            # 接近阈值时再走精算，兼顾性能与误判成本。
             exact = TokenUsageService.estimate_request_tokens(
                 payload,
                 model_name=model_name,
@@ -231,6 +330,7 @@ class ProxyService:
         model_name: str | None,
         endpoint_path: str,
     ) -> tuple[int, dict[str, Any]] | None:
+        """在请求超出 Token 限制时构造统一错误响应。"""
         limit = int(getattr(setting, "global_max_request_tokens", 0) or 0)
         model_limits = ProxyService._get_model_catalog_limits(model_name)
         max_input_tokens = int(model_limits.get("max_input_tokens") or 0)
@@ -786,9 +886,27 @@ class ProxyService:
         resolved_provider_model_id = kwargs.get("resolved_provider_model_id")
         provider_id = kwargs.get("provider_id")
         latency_ms = kwargs.get("latency_ms")
-        if provider_id is not None and resolved_provider_model_id is not None and latency_ms is not None:
+        if (
+            provider_id is not None
+            and resolved_provider_model_id is not None
+            and latency_ms is not None
+            and ProxyService._should_update_provider_success(provider_id, resolved_provider_model_id)
+        ):
             ProxyService._mark_success_by_id(db, provider_id, resolved_provider_model_id, latency_ms)
         return LogService.create_log(db, *args, auto_commit=False, **kwargs)
+
+    @staticmethod
+    def _should_update_provider_success(provider_id: int, provider_model_id: int) -> bool:
+        interval_ms = int(getattr(get_settings(), "provider_success_update_interval_ms", 1000) or 0)
+        if interval_ms <= 0:
+            return True
+        key = (int(provider_id), int(provider_model_id))
+        now_ms = time.monotonic() * 1000
+        last_ms = ProxyService._provider_success_update_at.get(key, 0)
+        if now_ms - last_ms < interval_ms:
+            return False
+        ProxyService._provider_success_update_at[key] = now_ms
+        return True
 
     @staticmethod
     async def chat_completions(db: Session, payload: dict[str, Any]) -> tuple[dict[str, Any], Provider, list[dict], int]:
@@ -823,6 +941,7 @@ class ProxyService:
         request_path_for_log: str | None = None,
         public_endpoint_path: str | None = None,
         response_transform: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+        suppress_success_log: bool = False,
     ) -> tuple[dict[str, Any], Provider, list[dict], int]:
         payload = ProxyService._normalize_reasoning_request_payload(endpoint_path=endpoint_path, payload=payload)
         model_name = payload.get("model")
@@ -1010,7 +1129,7 @@ class ProxyService:
         for candidate in candidates:
             provider = candidate.provider
             provider_model = candidate.provider_model
-            retries = max(1, min(provider.max_retries, setting.global_max_retries))
+            retries = ProxyService._same_provider_retry_budget(provider, setting)
             for _ in range(retries):
                 attempt_count += 1
                 started = time.perf_counter()
@@ -1042,54 +1161,55 @@ class ProxyService:
                     )
                     trace.extend(fallback_trace)
                     trace.append(ProxyService._build_trace_item(provider, provider_model, "success", latency_ms, status_code=200))
-                    await ProxyService._run_db_write(
-                        ProxyService._create_success_log_with_provider_status,
-                        log_type=log_type,
-                        trace_id=trace_id,
-                        provider_id=provider.id,
-                        provider_name=provider.name,
-                        model_name=model_name,
-                        requested_model=model_name,
-                        tenant_name=api_client_auth.api_client_key.tenant_name if api_client_auth else None,
-                        project_name=api_client_auth.api_client_key.project_name if api_client_auth else None,
-                        app_name=api_client_auth.api_client_key.app_name if api_client_auth else None,
-                        environment_name=api_client_auth.api_client_key.environment_name if api_client_auth else None,
-                        request_id=request_id,
-                        conversation_key=conversation_key,
-                        session_id=session_id,
-                        resolved_provider_model_id=provider_model.id,
-                        request_path=effective_log_request_path,
-                        source_ip=source_ip,
-                        http_method="POST",
-                        is_stream=False,
-                        has_image=has_image,
-                        success=True,
-                        status_code=200,
-                        latency_ms=latency_ms,
-                        duration_ms=latency_ms,
-                        reasoning_level=reasoning_level,
-                        model_reasoning_effort=model_reasoning_effort,
-                        attempt_count=attempt_count,
-                        prompt_tokens=usage_info["prompt_tokens"],
-                        completion_tokens=usage_info["completion_tokens"],
-                        total_tokens=usage_info["total_tokens"],
-                        cache_read_tokens=usage_info["cache_read_tokens"],
-                        cache_write_tokens=usage_info["cache_write_tokens"],
-                        finish_reason=finish_reason,
-                        upstream_request_id=upstream_request_id,
-                        request_body_json=request_body_json,
-                        response_body_json=response_body_json,
-                        response_text=response_text,
-                        message=f"{log_type} success",
-                        retryable=False,
-                        **ProxyService._build_api_client_log_kwargs(api_client_auth, auth_result="authenticated"),
-                        **ProxyService._build_provider_log_kwargs(provider_model),
-                        trace=trace,
-                        token_request_payload=payload,
-                        token_response_payload=response,
-                        token_response_text=response_text,
-                        schedule_token_fill=setting.enable_token_logging,
-                    )
+                    if not suppress_success_log:
+                        await ProxyService._run_db_write(
+                            ProxyService._create_success_log_with_provider_status,
+                            log_type=log_type,
+                            trace_id=trace_id,
+                            provider_id=provider.id,
+                            provider_name=provider.name,
+                            model_name=model_name,
+                            requested_model=model_name,
+                            tenant_name=api_client_auth.api_client_key.tenant_name if api_client_auth else None,
+                            project_name=api_client_auth.api_client_key.project_name if api_client_auth else None,
+                            app_name=api_client_auth.api_client_key.app_name if api_client_auth else None,
+                            environment_name=api_client_auth.api_client_key.environment_name if api_client_auth else None,
+                            request_id=request_id,
+                            conversation_key=conversation_key,
+                            session_id=session_id,
+                            resolved_provider_model_id=provider_model.id,
+                            request_path=effective_log_request_path,
+                            source_ip=source_ip,
+                            http_method="POST",
+                            is_stream=False,
+                            has_image=has_image,
+                            success=True,
+                            status_code=200,
+                            latency_ms=latency_ms,
+                            duration_ms=latency_ms,
+                            reasoning_level=reasoning_level,
+                            model_reasoning_effort=model_reasoning_effort,
+                            attempt_count=attempt_count,
+                            prompt_tokens=usage_info["prompt_tokens"],
+                            completion_tokens=usage_info["completion_tokens"],
+                            total_tokens=usage_info["total_tokens"],
+                            cache_read_tokens=usage_info["cache_read_tokens"],
+                            cache_write_tokens=usage_info["cache_write_tokens"],
+                            finish_reason=finish_reason,
+                            upstream_request_id=upstream_request_id,
+                            request_body_json=request_body_json,
+                            response_body_json=response_body_json,
+                            response_text=response_text,
+                            message=f"{log_type} success",
+                            retryable=False,
+                            **ProxyService._build_api_client_log_kwargs(api_client_auth, auth_result="authenticated"),
+                            **ProxyService._build_provider_log_kwargs(provider_model),
+                            trace=trace,
+                            token_request_payload=payload,
+                            token_response_payload=response,
+                            token_response_text=response_text,
+                            schedule_token_fill=setting.enable_token_logging,
+                        )
                     return client_response, provider, trace, latency_ms
                 except ProviderCapacityExceededError as exc:
                     latency_ms = int((time.perf_counter() - started) * 1000)
@@ -1141,7 +1261,7 @@ class ProxyService:
                             detail=ProxyService._normalize_error_detail(error_body),
                         ),
                     )
-                    if exc.response.status_code not in {401, 403, 404, 429} and exc.response.status_code < 500:
+                    if not ProxyService._should_retry_same_provider_status(exc.response.status_code):
                         break
                 except RequestsUpstreamHTTPError as exc:
                     latency_ms = int((time.perf_counter() - started) * 1000)
@@ -1171,7 +1291,7 @@ class ProxyService:
                             detail=exc.detail,
                         ),
                     )
-                    if exc.status_code not in {401, 403, 404, 429} and exc.status_code < 500:
+                    if not ProxyService._should_retry_same_provider_status(exc.status_code):
                         break
                 except NonStreamResponseTooLarge as exc:
                     latency_ms = int((time.perf_counter() - started) * 1000)
@@ -1423,7 +1543,7 @@ class ProxyService:
         for candidate in candidates:
             provider = candidate.provider
             provider_model = candidate.provider_model
-            retries = max(1, min(provider.max_retries, setting.global_max_retries))
+            retries = ProxyService._same_provider_retry_budget(provider, setting)
             for _ in range(retries):
                 attempt_count += 1
                 started = time.perf_counter()
@@ -1447,6 +1567,7 @@ class ProxyService:
                     upstream_request_id = ProxyService._extract_upstream_request_id(response)
                     trace.extend(fallback_trace)
                     trace.append(ProxyService._build_trace_item(provider, provider_model, "stream_opened", latency_ms, status_code=200))
+                    stream_log_fast_path = ProxyService._select_stream_log_fast_path(prepared)
 
                     async def stream_generator() -> AsyncIterator[bytes]:
                         success = False
@@ -1465,15 +1586,25 @@ class ProxyService:
                             "cache_read_tokens": None,
                             "cache_write_tokens": None,
                         }
+                        capture_stream_text = bool(setting.enable_stream_response_persist)
+                        capture_token_text = bool(setting.enable_token_logging)
                         finish_reason: str | None = None
                         response_text_parts: list[str] = []
                         response_text_bytes = 0
-                        token_response_parts: list[str] = []
+                        token_response_parts: list[str] | None = [] if capture_token_text else None
                         token_response_bytes = 0
-                        generated_image_summary: dict[str, Any] = {}
+                        generated_image_summary: dict[str, Any] | None = {} if has_image else None
                         event_buffer = bytearray()
-                        downstream_transform_state = ProxyService._create_responses_stream_state(payload=payload)
-                        chat_stream_transform_state = ProxyService._create_chat_stream_state(payload=payload)
+                        downstream_transform_state = (
+                            ProxyService._create_responses_stream_state(payload=payload)
+                            if prepared.adapt_chat_response_to_responses
+                            else None
+                        )
+                        chat_stream_transform_state = (
+                            ProxyService._create_chat_stream_state(payload=payload)
+                            if prepared.adapt_responses_response_to_chat
+                            else None
+                        )
                         timeout_policy = ProxyService._build_stream_timeout_policy(provider=provider, setting=setting)
                         stream_started = time.perf_counter()
                         try:
@@ -1489,7 +1620,7 @@ class ProxyService:
                                 except StopAsyncIteration:
                                     break
                                 if upstream_chunk:
-                                    if setting.enable_stream_response_persist or setting.enable_token_logging:
+                                    if capture_stream_text or capture_token_text or generated_image_summary is not None:
                                         (
                                             response_text_bytes,
                                             token_response_bytes,
@@ -1500,15 +1631,16 @@ class ProxyService:
                                             event_buffer=event_buffer,
                                             response_text_parts=response_text_parts,
                                             response_text_bytes=response_text_bytes,
-                                            token_response_parts=token_response_parts if setting.enable_token_logging else None,
+                                            token_response_parts=token_response_parts,
                                             token_response_bytes=token_response_bytes,
                                             finish_reason=finish_reason,
                                             usage_info=usage_info,
                                             generated_image_summary=generated_image_summary,
-                                            capture_text=setting.enable_stream_response_persist,
-                                            capture_usage=setting.enable_token_logging,
+                                            capture_text=capture_stream_text,
+                                            capture_usage=capture_token_text,
                                             limit_bytes=setting.max_logged_body_bytes,
                                             token_limit_bytes=getattr(setting, "stream_token_capture_max_bytes", 1048576),
+                                            stream_log_fast_path=stream_log_fast_path,
                                         )
                                     if first_chunk_latency_ms is None:
                                         first_chunk_latency_ms = int((time.perf_counter() - started) * 1000)
@@ -1524,14 +1656,14 @@ class ProxyService:
                                     if prepared.adapt_chat_response_to_responses:
                                         for downstream_chunk in ProxyService._adapt_chat_stream_chunk_to_responses_events(
                                             upstream_chunk,
-                                            state=downstream_transform_state,
+                                            state=downstream_transform_state or ProxyService._create_responses_stream_state(payload=payload),
                                             requested_model=str(payload.get("model") or ""),
                                         ):
                                             yield downstream_chunk
                                     elif prepared.adapt_responses_response_to_chat:
                                         for downstream_chunk in ProxyService._adapt_responses_stream_chunk_to_chat_events(
                                             upstream_chunk,
-                                            state=chat_stream_transform_state,
+                                            state=chat_stream_transform_state or ProxyService._create_chat_stream_state(payload=payload),
                                             requested_model=str(payload.get("model") or ""),
                                         ):
                                             yield downstream_chunk
@@ -1550,12 +1682,12 @@ class ProxyService:
                                 return
                             if prepared.adapt_chat_response_to_responses:
                                 for downstream_chunk in ProxyService._build_responses_stream_completion_events(
-                                    downstream_transform_state
+                                    downstream_transform_state or ProxyService._create_responses_stream_state(payload=payload)
                                 ):
                                     yield downstream_chunk
                             elif prepared.adapt_responses_response_to_chat:
                                 for downstream_chunk in ProxyService._build_chat_stream_completion_events(
-                                    chat_stream_transform_state
+                                    chat_stream_transform_state or ProxyService._create_chat_stream_state(payload=payload)
                                 ):
                                     yield downstream_chunk
                         except asyncio.CancelledError as exc:
@@ -1586,170 +1718,124 @@ class ProxyService:
                             total_duration_ms = int((time.perf_counter() - started) * 1000)
                             await stream_context.__aexit__(exc_type, exc_value, exc_traceback)
                             await capacity_lease.__aexit__(exc_type, exc_value, exc_traceback)
-                            log_db = SessionLocal()
-                            try:
-                                log_provider = log_db.get(Provider, provider.id)
-                                log_provider_model = log_db.get(ProviderModel, provider_model.id)
-                                if success and not interrupted:
-                                    if log_provider is not None and log_provider_model is not None:
-                                        ProxyService._mark_success(log_db, log_provider, log_provider_model, latency_ms)
-                                    final_trace = trace + [
-                                        ProxyService._build_trace_item(
-                                            provider,
-                                            provider_model,
-                                            "finished",
-                                            total_duration_ms,
-                                            status_code=200,
-                                            first_token_latency_ms=first_chunk_latency_ms,
-                                            total_duration_ms=total_duration_ms,
-                                        ),
-                                        ProxyService._build_trace_item(
-                                            provider,
-                                            provider_model,
-                                            "success",
-                                            latency_ms,
-                                            status_code=200,
-                                        ),
-                                    ]
-                                    LogService.create_log(
-                                        log_db,
-                                        log_type=log_type,
-                                        trace_id=trace_id,
-                                        provider_id=provider.id,
-                                        provider_name=provider.name,
-                                        model_name=model_name,
-                                        requested_model=model_name,
-                                        tenant_name=api_client_auth.api_client_key.tenant_name if api_client_auth else None,
-                                        project_name=api_client_auth.api_client_key.project_name if api_client_auth else None,
-                                        app_name=api_client_auth.api_client_key.app_name if api_client_auth else None,
-                                        environment_name=api_client_auth.api_client_key.environment_name if api_client_auth else None,
-                                        request_id=request_id,
-                                        conversation_key=conversation_key,
-                                        session_id=session_id,
-                                        resolved_provider_model_id=provider_model.id,
-                                        request_path=effective_log_request_path,
-                                        source_ip=source_ip,
-                                        http_method="POST",
-                                        is_stream=True,
-                                        has_image=has_image,
-                                        success=True,
+                            base_log_kwargs = {
+                                "log_type": log_type,
+                                "trace_id": trace_id,
+                                "provider_id": provider.id,
+                                "provider_name": provider.name,
+                                "model_name": model_name,
+                                "requested_model": model_name,
+                                "tenant_name": api_client_auth.api_client_key.tenant_name if api_client_auth else None,
+                                "project_name": api_client_auth.api_client_key.project_name if api_client_auth else None,
+                                "app_name": api_client_auth.api_client_key.app_name if api_client_auth else None,
+                                "environment_name": api_client_auth.api_client_key.environment_name if api_client_auth else None,
+                                "request_id": request_id,
+                                "conversation_key": conversation_key,
+                                "session_id": session_id,
+                                "resolved_provider_model_id": provider_model.id,
+                                "request_path": effective_log_request_path,
+                                "source_ip": source_ip,
+                                "http_method": "POST",
+                                "is_stream": True,
+                                "has_image": has_image,
+                                "latency_ms": latency_ms,
+                                "first_token_latency_ms": first_chunk_latency_ms,
+                                "ttfb_ms": first_chunk_latency_ms,
+                                "duration_ms": total_duration_ms,
+                                "reasoning_level": reasoning_level,
+                                "model_reasoning_effort": model_reasoning_effort,
+                                "attempt_count": attempt_count,
+                                "prompt_tokens": usage_info["prompt_tokens"],
+                                "completion_tokens": usage_info["completion_tokens"],
+                                "total_tokens": usage_info["total_tokens"],
+                                "cache_read_tokens": usage_info["cache_read_tokens"],
+                                "cache_write_tokens": usage_info["cache_write_tokens"],
+                                "finish_reason": finish_reason,
+                                "upstream_request_id": upstream_request_id,
+                                "request_body_json": request_body_json,
+                                "response_body_json": ProxyService._serialize_stream_response_summary_for_logging(
+                                    generated_image_summary,
+                                    setting=setting,
+                                ),
+                                "response_text": ProxyService._finalize_stream_text_capture(
+                                    response_text_parts,
+                                    generated_image_summary=generated_image_summary,
+                                ),
+                                "token_request_payload": payload,
+                                "token_response_text": ProxyService._finalize_text_capture(token_response_parts or []),
+                                "schedule_token_fill": setting.enable_token_logging,
+                                **ProxyService._build_api_client_log_kwargs(api_client_auth, auth_result="authenticated"),
+                                **ProxyService._build_provider_log_kwargs(provider_model),
+                            }
+                            if success and not interrupted:
+                                final_trace = trace + [
+                                    ProxyService._build_trace_item(
+                                        provider,
+                                        provider_model,
+                                        "finished",
+                                        total_duration_ms,
                                         status_code=200,
-                                        latency_ms=latency_ms,
                                         first_token_latency_ms=first_chunk_latency_ms,
-                                        ttfb_ms=first_chunk_latency_ms,
-                                        duration_ms=total_duration_ms,
-                                        reasoning_level=reasoning_level,
-                                        model_reasoning_effort=model_reasoning_effort,
-                                        attempt_count=attempt_count,
-                                        prompt_tokens=usage_info["prompt_tokens"],
-                                        completion_tokens=usage_info["completion_tokens"],
-                                        total_tokens=usage_info["total_tokens"],
-                                        cache_read_tokens=usage_info["cache_read_tokens"],
-                                        cache_write_tokens=usage_info["cache_write_tokens"],
-                                        finish_reason=finish_reason,
-                                        upstream_request_id=upstream_request_id,
-                                        request_body_json=request_body_json,
-                                        response_body_json=ProxyService._serialize_stream_response_summary_for_logging(
-                                            generated_image_summary,
-                                            setting=setting,
-                                        ),
-                                        response_text=ProxyService._finalize_text_capture(response_text_parts),
-                                        message=f"stream {log_type} success",
-                                        retryable=False,
-                                        **ProxyService._build_api_client_log_kwargs(api_client_auth, auth_result="authenticated"),
-                                        **ProxyService._build_provider_log_kwargs(provider_model),
-                                        trace=final_trace,
-                                        token_request_payload=payload,
-                                        token_response_text=ProxyService._finalize_text_capture(token_response_parts),
-                                        schedule_token_fill=setting.enable_token_logging,
-                                        auto_commit=False,
-                                    )
-                                    log_db.commit()
-                                else:
-                                    terminal_result = "client_cancelled" if client_cancelled else ("interrupted" if interrupted else "finished")
-                                    terminal_status_code = 499 if client_cancelled else (502 if interrupted or not success else 200)
-                                    if not client_cancelled and log_provider is not None and log_provider_model is not None:
-                                        ProxyService._mark_failure(
-                                            log_db,
-                                            log_provider,
-                                            log_provider_model,
-                                            latency_ms,
-                                            error_message or f"stream {log_type} failed",
-                                            force_unhealthy=ProxyService._should_mark_provider_model_unhealthy(
-                                                status_code=terminal_status_code,
-                                                detail={"message": error_message or f"stream {log_type} failed"},
-                                            ),
-                                        )
-                                    interrupted_trace = trace + [
-                                        ProxyService._build_trace_item(
-                                            provider,
-                                            provider_model,
-                                            terminal_result,
-                                            total_duration_ms,
+                                        total_duration_ms=total_duration_ms,
+                                    ),
+                                    ProxyService._build_trace_item(
+                                        provider,
+                                        provider_model,
+                                        "success",
+                                        latency_ms,
+                                        status_code=200,
+                                    ),
+                                ]
+                                await ProxyService._run_db_write(
+                                    ProxyService._create_success_log_with_provider_status,
+                                    **{
+                                        **base_log_kwargs,
+                                        "success": True,
+                                        "status_code": 200,
+                                        "message": f"stream {log_type} success",
+                                        "retryable": False,
+                                        "trace": final_trace,
+                                    },
+                                )
+                            else:
+                                terminal_result = "client_cancelled" if client_cancelled else ("interrupted" if interrupted else "finished")
+                                terminal_status_code = 499 if client_cancelled else (502 if interrupted or not success else 200)
+                                if not client_cancelled:
+                                    await ProxyService._mark_failure_async(
+                                        provider,
+                                        provider_model,
+                                        latency_ms,
+                                        error_message or f"stream {log_type} failed",
+                                        force_unhealthy=ProxyService._should_mark_provider_model_unhealthy(
                                             status_code=terminal_status_code,
-                                            first_token_latency_ms=first_chunk_latency_ms,
-                                            total_duration_ms=total_duration_ms,
-                                            error=error_message,
-                                        )
-                                    ]
-                                    LogService.create_log(
-                                        log_db,
-                                        log_type=log_type,
-                                        trace_id=trace_id,
-                                        provider_id=provider.id,
-                                        provider_name=provider.name,
-                                        model_name=model_name,
-                                        requested_model=model_name,
-                                        tenant_name=api_client_auth.api_client_key.tenant_name if api_client_auth else None,
-                                        project_name=api_client_auth.api_client_key.project_name if api_client_auth else None,
-                                        app_name=api_client_auth.api_client_key.app_name if api_client_auth else None,
-                                        environment_name=api_client_auth.api_client_key.environment_name if api_client_auth else None,
-                                        request_id=request_id,
-                                        conversation_key=conversation_key,
-                                        session_id=session_id,
-                                        resolved_provider_model_id=provider_model.id,
-                                        request_path=effective_log_request_path,
-                                        source_ip=source_ip,
-                                        http_method="POST",
-                                        is_stream=True,
-                                        has_image=has_image,
-                                        success=False,
-                                        status_code=terminal_status_code,
-                                        latency_ms=latency_ms,
-                                        first_token_latency_ms=first_chunk_latency_ms,
-                                        ttfb_ms=first_chunk_latency_ms,
-                                        duration_ms=total_duration_ms,
-                                        reasoning_level=reasoning_level,
-                                        model_reasoning_effort=model_reasoning_effort,
-                                        attempt_count=attempt_count,
-                                        prompt_tokens=usage_info["prompt_tokens"],
-                                        completion_tokens=usage_info["completion_tokens"],
-                                        total_tokens=usage_info["total_tokens"],
-                                        cache_read_tokens=usage_info["cache_read_tokens"],
-                                        cache_write_tokens=usage_info["cache_write_tokens"],
-                                        finish_reason=finish_reason,
-                                        upstream_request_id=upstream_request_id,
-                                        request_body_json=request_body_json,
-                                        response_body_json=ProxyService._serialize_stream_response_summary_for_logging(
-                                            generated_image_summary,
-                                            setting=setting,
+                                            detail={"message": error_message or f"stream {log_type} failed"},
                                         ),
-                                        response_text=ProxyService._finalize_text_capture(response_text_parts),
-                                        message=error_message or f"stream {log_type} failed",
-                                        error_type="server_error" if not client_cancelled else "client_error",
-                                        error_code=error_code,
-                                        retryable=not client_cancelled,
-                                        **ProxyService._build_api_client_log_kwargs(api_client_auth, auth_result="authenticated"),
-                                        **ProxyService._build_provider_log_kwargs(provider_model),
-                                        trace=interrupted_trace,
-                                        token_request_payload=payload,
-                                        token_response_text=ProxyService._finalize_text_capture(token_response_parts),
-                                        schedule_token_fill=setting.enable_token_logging,
-                                        auto_commit=False,
                                     )
-                                    log_db.commit()
-                            finally:
-                                log_db.close()
+                                interrupted_trace = trace + [
+                                    ProxyService._build_trace_item(
+                                        provider,
+                                        provider_model,
+                                        terminal_result,
+                                        total_duration_ms,
+                                        status_code=terminal_status_code,
+                                        first_token_latency_ms=first_chunk_latency_ms,
+                                        total_duration_ms=total_duration_ms,
+                                        error=error_message,
+                                    )
+                                ]
+                                await ProxyService._run_db_write(
+                                    LogService.create_log,
+                                    **{
+                                        **base_log_kwargs,
+                                        "success": False,
+                                        "status_code": terminal_status_code,
+                                        "message": error_message or f"stream {log_type} failed",
+                                        "error_type": "server_error" if not client_cancelled else "client_error",
+                                        "error_code": error_code,
+                                        "retryable": not client_cancelled,
+                                        "trace": interrupted_trace,
+                                    },
+                                )
 
                     return stream_generator(), provider, trace, latency_ms
                 except ProviderCapacityExceededError as exc:
@@ -1810,7 +1896,7 @@ class ProxyService:
                             detail=ProxyService._normalize_error_detail(error_body),
                         ),
                     )
-                    if exc.response.status_code not in {401, 403, 404, 429} and exc.response.status_code < 500:
+                    if not ProxyService._should_retry_same_provider_status(exc.response.status_code):
                         break
                 except Exception as exc:
                     if stream_context is not None:
@@ -2072,7 +2158,25 @@ class ProxyService:
         json: dict[str, Any],
         timeout: httpx.Timeout,
         max_response_bytes: int,
-    ) -> httpx.Response:
+    ) -> UpstreamJsonResponse:
+        client_name = get_settings().upstream_json_client.strip().lower()
+        if client_name == "aiohttp":
+            return await ProxyService._post_json_aiohttp_with_response_size_limit(
+                url,
+                headers=headers,
+                json_payload=json,
+                timeout=timeout,
+                max_response_bytes=max_response_bytes,
+            )
+        if client_name == "requests":
+            return await run_in_threadpool(
+                ProxyService._post_json_requests_with_response_size_limit,
+                url,
+                headers=headers,
+                json_payload=json,
+                timeout=timeout,
+                max_response_bytes=max_response_bytes,
+            )
         async with client.stream("POST", url, headers=headers, json=json, timeout=timeout) as response:
             content = await ProxyService._read_limited_httpx_response(
                 response,
@@ -2080,6 +2184,119 @@ class ProxyService:
             )
             response._content = content
             return response
+
+    @staticmethod
+    async def _post_json_aiohttp_with_response_size_limit(
+        url: str,
+        *,
+        headers: dict[str, str],
+        json_payload: dict[str, Any],
+        timeout: httpx.Timeout,
+        max_response_bytes: int,
+    ) -> AiohttpJsonResponse:
+        connect_timeout = float(timeout.connect or get_settings().request_timeout_ms / 1000)
+        read_timeout = float(timeout.read or get_settings().request_timeout_ms / 1000)
+        request_timeout = aiohttp.ClientTimeout(
+            total=None,
+            connect=connect_timeout,
+            sock_connect=connect_timeout,
+            sock_read=read_timeout,
+        )
+        session = UpstreamClientService.get_aiohttp_session()
+        async with session.post(url, headers=headers, json=json_payload, timeout=request_timeout) as response:
+            content_length = response.headers.get("content-length")
+            try:
+                response_bytes = int(content_length) if content_length is not None else None
+            except ValueError:
+                response_bytes = None
+            if max_response_bytes > 0 and response_bytes is not None and response_bytes > max_response_bytes:
+                raise NonStreamResponseTooLarge(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail={
+                        "message": f"非流式上游响应超过应用层上限 {max_response_bytes} 字节，请使用 stream=true",
+                        "code": "non_stream_response_too_large",
+                        "max_non_stream_response_body_bytes": max_response_bytes,
+                    },
+                )
+            if response_bytes is not None and (max_response_bytes <= 0 or response_bytes <= max_response_bytes):
+                body = await response.read()
+            else:
+                body_buffer = bytearray()
+                async for chunk in response.content.iter_chunked(65536):
+                    if not chunk:
+                        continue
+                    if max_response_bytes > 0 and len(body_buffer) + len(chunk) > max_response_bytes:
+                        raise NonStreamResponseTooLarge(
+                            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                            detail={
+                                "message": f"非流式上游响应超过应用层上限 {max_response_bytes} 字节，请使用 stream=true",
+                                "code": "non_stream_response_too_large",
+                                "max_non_stream_response_body_bytes": max_response_bytes,
+                            },
+                        )
+                    body_buffer.extend(chunk)
+                body = bytes(body_buffer)
+            return AiohttpJsonResponse(
+                status_code=response.status,
+                headers=dict(response.headers),
+                content=body,
+                request_method="POST",
+                request_url=url,
+            )
+
+    @staticmethod
+    def _post_json_requests_with_response_size_limit(
+        url: str,
+        *,
+        headers: dict[str, str],
+        json_payload: dict[str, Any],
+        timeout: httpx.Timeout,
+        max_response_bytes: int,
+    ) -> httpx.Response:
+        connect_timeout = float(timeout.connect or get_settings().request_timeout_ms / 1000)
+        read_timeout = float(timeout.read or get_settings().request_timeout_ms / 1000)
+        session = ProxyService._get_thread_local_requests_session()
+        with session.post(
+            url,
+            headers=headers,
+            json=json_payload,
+            timeout=(connect_timeout, read_timeout),
+            stream=True,
+        ) as response:
+            body = bytearray()
+            for chunk in response.iter_content(chunk_size=65536):
+                if not chunk:
+                    continue
+                if max_response_bytes > 0 and len(body) + len(chunk) > max_response_bytes:
+                    raise NonStreamResponseTooLarge(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        detail={
+                            "message": f"非流式上游响应超过应用层上限 {max_response_bytes} 字节，请使用 stream=true",
+                            "code": "non_stream_response_too_large",
+                            "max_non_stream_response_body_bytes": max_response_bytes,
+                        },
+                    )
+                body.extend(chunk)
+            return httpx.Response(
+                response.status_code,
+                headers=dict(response.headers),
+                content=bytes(body),
+                request=httpx.Request("POST", url),
+            )
+
+    @staticmethod
+    def _get_thread_local_requests_session() -> requests.Session:
+        session = getattr(ProxyService._requests_session_local, "session", None)
+        if isinstance(session, requests.Session):
+            return session
+        settings = get_settings()
+        pool_size = max(10, int(getattr(settings, "upstream_max_connections", 1200) or 1200))
+        session = requests.Session()
+        adapter = HTTPAdapter(pool_connections=pool_size, pool_maxsize=pool_size, max_retries=0, pool_block=False)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        ProxyService._requests_session_local.session = session
+        return session
 
     @staticmethod
     async def _read_limited_httpx_response(response: httpx.Response, *, max_response_bytes: int) -> bytes:
@@ -2127,11 +2344,27 @@ class ProxyService:
         prepared: PreparedUpstreamRequest,
         headers: dict[str, str],
         stream_connect_timeout_seconds: int | None = None,
-    ) -> AsyncIterator[tuple[httpx.Response, PreparedUpstreamRequest]]:
+    ) -> AsyncIterator[tuple[UpstreamStreamResponse, PreparedUpstreamRequest]]:
+        request_url = f"{provider.base_url}{prepared.request_path}"
+        if ProxyService._select_upstream_stream_client_name(payload=prepared.request_payload) == "aiohttp":
+            session = UpstreamClientService.get_aiohttp_session()
+            async with session.post(
+                request_url,
+                headers=headers,
+                json=prepared.request_payload,
+                timeout=ProxyService._build_aiohttp_timeout(
+                    provider,
+                    payload=prepared.request_payload,
+                    is_stream=True,
+                    stream_connect_timeout_seconds=stream_connect_timeout_seconds,
+                ),
+            ) as response:
+                yield AiohttpStreamResponse(response=response, request_method="POST", request_url=request_url), prepared
+            return
         client = ProxyService._select_upstream_client(payload=prepared.request_payload)
         async with client.stream(
             "POST",
-            f"{provider.base_url}{prepared.request_path}",
+            request_url,
             headers=headers,
             json=prepared.request_payload,
             timeout=ProxyService._build_httpx_timeout(
@@ -2152,7 +2385,7 @@ class ProxyService:
         *,
         started: float,
         stream_connect_timeout_seconds: int | None = None,
-    ) -> tuple[httpx.Response, PreparedUpstreamRequest, Any, list[dict]]:
+    ) -> tuple[UpstreamStreamResponse, PreparedUpstreamRequest, Any, list[dict]]:
         headers = {"Authorization": f"Bearer {provider.api_key}"}
         prepared = ProxyService._prepare_upstream_request(provider, endpoint_path=endpoint_path, payload=payload)
         stream_context = ProxyService._stream_prepared_request(
@@ -2161,13 +2394,16 @@ class ProxyService:
             headers=headers,
             stream_connect_timeout_seconds=stream_connect_timeout_seconds,
         )
+        stream_context_entered = False
         try:
             response, opened_prepared = await stream_context.__aenter__()
-            response.raise_for_status()
+            stream_context_entered = True
+            await ProxyService._raise_stream_response_for_status(response)
             return response, opened_prepared, stream_context, []
         except httpx.HTTPStatusError as exc:
             error_body = await ProxyService._extract_response_error(exc.response)
-            await stream_context.__aexit__(type(exc), exc, exc.__traceback__)
+            if stream_context_entered:
+                await stream_context.__aexit__(type(exc), exc, exc.__traceback__)
             if not ProxyService._should_try_endpoint_fallback(
                 provider,
                 endpoint_path=prepared.request_path,
@@ -2201,11 +2437,14 @@ class ProxyService:
                 headers=headers,
                 stream_connect_timeout_seconds=stream_connect_timeout_seconds,
             )
+            fallback_context_entered = False
             try:
                 fallback_response, opened_fallback_prepared = await fallback_context.__aenter__()
-                fallback_response.raise_for_status()
+                fallback_context_entered = True
+                await ProxyService._raise_stream_response_for_status(fallback_response)
             except Exception as fallback_exc:
-                await fallback_context.__aexit__(type(fallback_exc), fallback_exc, fallback_exc.__traceback__)
+                if fallback_context_entered:
+                    await fallback_context.__aexit__(type(fallback_exc), fallback_exc, fallback_exc.__traceback__)
                 raise
             fallback_trace.append(
                 ProxyService._build_trace_item(
@@ -2222,7 +2461,8 @@ class ProxyService:
             )
             return fallback_response, opened_fallback_prepared, fallback_context, fallback_trace
         except Exception as exc:
-            await stream_context.__aexit__(type(exc), exc, exc.__traceback__)
+            if stream_context_entered:
+                await stream_context.__aexit__(type(exc), exc, exc.__traceback__)
             raise
 
     @staticmethod
@@ -2230,6 +2470,13 @@ class ProxyService:
         if ProxyService._payload_needs_image_transport(payload):
             return UpstreamClientService.get_http1_client()
         return UpstreamClientService.get_client()
+
+    @staticmethod
+    def _select_upstream_stream_client_name(*, payload: dict[str, Any]) -> str:
+        configured = getattr(get_settings(), "upstream_stream_client", "aiohttp").strip().lower()
+        if configured == "aiohttp":
+            return "aiohttp"
+        return "httpx"
 
     @staticmethod
     def _build_httpx_timeout(
@@ -2265,6 +2512,40 @@ class ProxyService:
             read=read_timeout,
             pool=settings.upstream_pool_timeout_s,
         )
+
+    @staticmethod
+    def _build_aiohttp_timeout(
+        provider: Provider,
+        *,
+        payload: dict[str, Any],
+        is_stream: bool,
+        stream_connect_timeout_seconds: int | None = None,
+    ) -> aiohttp.ClientTimeout:
+        timeout = ProxyService._build_httpx_timeout(
+            provider,
+            payload=payload,
+            is_stream=is_stream,
+            stream_connect_timeout_seconds=stream_connect_timeout_seconds,
+        )
+        connect_timeout = float(timeout.connect or get_settings().request_timeout_ms / 1000)
+        read_timeout = None if is_stream else float(timeout.read or get_settings().request_timeout_ms / 1000)
+        return aiohttp.ClientTimeout(
+            total=None,
+            connect=connect_timeout,
+            sock_connect=connect_timeout,
+            sock_read=read_timeout,
+        )
+
+    @staticmethod
+    async def _raise_stream_response_for_status(response: UpstreamStreamResponse) -> None:
+        if isinstance(response, httpx.Response):
+            response.raise_for_status()
+            return
+        if response.status_code < 400:
+            return
+        body = await response.aread()
+        error_response = response.to_httpx_response(content=body)
+        error_response.raise_for_status()
 
     @staticmethod
     def _build_stream_timeout_policy(*, provider: Provider, setting: Any) -> StreamTimeoutPolicy:
@@ -2694,7 +2975,7 @@ class ProxyService:
             return False
         if endpoint_path not in {"/responses", "/chat/completions"}:
             return False
-        if status_code not in {400, 404}:
+        if status_code not in {400, 404, 405, 422, 501}:
             return False
         message = ProxyService._error_message_for_log(error_detail).lower()
         endpoint_tokens = (
@@ -2710,6 +2991,18 @@ class ProxyService:
             "model",
         )
         return any(token in message for token in endpoint_tokens)
+
+    @staticmethod
+    def _should_retry_same_provider_status(status_code: int) -> bool:
+        if status_code in {401, 403, 404, 429}:
+            return False
+        if 400 <= status_code < 500:
+            return False
+        return True
+
+    @staticmethod
+    def _same_provider_retry_budget(provider: Provider, setting: Any) -> int:
+        return max(1, min(int(provider.max_retries or 1), int(setting.global_max_retries or 1), 2))
 
     @staticmethod
     def _build_endpoint_fallback_request(
@@ -3364,6 +3657,13 @@ class ProxyService:
             provider_model.circuit_state = "closed"
             provider_model.circuit_opened_at = None
         ProviderService.refresh_provider_state(provider)
+        ProviderHealthStateService.record_route_failure(
+            provider,
+            provider_model,
+            latency_ms=latency_ms,
+            error_message=error_message,
+            force_unhealthy=force_unhealthy,
+        )
 
     @staticmethod
     def _mark_success(db: Session, provider: Provider, provider_model: ProviderModel, latency_ms: int) -> None:
@@ -3378,6 +3678,11 @@ class ProxyService:
         provider_model.circuit_state = "closed"
         provider_model.circuit_opened_at = None
         ProviderService.refresh_provider_state(provider)
+        ProviderHealthStateService.record_route_success(
+            provider,
+            provider_model,
+            latency_ms=latency_ms,
+        )
 
     @staticmethod
     async def _extract_response_error(response: httpx.Response) -> str:
@@ -3742,11 +4047,19 @@ class ProxyService:
         return ProxyService._extract_sticky_key(payload) or request_id
 
     @staticmethod
-    def _extract_upstream_request_id(response: httpx.Response) -> str | None:
+    def _extract_upstream_request_id(response: UpstreamStreamResponse | httpx.Response) -> str | None:
         for key in ("x-request-id", "request-id", "openai-request-id"):
             value = response.headers.get(key)
             if value:
                 return value
+        return None
+
+    @staticmethod
+    def _select_stream_log_fast_path(prepared: PreparedUpstreamRequest) -> str | None:
+        if prepared.adapt_chat_response_to_responses or prepared.adapt_responses_response_to_chat:
+            return None
+        if prepared.request_path == "/chat/completions":
+            return "chat"
         return None
 
     @staticmethod
@@ -4430,58 +4743,161 @@ class ProxyService:
         capture_usage: bool,
         limit_bytes: int,
         token_limit_bytes: int,
+        stream_log_fast_path: str | None,
+        ) -> tuple[int, int, str | None, dict[str, int | None]]:
+        if stream_log_fast_path == "chat":
+            return ProxyService._collect_chat_stream_log_data(
+                chunk=chunk,
+                event_buffer=event_buffer,
+                response_text_parts=response_text_parts,
+                response_text_bytes=response_text_bytes,
+                token_response_parts=token_response_parts,
+                token_response_bytes=token_response_bytes,
+                finish_reason=finish_reason,
+                usage_info=usage_info,
+                capture_text=capture_text,
+                capture_usage=capture_usage,
+                limit_bytes=limit_bytes,
+                token_limit_bytes=token_limit_bytes,
+            )
+        event_buffer.extend(chunk)
+        for data in ProxyService._consume_sse_data_payloads(event_buffer):
+            if not data or data == "[DONE]":
+                continue
+            event_json = safeJsonParse(data)
+            if not isinstance(event_json, dict):
+                continue
+            if capture_usage:
+                extracted_usage = ProxyService._extract_usage_info(event_json)
+                for key, value in extracted_usage.items():
+                    if value is not None:
+                        usage_info[key] = value
+            if finish_reason is None:
+                finish_reason = ProxyService._extract_finish_reason(event_json)
+            if generated_image_summary is not None:
+                event_generated_image_summary = ProxyService._extract_stream_generated_image_log_summary(event_json)
+                if event_generated_image_summary is not None:
+                    ProxyService._merge_stream_generated_image_summary(generated_image_summary, event_generated_image_summary)
+                    if not capture_text:
+                        summary_text = f"[生成了 {int(generated_image_summary.get('image_count') or 0)} 张图片]"
+                        if generated_image_summary.get("image_count") and (
+                            not response_text_parts or response_text_parts[-1] != summary_text
+                        ):
+                            response_text_bytes = ProxyService._append_limited_text(
+                                response_text_parts,
+                                summary_text,
+                                current_bytes=response_text_bytes,
+                                limit_bytes=limit_bytes,
+                            )
+            if capture_text or token_response_parts is not None:
+                delta_text = ProxyService._extract_response_text(event_json, limit_bytes=max(limit_bytes, 1_048_576))
+                if delta_text and capture_text:
+                    response_text_bytes = ProxyService._append_limited_text(
+                        response_text_parts,
+                        delta_text,
+                        current_bytes=response_text_bytes,
+                        limit_bytes=limit_bytes,
+                    )
+                if delta_text and token_response_parts is not None:
+                    token_response_bytes = ProxyService._append_limited_text(
+                        token_response_parts,
+                        delta_text,
+                        current_bytes=token_response_bytes,
+                        limit_bytes=token_limit_bytes,
+                    )
+        return response_text_bytes, token_response_bytes, finish_reason, usage_info
+
+    @staticmethod
+    def _collect_chat_stream_log_data(
+        *,
+        chunk: bytes,
+        event_buffer: bytearray,
+        response_text_parts: list[str],
+        response_text_bytes: int,
+        token_response_parts: list[str] | None,
+        token_response_bytes: int,
+        finish_reason: str | None,
+        usage_info: dict[str, int | None],
+        capture_text: bool,
+        capture_usage: bool,
+        limit_bytes: int,
+        token_limit_bytes: int,
     ) -> tuple[int, int, str | None, dict[str, int | None]]:
         event_buffer.extend(chunk)
-        for event_text in ProxyService._consume_sse_event_texts(event_buffer):
-            for line in event_text.splitlines():
-                line = line.strip()
-                if not line.startswith("data:"):
-                    continue
-                data = line[5:].strip()
-                if not data or data == "[DONE]":
-                    continue
-                event_json = safeJsonParse(data)
-                if not isinstance(event_json, dict):
-                    continue
-                if capture_usage:
-                    extracted_usage = ProxyService._extract_usage_info(event_json)
-                    for key, value in extracted_usage.items():
-                        if value is not None:
-                            usage_info[key] = value
-                if finish_reason is None:
-                    finish_reason = ProxyService._extract_finish_reason(event_json)
-                if generated_image_summary is not None:
-                    event_generated_image_summary = ProxyService._extract_stream_generated_image_log_summary(event_json)
-                    if event_generated_image_summary is not None:
-                        ProxyService._merge_stream_generated_image_summary(generated_image_summary, event_generated_image_summary)
-                        if not capture_text:
-                            summary_text = f"[生成了 {int(generated_image_summary.get('image_count') or 0)} 张图片]"
-                            if generated_image_summary.get("image_count") and (
-                                not response_text_parts or response_text_parts[-1] != summary_text
-                            ):
-                                response_text_bytes = ProxyService._append_limited_text(
-                                    response_text_parts,
-                                    summary_text,
-                                    current_bytes=response_text_bytes,
-                                    limit_bytes=limit_bytes,
-                                )
-                if capture_text or token_response_parts is not None:
-                    delta_text = ProxyService._extract_response_text(event_json, limit_bytes=max(limit_bytes, 1_048_576))
-                    if delta_text and capture_text:
-                        response_text_bytes = ProxyService._append_limited_text(
-                            response_text_parts,
-                            delta_text,
-                            current_bytes=response_text_bytes,
-                            limit_bytes=limit_bytes,
-                        )
-                    if delta_text and token_response_parts is not None:
-                        token_response_bytes = ProxyService._append_limited_text(
-                            token_response_parts,
-                            delta_text,
-                            current_bytes=token_response_bytes,
-                            limit_bytes=token_limit_bytes,
-                        )
+        for data in ProxyService._consume_sse_data_payloads(event_buffer):
+            if not data or data == "[DONE]":
+                continue
+            event_json = safeJsonParse(data)
+            if not isinstance(event_json, dict):
+                continue
+            if capture_usage and isinstance(event_json.get("usage"), dict):
+                extracted_usage = ProxyService._extract_usage_info(event_json)
+                for key, value in extracted_usage.items():
+                    if value is not None:
+                        usage_info[key] = value
+            if finish_reason is None:
+                choices = event_json.get("choices")
+                if isinstance(choices, list) and choices:
+                    first_choice = choices[0]
+                    if isinstance(first_choice, dict):
+                        choice_finish_reason = first_choice.get("finish_reason")
+                        if isinstance(choice_finish_reason, str) and choice_finish_reason:
+                            finish_reason = choice_finish_reason
+            if capture_text or token_response_parts is not None:
+                delta_text = ProxyService._extract_chat_stream_delta_text(event_json)
+                if delta_text and capture_text:
+                    response_text_bytes = ProxyService._append_limited_text(
+                        response_text_parts,
+                        delta_text,
+                        current_bytes=response_text_bytes,
+                        limit_bytes=limit_bytes,
+                    )
+                if delta_text and token_response_parts is not None:
+                    token_response_bytes = ProxyService._append_limited_text(
+                        token_response_parts,
+                        delta_text,
+                        current_bytes=token_response_bytes,
+                        limit_bytes=token_limit_bytes,
+                    )
         return response_text_bytes, token_response_bytes, finish_reason, usage_info
+
+    @staticmethod
+    def _consume_sse_data_payloads(event_buffer: bytearray) -> list[str]:
+        payloads: list[str] = []
+        while True:
+            separator_length = 0
+            separator_index = event_buffer.find(b"\r\n\r\n")
+            if separator_index >= 0:
+                separator_length = 4
+            else:
+                separator_index = event_buffer.find(b"\n\n")
+                if separator_index >= 0:
+                    separator_length = 2
+            if separator_index < 0:
+                break
+            raw_event = bytes(event_buffer[:separator_index])
+            del event_buffer[: separator_index + separator_length]
+            if not raw_event:
+                continue
+            stripped = raw_event.strip()
+            if not stripped:
+                continue
+            if stripped.startswith(b"data:") and b"\n" not in stripped and b"\r" not in stripped:
+                payload = stripped[5:].strip()
+                if payload:
+                    payloads.append(payload.decode("utf-8", errors="ignore"))
+                continue
+            event_payload_lines: list[str] = []
+            for raw_line in raw_event.splitlines():
+                line = raw_line.strip()
+                if not line.startswith(b"data:"):
+                    continue
+                payload = line[5:].strip()
+                if payload:
+                    event_payload_lines.append(payload.decode("utf-8", errors="ignore"))
+            if event_payload_lines:
+                payloads.append("\n".join(event_payload_lines))
+        return payloads
 
     @staticmethod
     def _consume_sse_event_texts(event_buffer: bytearray) -> list[str]:
@@ -4521,6 +4937,16 @@ class ProxyService:
         if not parts:
             return None
         return "".join(parts)
+
+    @staticmethod
+    def _finalize_stream_text_capture(parts: list[str], *, generated_image_summary: dict[str, Any] | None) -> str | None:
+        text = ProxyService._finalize_text_capture(parts)
+        if text:
+            return text
+        image_count = int((generated_image_summary or {}).get("image_count") or 0)
+        if image_count > 0:
+            return f"[生成了 {image_count} 张图片]"
+        return None
 
     @staticmethod
     def _build_api_client_log_kwargs(

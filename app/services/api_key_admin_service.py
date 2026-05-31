@@ -43,6 +43,13 @@ from app.utils.json_utils import dumps_json, loads_json
 
 class ApiKeyAdminService:
     @staticmethod
+    def _scoped_route_traffic(stmt, *, api_key_id: int):
+        return stmt.where(
+            RequestLog.api_client_key_id == api_key_id,
+            LogService._route_traffic_expr(),
+        )
+
+    @staticmethod
     def get_summary(db: Session) -> ApiKeySummaryOut:
         api_keys = ApiKeyAdminService.list_api_keys(db)
         now = datetime.utcnow()
@@ -515,8 +522,11 @@ class ApiKeyAdminService:
         log_type: str | None,
         success: bool | None,
     ) -> tuple[int, list[RequestLog]]:
-        stmt = select(RequestLog).where(RequestLog.api_client_key_id == api_key_id)
-        count_stmt = select(func.count()).select_from(RequestLog).where(RequestLog.api_client_key_id == api_key_id)
+        stmt = ApiKeyAdminService._scoped_route_traffic(select(RequestLog), api_key_id=api_key_id)
+        count_stmt = ApiKeyAdminService._scoped_route_traffic(
+            select(func.count()).select_from(RequestLog),
+            api_key_id=api_key_id,
+        )
         if log_type:
             stmt = stmt.where(RequestLog.log_type == log_type)
             count_stmt = count_stmt.where(RequestLog.log_type == log_type)
@@ -535,12 +545,15 @@ class ApiKeyAdminService:
 
     @staticmethod
     def get_stats(db: Session, *, api_key_id: int, window_hours: int = 24) -> ApiKeyStatsOut:
-        aggregate_stmt = select(
+        aggregate_stmt = ApiKeyAdminService._scoped_route_traffic(
+            select(
             func.count(RequestLog.id).label("total_requests"),
             func.sum(case((RequestLog.success.is_(True), 1), else_=0)).label("success_requests"),
             func.sum(case((RequestLog.success.is_(False), 1), else_=0)).label("failed_requests"),
             func.avg(RequestLog.latency_ms).label("avg_latency_ms"),
-        ).where(RequestLog.api_client_key_id == api_key_id)
+            ),
+            api_key_id=api_key_id,
+        )
         aggregate_row = db.execute(aggregate_stmt).one()
 
         recent_usage = ApiKeyAdminService.get_recent_usage(db, api_key_id=api_key_id, window_hours=window_hours)
@@ -569,7 +582,7 @@ class ApiKeyAdminService:
         model_limit: int = 12,
     ) -> ApiKeyAnalyticsOut:
         model_name_expr = func.coalesce(RequestLog.requested_model, RequestLog.model_name, "unknown")
-        model_distribution_rows = db.execute(
+        model_distribution_rows = db.execute(ApiKeyAdminService._scoped_route_traffic(
             select(
                 model_name_expr.label("model_name"),
                 func.count(RequestLog.id).label("total_requests"),
@@ -578,21 +591,21 @@ class ApiKeyAdminService:
                 func.sum(RequestLog.total_cost).label("total_cost"),
                 func.max(RequestLog.created_at).label("last_requested_at"),
             )
-            .where(RequestLog.api_client_key_id == api_key_id)
             .group_by(model_name_expr)
             .order_by(func.count(RequestLog.id).desc(), model_name_expr.asc())
-            .limit(max(1, model_limit))
-        ).all()
+            .limit(max(1, model_limit)),
+            api_key_id=api_key_id,
+        )).all()
 
-        recent_error_rows = db.execute(
+        recent_error_rows = db.execute(ApiKeyAdminService._scoped_route_traffic(
             select(RequestLog)
             .where(
-                RequestLog.api_client_key_id == api_key_id,
                 RequestLog.success.is_(False),
             )
             .order_by(RequestLog.created_at.desc(), RequestLog.id.desc())
-            .limit(max(1, recent_error_limit))
-        ).scalars().all()
+            .limit(max(1, recent_error_limit)),
+            api_key_id=api_key_id,
+        )).scalars().all()
 
         return ApiKeyAnalyticsOut(
             api_client_key_id=api_key_id,
@@ -750,9 +763,12 @@ class ApiKeyAdminService:
             func.sum(RequestLog.completion_tokens).label("recent_completion_tokens"),
             func.sum(RequestLog.total_tokens).label("recent_total_tokens"),
             func.sum(RequestLog.total_cost).label("recent_total_cost"),
-        ).where(
-            RequestLog.api_client_key_id == api_key_id,
-            RequestLog.created_at >= since,
+        )
+        recent_stmt = ApiKeyAdminService._scoped_route_traffic(
+            recent_stmt.where(
+                RequestLog.created_at >= since,
+            ),
+            api_key_id=api_key_id,
         )
         recent_row = db.execute(recent_stmt).one()
         return ApiKeyRecentUsageOut(

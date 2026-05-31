@@ -1364,6 +1364,11 @@ html[data-theme="dark"] body::before {
     color: var(--muted);
 }
 
+.status-skipped {
+    background: #f3f5f9;
+    color: var(--muted);
+}
+
 .status-open {
     background: #fff7e8;
     color: var(--amber);
@@ -2201,7 +2206,7 @@ textarea.field-input {
 
 .users-batch-grid {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 14px;
 }
 
@@ -2253,6 +2258,49 @@ textarea.field-input {
     border: 1px solid rgba(16, 185, 129, 0.08);
     border-radius: 16px;
     background: rgba(248, 250, 255, 0.88);
+}
+
+.users-select-card-inline {
+    padding: 8px 10px;
+}
+
+.users-directory-pagination {
+    margin-bottom: 14px;
+}
+
+.users-directory-pagination:last-child {
+    margin-top: 14px;
+    margin-bottom: 0;
+}
+
+.users-directory-table-shell {
+    overflow: auto;
+}
+
+.users-directory-table td {
+    min-width: 0;
+}
+
+.users-cell-stack {
+    display: grid;
+    gap: 8px;
+}
+
+.users-cell-stack strong {
+    font-size: 15px;
+}
+
+.users-detail-link {
+    width: fit-content;
+}
+
+.users-table-password-form {
+    width: 100%;
+    margin-top: 4px;
+}
+
+.users-table-password-form .table-inline-input {
+    width: min(240px, 100%);
 }
 
 .users-registry-list {
@@ -2334,6 +2382,10 @@ textarea.field-input {
 .users-password-input {
     width: 100%;
     min-width: 0;
+}
+
+.users-directory-table .table-actions form {
+    display: flex;
 }
 
 .users-empty-state {
@@ -6098,13 +6150,16 @@ html[data-theme="dark"] .users-empty-state p {
         grid-template-columns: 1fr;
     }
 
+    .users-batch-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
     .user-key-side {
         position: static;
         top: auto;
     }
 
     .users-admin-shell,
-    .users-batch-grid,
     .users-filter-snapshot,
     .users-registry-meta {
         grid-template-columns: 1fr;
@@ -7718,5 +7773,536 @@ html[data-theme="dark"] .nav-link.active {
 
     .log-billing-help {
         justify-content: flex-start;
+    }
+}
+
+/* 2026-05-31 appearance system: global light/dark support with 10 one-click presets. */
+:root {
+    --style-swatch-1: #10b981;
+    --style-swatch-2: #14b8a6;
+    --style-swatch-3: #84cc16;
+    --surface-elevated: color-mix(in srgb, var(--surface) 90%, transparent);
+    --surface-elevated-strong: color-mix(in srgb, var(--surface) 96%, transparent);
+    --panel-border: color-mix(in srgb, var(--accent) 14%, var(--line));
+    --nav-active-background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+    --nav-active-border: color-mix(in srgb, var(--accent) 28%, var(--line));
+    --nav-active-text: var(--accent-strong);
+    --body-grid-line: color-mix(in srgb, var(--text) 4%, transparent);
+    --body-background:
+        radial-gradient(circle at 12% 0%, color-mix(in srgb, var(--style-swatch-1) 11%, transparent), transparent 32%),
+        radial-gradient(circle at 86% 12%, color-mix(in srgb, var(--style-swatch-2) 9%, transparent), transparent 28%),
+        linear-gradient(180deg, var(--bg) 0%, var(--bg-deep) 100%);
+    --brand-logo-background:
+        radial-gradient(circle at 28% 18%, rgba(255, 255, 255, 0.42), transparent 34%),
+        linear-gradient(135deg, var(--style-swatch-1) 0%, var(--style-swatch-2) 100%);
+    --hero-background:
+        radial-gradient(circle at 88% 12%, color-mix(in srgb, var(--style-swatch-2) 14%, transparent), transparent 36%),
+        linear-gradient(
+            135deg,
+            color-mix(in srgb, var(--surface) 96%, white) 0%,
+            color-mix(in srgb, var(--surface-soft) 90%, var(--style-swatch-1) 10%) 56%,
+            color-mix(in srgb, var(--surface-tint) 88%, var(--style-swatch-2) 12%) 100%
+        );
+    --hero-after: radial-gradient(circle, color-mix(in srgb, var(--style-swatch-2) 58%, transparent) 0%, transparent 70%);
+    --user-chip-background:
+        linear-gradient(
+            135deg,
+            color-mix(in srgb, var(--style-swatch-1) 18%, var(--surface)) 0%,
+            color-mix(in srgb, var(--style-swatch-2) 20%, var(--surface)) 100%
+        );
+    --panel-muted-background: color-mix(in srgb, var(--surface-soft) 86%, transparent);
+    --appearance-card-background: color-mix(in srgb, var(--surface-soft) 90%, transparent);
+}
+
+html[data-theme="dark"] {
+    --surface-elevated: color-mix(in srgb, var(--surface) 92%, transparent);
+    --surface-elevated-strong: color-mix(in srgb, var(--surface-strong) 94%, transparent);
+    --panel-border: color-mix(in srgb, var(--accent) 18%, var(--line));
+    --nav-active-background: color-mix(in srgb, var(--accent) 18%, var(--surface));
+    --nav-active-border: color-mix(in srgb, var(--accent) 32%, var(--line));
+    --body-grid-line: color-mix(in srgb, white 4%, transparent);
+    --body-background:
+        radial-gradient(circle at 12% 0%, color-mix(in srgb, var(--style-swatch-1) 16%, transparent), transparent 30%),
+        radial-gradient(circle at 86% 12%, color-mix(in srgb, var(--style-swatch-2) 13%, transparent), transparent 28%),
+        linear-gradient(180deg, var(--bg) 0%, var(--bg-deep) 52%, var(--bg) 100%);
+    --hero-background:
+        radial-gradient(circle at 88% 12%, color-mix(in srgb, var(--style-swatch-2) 18%, transparent), transparent 34%),
+        linear-gradient(
+            135deg,
+            color-mix(in srgb, var(--surface) 92%, black) 0%,
+            color-mix(in srgb, var(--surface-soft) 90%, var(--style-swatch-1) 10%) 56%,
+            color-mix(in srgb, var(--surface-tint) 86%, var(--style-swatch-2) 14%) 100%
+        );
+    --hero-after: radial-gradient(circle, color-mix(in srgb, var(--style-swatch-2) 62%, transparent) 0%, transparent 70%);
+    --user-chip-background:
+        linear-gradient(
+            135deg,
+            color-mix(in srgb, var(--style-swatch-1) 26%, var(--surface)) 0%,
+            color-mix(in srgb, var(--style-swatch-2) 26%, var(--surface)) 100%
+        );
+    --panel-muted-background: color-mix(in srgb, var(--surface-soft) 90%, transparent);
+    --appearance-card-background: color-mix(in srgb, var(--surface-strong) 94%, transparent);
+}
+
+html[data-style="jade"] {
+    --style-swatch-1: #10b981;
+    --style-swatch-2: #14b8a6;
+    --style-swatch-3: #84cc16;
+    --radius: 20px;
+    --radius-sm: 14px;
+}
+
+html[data-style="ocean"] {
+    --style-swatch-1: #0f766e;
+    --style-swatch-2: #0284c7;
+    --style-swatch-3: #38bdf8;
+    --radius: 22px;
+    --radius-sm: 15px;
+}
+
+html[data-style="amber"] {
+    --style-swatch-1: #d97706;
+    --style-swatch-2: #f59e0b;
+    --style-swatch-3: #fb7185;
+    --radius: 18px;
+    --radius-sm: 12px;
+}
+
+html[data-style="rose"] {
+    --style-swatch-1: #e11d48;
+    --style-swatch-2: #fb7185;
+    --style-swatch-3: #f97316;
+    --radius: 24px;
+    --radius-sm: 16px;
+}
+
+html[data-style="cobalt"] {
+    --style-swatch-1: #2563eb;
+    --style-swatch-2: #4f46e5;
+    --style-swatch-3: #06b6d4;
+    --radius: 17px;
+    --radius-sm: 12px;
+}
+
+html[data-style="plum"] {
+    --style-swatch-1: #7c3aed;
+    --style-swatch-2: #a855f7;
+    --style-swatch-3: #ec4899;
+    --radius: 23px;
+    --radius-sm: 15px;
+}
+
+html[data-style="graphite"] {
+    --style-swatch-1: #334155;
+    --style-swatch-2: #475569;
+    --style-swatch-3: #94a3b8;
+    --radius: 16px;
+    --radius-sm: 11px;
+}
+
+html[data-style="forest"] {
+    --style-swatch-1: #166534;
+    --style-swatch-2: #15803d;
+    --style-swatch-3: #a3a948;
+    --radius: 19px;
+    --radius-sm: 13px;
+}
+
+html[data-style="sunset"] {
+    --style-swatch-1: #ea580c;
+    --style-swatch-2: #f97316;
+    --style-swatch-3: #ef4444;
+    --radius: 21px;
+    --radius-sm: 14px;
+}
+
+html[data-style="mist"] {
+    --style-swatch-1: #0f766e;
+    --style-swatch-2: #14b8a6;
+    --style-swatch-3: #64748b;
+    --radius: 24px;
+    --radius-sm: 18px;
+}
+
+html[data-style="jade"][data-theme="light"] {
+    --accent: #10b981;
+    --accent-strong: #047857;
+}
+
+html[data-style="jade"][data-theme="dark"] {
+    --accent: #34d399;
+    --accent-strong: #a7f3d0;
+}
+
+html[data-style="ocean"][data-theme="light"] {
+    --accent: #0284c7;
+    --accent-strong: #155e75;
+}
+
+html[data-style="ocean"][data-theme="dark"] {
+    --accent: #38bdf8;
+    --accent-strong: #bae6fd;
+}
+
+html[data-style="amber"][data-theme="light"] {
+    --accent: #d97706;
+    --accent-strong: #9a3412;
+}
+
+html[data-style="amber"][data-theme="dark"] {
+    --accent: #f59e0b;
+    --accent-strong: #fde68a;
+}
+
+html[data-style="rose"][data-theme="light"] {
+    --accent: #e11d48;
+    --accent-strong: #be123c;
+}
+
+html[data-style="rose"][data-theme="dark"] {
+    --accent: #fb7185;
+    --accent-strong: #fecdd3;
+}
+
+html[data-style="cobalt"][data-theme="light"] {
+    --accent: #2563eb;
+    --accent-strong: #1d4ed8;
+}
+
+html[data-style="cobalt"][data-theme="dark"] {
+    --accent: #60a5fa;
+    --accent-strong: #dbeafe;
+}
+
+html[data-style="plum"][data-theme="light"] {
+    --accent: #7c3aed;
+    --accent-strong: #6d28d9;
+}
+
+html[data-style="plum"][data-theme="dark"] {
+    --accent: #a78bfa;
+    --accent-strong: #ede9fe;
+}
+
+html[data-style="graphite"][data-theme="light"] {
+    --accent: #475569;
+    --accent-strong: #334155;
+}
+
+html[data-style="graphite"][data-theme="dark"] {
+    --accent: #94a3b8;
+    --accent-strong: #e2e8f0;
+}
+
+html[data-style="forest"][data-theme="light"] {
+    --accent: #15803d;
+    --accent-strong: #166534;
+}
+
+html[data-style="forest"][data-theme="dark"] {
+    --accent: #4ade80;
+    --accent-strong: #dcfce7;
+}
+
+html[data-style="sunset"][data-theme="light"] {
+    --accent: #ea580c;
+    --accent-strong: #c2410c;
+}
+
+html[data-style="sunset"][data-theme="dark"] {
+    --accent: #fb923c;
+    --accent-strong: #ffedd5;
+}
+
+html[data-style="mist"][data-theme="light"] {
+    --accent: #0f766e;
+    --accent-strong: #115e59;
+}
+
+html[data-style="mist"][data-theme="dark"] {
+    --accent: #5eead4;
+    --accent-strong: #ccfbf1;
+}
+
+:root {
+    --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
+    --button-border-cue: color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
+body {
+    background: var(--body-background);
+}
+
+body::before {
+    background-image:
+        linear-gradient(var(--body-grid-line) 1px, transparent 1px),
+        linear-gradient(90deg, var(--body-grid-line) 1px, transparent 1px);
+    opacity: 0.28;
+}
+
+.auth-card,
+.auth-side-card,
+.site-nav,
+.site-footer,
+.page-heading,
+.panel-card,
+.metric-card,
+.summary-list-card,
+.provider-card,
+.risk-card,
+.stage-card,
+.monitor-card,
+.users-select-card,
+.users-registry-card,
+.modal-card,
+.account-menu-panel {
+    border-color: var(--panel-border) !important;
+    background: var(--surface-elevated) !important;
+}
+
+.auth-side-card,
+.page-heading,
+.site-footer,
+.account-menu-panel,
+.cockpit-hero-aside {
+    background: var(--surface-elevated-strong) !important;
+}
+
+.hero-panel {
+    background: var(--hero-background) !important;
+    border-color: var(--panel-border) !important;
+}
+
+.hero-panel::after {
+    background: var(--hero-after) !important;
+    opacity: 0.2;
+}
+
+.brand-logo,
+html[data-theme="dark"] .brand-logo {
+    background: var(--brand-logo-background) !important;
+}
+
+.topbar-mark {
+    background: linear-gradient(135deg, var(--style-swatch-1) 0%, var(--style-swatch-2) 100%);
+    box-shadow: 0 0 0 6px color-mix(in srgb, var(--style-swatch-2) 12%, transparent);
+}
+
+.topbar-user {
+    background: var(--user-chip-background) !important;
+    border-color: color-mix(in srgb, var(--accent) 18%, transparent) !important;
+    color: var(--accent-strong) !important;
+}
+
+.nav-link.active,
+html[data-theme="dark"] .nav-link.active {
+    color: var(--nav-active-text) !important;
+    background: var(--nav-active-background) !important;
+    border-color: var(--nav-active-border) !important;
+}
+
+.panel-kicker,
+.eyebrow {
+    background: color-mix(in srgb, var(--accent) 12%, transparent) !important;
+    color: var(--accent-strong) !important;
+}
+
+.topbar-style-btn,
+.topbar-theme-btn {
+    gap: 10px;
+}
+
+.auth-appearance-bar {
+    position: fixed;
+    top: calc(18px + env(safe-area-inset-top));
+    right: 18px;
+    z-index: 30;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+}
+
+.topbar-action-copy {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+    text-align: left;
+}
+
+.topbar-action-copy strong,
+.topbar-action-copy small {
+    display: block;
+    line-height: 1.2;
+}
+
+.topbar-action-copy strong {
+    font-size: 14px;
+}
+
+.topbar-action-copy small {
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.style-toggle-preview {
+    width: 18px;
+    height: 18px;
+    flex: 0 0 18px;
+    border-radius: 999px;
+    background:
+        radial-gradient(circle at 30% 30%, rgba(255, 255, 255, 0.68), transparent 34%),
+        linear-gradient(135deg, var(--style-swatch-1) 0%, var(--style-swatch-2) 56%, var(--style-swatch-3) 100%);
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--style-swatch-2) 10%, transparent);
+}
+
+.appearance-modal-card {
+    width: min(980px, calc(100vw - 40px));
+    display: grid;
+    gap: 18px;
+    border-radius: 28px;
+    border: 1px solid var(--panel-border);
+    background: var(--surface-elevated-strong);
+}
+
+.appearance-modal-intro {
+    margin: 8px 0 0;
+    color: var(--muted);
+    line-height: 1.7;
+}
+
+.appearance-modal-summary {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.appearance-summary-item {
+    min-width: 0;
+    padding: 16px 18px;
+    border-radius: calc(var(--radius-sm) + 2px);
+    background: var(--appearance-card-background);
+    border: 1px solid transparent;
+}
+
+.appearance-summary-item span,
+.appearance-summary-item strong {
+    display: block;
+}
+
+.appearance-summary-item span {
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.4;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+
+.appearance-summary-item strong {
+    margin-top: 8px;
+    font-size: 20px;
+    letter-spacing: -0.03em;
+}
+
+.appearance-preset-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+    gap: 14px;
+}
+
+.appearance-preset-card {
+    min-height: 172px;
+    align-items: flex-start;
+    justify-content: flex-start;
+    flex-direction: column;
+    gap: 14px;
+    padding: 18px;
+    border-radius: calc(var(--radius-sm) + 4px);
+    border: 1px solid transparent;
+    background: var(--appearance-card-background);
+    text-align: left;
+}
+
+.appearance-preset-card:hover {
+    background: color-mix(in srgb, var(--appearance-card-background) 90%, var(--accent) 10%);
+    border-color: var(--button-border-cue);
+}
+
+.appearance-preset-card.is-active {
+    background: color-mix(in srgb, var(--accent) 12%, var(--appearance-card-background));
+    border-color: var(--nav-active-border);
+}
+
+.appearance-preset-swatch {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.appearance-preset-dot {
+    width: 16px;
+    height: 16px;
+    border-radius: 999px;
+    background: var(--appearance-preset-color);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+
+.appearance-preset-copy {
+    display: grid;
+    gap: 8px;
+    min-width: 0;
+}
+
+.appearance-preset-copy strong,
+.appearance-preset-copy small {
+    display: block;
+}
+
+.appearance-preset-copy strong {
+    font-size: 18px;
+    line-height: 1.25;
+}
+
+.appearance-preset-copy small {
+    color: var(--muted);
+    font-size: 13px;
+    line-height: 1.7;
+}
+
+.appearance-preset-state {
+    margin-top: auto;
+    color: var(--accent-strong);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+}
+
+@media (max-width: 992px) {
+    .appearance-modal-card {
+        width: min(100%, calc(100vw - 24px));
+    }
+}
+
+@media (max-width: 768px) {
+    .auth-appearance-bar {
+        top: calc(12px + env(safe-area-inset-top));
+        right: 12px;
+        left: 12px;
+        justify-content: stretch;
+    }
+
+    .auth-appearance-bar .topbar-btn {
+        flex: 1 1 min(220px, 100%);
+        min-width: 0;
+    }
+
+    .appearance-modal-summary {
+        grid-template-columns: 1fr;
+    }
+
+    .appearance-preset-grid {
+        grid-template-columns: 1fr;
     }
 }

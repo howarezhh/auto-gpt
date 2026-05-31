@@ -7,13 +7,20 @@
     <script>
         (function () {
             try {
-                const storedTheme = localStorage.getItem("aotu-theme");
+                const THEME_STORAGE_KEY = "aotu-theme";
+                const STYLE_STORAGE_KEY = "aotu-style";
+                const STYLE_PRESET_IDS = new Set(["jade", "ocean", "amber", "rose", "cobalt", "plum", "graphite", "forest", "sunset", "mist"]);
+                const storedTheme = localStorage.getItem(THEME_STORAGE_KEY);
+                const storedStyle = localStorage.getItem(STYLE_STORAGE_KEY);
                 const preferredTheme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-                const initialTheme = storedTheme || preferredTheme;
+                const initialTheme = storedTheme === "light" || storedTheme === "dark" ? storedTheme : preferredTheme;
+                const initialStyle = STYLE_PRESET_IDS.has(storedStyle) ? storedStyle : "jade";
                 document.documentElement.dataset.theme = initialTheme;
+                document.documentElement.dataset.style = initialStyle;
                 document.documentElement.style.colorScheme = initialTheme;
             } catch (error) {
                 document.documentElement.dataset.theme = "light";
+                document.documentElement.dataset.style = "jade";
                 document.documentElement.style.colorScheme = "light";
             }
         })();
@@ -24,7 +31,7 @@
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
     <link rel="icon" type="image/png" href="{{ url_for('static', path='images/logo.png') }}?v=20260503-06">
-    <link href="{{ url_for('static', path='css/app.css') }}?v=20260508-05" rel="stylesheet">
+    <link href="{{ url_for('static', path='css/app.css') }}?v=20260531-09" rel="stylesheet">
 </head>
 {% set page_role = (
     'overview' if page_name in ['dashboard', 'user-home']
@@ -107,6 +114,20 @@
                         </div>
                     </div>
                     <div class="site-nav-actions">
+                        <button
+                            class="topbar-btn topbar-btn-ghost topbar-style-btn interactive-btn"
+                            id="style-toggle"
+                            type="button"
+                            aria-haspopup="dialog"
+                            aria-controls="appearance-modal"
+                            aria-label="打开全站风格选择器"
+                        >
+                            <span class="style-toggle-preview" aria-hidden="true"></span>
+                            <span class="topbar-action-copy">
+                                <strong id="style-toggle-label">玉阶绿</strong>
+                                <small id="style-toggle-meta">默认控制台风格</small>
+                            </span>
+                        </button>
                         <button class="topbar-btn topbar-btn-ghost topbar-theme-btn interactive-btn" id="theme-toggle" type="button" aria-label="切换暗黑模式">
                             <i class="bi bi-circle-half" aria-hidden="true"></i>
                             <span id="theme-toggle-label">暗黑模式</span>
@@ -146,7 +167,30 @@
             </div>
         </footer>
     </div>
+    <div class="modal-shell hidden" id="appearance-modal" aria-hidden="true">
+        <div class="modal-card appearance-modal-card" role="dialog" aria-modal="true" aria-labelledby="appearance-modal-title" tabindex="-1">
+            <div class="modal-head">
+                <div>
+                    <div class="panel-kicker">全站外观</div>
+                    <h2 id="appearance-modal-title">一键切换整体风格</h2>
+                    <p class="appearance-modal-intro">支持 10 套统一风格预设，亮色与暗黑模式会自动同步适配。</p>
+                </div>
+                <button class="icon-btn interactive-btn" id="appearance-modal-close" type="button" aria-label="关闭风格选择器">×</button>
+            </div>
+            <div class="appearance-modal-summary">
+                <div class="appearance-summary-item">
+                    <span>当前模式</span>
+                    <strong id="appearance-current-mode">日间模式</strong>
+                </div>
+                <div class="appearance-summary-item">
+                    <span>当前风格</span>
+                    <strong id="appearance-current-style">玉阶绿</strong>
+                </div>
+            </div>
+            <div class="appearance-preset-grid" id="appearance-preset-grid"></div>
+        </div>
+    </div>
     <div class="toast-stack" id="toast-stack" role="status" aria-live="polite" aria-atomic="false"></div>
-    <script src="{{ url_for('static', path='js/app.js') }}?v=20260508-05"></script>
+    <script src="{{ url_for('static', path='js/app.js') }}?v=20260531-08"></script>
 </body>
 </html>

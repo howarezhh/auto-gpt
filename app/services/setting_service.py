@@ -1,10 +1,13 @@
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from types import SimpleNamespace
 
 from app.config import get_settings
+from app.database import SessionLocal
 from app.models.app_setting import AppSetting
 from app.models.provider import Provider
 from app.schemas.setting import SettingUpdate
+from app.services.cache_service import CacheService
 
 
 _settings = get_settings()
@@ -57,23 +60,52 @@ DEFAULT_SETTING = {
 
 
 class SettingService:
+    """负责读取、初始化和校验全局应用设置。"""
+
+    RUNTIME_CACHE_KEY = "runtime-settings:app"
+    RUNTIME_CACHE_TTL_SECONDS = 5
+
     @staticmethod
     def get_or_create(db: Session) -> AppSetting:
+        """读取系统设置，不存在时按默认值初始化。"""
         setting = db.get(AppSetting, 1)
         if setting:
+            # 兼容旧数据，把过低的健康检查间隔自动拉回最小安全值。
             if setting.health_check_interval_sec < 300:
                 setting.health_check_interval_sec = 300
                 db.commit()
                 db.refresh(setting)
+                SettingService.invalidate_runtime_cache()
             return setting
         setting = AppSetting(**DEFAULT_SETTING)
         db.add(setting)
         db.commit()
         db.refresh(setting)
+        SettingService.invalidate_runtime_cache()
         return setting
 
     @staticmethod
+    def get_cached() -> SimpleNamespace:
+        """读取请求热路径使用的设置快照，避免每个请求重复打开数据库会话。"""
+        cached = CacheService.get(SettingService.RUNTIME_CACHE_KEY)
+        if isinstance(cached, dict):
+            return SimpleNamespace(**cached)
+        db = SessionLocal()
+        try:
+            setting = SettingService.get_or_create(db)
+            payload = SettingService._to_runtime_payload(setting)
+        finally:
+            db.close()
+        CacheService.set(
+            SettingService.RUNTIME_CACHE_KEY,
+            payload,
+            ttl_seconds=SettingService.RUNTIME_CACHE_TTL_SECONDS,
+        )
+        return SimpleNamespace(**payload)
+
+    @staticmethod
     def update(db: Session, payload: SettingUpdate) -> AppSetting:
+        """更新系统设置，并在落库前执行关键约束校验。"""
         setting = SettingService.get_or_create(db)
         SettingService._validate_route_configuration(
             db,
@@ -93,7 +125,20 @@ class SettingService:
             setattr(setting, field, value)
         db.commit()
         db.refresh(setting)
+        SettingService.invalidate_runtime_cache()
         return setting
+
+    @staticmethod
+    def invalidate_runtime_cache() -> None:
+        CacheService.invalidate_prefix("runtime-settings")
+
+    @staticmethod
+    def _to_runtime_payload(setting: AppSetting) -> dict:
+        return {
+            column.name: getattr(setting, column.name)
+            for column in AppSetting.__table__.columns
+            if column.name not in {"created_at", "updated_at"}
+        }
 
     @staticmethod
     def _validate_route_configuration(
@@ -102,6 +147,7 @@ class SettingService:
         route_mode: str,
         default_provider_id: int | None,
     ) -> None:
+        """校验路由模式和默认 provider 配置是否合法。"""
         if route_mode == "manual" and default_provider_id is None:
             raise ValueError("manual route_mode requires default_provider_id")
         if default_provider_id is None:
@@ -118,6 +164,7 @@ class SettingService:
         request_log_retention_days: int,
         admin_audit_log_retention_days: int,
     ) -> None:
+        """校验日志保留时间不能为负数。"""
         if request_log_retention_days < 0:
             raise ValueError("request_log_retention_days must be >= 0")
         if admin_audit_log_retention_days < 0:
@@ -130,6 +177,7 @@ class SettingService:
         idle_timeout_seconds: int,
         max_duration_seconds: int,
     ) -> None:
+        """校验流式超时配置之间的相对关系。"""
         if max_duration_seconds <= 0:
             return
         positive_timeouts = [

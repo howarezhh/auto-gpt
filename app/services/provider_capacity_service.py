@@ -16,24 +16,32 @@ from app.services.redis_service import RedisService
 
 @dataclass(slots=True)
 class ProviderCapacitySnapshot:
+    """表示某个 provider 当前的并发与 QPS 快照。"""
+
     active_requests: int = 0
     active_streams: int = 0
     current_qps: int = 0
 
 
 class ProviderCapacityExceededError(Exception):
+    """表示 provider 容量限制被触发。"""
+
     def __init__(self, message: str, *, code: str) -> None:
         super().__init__(message)
         self.code = code
 
 
 class ProviderCapacityUnavailableError(Exception):
+    """表示 provider 容量服务当前不可用。"""
+
     def __init__(self, message: str = "Redis provider capacity service is unavailable") -> None:
         super().__init__(message)
         self.code = "redis_unavailable"
 
 
 class ProviderCapacityService:
+    """基于 Redis 维护 provider 级别的并发和 QPS 租约。"""
+
     _redis_client: Redis | None = None
 
     _ACQUIRE_LUA = """
@@ -93,6 +101,7 @@ return 1
 
     @classmethod
     def snapshot(cls, provider_id: int) -> ProviderCapacitySnapshot:
+        """读取单个 provider 的容量快照。"""
         try:
             redis_snapshot = cls._redis_snapshot(provider_id)
             if redis_snapshot is not None:
@@ -105,6 +114,7 @@ return 1
 
     @classmethod
     def snapshots(cls, provider_ids: set[int]) -> dict[int, ProviderCapacitySnapshot]:
+        """批量读取多个 provider 的容量快照。"""
         try:
             redis_snapshots = cls._redis_snapshots(provider_ids)
             if redis_snapshots is not None:
@@ -117,6 +127,7 @@ return 1
 
     @classmethod
     async def async_snapshots(cls, provider_ids: set[int]) -> dict[int, ProviderCapacitySnapshot]:
+        """异步批量读取多个 provider 的容量快照。"""
         try:
             return await cls._async_redis_snapshots(provider_ids)
         except ProviderCapacityUnavailableError:
@@ -126,12 +137,14 @@ return 1
 
     @classmethod
     def can_accept(cls, provider: Provider, *, is_stream: bool) -> bool:
+        """判断 provider 当前是否还能接收新请求。"""
         snapshot = cls.snapshot(provider.id)
         return cls._has_capacity(provider, snapshot=snapshot, is_stream=is_stream)
 
     @classmethod
     @asynccontextmanager
     async def async_lease(cls, provider: Provider, *, is_stream: bool) -> AsyncIterator[ProviderCapacitySnapshot]:
+        """异步申请 provider 容量租约，并在退出时自动释放。"""
         lease_id = uuid4().hex
         lease_acquired = False
         try:
@@ -149,6 +162,7 @@ return 1
 
     @classmethod
     async def async_release(cls, *, lease_id: str | None) -> bool:
+        """释放 provider 容量租约。"""
         if not lease_id:
             return False
         try:
@@ -160,6 +174,7 @@ return 1
 
     @classmethod
     def _ensure_capacity(cls, provider: Provider, *, snapshot: ProviderCapacitySnapshot, is_stream: bool) -> None:
+        """根据快照校验 provider 是否触达并发或 QPS 上限。"""
         if cls._limit_reached(snapshot.active_requests, provider.max_active_requests):
             raise ProviderCapacityExceededError("Provider active request limit exceeded", code="provider_active_request_limit_exceeded")
         if is_stream and cls._limit_reached(snapshot.active_streams, provider.max_active_streams):
@@ -169,6 +184,7 @@ return 1
 
     @classmethod
     def _has_capacity(cls, provider: Provider, *, snapshot: ProviderCapacitySnapshot, is_stream: bool) -> bool:
+        """返回 provider 是否还有可用容量。"""
         try:
             cls._ensure_capacity(provider, snapshot=snapshot, is_stream=is_stream)
         except ProviderCapacityExceededError:
@@ -177,10 +193,12 @@ return 1
 
     @staticmethod
     def _limit_reached(current_value: int, limit: int | None) -> bool:
+        """判断当前值是否达到限制值。"""
         return limit is not None and limit > 0 and current_value >= limit
 
     @classmethod
     def _redis(cls) -> Redis | None:
+        """返回同步 Redis 客户端。"""
         settings = get_settings()
         if not settings.redis_url.strip():
             raise ProviderCapacityUnavailableError("REDIS_URL is empty")
@@ -190,6 +208,7 @@ return 1
 
     @classmethod
     def _redis_snapshot(cls, provider_id: int) -> ProviderCapacitySnapshot | None:
+        """从 Redis 读取单个 provider 的计数值。"""
         client = cls._redis()
         try:
             current_second = int(time.time())
@@ -209,6 +228,7 @@ return 1
 
     @classmethod
     def _redis_snapshots(cls, provider_ids: set[int]) -> dict[int, ProviderCapacitySnapshot] | None:
+        """从 Redis 批量读取 provider 计数值。"""
         client = cls._redis()
         try:
             current_second = int(time.time())
@@ -237,6 +257,7 @@ return 1
 
     @classmethod
     async def _async_redis(cls) -> AsyncRedis:
+        """返回异步 Redis 客户端。"""
         try:
             return RedisService.get_client()
         except Exception as exc:
@@ -244,6 +265,7 @@ return 1
 
     @classmethod
     async def _async_redis_snapshots(cls, provider_ids: set[int]) -> dict[int, ProviderCapacitySnapshot]:
+        """异步批量读取 provider 计数值。"""
         client = await cls._async_redis()
         current_second = int(time.time())
         keys: list[str] = []

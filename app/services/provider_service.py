@@ -36,6 +36,8 @@ from app.utils.json_utils import dumps_json, loads_json
 
 
 class ProviderService:
+    """负责 provider 及其模型挂载的管理、能力推断与状态维护。"""
+
     QUALITY_WINDOW_MINUTES = 24 * 60
     VISION_MODEL_HINTS = ("gpt-4o", "gpt-4.1", "gpt-5")
     TOOL_CAPABLE_MODEL_HINTS = ("gpt-4o", "gpt-4.1", "gpt-5", "o3", "o4", "claude", "qwen", "deepseek", "glm")
@@ -53,6 +55,7 @@ class ProviderService:
 
     @staticmethod
     def _infer_model_capabilities(model_name: str) -> dict[str, bool]:
+        """根据模型名启发式推断视觉、工具和图像生成能力。"""
         normalized = (model_name or "").strip().lower()
         supports_vision = any(prefix in normalized for prefix in ProviderService.VISION_MODEL_HINTS)
         supports_tools = any(prefix in normalized for prefix in ProviderService.TOOL_CAPABLE_MODEL_HINTS)
@@ -68,19 +71,23 @@ class ProviderService:
 
     @staticmethod
     def model_name_supports_image_generation(model_name: str) -> bool:
+        """判断模型名是否具备图像生成倾向。"""
         return ProviderService._infer_model_capabilities(model_name).get("supports_image_generation", False)
 
     @staticmethod
     def model_name_supports_tools(model_name: str) -> bool:
+        """判断模型名是否具备工具调用倾向。"""
         return ProviderService._infer_model_capabilities(model_name).get("supports_tools", False)
 
     @staticmethod
     def provider_model_supports_tools(provider_model: ProviderModel) -> bool:
+        """结合显式配置和模型名推断 provider model 的工具能力。"""
         inferred = ProviderService._infer_model_capabilities(provider_model.model_name)
         return bool(provider_model.supports_tools or inferred.get("supports_tools", False))
 
     @staticmethod
     def provider_model_supports_image_generation(provider_model: ProviderModel) -> bool:
+        """判断 provider model 是否可用于图像生成链路。"""
         inferred = ProviderService._infer_model_capabilities(provider_model.model_name)
         return bool(
             provider_model.supports_responses
@@ -90,6 +97,7 @@ class ProviderService:
 
     @staticmethod
     def _build_model_config_input_from_name(model_name: str) -> ProviderModelConfigInput:
+        """根据模型名生成默认的模型配置输入对象。"""
         capabilities = ProviderService._infer_model_capabilities(model_name)
         return ProviderModelConfigInput(
             model_name=model_name,
@@ -102,12 +110,14 @@ class ProviderService:
 
     @staticmethod
     def mask_api_key(api_key: str) -> str:
+        """对 provider API key 做脱敏展示。"""
         if len(api_key) <= 8:
             return "******"
         return f"{api_key[:4]}...{api_key[-4:]}"
 
     @staticmethod
     def list_providers(db: Session) -> list[Provider]:
+        """按优先级返回 provider 列表，并预加载模型挂载信息。"""
         return list(
             db.scalars(
                 select(Provider)
@@ -117,7 +127,19 @@ class ProviderService:
         )
 
     @staticmethod
+    def list_runtime_providers(db: Session) -> list[Provider]:
+        """读取请求路由热路径使用的 provider 快照。"""
+        cache_key = "providers-runtime:list"
+        cached = CacheService.get(cache_key)
+        if isinstance(cached, list):
+            return cached
+        providers = ProviderService.list_providers(db)
+        CacheService.set(cache_key, providers, ttl_seconds=2)
+        return providers
+
+    @staticmethod
     def list_provider_dicts(db: Session) -> list[dict]:
+        """返回带质量指标的 provider 序列化结果。"""
         providers = ProviderService.list_providers(db)
         metrics = ProviderService._build_quality_metrics(db, providers)
         return [ProviderService.provider_to_dict(provider, metrics=metrics) for provider in providers]
@@ -133,6 +155,7 @@ class ProviderService:
         enabled: bool | None = None,
         health_status: str | None = None,
     ) -> dict:
+        """分页返回 provider model 挂载列表。"""
         page = max(1, page)
         page_size = max(1, min(page_size, 100))
         filters = []
@@ -188,12 +211,14 @@ class ProviderService:
 
     @staticmethod
     def get_provider(db: Session, provider_id: int) -> Provider | None:
+        """按 ID 读取 provider 及其模型挂载。"""
         return db.scalar(
             select(Provider).options(selectinload(Provider.provider_models)).where(Provider.id == provider_id)
         )
 
     @staticmethod
     def create_provider(db: Session, payload: ProviderCreate) -> Provider:
+        """创建 provider，并同步初始化模型挂载和模型目录。"""
         from app.services.model_catalog_service import ModelCatalogService
 
         provider = Provider(
@@ -235,6 +260,7 @@ class ProviderService:
 
     @staticmethod
     def update_provider(db: Session, provider: Provider, payload: ProviderUpdate) -> Provider:
+        """更新 provider 基础信息及模型挂载。"""
         from app.services.model_catalog_service import ModelCatalogService
 
         data = payload.model_dump(exclude_unset=True)
@@ -249,6 +275,7 @@ class ProviderService:
             ProviderService._replace_provider_models(db, provider, ProviderService._resolve_model_configs(payload, provider))
 
         if {"base_url", "api_key"} & set(data.keys()):
+            # 上游连接信息变化后，强制重置健康状态并等待重新探测。
             provider.health_status = "unknown"
             provider.circuit_state = "closed"
             for provider_model in provider.provider_models:
@@ -835,6 +862,7 @@ class ProviderService:
     def invalidate_provider_runtime_cache() -> None:
         CacheService.invalidate_prefix("route-candidates")
         CacheService.invalidate_prefix("v1-models")
+        CacheService.invalidate_prefix("providers-runtime")
 
     @staticmethod
     def _build_quality_metrics(db: Session, providers: list[Provider]) -> dict[str, dict]:

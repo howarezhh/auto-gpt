@@ -28,6 +28,60 @@ Start Docker Desktop Linux Engine before running compose verification, or verify
 - Related Files: docker-compose.postgres.yml
 
 ---
+## [ERR-20260531-001] powershell_nested_regex_escaping
+
+**Logged**: 2026-05-31T14:45:00+08:00
+**Priority**: low
+**Status**: pending
+**Area**: infra
+
+### Summary
+Nested `pwsh -Command` with double-quoted regex patterns can leak backslashes to PowerShell parsing and fail before `rg` runs.
+
+### Error
+```text
+The term '\' is not recognized as a name of a cmdlet, function, script file, or executable program.
+```
+
+### Context
+- Command attempted: `pwsh -Command "rg -n \"jsonable_encoder|datetime.*isoformat|isoformat\\(\\)\" app"`
+- Environment: Codex shell command already runs under PowerShell, then nested `pwsh -Command` adds another quoting layer.
+
+### Suggested Fix
+Use a single-quoted outer PowerShell command for regex searches, or avoid nested `pwsh -Command` when the command contains escaped parentheses or quotes.
+
+### Metadata
+- Reproducible: yes
+- Related Files: none
+
+---
+## [ERR-20260530-001] powershell_nested_rg_pipe_pattern
+
+**Logged**: 2026-05-30T23:55:23+08:00
+**Priority**: low
+**Status**: pending
+**Area**: infra
+
+### Summary
+Nested `pwsh -Command` can misparse ripgrep regex patterns containing `|` when quoting is not protected.
+
+### Error
+```text
+ParserError: Expressions are only allowed as the first element of a pipeline.
+```
+
+### Context
+- Command attempted: `pwsh -Command "rg -n \"uvicorn|FastAPI|app =|...\" app start_project.py run.ps1 -S"`
+- Environment: Windows PowerShell 7 command executed through another PowerShell command layer.
+
+### Suggested Fix
+Use PowerShell single quotes around the ripgrep pattern inside the nested command, for example `& rg -n 'uvicorn|FastAPI|app =' app start_project.py run.ps1 -S`.
+
+### Metadata
+- Reproducible: yes
+- Related Files: none
+
+---
 ## [ERR-20260502-002] github_push_network_unreachable
 
 **Logged**: 2026-05-02T23:30:00+08:00

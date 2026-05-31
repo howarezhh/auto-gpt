@@ -15,11 +15,13 @@ templates = Jinja2Templates(directory="app/templates")
 
 
 def _current_user(request: Request, db: Session):
+    """读取当前请求对应的登录用户。"""
     return UserAuthService.get_current_user(request, db)
 
 
 @router.get("/setup-admin", response_class=HTMLResponse)
 def setup_admin_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
+    """展示管理员初始化页面。"""
     if UserAuthService.has_any_admin(db):
         return RedirectResponse("/login", status_code=303)
     return templates.TemplateResponse(
@@ -35,6 +37,7 @@ def setup_admin_page(request: Request, db: Session = Depends(get_db)) -> HTMLRes
 
 @router.post("/setup-admin", response_class=HTMLResponse)
 def setup_admin_submit(request: Request, db: Session = Depends(get_db)):
+    """阻止通过网页直接创建管理员，统一要求走服务器脚本。"""
     return templates.TemplateResponse(
         "setup_admin.html",
         {
@@ -49,6 +52,7 @@ def setup_admin_submit(request: Request, db: Session = Depends(get_db)):
 
 @router.get("/login", response_class=HTMLResponse)
 def login_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
+    """展示登录页，并处理已登录用户跳转。"""
     if not UserAuthService.has_any_admin(db):
         return RedirectResponse("/setup-admin", status_code=303)
     user = _current_user(request, db)
@@ -75,6 +79,7 @@ def login_submit(
     next_path: str | None = Form(default=None),
     db: Session = Depends(get_db),
 ):
+    """校验用户凭证并创建会话。"""
     if not UserAuthService.has_any_admin(db):
         return RedirectResponse("/setup-admin", status_code=303)
     user = UserAuthService.authenticate(db, identifier, password)
@@ -96,6 +101,7 @@ def login_submit(
 
 @router.get("/register", response_class=HTMLResponse)
 def register_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
+    """展示注册页，并根据配置决定是否允许公开注册。"""
     if not UserAuthService.has_any_admin(db):
         return RedirectResponse("/setup-admin", status_code=303)
     user = _current_user(request, db)
@@ -126,6 +132,7 @@ def register_submit(
     next_path: str | None = Form(default=None),
     db: Session = Depends(get_db),
 ):
+    """处理公开注册请求。"""
     settings = SettingService.get_or_create(db)
     if not settings.allow_public_user_registration:
         return templates.TemplateResponse(
@@ -184,5 +191,6 @@ def register_submit(
 
 @router.get("/logout")
 def logout(request: Request) -> RedirectResponse:
+    """退出当前登录会话。"""
     UserAuthService.logout_user(request)
     return RedirectResponse("/login", status_code=303)

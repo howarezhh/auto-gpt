@@ -36,7 +36,8 @@ async def _acquire_request_concurrency(
     api_client_auth: ApiClientAuthContext,
     is_stream: bool,
 ) -> ConcurrencyLease:
-    setting = await run_in_threadpool(_get_setting_with_scoped_session)
+    """为当前请求申请并发租约，超限时转换为统一鉴权错误。"""
+    setting = _get_setting_with_scoped_session()
     try:
         return await ConcurrencyService.acquire(
             request_id=uuid4().hex,
@@ -90,18 +91,17 @@ async def _acquire_request_concurrency(
 
 
 async def _release_request_concurrency(lease: ConcurrencyLease | None) -> None:
+    """释放并发租约。"""
     await ConcurrencyService.release(lease)
 
 
 def _get_setting_with_scoped_session():
-    db = SessionLocal()
-    try:
-        return SettingService.get_or_create(db)
-    finally:
-        db.close()
+    """在独立数据库会话中读取系统设置。"""
+    return SettingService.get_cached()
 
 
 def _effective_request_body_limit(setting, endpoint_path: str) -> int:
+    """计算某个 v1 端点实际生效的请求体大小限制。"""
     global_limit = int(getattr(setting, "max_v1_request_body_bytes", 0) or 0)
     endpoint_limit = 0
     if endpoint_path == "/chat/completions":
@@ -113,7 +113,8 @@ def _effective_request_body_limit(setting, endpoint_path: str) -> int:
 
 
 async def _read_limited_v1_json_payload(request: Request, *, endpoint_path: str) -> dict:
-    setting = await run_in_threadpool(_get_setting_with_scoped_session)
+    """在读取 JSON 请求体时执行应用层大小限制和结构化日志记录。"""
+    setting = _get_setting_with_scoped_session()
     limit = _effective_request_body_limit(setting, endpoint_path)
     content_length = request.headers.get("content-length")
     try:
@@ -149,6 +150,7 @@ async def _read_limited_v1_json_payload(request: Request, *, endpoint_path: str)
         if not chunk:
             continue
         if limit > 0 and len(body) + len(chunk) > limit:
+            # 流式读取时也要持续检查累计大小，避免大包绕过 Content-Length 预检。
             request.state.v1_request_body_structure_json = _truncate_json_for_log(
                 {
                     "_summary": "request body structure omitted because streamed body exceeds application limit",
@@ -218,7 +220,8 @@ async def _read_limited_v1_json_payload(request: Request, *, endpoint_path: str)
 
 
 async def _prepare_v1_body_limit_context(request: Request, *, endpoint_path: str) -> tuple[object, int, int]:
-    setting = await run_in_threadpool(_get_setting_with_scoped_session)
+    """提前准备请求体大小限制相关上下文。"""
+    setting = _get_setting_with_scoped_session()
     limit = _effective_request_body_limit(setting, endpoint_path)
     max_logged_body_bytes = int(getattr(setting, "max_logged_body_bytes", 16384) or 16384)
     content_length = request.headers.get("content-length")
@@ -252,6 +255,7 @@ async def _prepare_v1_body_limit_context(request: Request, *, endpoint_path: str
 
 
 async def _upload_to_data_url(upload_file, *, field_name: str) -> dict[str, object]:
+    """把上传图片转换成 data URL，供下游接口统一消费。"""
     content_type = (getattr(upload_file, "content_type", None) or "").strip().lower()
     if content_type not in AssetService.IMAGE_CONTENT_TYPES:
         raise HTTPException(
@@ -418,6 +422,7 @@ async def _forward_legacy_image_batch(
                 upstream,
                 response_format=response_format,
             ),
+            suppress_success_log=requested_count > 1,
         )
         merged_results.append(result)
         provider = current_provider
@@ -433,6 +438,82 @@ async def _forward_legacy_image_batch(
                 for item in current_trace
             )
     return _merge_legacy_image_api_results(merged_results, response_format=response_format), provider, trace, latency_ms_total
+
+
+def _write_legacy_batch_success_log(
+    *,
+    request: Request,
+    api_client_auth: ApiClientAuthContext,
+    provider,
+    request_path_for_log: str,
+    request_payload_for_log: dict,
+    response_payload_for_log: dict,
+    trace: list[dict],
+    latency_ms: int,
+) -> None:
+    request_id = uuid4().hex
+    conversation_key = ProxyService._extract_conversation_key(request_payload_for_log, request_id)
+    session_id = LogService.extract_session_id(request_payload_for_log, conversation_key=conversation_key, fallback=request_id)
+    setting = _get_setting_with_scoped_session()
+    request_body_json = getattr(request.state, "v1_request_body_structure_json", None) or ProxyService._serialize_payload_for_logging(
+        request_payload_for_log,
+        setting=setting,
+        preserve_request_content_when_disabled=True,
+        structure_only=True,
+    )
+    response_body_json = ProxyService._serialize_payload_for_logging(response_payload_for_log, setting=setting)
+    response_text = ProxyService._extract_response_display_text(
+        response_payload_for_log,
+        limit_bytes=setting.max_logged_body_bytes,
+    )
+    source_ip = ApiKeyService.extract_source_ip(request)
+    model_name = str(request_payload_for_log.get("model") or "")
+    reasoning_level = LogService.extract_reasoning_level(request_payload_for_log)
+    model_reasoning_effort = LogService.extract_model_reasoning_effort(request_payload_for_log)
+    db = SessionLocal()
+    try:
+        LogService.create_log(
+            db,
+            log_type="responses",
+            trace_id=getattr(request.state, "trace_id", None),
+            provider_id=getattr(provider, "id", None),
+            provider_name=getattr(provider, "name", None),
+            model_name=model_name,
+            requested_model=model_name,
+            tenant_name=api_client_auth.api_client_key.tenant_name,
+            project_name=api_client_auth.api_client_key.project_name,
+            app_name=api_client_auth.api_client_key.app_name,
+            environment_name=api_client_auth.api_client_key.environment_name,
+            request_id=request_id,
+            conversation_key=conversation_key,
+            session_id=session_id,
+            request_path=request_path_for_log,
+            source_ip=source_ip,
+            http_method="POST",
+            is_stream=False,
+            has_image=True,
+            success=True,
+            status_code=200,
+            latency_ms=latency_ms,
+            duration_ms=latency_ms,
+            reasoning_level=reasoning_level,
+            model_reasoning_effort=model_reasoning_effort,
+            request_body_json=request_body_json,
+            response_body_json=response_body_json,
+            response_text=response_text,
+            message="responses success",
+            retryable=False,
+            **ProxyService._build_api_client_log_kwargs(api_client_auth, auth_result="authenticated"),
+            trace=trace,
+            token_request_payload=request_payload_for_log,
+            token_response_payload=response_payload_for_log,
+            token_response_text=response_text,
+            schedule_token_fill=setting.enable_token_logging,
+            auto_commit=False,
+        )
+        db.commit()
+    finally:
+        db.close()
 
 
 async def _release_after_stream(
@@ -623,6 +704,18 @@ async def image_generations(
         )
     finally:
         await _release_request_concurrency(lease)
+    if requested_count > 1:
+        await run_in_threadpool(
+            _write_legacy_batch_success_log,
+            request=request,
+            api_client_auth=api_client_auth,
+            provider=provider,
+            request_path_for_log="/v1/images/generations",
+            request_payload_for_log=responses_payload,
+            response_payload_for_log=result,
+            trace=trace,
+            latency_ms=latency_ms,
+        )
     for key, value in build_proxy_response_headers(
         provider_id=provider.id,
         provider_name=provider.name,
@@ -673,6 +766,18 @@ async def image_edits(
         )
     finally:
         await _release_request_concurrency(lease)
+    if requested_count > 1:
+        await run_in_threadpool(
+            _write_legacy_batch_success_log,
+            request=request,
+            api_client_auth=api_client_auth,
+            provider=provider,
+            request_path_for_log="/v1/images/edits",
+            request_payload_for_log=responses_payload,
+            response_payload_for_log=result,
+            trace=trace,
+            latency_ms=latency_ms,
+        )
     for key, value in build_proxy_response_headers(
         provider_id=provider.id,
         provider_name=provider.name,
@@ -720,6 +825,18 @@ async def image_variations(
         )
     finally:
         await _release_request_concurrency(lease)
+    if requested_count > 1:
+        await run_in_threadpool(
+            _write_legacy_batch_success_log,
+            request=request,
+            api_client_auth=api_client_auth,
+            provider=provider,
+            request_path_for_log="/v1/images/variations",
+            request_payload_for_log=responses_payload,
+            response_payload_for_log=result,
+            trace=trace,
+            latency_ms=latency_ms,
+        )
     for key, value in build_proxy_response_headers(
         provider_id=provider.id,
         provider_name=provider.name,

@@ -31,6 +31,7 @@
         degraded: "降级",
         unhealthy: "异常",
         unknown: "未知",
+        skipped: "已跳过",
     };
 
     const CIRCUIT_STATE_LABELS = {
@@ -70,6 +71,22 @@
     const API_KEY_RAW_MAX_LENGTH = 128;
     const API_KEY_RAW_PATTERN = /^[A-Za-z0-9\-_]+$/;
     const IMAGE_GENERATION_TOOL_MODEL = "gpt-image-2";
+    const THEME_STORAGE_KEY = "aotu-theme";
+    const STYLE_STORAGE_KEY = "aotu-style";
+    const DEFAULT_STYLE_ID = "jade";
+    const STYLE_PRESETS = Object.freeze([
+        { id: "jade", name: "玉阶绿", shortDescription: "默认控制台风格", description: "冷静通透，适合日常运维与管理台。", swatches: ["#10b981", "#14b8a6", "#84cc16"] },
+        { id: "ocean", name: "深海蓝", shortDescription: "稳重数据风格", description: "深海蓝与海雾青组合，更偏向数据中心气质。", swatches: ["#0f766e", "#0284c7", "#38bdf8"] },
+        { id: "amber", name: "琥珀砂", shortDescription: "暖调运营风格", description: "金棕与蜜柑色强调活力和可见度。", swatches: ["#d97706", "#f59e0b", "#fb7185"] },
+        { id: "rose", name: "绯雾粉", shortDescription: "柔和品牌风格", description: "偏柔和的玫瑰与珊瑚色，适合更轻盈的界面。", swatches: ["#e11d48", "#fb7185", "#f97316"] },
+        { id: "cobalt", name: "钴光蓝", shortDescription: "高对比科技风格", description: "钴蓝与电青更锐利，适合强调技术感。", swatches: ["#2563eb", "#4f46e5", "#06b6d4"] },
+        { id: "plum", name: "暮莓紫", shortDescription: "深邃夜幕风格", description: "莓紫与酒红做低饱和混合，更偏夜间工作流。", swatches: ["#7c3aed", "#a855f7", "#ec4899"] },
+        { id: "graphite", name: "石墨灰", shortDescription: "极简中性风格", description: "压低色彩表达，保留清爽的工业感和秩序感。", swatches: ["#334155", "#475569", "#94a3b8"] },
+        { id: "forest", name: "松林墨", shortDescription: "沉稳自然风格", description: "深松绿与苔藓黄组合，更有自然质感。", swatches: ["#166534", "#15803d", "#a3a948"] },
+        { id: "sunset", name: "落日橙", shortDescription: "鲜明增长风格", description: "日落橙与暖红渐变，更强调增长和行动感。", swatches: ["#ea580c", "#f97316", "#ef4444"] },
+        { id: "mist", name: "雾屿青", shortDescription: "轻雾冷调风格", description: "灰青与冰蓝更柔和，适合长时间阅读与筛选。", swatches: ["#0f766e", "#14b8a6", "#64748b"] },
+    ]);
+    const STYLE_PRESET_MAP = new Map(STYLE_PRESETS.map((preset) => [preset.id, preset]));
 
     const api = {
         get: async (url) => parseResponse(await fetch(url, { cache: "no-store", headers: { "Cache-Control": "no-cache" } })),
@@ -88,42 +105,189 @@
         };
     }
 
+    function getStoredThemePreference() {
+        const storedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
+        return storedTheme === "light" || storedTheme === "dark" ? storedTheme : null;
+    }
+
     function getResolvedTheme() {
-        const storedTheme = window.localStorage.getItem("aotu-theme");
-        if (storedTheme === "light" || storedTheme === "dark") {
-            return storedTheme;
+        return getStoredThemePreference() || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    }
+
+    function getStoredStylePresetId() {
+        const storedStyle = window.localStorage.getItem(STYLE_STORAGE_KEY);
+        return STYLE_PRESET_MAP.has(storedStyle) ? storedStyle : null;
+    }
+
+    function getResolvedStylePresetId() {
+        return getStoredStylePresetId() || DEFAULT_STYLE_ID;
+    }
+
+    function getCurrentTheme() {
+        return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+    }
+
+    function getCurrentStylePresetId() {
+        const currentStyle = document.documentElement.dataset.style;
+        return STYLE_PRESET_MAP.has(currentStyle) ? currentStyle : DEFAULT_STYLE_ID;
+    }
+
+    function getStylePreset(styleId = getCurrentStylePresetId()) {
+        return STYLE_PRESET_MAP.get(styleId) || STYLE_PRESET_MAP.get(DEFAULT_STYLE_ID);
+    }
+
+    function getThemeModeLabel(theme = getCurrentTheme()) {
+        return theme === "dark" ? "暗黑模式" : "日间模式";
+    }
+
+    function renderAppearancePresetGrid(activeStyleId = getCurrentStylePresetId()) {
+        const grid = document.getElementById("appearance-preset-grid");
+        if (!grid) return;
+        grid.innerHTML = STYLE_PRESETS.map((preset) => {
+            const isActive = preset.id === activeStyleId;
+            const swatches = preset.swatches
+                .map((color) => `<span class="appearance-preset-dot" style="--appearance-preset-color:${color}"></span>`)
+                .join("");
+            return `
+                <button
+                    class="appearance-preset-card interactive-btn ${isActive ? "is-active" : ""}"
+                    type="button"
+                    data-style-preset="${preset.id}"
+                    aria-pressed="${isActive ? "true" : "false"}"
+                >
+                    <span class="appearance-preset-swatch" aria-hidden="true">${swatches}</span>
+                    <span class="appearance-preset-copy">
+                        <strong>${preset.name}</strong>
+                        <small>${preset.description}</small>
+                    </span>
+                    <span class="appearance-preset-state">${isActive ? "当前风格" : "一键应用"}</span>
+                </button>
+            `;
+        }).join("");
+        enhanceInteractiveButtons(grid);
+    }
+
+    function syncAppearanceUI() {
+        const theme = getCurrentTheme();
+        const preset = getStylePreset();
+        const themeLabel = document.getElementById("theme-toggle-label");
+        const themeButton = document.getElementById("theme-toggle");
+        const themeIcon = themeButton?.querySelector("i");
+        const styleButton = document.getElementById("style-toggle");
+        const styleLabel = document.getElementById("style-toggle-label");
+        const styleMeta = document.getElementById("style-toggle-meta");
+        const currentMode = document.getElementById("appearance-current-mode");
+        const currentStyle = document.getElementById("appearance-current-style");
+
+        if (themeLabel) {
+            themeLabel.textContent = theme === "dark" ? "切换日间" : "切换暗黑";
         }
-        return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        if (themeButton) {
+            themeButton.setAttribute("aria-label", theme === "dark" ? "切换到日间模式" : "切换到暗黑模式");
+            themeButton.dataset.theme = theme;
+        }
+        if (themeIcon) {
+            themeIcon.className = theme === "dark" ? "bi bi-sun" : "bi bi-moon-stars";
+        }
+        if (styleButton) {
+            styleButton.setAttribute("aria-label", `打开全站风格选择器，当前风格 ${preset.name}`);
+            styleButton.dataset.style = preset.id;
+        }
+        if (styleLabel) {
+            styleLabel.textContent = preset.name;
+        }
+        if (styleMeta) {
+            styleMeta.textContent = preset.shortDescription;
+        }
+        if (currentMode) {
+            currentMode.textContent = getThemeModeLabel(theme);
+        }
+        if (currentStyle) {
+            currentStyle.textContent = preset.name;
+        }
+        renderAppearancePresetGrid(preset.id);
     }
 
     function applyTheme(theme) {
-        document.documentElement.dataset.theme = theme;
-        document.documentElement.style.colorScheme = theme;
-        const label = document.getElementById("theme-toggle-label");
-        const button = document.getElementById("theme-toggle");
-        if (label) {
-            label.textContent = theme === "dark" ? "浅色模式" : "暗黑模式";
+        const nextTheme = theme === "dark" ? "dark" : "light";
+        document.documentElement.dataset.theme = nextTheme;
+        document.documentElement.style.colorScheme = nextTheme;
+        syncAppearanceUI();
+    }
+
+    function applyStylePreset(styleId) {
+        document.documentElement.dataset.style = STYLE_PRESET_MAP.has(styleId) ? styleId : DEFAULT_STYLE_ID;
+        syncAppearanceUI();
+    }
+
+    let appearanceModalController = null;
+    let appearanceModalNode = null;
+
+    function ensureAppearanceModalController() {
+        const modal = document.getElementById("appearance-modal");
+        const grid = document.getElementById("appearance-preset-grid");
+        if (!modal || !grid) return null;
+        if (appearanceModalController && appearanceModalNode === modal) {
+            return appearanceModalController;
         }
-        if (button) {
-            button.setAttribute("aria-label", theme === "dark" ? "切换到浅色模式" : "切换到暗黑模式");
-            button.dataset.theme = theme;
+        appearanceModalNode = modal;
+        appearanceModalController = modalManager.register({
+            modal,
+            dialog: modal.querySelector('[role="dialog"]'),
+            getInitialFocus: () => modal.querySelector("[data-style-preset][aria-pressed='true']") || document.getElementById("appearance-modal-close"),
+        });
+        const closeButton = document.getElementById("appearance-modal-close");
+        if (closeButton && closeButton.dataset.boundAppearanceClose !== "true") {
+            closeButton.dataset.boundAppearanceClose = "true";
+            closeButton.addEventListener("click", () => {
+                appearanceModalController?.close();
+            });
         }
+        if (grid.dataset.boundAppearancePresetGrid !== "true") {
+            grid.dataset.boundAppearancePresetGrid = "true";
+            grid.addEventListener("click", (event) => {
+                const button = event.target.closest("[data-style-preset]");
+                if (!button) return;
+                const preset = getStylePreset(button.dataset.stylePreset);
+                window.localStorage.setItem(STYLE_STORAGE_KEY, preset.id);
+                applyStylePreset(preset.id);
+                showToast(`已切换为${preset.name}`);
+            });
+        }
+        return appearanceModalController;
+    }
+
+    function openAppearanceModal(trigger = document.activeElement) {
+        const controller = ensureAppearanceModalController();
+        if (!controller) return;
+        renderAppearancePresetGrid();
+        if (controller.isOpen()) return;
+        controller.open(trigger);
     }
 
     function initThemeToggle() {
         applyTheme(getResolvedTheme());
+        applyStylePreset(getResolvedStylePresetId());
         const toggle = document.getElementById("theme-toggle");
-        if (!toggle || toggle.dataset.boundThemeToggle === "true") return;
-        toggle.dataset.boundThemeToggle = "true";
-        toggle.addEventListener("click", () => {
-            const nextTheme = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
-            window.localStorage.setItem("aotu-theme", nextTheme);
-            applyTheme(nextTheme);
-        });
+        if (toggle && toggle.dataset.boundThemeToggle !== "true") {
+            toggle.dataset.boundThemeToggle = "true";
+            toggle.addEventListener("click", () => {
+                const nextTheme = getCurrentTheme() === "dark" ? "light" : "dark";
+                window.localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
+                applyTheme(nextTheme);
+            });
+        }
+        const styleToggle = document.getElementById("style-toggle");
+        if (styleToggle && styleToggle.dataset.boundStyleToggle !== "true") {
+            styleToggle.dataset.boundStyleToggle = "true";
+            styleToggle.addEventListener("click", () => {
+                openAppearanceModal(styleToggle);
+            });
+        }
+        ensureAppearanceModalController();
         const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
         const syncSystemTheme = (event) => {
-            const storedTheme = window.localStorage.getItem("aotu-theme");
-            if (storedTheme === "light" || storedTheme === "dark") return;
+            if (getStoredThemePreference()) return;
             applyTheme(event.matches ? "dark" : "light");
         };
         if (typeof mediaQuery.addEventListener === "function") {
@@ -716,7 +880,7 @@
             <article class="provider-test-model-item">
                 <div class="provider-test-model-top">
                     <strong>${escapeHtml(item.providerName)}</strong>
-                    <div>${item.skipped ? statusBadge("unknown") : statusBadge(item.successCount > 0 ? (item.failureCount > 0 ? "degraded" : "healthy") : "unhealthy")}</div>
+                    <div>${item.skipped ? statusBadge("skipped") : statusBadge(item.successCount > 0 ? (item.failureCount > 0 ? "degraded" : "healthy") : "unhealthy")}</div>
                 </div>
                 <div class="table-muted">${escapeHtml(item.phaseLabel)}</div>
                 <div class="provider-test-model-message">
@@ -2570,6 +2734,16 @@
     function updateRefreshLabel(node, prefix = "每 30 秒刷新") {
         if (!node) return;
         node.textContent = `${prefix} · 最近刷新 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`;
+    }
+
+    function updateLogRefreshResultLabel(node, status = "success", timestamp = new Date()) {
+        if (!node) return;
+        const resolvedTime = timestamp instanceof Date ? timestamp : new Date(timestamp);
+        const timeText = Number.isNaN(resolvedTime.getTime())
+            ? "-"
+            : resolvedTime.toLocaleTimeString("zh-CN", { hour12: false });
+        const statusText = status === "error" ? "失败" : "成功";
+        node.textContent = `最近刷新：${timeText} ${statusText}`;
     }
 
     function formatStatusText(finishReason) {
@@ -6554,8 +6728,16 @@
         });
         refreshBtn.addEventListener("click", async (event) => {
             event.preventDefault();
-            await loadFilterOptions();
-            await loadLogs({ manual: true });
+            try {
+                setButtonLoading(refreshBtn, true);
+                await loadFilterOptions();
+                await loadLogs({ manual: true, feedbackSource: "refresh" });
+            } catch (error) {
+                updateLogRefreshResultLabel(lastRefreshLabel, "error", new Date());
+                showToast(error.message, "error");
+                setButtonLoading(refreshBtn, false);
+                setButtonTransientFeedback(refreshBtn, "error", { errorText: "刷新失败" });
+            }
         });
 
         function renderLogSummary(summary) {
@@ -6656,8 +6838,9 @@
             nextPageBtn.disabled = state.page >= totalPages;
         }
 
-        async function loadLogs({ manual = false } = {}) {
+        async function loadLogs({ manual = false, feedbackSource = "auto" } = {}) {
             setButtonLoading(refreshBtn, true);
+            let refreshFeedbackStatus = null;
             const params = new URLSearchParams({
                 page: String(state.page),
                 page_size: String(state.pageSize),
@@ -6728,14 +6911,26 @@
                     button.dataset.log = JSON.stringify(data.items[index] || {});
                 });
                 enhanceInteractiveButtons(tableBody);
-                lastRefreshLabel.textContent = `最近刷新: ${formatDate(new Date().toISOString())}`;
+                updateLogRefreshResultLabel(lastRefreshLabel, "success", new Date());
+                if (manual && feedbackSource === "refresh") {
+                    refreshFeedbackStatus = "success";
+                }
                 if (manual) {
                     showToast(`日志已刷新，第 ${state.page} 页 / ${Math.max(1, Math.ceil((state.total || 0) / state.pageSize))} 页`);
                 }
             } catch (error) {
+                updateLogRefreshResultLabel(lastRefreshLabel, "error", new Date());
                 showToast(error.message, "error");
+                if (manual && feedbackSource === "refresh") {
+                    refreshFeedbackStatus = "error";
+                }
             } finally {
                 setButtonLoading(refreshBtn, false);
+                if (refreshFeedbackStatus === "success") {
+                    setButtonTransientFeedback(refreshBtn, "success", { successText: "已刷新" });
+                } else if (refreshFeedbackStatus === "error") {
+                    setButtonTransientFeedback(refreshBtn, "error", { errorText: "刷新失败" });
+                }
             }
         }
 
@@ -9358,8 +9553,16 @@
 
         refreshBtn.addEventListener("click", async (event) => {
             event.preventDefault();
-            await loadFilterOptions();
-            await loadLogs({ manual: true });
+            try {
+                setButtonLoading(refreshBtn, true);
+                await loadFilterOptions();
+                await loadLogs({ manual: true, feedbackSource: "refresh" });
+            } catch (error) {
+                updateLogRefreshResultLabel(lastRefreshLabel, "error", new Date());
+                showToast(error.message, "error");
+                setButtonLoading(refreshBtn, false);
+                setButtonTransientFeedback(refreshBtn, "error", { errorText: "刷新失败" });
+            }
         });
         document.getElementById("log-trace-close").addEventListener("click", () => traceModal.classList.add("hidden"));
         traceModal.addEventListener("click", (event) => {
@@ -9477,8 +9680,9 @@
             nextPageBtn.disabled = state.page >= totalPages;
         }
         
-        async function loadLogs({ manual = false } = {}) {
+        async function loadLogs({ manual = false, feedbackSource = "auto" } = {}) {
             setButtonLoading(refreshBtn, true);
+            let refreshFeedbackStatus = null;
             const params = new URLSearchParams({
                 page: String(state.page),
                 page_size: String(state.pageSize),
@@ -9554,16 +9758,26 @@
                     button.dataset.log = JSON.stringify(data.items[index] || {});
                 });
                 enhanceInteractiveButtons(tableBody);
-                if (lastRefreshLabel) {
-                    lastRefreshLabel.textContent = `最近刷新: ${formatDate(new Date().toISOString())}`;
+                updateLogRefreshResultLabel(lastRefreshLabel, "success", new Date());
+                if (manual && feedbackSource === "refresh") {
+                    refreshFeedbackStatus = "success";
                 }
                 if (manual) {
                     showToast(`日志已刷新，第 ${state.page} 页 / ${Math.max(1, Math.ceil((state.total || 0) / state.pageSize))} 页`);
                 }
             } catch (error) {
+                updateLogRefreshResultLabel(lastRefreshLabel, "error", new Date());
                 showToast(error.message, "error");
+                if (manual && feedbackSource === "refresh") {
+                    refreshFeedbackStatus = "error";
+                }
             } finally {
                 setButtonLoading(refreshBtn, false);
+                if (refreshFeedbackStatus === "success") {
+                    setButtonTransientFeedback(refreshBtn, "success", { successText: "已刷新" });
+                } else if (refreshFeedbackStatus === "error") {
+                    setButtonTransientFeedback(refreshBtn, "error", { errorText: "刷新失败" });
+                }
             }
         }
 

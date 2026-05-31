@@ -342,11 +342,15 @@ class UserPortalService:
         stmt = select(UserAccount)
         count_stmt = select(func.count()).select_from(UserAccount)
         if keyword:
-            like_value = f"%{keyword.strip().lower()}%"
-            filters = or_(
+            normalized_keyword = keyword.strip()
+            like_value = f"%{normalized_keyword.lower()}%"
+            search_filters = [
                 func.lower(UserAccount.username).like(like_value),
                 func.lower(UserAccount.email).like(like_value),
-            )
+            ]
+            if normalized_keyword.isdigit():
+                search_filters.append(UserAccount.id == int(normalized_keyword))
+            filters = or_(*search_filters)
             stmt = stmt.where(filters)
             count_stmt = count_stmt.where(filters)
         if role:

@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
+
+from redis import Redis
 
 from app.config import get_settings
 from app.models.api_client_key import ApiClientKey
@@ -16,6 +19,9 @@ from app.utils.json_utils import dumps_json, loads_json
 
 class ApiKeyAuthCache:
     _last_error: str | None = None
+    _sync_client: Redis | None = None
+    _local_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+    _local_api_key_hashes: dict[int, str] = {}
 
     @classmethod
     def _run_async_compat(cls, coro) -> Any:
@@ -79,6 +85,66 @@ class ApiKeyAuthCache:
             return None
         data = loads_json(raw_value, None)
         return data if isinstance(data, dict) else None
+
+    @classmethod
+    def _get_sync_client(cls) -> Redis | None:
+        redis_url = get_settings().redis_url.strip()
+        if not redis_url:
+            return None
+        if cls._sync_client is None:
+            cls._sync_client = Redis.from_url(redis_url, decode_responses=True)
+        return cls._sync_client
+
+    @classmethod
+    def _sync_get_by_hash(cls, key_hash: str) -> dict[str, Any] | None:
+        local_value = cls._get_local(key_hash)
+        if local_value is not None:
+            return local_value
+        try:
+            client = cls._get_sync_client()
+            if client is None:
+                return None
+            raw_value = client.get(cls.key_hash_cache_key(key_hash))
+            cls._last_error = None
+        except Exception as exc:
+            cls._last_error = str(exc)
+            return None
+        if not raw_value:
+            return None
+        data = loads_json(raw_value, None)
+        if not isinstance(data, dict):
+            return None
+        cls._set_local(key_hash, data)
+        return data
+
+    @classmethod
+    def _get_local(cls, key_hash: str) -> dict[str, Any] | None:
+        ttl = float(getattr(get_settings(), "api_key_auth_l1_cache_ttl_seconds", 0) or 0)
+        if ttl <= 0:
+            return None
+        item = cls._local_cache.get(key_hash)
+        if item is None:
+            return None
+        expires_at, data = item
+        if expires_at <= time.monotonic():
+            cls._local_cache.pop(key_hash, None)
+            return None
+        return data
+
+    @classmethod
+    def get_local_by_hash(cls, key_hash: str) -> dict[str, Any] | None:
+        return cls._get_local(key_hash)
+
+    @classmethod
+    def _set_local(cls, key_hash: str, data: dict[str, Any]) -> None:
+        ttl = float(getattr(get_settings(), "api_key_auth_l1_cache_ttl_seconds", 0) or 0)
+        if ttl <= 0:
+            return
+        cls._local_cache[key_hash] = (time.monotonic() + ttl, data)
+        api_key = data.get("api_key") if isinstance(data, dict) else None
+        api_key_id = api_key.get("id") if isinstance(api_key, dict) else None
+        if api_key_id is not None:
+            cls._local_api_key_hashes[int(api_key_id)] = key_hash
 
     @classmethod
     async def async_set_auth_context(
@@ -263,7 +329,7 @@ class ApiKeyAuthCache:
 
     @classmethod
     def get_by_hash(cls, key_hash: str) -> dict[str, Any] | None:
-        return cls._run_async_compat(cls.async_get_by_hash(key_hash))
+        return cls._sync_get_by_hash(key_hash)
 
     @classmethod
     def set_auth_context(cls, **kwargs) -> None:
@@ -271,16 +337,31 @@ class ApiKeyAuthCache:
 
     @classmethod
     def invalidate_hash(cls, key_hash: str | None) -> None:
+        if key_hash:
+            cls._local_cache.pop(key_hash, None)
         cls._run_async_compat(cls.async_invalidate_hash(key_hash))
 
     @classmethod
     def invalidate_api_key(cls, api_key_id: int | None, key_hash: str | None = None) -> None:
+        if key_hash:
+            cls._local_cache.pop(key_hash, None)
+        if api_key_id is not None:
+            mapped_hash = cls._local_api_key_hashes.pop(int(api_key_id), None)
+            if mapped_hash:
+                cls._local_cache.pop(mapped_hash, None)
         cls._run_async_compat(cls.async_invalidate_api_key(api_key_id, key_hash))
 
     @classmethod
     def invalidate_user(cls, user_id: int | None) -> None:
+        cls._local_cache.clear()
+        cls._local_api_key_hashes.clear()
         cls._run_async_compat(cls.async_invalidate_user(user_id))
 
     @classmethod
     def close(cls) -> None:
         cls._last_error = None
+        cls._local_cache.clear()
+        cls._local_api_key_hashes.clear()
+        if cls._sync_client is not None:
+            cls._sync_client.close()
+            cls._sync_client = None

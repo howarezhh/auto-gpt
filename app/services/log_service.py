@@ -8,11 +8,14 @@ from sqlalchemy.orm import Session
 
 from app.models.provider_model import ProviderModel
 from app.models.request_log import RequestLog
+from app.services.cache_service import CacheService
 from app.services.runtime_state_service import RuntimeStateService
 from app.utils.json_utils import dumps_json, safeJsonParse
 
 
 class LogService:
+    """负责请求日志落库、派生指标计算和日志序列化。"""
+
     HEALTH_CHECK_LOG_TYPES = ("health_check", "health_check_provider", "health_check_model")
     ROUTE_TRAFFIC_LOG_TYPES = ("chat", "responses")
     USER_VISIBLE_LOG_TYPES = ("chat", "responses")
@@ -88,7 +91,11 @@ class LogService:
         token_response_text: str | None = None,
         schedule_token_fill: bool = True,
         auto_commit: bool = True,
+        refresh_after_create: bool = True,
+        flush_after_add: bool = True,
+        enqueue_finalize: bool = True,
     ) -> RequestLog:
+        """创建请求日志，并在必要时补充异步 token 统计任务。"""
         provider_model = None
         if resolved_provider_model_id is not None and (
             billing_multiplier is None
@@ -205,31 +212,29 @@ class LogService:
             log.billing_error = None
         LogService.refresh_derived_fields(log, response_payload=token_response_payload, trace=trace)
         db.add(log)
-        db.flush()
+        if flush_after_add:
+            db.flush()
         if auto_commit:
             db.commit()
-        db.refresh(log)
-        if (
-            request_path
-            and request_path != "/v1/models"
-            and log_type not in LogService.HEALTH_CHECK_LOG_TYPES
-        ):
-            from app.services.token_usage_service import TokenUsageService
-            safe_token_request_payload = LogService._token_job_payload_or_none(token_request_payload)
-
-            TokenUsageService.enqueue_log_finalize(
-                log_id=log.id,
+        if refresh_after_create:
+            db.refresh(log)
+        if enqueue_finalize:
+            if log.id is None:
+                db.flush()
+            LogService.enqueue_finalize_for_log(
+                log=log,
                 model_name=requested_model or model_name,
                 request_path=request_path,
-                request_payload=safe_token_request_payload,
-                response_payload=token_response_payload,
-                response_text=token_response_text,
-                enable_usage_fill=schedule_token_fill and safe_token_request_payload is not None,
+                token_request_payload=token_request_payload,
+                token_response_payload=token_response_payload,
+                token_response_text=token_response_text,
+                schedule_token_fill=schedule_token_fill,
             )
         return log
 
     @staticmethod
     def _token_job_payload_or_none(payload: dict | None) -> dict | None:
+        """仅在 payload 足够小且可序列化时保留给异步补算任务。"""
         if not isinstance(payload, dict):
             return None
         try:
@@ -241,17 +246,54 @@ class LogService:
         return payload
 
     @staticmethod
+    def enqueue_finalize_for_log(
+        *,
+        log: RequestLog,
+        model_name: str | None,
+        request_path: str | None,
+        token_request_payload: dict | None = None,
+        token_response_payload: dict | None = None,
+        token_response_text: str | None = None,
+        schedule_token_fill: bool = True,
+    ) -> None:
+        """在日志主记录已拿到 ID 后，按统一口径补充异步 token 统计任务。"""
+        if (
+            log.id is None
+            or not request_path
+            or request_path == "/v1/models"
+            or log.log_type in LogService.HEALTH_CHECK_LOG_TYPES
+        ):
+            return
+        from app.services.token_usage_service import TokenUsageService
+
+        safe_token_request_payload = LogService._token_job_payload_or_none(token_request_payload)
+
+        # 大请求体不再进入异步补算任务，避免日志队列压力过高。
+        TokenUsageService.enqueue_log_finalize(
+            log_id=log.id,
+            model_name=model_name,
+            request_path=request_path,
+            request_payload=safe_token_request_payload,
+            response_payload=token_response_payload,
+            response_text=token_response_text,
+            enable_usage_fill=schedule_token_fill and safe_token_request_payload is not None,
+        )
+
+    @staticmethod
     def serialize_log(log: RequestLog) -> dict[str, Any]:
+        """把单条日志对象转换为接口返回结构。"""
         data = {column.name: getattr(log, column.name) for column in RequestLog.__table__.columns}
         data.update(LogService._derive_image_observability(log))
         return data
 
     @staticmethod
     def serialize_logs(logs: list[RequestLog]) -> list[dict[str, Any]]:
+        """批量序列化日志对象。"""
         return [LogService.serialize_log(item) for item in logs]
 
     @staticmethod
     def _derive_image_observability(log: RequestLog) -> dict[str, Any]:
+        """从请求和响应负载中提炼图像相关观测字段。"""
         request_payload = safeJsonParse(log.request_body_json) if log.request_body_json else None
         response_payload = safeJsonParse(log.response_body_json) if log.response_body_json else None
         has_image_input = LogService._payload_has_image_input(request_payload)
@@ -556,6 +598,13 @@ class LogService:
     ):
         if exclude_health_checks:
             stmt = stmt.where(LogService._non_health_check_expr())
+        needs_user_traffic_scope = (
+            api_client_key_id is not None
+            or api_client_key_query is not None
+            or api_client_key_ids is not None
+        )
+        if needs_user_traffic_scope and not log_type and not log_types:
+            stmt = stmt.where(LogService._route_traffic_expr())
         if log_type:
             stmt = stmt.where(RequestLog.log_type == log_type)
         elif log_types:
@@ -1214,6 +1263,20 @@ class LogService:
 
     @staticmethod
     def route_metric_summary(db: Session, *, window_minutes: int, requested_model: str | None = None) -> dict[tuple[int | None, str | None], dict]:
+        cache_key = f"route-metrics:{int(window_minutes)}:{requested_model or '*'}"
+        cached = CacheService.get(cache_key)
+        if isinstance(cached, list):
+            return {
+                (item.get("provider_id"), item.get("requested_model")): {
+                    "total_requests": int(item.get("total_requests") or 0),
+                    "failed_requests": int(item.get("failed_requests") or 0),
+                    "failure_rate": float(item.get("failure_rate") or 0.0),
+                    "success_rate": float(item.get("success_rate") if item.get("success_rate") is not None else 1.0),
+                    "avg_latency_ms": item.get("avg_latency_ms"),
+                }
+                for item in cached
+                if isinstance(item, dict)
+            }
         since = datetime.utcnow() - timedelta(minutes=window_minutes)
         stmt = (
             select(
@@ -1243,6 +1306,18 @@ class LogService:
                 "success_rate": ((total_requests - failed_requests) / total_requests) if total_requests else 1.0,
                 "avg_latency_ms": float(row.avg_latency_ms) if row.avg_latency_ms is not None else None,
             }
+        CacheService.set(
+            cache_key,
+            [
+                {
+                    "provider_id": provider_id,
+                    "requested_model": model_name,
+                    **payload,
+                }
+                for (provider_id, model_name), payload in summary.items()
+            ],
+            ttl_seconds=2,
+        )
         return summary
 
     @staticmethod

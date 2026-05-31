@@ -1,6 +1,8 @@
 from contextlib import asynccontextmanager
+import logging
 from uuid import uuid4
 
+import anyio.to_thread
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi import Request
@@ -38,8 +40,10 @@ from app.services.model_catalog_service import ModelCatalogService
 from app.services.openai_error_service import OpenAIErrorService
 from app.services.provider_service import ProviderService
 from app.services.redis_service import RedisService
+from app.services.request_log_queue_service import RequestLogQueueService
 from app.services.runtime_state_service import RuntimeStateService
 from app.services.setting_service import SettingService
+from app.services.token_usage_service import TokenUsageService
 from app.services.upstream_client import UpstreamClientService
 from app.services.user_auth_service import require_admin_api_user
 from app.tasks import configure_scheduler
@@ -57,9 +61,11 @@ from app.utils.request_body_structure import summarize_request_body_structure
 
 settings = get_settings()
 settings.validate_runtime_settings()
+logger = logging.getLogger(__name__)
 
 
 def init_database(*, allow_production_ddl: bool = False) -> None:
+    """初始化数据库，并补齐运行所需的迁移和基础数据。"""
     if settings.is_production() and not allow_production_ddl:
         return
     Base.metadata.create_all(bind=engine)
@@ -85,10 +91,12 @@ def init_database(*, allow_production_ddl: bool = False) -> None:
 
 
 def _is_sqlite_session(db) -> bool:
+    """判断当前数据库会话是否连接到 SQLite。"""
     return db.get_bind().dialect.name == "sqlite"
 
 
 def _get_table_columns(db, table_name: str) -> set[str]:
+    """读取指定表的现有列名集合。"""
     inspector = inspect(db.get_bind())
     if table_name not in inspector.get_table_names():
         return set()
@@ -96,6 +104,7 @@ def _get_table_columns(db, table_name: str) -> set[str]:
 
 
 def _migrate_provider_capacity_columns(db) -> None:
+    """为 providers 表补充容量控制相关字段。"""
     existing_columns = _get_table_columns(db, "providers")
     additions = {
         "max_active_requests": "ALTER TABLE providers ADD COLUMN max_active_requests INTEGER DEFAULT 1000",
@@ -115,6 +124,7 @@ def _migrate_provider_capacity_columns(db) -> None:
 
 
 def _migrate_app_setting_concurrency_columns(db) -> None:
+    """为 app_settings 表补充并发、超时与限额字段。"""
     existing_columns = _get_table_columns(db, "app_settings")
     runtime_settings = get_settings()
     additions = {
@@ -151,6 +161,7 @@ def _migrate_app_setting_concurrency_columns(db) -> None:
 
 
 def _migrate_cache_price_columns(db) -> None:
+    """为模型和日志表补充缓存计费与能力字段。"""
     dialect_name = db.get_bind().dialect.name
     price_type = f"NUMERIC({DB_PRICE_PRECISION}, {DB_PRICE_SCALE})"
     true_default = "TRUE" if dialect_name == "postgresql" else "1"
@@ -217,6 +228,7 @@ def _migrate_cache_price_columns(db) -> None:
 
 
 def _migrate_request_log_columns(db) -> None:
+    """为 SQLite 下的请求日志补充金额与倍率字段。"""
     money_type = f"NUMERIC({DB_MONEY_PRECISION}, {DB_MONEY_SCALE})"
     price_type = f"NUMERIC({DB_PRICE_PRECISION}, {DB_PRICE_SCALE})"
     multiplier_type = f"NUMERIC({DB_MULTIPLIER_PRECISION}, {DB_MULTIPLIER_SCALE})"
@@ -563,16 +575,23 @@ def _backfill_user_shared_wallet(db) -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    anyio.to_thread.current_default_thread_limiter().total_tokens = max(40, int(settings.worker_threadpool_tokens or 40))
     if settings.enable_startup_db_init:
         init_database(allow_production_ddl=False)
     await RedisService.init()
     UpstreamClientService.get_client()
+    if settings.enable_background_workers:
+        await RequestLogQueueService.start_background_workers()
+        await TokenUsageService.start_background_workers()
     if settings.enable_scheduler and not scheduler.running:
         configure_scheduler()
         scheduler.start()
     yield
     if scheduler.running:
         scheduler.shutdown(wait=False)
+    await RequestLogQueueService.stop_background_workers()
+    if settings.enable_background_workers:
+        await TokenUsageService.stop_background_workers()
     await UpstreamClientService.aclose()
     await ApiKeyAuthCache.aclose()
     await RedisService.aclose()
@@ -619,12 +638,8 @@ async def trace_and_runtime_middleware(request: Request, call_next):
 def _reject_oversized_v1_request_by_content_length(request: Request) -> JSONResponse | None:
     if not _is_external_v1_path(request.url.path) or request.method.upper() not in {"POST", "PUT", "PATCH"}:
         return None
-    db = SessionLocal()
-    try:
-        app_setting = SettingService.get_or_create(db)
-        limit = _effective_v1_body_limit(app_setting, request.url.path)
-    finally:
-        db.close()
+    app_setting = SettingService.get_cached()
+    limit = _effective_v1_body_limit(app_setting, request.url.path)
     if limit <= 0:
         return None
     content_length = request.headers.get("content-length")
@@ -795,6 +810,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 
 def _build_unhandled_v1_error_response(request: Request, exc: Exception) -> JSONResponse:
+    logger.exception("Unhandled external v1 request failed: %s", exc)
     trace_id = getattr(request.state, "trace_id", None)
     message = str(exc).strip() or exc.__class__.__name__
     detail = {
@@ -865,6 +881,8 @@ def _log_v1_request_rejected_before_route(
             attempt_count=0,
             schedule_token_fill=False,
         )
+    except Exception:
+        request.state.v1_rejection_logged = False
     finally:
         db.close()
 
@@ -882,9 +900,9 @@ def _make_json_safe(value):
 async def _log_api_client_auth_failure(request: Request, exc: ApiClientAuthError) -> None:
     if not _is_external_v1_path(request.url.path):
         return
+    settings = SettingService.get_cached()
     db = SessionLocal()
     try:
-        settings = SettingService.get_or_create(db)
         max_body_bytes = int(getattr(settings, "max_v1_request_body_bytes", 0) or 0)
         content_length_header = request.headers.get("content-length")
         try:

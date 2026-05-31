@@ -36,6 +36,7 @@ def summarize_request_body_structure(
     max_items: int = 20,
     max_safe_string_chars: int = 128,
 ) -> dict[str, Any]:
+    """提炼请求体结构摘要，避免记录敏感内容和长文本正文。"""
     return {
         "_summary": "request body structure only; prompt/content values are omitted",
         "structure": _summarize_value(
@@ -60,6 +61,7 @@ def _summarize_value(
     max_items: int,
     max_safe_string_chars: int,
 ) -> dict[str, Any]:
+    """递归提炼对象结构，只保留类型、键名和安全元信息。"""
     if depth >= max_depth:
         return {"type": _type_name(value), "truncated": "max_depth"}
 
@@ -109,8 +111,10 @@ def _summarize_value(
         summary: dict[str, Any] = {"type": "string", "chars": len(value)}
         lowered_key = (key or "").lower()
         if _is_sensitive_key(lowered_key):
+            # 敏感字段只保留存在性，不暴露原始值。
             summary["masked"] = True
         elif _is_content_key(lowered_key):
+            # prompt、content 等正文统一省略，避免日志泄露。
             summary["omitted"] = True
         elif key in SAFE_STRING_VALUE_KEYS and len(value) <= max_safe_string_chars:
             summary["value"] = value
@@ -130,6 +134,7 @@ def _summarize_value(
 
 
 def _type_name(value: Any) -> str:
+    """返回统一的结构类型名称。"""
     if isinstance(value, dict):
         return "object"
     if isinstance(value, list):
@@ -138,8 +143,10 @@ def _type_name(value: Any) -> str:
 
 
 def _is_sensitive_key(lowered_key: str) -> bool:
+    """判断字段名是否可能包含敏感信息。"""
     return any(token in lowered_key for token in SENSITIVE_KEY_TOKENS)
 
 
 def _is_content_key(lowered_key: str) -> bool:
+    """判断字段名是否属于正文内容字段。"""
     return lowered_key in CONTENT_KEYS or lowered_key.endswith("_content")
