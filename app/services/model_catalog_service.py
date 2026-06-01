@@ -16,7 +16,6 @@ from app.models.provider_model import ProviderModel
 from app.models.user_account import UserAccount
 from app.schemas.model_catalog import ModelCatalogCreate, ModelCatalogUpdate, ModelProviderBindingIn
 from app.services.cache_service import CacheService
-from app.services.health_service import HealthService
 from app.services.model_pricing_service import ModelPricingService
 from app.services.provider_service import ProviderService
 from app.utils.decimal_utils import (
@@ -773,6 +772,8 @@ class ModelCatalogService:
 
     @staticmethod
     async def _probe_catalog_health(catalog: ModelCatalog, providers: list[Provider]) -> dict[str, Any]:
+        from app.services.health_service import HealthService
+
         targets = ModelCatalogService._collect_catalog_test_targets(catalog, providers)
         if not targets:
             return {"catalog": catalog, "channel_results": []}
@@ -798,6 +799,8 @@ class ModelCatalogService:
         *,
         request_path: str,
     ) -> dict[str, Any]:
+        from app.services.health_service import HealthService
+
         catalog: ModelCatalog = raw_result["catalog"]
         channel_payloads: list[dict[str, Any]] = []
         for provider, provider_model, model_result in raw_result.get("channel_results") or []:
