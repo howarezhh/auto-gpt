@@ -48,10 +48,11 @@ Select-Object: Cannot bind parameter 'Index'. Cannot convert value "35..65" to t
 ### Context
 - Command attempted: `rg -n "PROJECT_DISK_CACHE_SECONDS|project_disk|..." ...`
 - Command attempted: `Get-Content ... | Select-Object -Index 35..65`
+- Command attempted: nested `pwsh -Command` checks containing `$script` and `$_` inside an outer double-quoted command.
 - Environment: Windows workspace using PowerShell 7 via `pwsh`.
 
 ### Suggested Fix
-Use single-quoted regex patterns inside the PowerShell command string, or prefer `rg -C` for context. For `Select-Object -Index`, ensure the range is evaluated by PowerShell rather than passed as a string.
+Use single-quoted regex patterns and single-quoted script blocks inside nested `pwsh -Command` calls, or prefer `rg -C` for context. For `Select-Object -Index`, ensure the range is evaluated by PowerShell rather than passed as a string.
 
 ### Metadata
 - Reproducible: yes
