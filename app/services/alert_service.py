@@ -18,6 +18,19 @@ from app.utils.json_utils import dumps_json, safeJsonParse
 
 
 class AlertService:
+    PROVIDER_AVAILABILITY_LABELS = {
+        "healthy": "全部可用",
+        "degraded": "部分可用",
+        "unhealthy": "全部不可用",
+        "unknown": "未检测",
+    }
+    CIRCUIT_STATE_LABELS = {
+        "closed": "闭合",
+        "open": "已熔断",
+        "half_open": "半开探测",
+        "unknown": "未知",
+    }
+
     @staticmethod
     def _json_safe(value):
         if isinstance(value, (datetime, date)):
@@ -116,12 +129,14 @@ class AlertService:
         active_events: dict[str, dict] = {}
         for item in unhealthy_providers:
             alert_key = f"provider:{item['id']}"
+            availability_label = AlertService.PROVIDER_AVAILABILITY_LABELS.get(item["health_status"], "未检测")
+            circuit_label = AlertService.CIRCUIT_STATE_LABELS.get(item["circuit_state"], "未知")
             active_events[alert_key] = {
                 "alert_key": alert_key,
                 "alert_type": "provider",
                 "severity": "danger" if item["circuit_state"] == "open" or item["health_status"] == "unhealthy" else "warning",
-                "title": f"渠道异常 · {item['name']}",
-                "message": f"健康状态 {item['health_status']}，熔断状态 {item['circuit_state']}",
+                "title": f"中转站可用性异常 · {item['name']}",
+                "message": f"整体可用性 {availability_label}，熔断状态 {circuit_label}",
                 "payload": item,
             }
         for item in abnormal_api_keys[:100]:

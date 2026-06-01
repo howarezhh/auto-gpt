@@ -1412,6 +1412,7 @@ class LogService:
             "cache_read_tokens",
             "cache_write_tokens",
             "billing_multiplier",
+            "pricing_tier_name",
             "total_cost",
             "billing_calculation",
             "reasoning_level",
@@ -1465,6 +1466,7 @@ class LogService:
                 item.cache_read_tokens if item.cache_read_tokens is not None else "",
                 item.cache_write_tokens if item.cache_write_tokens is not None else "",
                 item.billing_multiplier if item.billing_multiplier is not None else "",
+                item.pricing_tier_name or "",
                 item.total_cost if item.total_cost is not None else "",
                 LogService.format_billing_calculation(item),
                 item.reasoning_level or "",
@@ -1508,7 +1510,8 @@ class LogService:
         if cache_part:
             parts.append(cache_part)
         parts.append(output_part)
-        return f"倍率 {float(multiplier):.2f}x；" + " + ".join(parts)
+        tier_text = f"档位 {item.pricing_tier_name}；" if item.pricing_tier_name else ""
+        return f"{tier_text}倍率 {float(multiplier):.2f}x；" + " + ".join(parts)
 
     @staticmethod
     def metric_timeseries(

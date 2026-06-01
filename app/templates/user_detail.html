@@ -37,7 +37,7 @@
     <a class="page-anchor-link" href="#user-detail-activity">近期活动</a>
 </nav>
 
-<section class="stats-grid anchor-section-offset" id="user-detail-overview">
+<section class="stats-grid user-detail-stats-grid anchor-section-offset" id="user-detail-overview">
     <article class="metric-card"><span>名下 API 密钥</span><strong>{{ owned_api_keys|length }}</strong></article>
     <article class="metric-card"><span>总请求量</span><strong>{{ totals.total_requests }}</strong></article>
     <article class="metric-card"><span>总 Token</span><strong>{{ totals.total_tokens }}</strong></article>
@@ -47,7 +47,7 @@
     <article class="metric-card"><span>累计充值</span><strong>{{ '%.6f'|format(account_summary.total_recharge_amount or 0) }}</strong></article>
 </section>
 
-<section class="dashboard-command-grid">
+<section class="dashboard-command-grid user-detail-overview-grid">
     <div class="panel-card section-shell">
         <div class="section-subhead">
             <div>
@@ -72,7 +72,7 @@
     </div>
 </section>
 
-<section class="dashboard-command-grid anchor-section-offset" id="user-detail-governance">
+<section class="dashboard-command-grid user-detail-governance-grid anchor-section-offset" id="user-detail-governance">
     <div class="panel-card section-shell">
         <div class="section-subhead">
             <div>
@@ -80,7 +80,7 @@
                 <h3>共享账户调账</h3>
             </div>
         </div>
-        <form class="form-grid" method="post" action="/users/{{ user.id }}/balance-adjust">
+        <form class="form-grid user-detail-balance-form" method="post" action="/users/{{ user.id }}/balance-adjust">
             <label>
                 <span>调整金额</span>
                 <input class="field-input" name="amount" type="number" step="0.000001" placeholder="正数为充值，负数为扣减" required>
@@ -89,14 +89,13 @@
                 <span>当前共享可用余额</span>
                 <input class="field-input" value="{{ '%.6f'|format(account_summary.available_balance) if account_summary.available_balance is not none else '不限' }}" disabled>
             </label>
-            <label class="form-span-2">
+            <label>
                 <span>备注</span>
                 <input class="field-input" name="remark" placeholder="例如：人工补款 / 退款回收">
             </label>
-            <div class="form-actions form-span-2">
+            <div class="form-actions">
                 <button class="btn btn-accent" type="submit">提交调账</button>
             </div>
-            <div class="form-span-2 table-muted">当前账户采用共享金额池。该用户名下所有 API 密钥都会共同消耗这里的余额，不再单独维护每个密钥的钱包。</div>
         </form>
     </div>
 
@@ -108,7 +107,7 @@
                     <h3>配额与冻结金额</h3>
                 </div>
             </div>
-            <form class="form-grid" method="post" action="/users/{{ user.id }}/quota-policy">
+            <form class="form-grid user-detail-quota-form" method="post" action="/users/{{ user.id }}/quota-policy">
                 <label>
                     <span>冻结金额</span>
                     <input class="field-input" name="frozen_amount" type="number" step="0.000001" value="{{ '%.6f'|format(account_summary.frozen_amount or 0) }}">
@@ -149,10 +148,9 @@
                     <span>月金额上限</span>
                     <input class="field-input" name="cost_limit_monthly" type="number" step="0.000001" min="0" value="{{ '%.6f'|format(account_summary.cost_limit_monthly) if account_summary.cost_limit_monthly is not none else '' }}">
                 </label>
-                <div class="form-actions form-span-2">
+                <div class="form-actions">
                     <button class="btn btn-accent" type="submit">保存账户额度</button>
                 </div>
-                <div class="form-span-2 table-muted">日/月配额按 UTC 自然日与自然月统计；余额拦截统一按账户共享金额池执行。</div>
             </form>
         </div>
     </div>

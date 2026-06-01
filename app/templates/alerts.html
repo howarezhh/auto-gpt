@@ -160,7 +160,7 @@
                 <thead>
                     <tr>
                         <th>名称</th>
-                        <th>健康状态</th>
+                        <th>整体可用性</th>
                         <th>熔断状态</th>
                         <th>最近延迟</th>
                         <th>建议动作</th>
@@ -168,11 +168,13 @@
                     </tr>
                 </thead>
                 <tbody>
+                    {% set availability_labels = {'healthy': '全部可用', 'degraded': '部分可用', 'unhealthy': '全部不可用', 'unknown': '未检测'} %}
+                    {% set circuit_labels = {'closed': '闭合', 'open': '已熔断', 'half_open': '半开探测', 'unknown': '未知'} %}
                     {% for item in unhealthy_providers %}
                     <tr>
                         <td>{{ item.name }}</td>
-                        <td>{{ item.health_status }}</td>
-                        <td>{{ item.circuit_state }}</td>
+                        <td>{{ availability_labels.get(item.health_status, '未检测') }}</td>
+                        <td>{{ circuit_labels.get(item.circuit_state, '未知') }}</td>
                         <td>{{ item.last_latency_ms if item.last_latency_ms is not none else '-' }}</td>
                         <td>{% if item.circuit_state == 'open' %}优先下线或切流，再排查上游连通性{% else %}复查健康检查与模型可用性{% endif %}</td>
                         <td><a href="/providers" data-shell-link>进入渠道管理</a></td>

@@ -44,6 +44,8 @@ class ModelCatalogBase(BaseModel):
     context_window_tokens: int | None = Field(default=None, ge=1)
     max_input_tokens: int | None = Field(default=None, ge=1)
     max_output_tokens: int | None = Field(default=None, ge=1)
+    pricing_mode: str = Field(default="fixed", max_length=20)
+    pricing_json: dict | None = None
     input_price_per_1k: float | None = Field(default=None, ge=0)
     output_price_per_1k: float | None = Field(default=None, ge=0)
     cache_price_per_1k: float | None = Field(default=None, ge=0)
@@ -79,6 +81,8 @@ class ModelCatalogUpdate(BaseModel):
     context_window_tokens: int | None = Field(default=None, ge=1)
     max_input_tokens: int | None = Field(default=None, ge=1)
     max_output_tokens: int | None = Field(default=None, ge=1)
+    pricing_mode: str | None = Field(default=None, max_length=20)
+    pricing_json: dict | None = None
     input_price_per_1k: float | None = Field(default=None, ge=0)
     output_price_per_1k: float | None = Field(default=None, ge=0)
     cache_price_per_1k: float | None = Field(default=None, ge=0)
@@ -114,6 +118,9 @@ class ModelCatalogOut(ModelCatalogBase):
     bound_provider_count: int = 0
     available_provider_count: int = 0
     enabled_provider_count: int = 0
+    health_status: str = "unhealthy"
+    healthy_provider_count: int = 0
+    unhealthy_provider_count: int = 0
     lowest_input_price_per_1k: float | None = None
     lowest_output_price_per_1k: float | None = None
     lowest_cache_price_per_1k: float | None = None
@@ -164,6 +171,8 @@ class UserModelOut(BaseModel):
     context_window_tokens: int | None = Field(default=None, ge=1)
     max_input_tokens: int | None = Field(default=None, ge=1)
     max_output_tokens: int | None = Field(default=None, ge=1)
+    pricing_mode: str = "fixed"
+    pricing_json: dict | None = None
     input_price_per_1k: float | None = None
     output_price_per_1k: float | None = None
     cache_price_per_1k: float | None = None

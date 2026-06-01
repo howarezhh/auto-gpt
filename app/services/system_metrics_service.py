@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import os
+import platform
+import shutil
 import time
 from datetime import datetime, timedelta
 from typing import Any
+
+try:
+    import psutil
+except ImportError:  # pragma: no cover - deployment fallback
+    psutil = None
 
 from redis import Redis
 from sqlalchemy import case, func, select, text
@@ -21,6 +29,9 @@ from app.services.runtime_state_service import RuntimeStateService
 from app.utils.json_utils import dumps_json
 
 
+PROCESS_STARTED_AT = time.time()
+
+
 class SystemMetricsService:
     TRAFFIC_LOG_TYPES = ("chat", "responses")
     ACTIVE_REQUEST_WARNING_THRESHOLD = 900
@@ -33,6 +44,9 @@ class SystemMetricsService:
     BILLING_FAILURE_WARNING_THRESHOLD = 10
     TOKEN_FAILURE_WARNING_THRESHOLD = 10
     METRIC_PERCENTILE_SAMPLE_LIMIT = 5000
+    # Operations refreshes often; recursive project-size scans must stay infrequent.
+    PROJECT_DISK_CACHE_SECONDS = 6 * 60 * 60
+    _project_disk_cache: dict[str, Any] = {"path": None, "size_bytes": None, "checked_at": 0.0}
 
     @classmethod
     def collect(
@@ -46,6 +60,7 @@ class SystemMetricsService:
         database = cls._database_snapshot(db)
         redis_snapshot = cls._redis_snapshot()
         runtime = cls._runtime_snapshot()
+        host = cls._host_snapshot()
         traffic = cls._traffic_snapshot(db, window_minutes=window_minutes) if database["ok"] else cls._empty_traffic()
         providers = cls._provider_snapshot(db, window_minutes=window_minutes) if database["ok"] else []
         background = cls._background_snapshot(db) if database["ok"] else cls._empty_background()
@@ -63,6 +78,7 @@ class SystemMetricsService:
             "database": {**database, "pool": pool},
             "redis": redis_snapshot,
             "runtime": runtime,
+            "host": host,
             "traffic": traffic,
             "providers": providers,
             "background": background,
@@ -230,6 +246,137 @@ class SystemMetricsService:
             "note": "RuntimeStateService reflects only the current worker; Redis counters are the global concurrency source.",
         }
 
+    @staticmethod
+    def _host_snapshot() -> dict[str, Any]:
+        project_root = os.getcwd()
+        disk_usage = shutil.disk_usage(project_root)
+        project_disk = SystemMetricsService._project_disk_snapshot(project_root, disk_usage.total)
+        now = time.time()
+        snapshot: dict[str, Any] = {
+            "available": psutil is not None,
+            "provider": "psutil" if psutil is not None else "stdlib",
+            "platform": platform.platform(),
+            "python_version": platform.python_version(),
+            "cpu_count": os.cpu_count(),
+            "cpu_percent": None,
+            "load_average": list(os.getloadavg()) if hasattr(os, "getloadavg") else None,
+            "memory": {
+                "total_bytes": None,
+                "available_bytes": None,
+                "used_bytes": None,
+                "percent": None,
+            },
+            "disk": {
+                "path": project_root,
+                "total_bytes": disk_usage.total,
+                "used_bytes": disk_usage.used,
+                "free_bytes": disk_usage.free,
+                "percent": round((disk_usage.used / disk_usage.total) * 100, 2) if disk_usage.total else None,
+            },
+            "project_disk": project_disk,
+            "process": {
+                "pid": os.getpid(),
+                "cpu_percent": None,
+                "memory_rss_bytes": None,
+                "memory_vms_bytes": None,
+                "memory_percent": None,
+                "thread_count": None,
+                "open_file_count": None,
+                "connection_count": None,
+                "started_at": datetime.utcfromtimestamp(PROCESS_STARTED_AT).isoformat(),
+                "uptime_seconds": round(now - PROCESS_STARTED_AT, 2),
+            },
+            "error": None,
+        }
+        if psutil is None:
+            snapshot["error"] = "psutil is not installed"
+            return snapshot
+        try:
+            memory = psutil.virtual_memory()
+            process = psutil.Process(os.getpid())
+            with process.oneshot():
+                process_memory = process.memory_info()
+                try:
+                    open_file_count = len(process.open_files())
+                except Exception:
+                    open_file_count = None
+                try:
+                    connection_count = len(process.net_connections())
+                except Exception:
+                    connection_count = None
+                create_time = process.create_time()
+                snapshot["process"].update(
+                    {
+                        "cpu_percent": round(process.cpu_percent(interval=None), 2),
+                        "memory_rss_bytes": process_memory.rss,
+                        "memory_vms_bytes": process_memory.vms,
+                        "memory_percent": round(process.memory_percent(), 2),
+                        "thread_count": process.num_threads(),
+                        "open_file_count": open_file_count,
+                        "connection_count": connection_count,
+                        "started_at": datetime.utcfromtimestamp(create_time).isoformat(),
+                        "uptime_seconds": round(now - create_time, 2),
+                    }
+                )
+            snapshot.update(
+                {
+                    "cpu_percent": round(psutil.cpu_percent(interval=None), 2),
+                    "memory": {
+                        "total_bytes": memory.total,
+                        "available_bytes": memory.available,
+                        "used_bytes": memory.used,
+                        "percent": memory.percent,
+                    },
+                }
+            )
+            return snapshot
+        except Exception as exc:
+            snapshot["available"] = False
+            snapshot["error"] = str(exc)
+            return snapshot
+
+    @classmethod
+    def _project_disk_snapshot(cls, project_root: str, disk_total_bytes: int) -> dict[str, Any]:
+        now = time.time()
+        cached_path = cls._project_disk_cache.get("path")
+        cached_size = cls._project_disk_cache.get("size_bytes")
+        checked_at = float(cls._project_disk_cache.get("checked_at") or 0)
+        if cached_path == project_root and cached_size is not None and now - checked_at < cls.PROJECT_DISK_CACHE_SECONDS:
+            size_bytes = int(cached_size)
+        else:
+            size_bytes = cls._directory_size_bytes(project_root)
+            cls._project_disk_cache = {
+                "path": project_root,
+                "size_bytes": size_bytes,
+                "checked_at": now,
+            }
+        return {
+            "path": project_root,
+            "used_bytes": size_bytes,
+            "percent": round((size_bytes / disk_total_bytes) * 100, 2) if disk_total_bytes else None,
+            "scope": "project_directory",
+            "cached_seconds": cls.PROJECT_DISK_CACHE_SECONDS,
+        }
+
+    @classmethod
+    def _directory_size_bytes(cls, directory_path: str) -> int:
+        total = 0
+        try:
+            with os.scandir(directory_path) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_symlink():
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            total += cls._directory_size_bytes(entry.path)
+                        elif entry.is_file(follow_symlinks=False):
+                            total += entry.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        continue
+        except OSError:
+            return 0
+        return total
+
     @classmethod
     def _traffic_snapshot(cls, db: Session, *, window_minutes: int) -> dict[str, Any]:
         since = datetime.utcnow() - timedelta(minutes=window_minutes)
@@ -351,6 +498,7 @@ class SystemMetricsService:
                 select(func.count()).select_from(RequestLog).where(
                     RequestLog.request_path.is_not(None),
                     RequestLog.request_path != "/v1/models",
+                    RequestLog.log_type.in_(cls.TRAFFIC_LOG_TYPES),
                     LogService._non_health_check_expr(),
                     RequestLog.billing_finalized_at.is_(None),
                 )
@@ -359,6 +507,7 @@ class SystemMetricsService:
         billing_failed = int(
             db.scalar(
                 select(func.count()).select_from(RequestLog).where(
+                    RequestLog.log_type.in_(cls.TRAFFIC_LOG_TYPES),
                     LogService._non_health_check_expr(),
                     RequestLog.billing_error.is_not(None),
                     RequestLog.billing_finalized_at.is_(None),
@@ -368,6 +517,7 @@ class SystemMetricsService:
         token_failed = int(
             db.scalar(
                 select(func.count()).select_from(RequestLog).where(
+                    RequestLog.log_type.in_(cls.TRAFFIC_LOG_TYPES),
                     LogService._non_health_check_expr(),
                     RequestLog.token_finalize_error.is_not(None),
                     RequestLog.billing_finalized_at.is_(None),

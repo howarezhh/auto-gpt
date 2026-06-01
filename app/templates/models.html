@@ -7,6 +7,7 @@
         <p>统一维护模型基础价格、速度标签、全局启用状态，并控制各个中转站对同一模型的可用性与价格倍率。</p>
         <div class="hero-actions">
             <button class="btn btn-accent interactive-btn" id="add-model-btn" type="button">新增模型</button>
+            <button class="btn btn-ghost interactive-btn" id="models-test-all-btn" type="button">一键测试</button>
             <button class="btn btn-ghost interactive-btn" id="models-refresh-btn" type="button">刷新</button>
         </div>
     </div>
@@ -71,6 +72,7 @@
                 <col class="models-col-select">
                 <col class="models-col-name">
                 <col class="models-col-status">
+                <col class="models-col-enabled">
                 <col class="models-col-ability">
                 <col class="models-col-context">
                 <col class="models-col-price">
@@ -84,6 +86,7 @@
                     <th><input id="models-select-page" type="checkbox" aria-label="选择当前页模型"></th>
                     <th>模型</th>
                     <th>状态</th>
+                    <th>启用</th>
                     <th>能力</th>
                     <th>上下文窗口</th>
                     <th>基础价格</th>
@@ -146,6 +149,10 @@
                 <span>缓存单价 /1M</span>
                 <input class="field-input" id="model-cache-price" type="number" min="0" step="0.0001" placeholder="例如 0.3">
             </label>
+            <div class="settings-note form-span-2" id="model-pricing-summary">
+                <strong>价格形态</strong>
+                <span>固定价。若该模型存在官方阶梯价或缓存写入价，会在保存后以结构化价格摘要展示。</span>
+            </div>
             <label>
                 <span>速度标签</span>
                 <input class="field-input" id="model-speed-label" placeholder="例如 快 / 均衡 / 慢">

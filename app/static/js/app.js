@@ -6,7 +6,7 @@
         userRole: document.body.dataset.userRole || "",
     };
     const PUBLIC_ROUTE_PREFIXES = ["/login", "/register", "/setup-admin"];
-    const ADMIN_ROUTE_PREFIXES = ["/providers", "/models", "/settings", "/playground", "/docs", "/api-keys", "/logs", "/alerts", "/conversations", "/users", "/audit-logs"];
+    const ADMIN_ROUTE_PREFIXES = ["/providers", "/models", "/settings", "/playground", "/benchmark", "/operations", "/docs", "/api-keys", "/logs", "/alerts", "/conversations", "/users", "/audit-logs"];
 
     const ROUTE_MODE_LABELS = {
         manual: "手动优先",
@@ -32,6 +32,13 @@
         unhealthy: "异常",
         unknown: "未知",
         skipped: "已跳过",
+    };
+
+    const PROVIDER_AVAILABILITY_LABELS = {
+        healthy: "全部可用",
+        degraded: "部分可用",
+        unhealthy: "全部不可用",
+        unknown: "未检测",
     };
 
     const CIRCUIT_STATE_LABELS = {
@@ -751,11 +758,15 @@
         const titleName = options.name || result?.provider_name || result?.model_name || "测试对象";
         const modelResults = Array.isArray(result?.model_results) ? result.model_results : [];
         const endpointResults = Array.isArray(result?.endpoint_results) ? result.endpoint_results : [];
+        const healthLabel = scope === "model" ? "模型健康" : "整体可用性";
+        const healthValue = scope === "model"
+            ? formatHealthStatusLabel(result?.health_status || "unknown")
+            : formatProviderAvailabilityLabel(result?.health_status || "unknown");
         const summaryRows = [
             ["测试对象", titleName],
             ["测试范围", scope === "model" ? "单模型测试" : "中转站测试"],
             ["结果", result?.success ? "成功" : "失败"],
-            ["健康状态", formatHealthStatusLabel(result?.health_status || "unknown")],
+            [healthLabel, healthValue],
             ["状态码", result?.status_code ?? "-"],
             ["耗时", `${result?.latency_ms ?? "-"} ms`],
         ];
@@ -1734,6 +1745,30 @@
         return `${Math.round(Number(value))} ms`;
     }
 
+    function formatBytes(value) {
+        const number = Number(value);
+        if (!Number.isFinite(number) || number < 0) return "-";
+        const units = ["B", "KB", "MB", "GB", "TB"];
+        let normalized = number;
+        let index = 0;
+        while (normalized >= 1024 && index < units.length - 1) {
+            normalized /= 1024;
+            index += 1;
+        }
+        const digits = normalized >= 100 || index === 0 ? 0 : normalized >= 10 ? 1 : 2;
+        return `${normalized.toFixed(digits)} ${units[index]}`;
+    }
+
+    function formatDurationSeconds(value) {
+        const seconds = Math.max(0, Math.floor(Number(value) || 0));
+        const days = Math.floor(seconds / 86400);
+        const hours = Math.floor((seconds % 86400) / 3600);
+        const minutes = Math.floor((seconds % 3600) / 60);
+        if (days > 0) return `${days}天 ${hours}h`;
+        if (hours > 0) return `${hours}h ${minutes}m`;
+        return `${minutes}m`;
+    }
+
     function formatScore(value) {
         if (value == null || Number.isNaN(Number(value))) return "-";
         return `${Number(value).toFixed(2)} 分`;
@@ -1758,200 +1793,51 @@
         return String(value ?? "-");
     }
 
-    function getRouteModeDefinitions(defaultProviderLabel, manualAllowFallback) {
-        const manualFallbackText = manualAllowFallback
-            ? "默认中转失败后，继续按模型候选池回退。"
-            : "默认中转失败后，立即返回失败，不再切换其它中转。";
-        return {
-            manual: {
-                title: formatRouteModeLabel("manual"),
-                tag: "强控制",
-                summary: "固定把默认中转站当成首选，适合明确指定主线路、灰度验证或内部定向测试。",
-                points: [
-                    `优先尝试默认中转站：${defaultProviderLabel}。`,
-                    manualFallbackText,
-                    "如果默认中转没有该模型或该模型当前不可用，是否还能继续分发，取决于 fallback 是否开启。",
-                ],
-            },
-            failover: {
-                title: formatRouteModeLabel("failover"),
-                tag: "高可用",
-                summary: "先尝试默认中转，失败后自动切到其它可用候选，是最稳妥的常规生产模式。",
-                points: [
-                    `优先尝试默认中转站：${defaultProviderLabel}。`,
-                    "默认中转失败后，按模型健康度、优先级、最近成功率和延迟依次切换。",
-                    "适合主线路明确，但要求自动兜底的场景。",
-                ],
-            },
-            weighted: {
-                title: formatRouteModeLabel("weighted"),
-                tag: "自动分流",
-                summary: "系统会先按模型级权重做首选分流，再用综合排序做回退，适合多副本共享流量。",
-                points: [
-                    "首个命中不是固定的，而是根据模型权重和近期失败率动态调整。",
-                    "某条线路近期失败率高时，会被自动降权，不会持续吃满流量。",
-                    "首选失败后，仍会按健康度、优先级、成功率和延迟继续回退。",
-                ],
-            },
-            sticky: {
-                title: formatRouteModeLabel("sticky"),
-                tag: "会话稳定",
-                summary: "同一用户或同一会话优先落到同一中转，减少多轮对话在不同线路间跳动。",
-                points: [
-                    "系统会根据用户、会话或对话相关标识生成 sticky key。",
-                    "相同 key 会优先命中同一首选中转，但不是绝对锁死，失败时仍会回退。",
-                    "适合追求连续多轮对话体验更稳定的场景。",
-                ],
-            },
-        };
+    function normalizeProviderAvailability(value) {
+        const normalized = String(value || "unknown");
+        return normalized in PROVIDER_AVAILABILITY_LABELS ? normalized : "unknown";
     }
 
-    function buildRouteModeCards(routeMode, defaultProviderLabel, manualAllowFallback) {
-        const definitions = getRouteModeDefinitions(defaultProviderLabel, manualAllowFallback);
-        return Object.entries(definitions).map(([key, item]) => `
-            <article class="route-mode-card ${key === routeMode ? "active" : ""}">
-                <div class="route-mode-card-header">
-                    <strong>${escapeHtml(item.title)}</strong>
-                    <span class="route-mode-pill">${escapeHtml(item.tag)}</span>
-                </div>
-                <div class="route-mode-card-summary">${escapeHtml(item.summary)}</div>
-                <ul class="route-mode-card-points">
-                    ${item.points.map((point) => `<li>${escapeHtml(point)}</li>`).join("")}
-                </ul>
-            </article>
-        `).join("");
+    function formatProviderAvailabilityLabel(value) {
+        return PROVIDER_AVAILABILITY_LABELS[normalizeProviderAvailability(value)];
     }
 
-    function buildRouteLiveSummary(routeMode, defaultProviderLabel, manualAllowFallback, hasDefaultProvider) {
-        const commonSteps = [
-            {
-                title: "先按模型过滤候选池",
-                text: "只有已启用、支持请求模型、且模型健康状态可参与路由的 provider_model 才会进入候选列表。",
-            },
-        ];
-        const chips = [
-            `当前模式：${formatRouteModeLabel(routeMode)}`,
-            `默认中转：${defaultProviderLabel}`,
-            `失败后回退：${formatSwitchText(manualAllowFallback)}`,
-        ];
-        let modeSteps = [];
-        let warning = "";
-
-        if (routeMode === "manual") {
-            modeSteps = [
-                {
-                    title: "首选固定默认中转",
-                    text: hasDefaultProvider
-                        ? `系统先尝试默认中转站「${defaultProviderLabel}」。`
-                        : "当前没有配置默认中转站，因此不会有固定首选线路。",
-                },
-                {
-                    title: "是否允许继续回退",
-                    text: manualAllowFallback
-                        ? "已开启 fallback。默认中转失败后，会继续尝试其它模型候选。"
-                        : "已关闭 fallback。默认中转失败、缺少该模型或当前不可用时，请求会直接失败。",
-                },
-            ];
-            if (!hasDefaultProvider) {
-                warning = "当前是 manual 模式，但默认中转站为空。这样不会形成真正的“固定主线路”，如果同时关闭 fallback，请求很容易直接失败。";
-            } else if (!manualAllowFallback) {
-                warning = "当前 manual 模式已关闭 fallback。默认中转一旦无该模型、鉴权失败或线路异常，请求不会自动切换到其它中转。";
-            }
-        } else if (routeMode === "failover") {
-            modeSteps = [
-                {
-                    title: "先打默认中转",
-                    text: hasDefaultProvider
-                        ? `系统会先尝试默认中转站「${defaultProviderLabel}」。`
-                        : "当前没有默认中转站，因此首选阶段会被跳过。",
-                },
-                {
-                    title: "失败后按综合顺序切换",
-                    text: "回退顺序取决于模型健康度、模型优先级、provider 优先级、最近成功率和平均延迟。",
-                },
-            ];
-            if (!hasDefaultProvider) {
-                warning = "当前 failover 模式未设置默认中转站，系统仍能分发，但会退化为直接按候选排序选择首个可用线路。";
-            }
-        } else if (routeMode === "weighted") {
-            modeSteps = [
-                {
-                    title: "首选按动态权重分流",
-                    text: "首个命中由模型级权重决定，近期失败率越高，动态权重会越低。",
-                },
-                {
-                    title: "失败后继续按排序回退",
-                    text: "首选失败时，不会再次随机，而是按照综合评分链路继续尝试其它候选。",
-                },
-            ];
-        } else if (routeMode === "sticky") {
-            modeSteps = [
-                {
-                    title: "同 key 优先同中转",
-                    text: "系统会根据 user 或 metadata 中的 session / conversation / thread 标识计算 sticky key。",
-                },
-                {
-                    title: "保持稳定，但不死锁",
-                    text: "同一个 key 会优先命中同一首选；如果该线路失败，仍会自动回退到其它候选。",
-                },
-            ];
-        }
-
-        const tailStep = {
-            title: "代理层执行真正转发",
-            text: "非流式会逐个尝试候选；流式只允许在首包前切换，一旦开始输出就不再中途换线。",
-        };
-
-        return `
-            <div class="route-live-chip-row">
-                ${chips.map((chip) => `<span class="route-live-chip">${escapeHtml(chip)}</span>`).join("")}
-            </div>
-            <div class="route-live-steps">
-                ${commonSteps.concat(modeSteps).concat(tailStep).map((step, index) => `
-                    <div class="route-live-step">
-                        <div class="route-live-step-index">${index + 1}</div>
-                        <div>
-                            <strong>${escapeHtml(step.title)}</strong>
-                            <span>${escapeHtml(step.text)}</span>
-                        </div>
-                    </div>
-                `).join("")}
-            </div>
-            ${warning ? `<div class="route-live-warning">${escapeHtml(warning)}</div>` : ""}
-        `;
+    function providerAvailabilityBadge(value) {
+        const normalized = normalizeProviderAvailability(value);
+        return `<span class="status-badge status-${normalized}">${escapeHtml(formatProviderAvailabilityLabel(normalized))}</span>`;
     }
 
-    function renderRoutePolicyGuideInto({
-        modeCards,
-        liveSummary,
-        routeMode,
-        defaultProviderId,
-        manualAllowFallback,
-        providers = [],
-    }) {
-        if (!modeCards) return;
-        const defaultProviderLabel = getDefaultProviderLabel(providers, defaultProviderId);
-        const hasDefaultProvider = Boolean(defaultProviderId) && providers.some((item) => item.id === Number(defaultProviderId));
-        modeCards.innerHTML = buildRouteModeCards(routeMode, defaultProviderLabel, manualAllowFallback);
-        if (liveSummary) {
-            liveSummary.innerHTML = buildRouteLiveSummary(routeMode, defaultProviderLabel, manualAllowFallback, hasDefaultProvider);
-        }
-    }
-
-    function renderRoutePolicyGuide({
-        routeMode,
-        defaultProviderId,
-        manualAllowFallback,
-        providers = [],
-    }) {
-        renderRoutePolicyGuideInto({
-            modeCards: document.getElementById("route-mode-cards"),
-            liveSummary: document.getElementById("route-live-summary"),
-            routeMode,
-            defaultProviderId,
-            manualAllowFallback,
-            providers,
+    function summarizeEnabledModelHealth(modelConfigs = []) {
+        const enabledModels = modelConfigs.filter((item) => item.enabled);
+        return enabledModels.reduce((summary, item) => {
+            const status = String(item.health_status || "unknown");
+            summary.total += 1;
+            if (status === "healthy") summary.healthy += 1;
+            else if (status === "degraded") summary.degraded += 1;
+            else if (status === "unhealthy") summary.unhealthy += 1;
+            else summary.unknown += 1;
+            return summary;
+        }, {
+            total: 0,
+            healthy: 0,
+            degraded: 0,
+            unhealthy: 0,
+            unknown: 0,
         });
+    }
+
+    function renderProviderAvailability(provider = {}) {
+        const modelConfigs = Array.isArray(provider.model_configs) ? provider.model_configs : [];
+        const summary = summarizeEnabledModelHealth(modelConfigs);
+        const detail = summary.total
+            ? `启用 ${formatNumber(summary.total)}：健康 ${formatNumber(summary.healthy)} / 降级 ${formatNumber(summary.degraded)} / 异常 ${formatNumber(summary.unhealthy)}${summary.unknown ? ` / 未检 ${formatNumber(summary.unknown)}` : ""}`
+            : (modelConfigs.length ? "无启用模型" : "未挂载模型");
+        return `
+            <div class="provider-availability-summary">
+                <div class="provider-availability-main">${providerAvailabilityBadge(provider.health_status)}</div>
+                <div class="provider-availability-meta">${escapeHtml(detail)}</div>
+            </div>
+        `;
     }
 
     function renderProviderModelHealth(modelConfigs = [], providerId) {
@@ -1967,7 +1853,7 @@
             <div class="provider-model-summary">
                 <div class="provider-model-summary-head">
                     <strong>${formatNumber(modelConfigs.length)} 个模型</strong>
-                    <span>${formatNumber(enabledCount)} 启用 · ${formatNumber(healthyCount)} 状态正常 · ${formatNumber(streamCount)} 流式 · ${formatNumber(visionCount)} 识图 · ${formatNumber(imageGenerationCount)} 生图</span>
+                    <span>${formatNumber(enabledCount)} 启用 · ${formatNumber(healthyCount)} 模型健康 · ${formatNumber(streamCount)} 流式 · ${formatNumber(visionCount)} 识图 · ${formatNumber(imageGenerationCount)} 生图</span>
                 </div>
                 <div class="provider-model-preview-list">
                     ${visibleModels.map((item) => `
@@ -2085,7 +1971,7 @@
                     <strong>${escapeHtml(provider.name)}</strong>
                     <span>${provider.enabled ? "已启用" : "已停用"} · ${escapeHtml(provider.base_url)} · ${provider.model_configs?.length ?? 0} 个模型</span>
                 </div>
-                <div>${statusBadge(provider.health_status || "unknown")}</div>
+                <div>${providerAvailabilityBadge(provider.health_status || "unknown")}</div>
             </label>
         `).join("");
     }
@@ -2230,7 +2116,7 @@
                 <div class="playground-batch-card-head">
                     <div>
                         <div class="playground-card-title">批量测试具体结果</div>
-                        <div class="table-muted">按渠道列表分页查看，并支持关键词与健康状态筛选。</div>
+                        <div class="table-muted">按渠道列表分页查看，并支持关键词与整体可用性筛选。</div>
                     </div>
                 </div>
                 <div class="filter-toolbar playground-batch-filter-toolbar">
@@ -2239,11 +2125,11 @@
                         <input class="field-input search-input" id="playground-batch-search" type="text" value="${escapeHtml(options.keyword || "")}" placeholder="搜索渠道名、模型名、结果说明">
                     </label>
                     <label>
-                        <span>健康状态</span>
+                        <span>整体可用性</span>
                         <select class="field-input" id="playground-batch-health">
                             <option value="" ${health === "" ? "selected" : ""}>全部</option>
-                            <option value="healthy" ${health === "healthy" ? "selected" : ""}>健康</option>
-                            <option value="abnormal" ${health === "abnormal" ? "selected" : ""}>异常</option>
+                            <option value="healthy" ${health === "healthy" ? "selected" : ""}>全部可用</option>
+                            <option value="abnormal" ${health === "abnormal" ? "selected" : ""}>存在异常</option>
                         </select>
                     </label>
                 </div>
@@ -2255,7 +2141,7 @@
                                     <div class="playground-card-title">${escapeHtml(item.provider_name || `渠道 ${item.provider_id}`)}</div>
                                     <div class="table-muted">${item.provider_enabled ? "已启用" : "已停用"} · 模型 ${item.models_success ?? 0}/${item.models_total ?? 0} 正常</div>
                                 </div>
-                                <div>${statusBadge(item.health_status || "unknown")}</div>
+                                <div>${providerAvailabilityBadge(item.health_status || "unknown")}</div>
                             </div>
                             <div class="playground-batch-provider-grid">
                                 <div><span>渠道连通</span><strong class="${item.provider_success ? "playground-status-success" : "playground-status-danger"}">${item.provider_success ? "成功" : "失败"}</strong></div>
@@ -2284,7 +2170,7 @@
                             </div>
                         </article>
                     `).join("") : `
-                        <div class="playground-provider-list-empty">当前筛选条件下没有命中的测试结果，请调整关键词或健康状态。</div>
+                        <div class="playground-provider-list-empty">当前筛选条件下没有命中的测试结果，请调整关键词或整体可用性。</div>
                     `}
                 </div>
                 <div class="table-toolbar logs-pagination-bar playground-batch-pagination-bar">
@@ -3573,7 +3459,7 @@
             <article class="provider-card">
                 <div class="provider-card-top">
                     <h4>${escapeHtml(provider.name)}</h4>
-                    ${statusBadge(provider.health_status)}
+                    ${providerAvailabilityBadge(provider.health_status)}
                 </div>
                 <div class="provider-meta">优先级 ${provider.priority} / 权重 ${provider.weight}</div>
                 <div class="provider-models">${escapeHtml(provider.models.join(", ") || "-")}</div>
@@ -3603,14 +3489,14 @@
             <div class="cockpit-health-bar"><span style="width:${healthRatio}%"></span></div>
             <div class="cockpit-aside-meta">
                 <span>路由 ${escapeHtml(formatRouteModeLabel(settings.route_mode))}</span>
-                <span>${stats.healthy_count}/${stats.provider_count} 健康</span>
+                <span>${stats.healthy_count}/${stats.provider_count} 全部可用</span>
             </div>
         `;
 
         document.getElementById("dashboard-health-distribution").innerHTML = `
-            <div><span>健康</span><strong>${stats.healthy_count}</strong></div>
-            <div><span>降级</span><strong>${stats.degraded_count}</strong></div>
-            <div><span>异常</span><strong>${stats.unhealthy_count}</strong></div>
+            <div><span>全部可用</span><strong>${stats.healthy_count}</strong></div>
+            <div><span>部分可用</span><strong>${stats.degraded_count}</strong></div>
+            <div><span>全部不可用</span><strong>${stats.unhealthy_count}</strong></div>
             <div><span>模型数</span><strong>${stats.model_count}</strong></div>
         `;
 
@@ -4766,7 +4652,7 @@
                     <td>${renderProviderScope(provider)}</td>
                     <td>${escapeHtml(provider.base_url)}</td>
                     <td>${renderProviderModelHealth(provider.model_configs, provider.id)}</td>
-                    <td>${statusBadge(provider.health_status)}</td>
+                    <td>${renderProviderAvailability(provider)}</td>
                     <td>${statusBadge(provider.circuit_state)}</td>
                     <td>${renderProviderStrategy(provider)}</td>
                     <td>${renderProviderCapacity(provider)}</td>
@@ -5183,6 +5069,7 @@
         const batchMeta = document.getElementById("models-batch-meta");
         const batchContextWindowInput = document.getElementById("models-batch-context-window-tokens");
         const batchContextApplyBtn = document.getElementById("models-batch-context-apply-btn");
+        const testAllBtn = document.getElementById("models-test-all-btn");
         const refreshBtn = document.getElementById("models-refresh-btn");
         const addBtn = document.getElementById("add-model-btn");
         const modal = document.getElementById("model-modal");
@@ -5205,6 +5092,7 @@
         const inputPriceInput = document.getElementById("model-input-price");
         const outputPriceInput = document.getElementById("model-output-price");
         const cachePriceInput = document.getElementById("model-cache-price");
+        const pricingSummaryNode = document.getElementById("model-pricing-summary");
         const speedLabelInput = document.getElementById("model-speed-label");
         const remarkInput = document.getElementById("model-remark");
         const bindingBody = document.getElementById("model-binding-body");
@@ -5213,7 +5101,7 @@
             || !supportsStreamInput || !supportsVisionInput || !supportsToolsInput || !supportsChatCompletionsInput
             || !supportsResponsesInput || !contextWindowInput || !maxInputTokensInput || !maxOutputTokensInput
             || !selectPageInput || !batchMeta || !batchContextWindowInput || !batchContextApplyBtn
-            || !pageMeta || !prevPageBtn || !nextPageBtn || !refreshBtn || !addBtn || !modal || !form || !bindingBody
+            || !pageMeta || !prevPageBtn || !nextPageBtn || !testAllBtn || !refreshBtn || !addBtn || !modal || !form || !bindingBody
         ) return;
 
         const state = {
@@ -5291,6 +5179,133 @@
             `;
         }
 
+        function renderModelHealthCell(item) {
+            const status = item.health_status === "healthy" ? "healthy" : "unhealthy";
+            const healthyCount = Number(item.healthy_provider_count ?? item.enabled_provider_count ?? 0);
+            const totalCount = Number(item.bound_provider_count ?? item.provider_count ?? 0);
+            return `
+                <div>${statusBadge(status)}</div>
+                <div class="table-muted">${escapeHtml(String(healthyCount))}/${escapeHtml(String(totalCount))}</div>
+            `;
+        }
+
+        function formatModelTestStatus(value) {
+            return value === "healthy" ? "healthy" : "unhealthy";
+        }
+
+        function renderModelChannelTestList(channels = []) {
+            if (!channels.length) {
+                return '<div class="empty-state">未绑定渠道</div>';
+            }
+            return channels.map((item) => {
+                const status = item.available ? "healthy" : "unhealthy";
+                const meta = [
+                    `耗时 ${item.latency_ms ?? "-"} ms`,
+                    `状态码 ${item.status_code ?? "-"}`,
+                ].join(" · ");
+                const message = item.message ? `<div class="provider-test-model-message">${escapeHtml(item.message)}</div>` : "";
+                return `
+                    <article class="provider-test-model-item">
+                        <div class="provider-test-model-top">
+                            <strong>${escapeHtml(item.provider_name || "-")}</strong>
+                            <div>${statusBadge(status)}</div>
+                        </div>
+                        <div class="table-muted">${escapeHtml(meta)}</div>
+                        ${message}
+                    </article>
+                `;
+            }).join("");
+        }
+
+        function renderModelHealthTestResult(result) {
+            const status = formatModelTestStatus(result?.health_status);
+            const summaryRows = [
+                ["模型", result?.display_name || result?.model_name || "-"],
+                ["状态", formatHealthStatusLabel(status)],
+                ["通过", `${result?.healthy_channel_count ?? 0}/${result?.total_channel_count ?? 0}`],
+                ["耗时", `${result?.latency_ms ?? "-"} ms`],
+            ];
+            const summaryHtml = summaryRows.map(([label, value]) => `
+                <div class="provider-test-summary-item">
+                    <span>${escapeHtml(String(label))}</span>
+                    <strong>${escapeHtml(String(value))}</strong>
+                </div>
+            `).join("");
+            return `
+                <div class="provider-test-result-shell">
+                    <section class="provider-test-result-card">
+                        <div class="panel-kicker">摘要</div>
+                        <div class="provider-test-summary-grid">${summaryHtml}</div>
+                    </section>
+                    <section class="provider-test-result-card">
+                        <div class="panel-kicker">渠道</div>
+                        <div class="provider-test-model-list">${renderModelChannelTestList(result?.channel_results || [])}</div>
+                    </section>
+                </div>
+            `;
+        }
+
+        function renderAllModelHealthTestResult(results = []) {
+            if (!results.length) {
+                return '<div class="empty-state">暂无模型</div>';
+            }
+            const healthyCount = results.filter((item) => item.health_status === "healthy").length;
+            const summaryRows = [
+                ["模型", `${healthyCount}/${results.length}`],
+                ["异常", String(results.length - healthyCount)],
+            ];
+            const summaryHtml = summaryRows.map(([label, value]) => `
+                <div class="provider-test-summary-item">
+                    <span>${escapeHtml(String(label))}</span>
+                    <strong>${escapeHtml(String(value))}</strong>
+                </div>
+            `).join("");
+            const modelHtml = results.map((item) => {
+                const status = formatModelTestStatus(item.health_status);
+                return `
+                    <article class="provider-test-model-item">
+                        <div class="provider-test-model-top">
+                            <strong>${escapeHtml(item.display_name || item.model_name || "-")}</strong>
+                            <div>${statusBadge(status)}</div>
+                        </div>
+                        <div class="table-muted">通过 ${escapeHtml(String(item.healthy_channel_count ?? 0))}/${escapeHtml(String(item.total_channel_count ?? 0))} · ${escapeHtml(String(item.latency_ms ?? "-"))} ms</div>
+                    </article>
+                `;
+            }).join("");
+            return `
+                <div class="provider-test-result-shell">
+                    <section class="provider-test-result-card">
+                        <div class="panel-kicker">摘要</div>
+                        <div class="provider-test-summary-grid">${summaryHtml}</div>
+                    </section>
+                    <section class="provider-test-result-card">
+                        <div class="panel-kicker">模型</div>
+                        <div class="provider-test-model-list">${modelHtml}</div>
+                    </section>
+                </div>
+            `;
+        }
+
+        function formatPricingSummary(item) {
+            const mode = item?.pricing_mode || "fixed";
+            const pricingJson = item?.pricing_json || {};
+            const tiers = Array.isArray(pricingJson.tiers) ? pricingJson.tiers : [];
+            const sourceLabel = pricingJson.source_label || "";
+            const sourceHint = sourceLabel ? ` · 来源 ${sourceLabel}` : "";
+            if (mode === "tiered" && tiers.length) {
+                const firstTier = tiers[0] || {};
+                const tierName = firstTier.tier_name || firstTier.tier_key || "默认档";
+                const minTokens = firstTier.min_prompt_tokens == null ? "0" : formatNumber(firstTier.min_prompt_tokens);
+                const maxTokens = firstTier.max_prompt_tokens == null ? "∞" : formatNumber(firstTier.max_prompt_tokens);
+                const cacheWriteHint = firstTier.cache_write_price_per_1k != null ? "，含缓存写入价" : "";
+                return `阶梯价 · ${tiers.length} 档 · ${tierName}（${minTokens}-${maxTokens} tok）${cacheWriteHint}${sourceHint}`;
+            }
+            if (mode === "unpriced") {
+                return `未定价${sourceHint}`;
+            }
+            return `固定价${sourceHint}`;
+        }
+
         function updateBatchBar() {
             const selectedCount = state.selectedModelNames.size;
             batchMeta.textContent = `已选 ${formatNumber(selectedCount)} 个模型`;
@@ -5309,6 +5324,7 @@
                         <strong>${escapeHtml(item.display_name || item.model_name)}</strong>
                         <div class="table-muted">${escapeHtml(item.model_name)}</div>
                     </td>
+                    <td>${renderModelHealthCell(item)}</td>
                     <td>${item.enabled ? '<span class="status-badge status-healthy">已启用</span>' : '<span class="status-badge status-unknown">已停用</span>'}</td>
                     <td>${renderModelAbilityCell(item)}</td>
                     <td>${renderTokenLimitCell(item)}</td>
@@ -5316,6 +5332,7 @@
                         <div>输入 ${escapeHtml(formatPrice(item.input_price_per_1k ?? item.lowest_input_price_per_1k))}</div>
                         <div class="table-muted">输出 ${escapeHtml(formatPrice(item.output_price_per_1k ?? item.lowest_output_price_per_1k))}</div>
                         <div class="table-muted">缓存 ${escapeHtml(formatPrice(item.cache_price_per_1k ?? item.lowest_cache_price_per_1k))}</div>
+                        <div class="table-muted">${escapeHtml(formatPricingSummary(item))}</div>
                     </td>
                     <td>${escapeHtml(item.speed_label || "-")}</td>
                     <td>
@@ -5325,12 +5342,13 @@
                     <td>${renderMultiplierCell(item)}</td>
                     <td>
                         <div class="table-actions">
+                            <button class="table-action-btn" data-action="test" data-model-name="${escapeHtml(item.model_name)}">测试</button>
                             <button class="table-action-btn" data-action="edit" data-model-name="${escapeHtml(item.model_name)}">编辑</button>
                             <button class="table-action-btn" data-action="delete" data-model-name="${escapeHtml(item.model_name)}">删除</button>
                         </div>
                     </td>
                 </tr>
-            `).join("") || '<tr><td colspan="10"><div class="empty-state">暂无模型配置</div></td></tr>';
+            `).join("") || '<tr><td colspan="11"><div class="empty-state">暂无模型配置</div></td></tr>';
             enhanceInteractiveButtons(tableBody);
             updateBatchBar();
         }
@@ -5452,6 +5470,9 @@
             cachePriceInput.value = detail?.cache_price_per_1k == null
                 ? (detail?.input_price_per_1k == null ? "" : toPricePer1M(detail.input_price_per_1k))
                 : toPricePer1M(detail.cache_price_per_1k);
+            if (pricingSummaryNode) {
+                pricingSummaryNode.innerHTML = `<strong>价格形态</strong><span>${escapeHtml(formatPricingSummary(detail))}</span>`;
+            }
             speedLabelInput.value = detail?.speed_label || "";
             remarkInput.value = detail?.remark || "";
             buildBindingRows(detail?.provider_bindings || []);
@@ -5505,9 +5526,61 @@
             if (!silent) showToast("模型配置已刷新");
         }
 
+        async function testModelHealth(modelName, trigger) {
+            if (!modelName) return;
+            try {
+                setButtonLoading(trigger, true);
+                const result = await api.post(`/api/models/${encodeURIComponent(modelName)}/test`);
+                setButtonTransientFeedback(trigger, result.health_status === "healthy" ? "success" : "error", {
+                    successText: "健康",
+                    errorText: "异常",
+                });
+                openHealthCheckResultModal(
+                    `模型测试 · ${modelName}`,
+                    renderModelHealthTestResult(result),
+                    trigger,
+                );
+                showToast(`模型检测：${formatHealthStatusLabel(result.health_status)}`);
+                await loadData({ silent: true, reloadProviders: true });
+            } catch (error) {
+                setButtonTransientFeedback(trigger, "error", { errorText: "失败" });
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(trigger, false);
+            }
+        }
+
+        async function testAllModelHealth() {
+            try {
+                setButtonLoading(testAllBtn, true);
+                const results = await api.post("/api/models/test-all");
+                const healthyCount = results.filter((item) => item.health_status === "healthy").length;
+                setButtonTransientFeedback(testAllBtn, healthyCount === results.length ? "success" : "error", {
+                    successText: "完成",
+                    errorText: "有异常",
+                });
+                openHealthCheckResultModal(
+                    "模型批量测试",
+                    renderAllModelHealthTestResult(results),
+                    testAllBtn,
+                );
+                showToast(`模型检测：${healthyCount}/${results.length} 健康`);
+                await loadData({ silent: true, reloadProviders: true });
+            } catch (error) {
+                setButtonTransientFeedback(testAllBtn, "error", { errorText: "失败" });
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(testAllBtn, false);
+            }
+        }
+
         tableBody.addEventListener("click", async (event) => {
             const button = event.target.closest("[data-action]");
             if (!button) return;
+            if (button.dataset.action === "test") {
+                await testModelHealth(button.dataset.modelName, button);
+                return;
+            }
             if (button.dataset.action === "delete") {
                 if (!window.confirm(`确认删除模型 ${button.dataset.modelName} 吗？相关渠道绑定也会一并移除。`)) {
                     return;
@@ -5645,6 +5718,7 @@
         });
 
         addBtn.addEventListener("click", () => openModal());
+        testAllBtn.addEventListener("click", testAllModelHealth);
         refreshBtn.addEventListener("click", async () => {
             try {
                 setButtonLoading(refreshBtn, true);
@@ -5763,20 +5837,6 @@
         document.getElementById("setting-provider-max-active-requests").value = settings.provider_max_active_requests;
         document.getElementById("setting-provider-max-active-streams").value = settings.provider_max_active_streams;
         document.getElementById("setting-concurrency-lease-ttl-seconds").value = settings.concurrency_lease_ttl_seconds;
-
-        const refreshRouteGuide = () => {
-            renderRoutePolicyGuide({
-                routeMode: routeModeSelect.value,
-                defaultProviderId: providerSelect.value ? Number(providerSelect.value) : null,
-                manualAllowFallback: manualAllowFallbackInput.checked,
-                providers,
-            });
-        };
-
-        refreshRouteGuide();
-        routeModeSelect.addEventListener("change", refreshRouteGuide);
-        providerSelect.addEventListener("change", refreshRouteGuide);
-        manualAllowFallbackInput.addEventListener("change", refreshRouteGuide);
 
         form.addEventListener("submit", async (event) => {
             event.preventDefault();
@@ -7350,10 +7410,10 @@
             return {
                 failure: [
                     { label: "状态", value: "上游线路异常或延迟过高" },
-                    { label: "摘要", value: "当前命中的渠道可能健康异常、响应超时或暂时不可用。" },
+                    { label: "摘要", value: "当前命中的渠道可能整体可用性异常、响应超时或暂时不可用。" },
                 ],
                 fixes: [
-                    { label: "修复建议", value: "先看候选线路列表里的健康状态和成功率，必要时换模型或换一把授权范围更广的密钥重试。" },
+                    { label: "修复建议", value: "先看候选线路列表里的整体可用性、模型健康和成功率，必要时换模型或换一把授权范围更广的密钥重试。" },
                     { label: "补充检查", value: "如果连续失败，去日志页确认是否同一渠道持续报错。" },
                 ],
                 next: [
@@ -8033,7 +8093,7 @@
                     <strong>${escapeHtml(provider.name)}</strong>
                     <span>${escapeHtml(provider.models.join(", ") || "未配置模型")}</span>
                 </div>
-                <div>${statusBadge(provider.health_status || "unknown")}</div>
+                <div>${providerAvailabilityBadge(provider.health_status || "unknown")}</div>
             </label>
         `).join("");
     }
@@ -8568,17 +8628,6 @@
             }
         }
 
-        function refreshRoutePreview() {
-            renderRoutePolicyGuideInto({
-                modeCards: document.getElementById("api-key-route-mode-cards"),
-                liveSummary: document.getElementById("api-key-route-live-summary"),
-                routeMode: routeModeInput.value,
-                defaultProviderId: defaultProviderSelect.value ? Number(defaultProviderSelect.value) : null,
-                manualAllowFallback: manualFallbackInput.checked,
-                providers: state.providers,
-            });
-        }
-
         function openModal(apiKey = null) {
             const isEditing = Boolean(apiKey);
             modalTitle.textContent = isEditing ? `编辑 API 密钥 #${apiKey.id}` : "新增 API 密钥";
@@ -8605,7 +8654,6 @@
             populateDefaultProviderOptions(apiKey?.default_provider_id || null);
             renderApiKeyProviderSelector(providerSelector, state.providers, apiKey?.allowed_provider_ids || []);
             renderApiKeyModelSelector(modelSelector, state.models, apiKey?.allowed_model_names || []);
-            refreshRoutePreview();
             refreshRawApiKeyInputState();
             rawPanel.classList.add("hidden");
             rawValue.textContent = "";
@@ -8627,7 +8675,6 @@
             renderApiKeyModelSelector(modelSelector, state.models, []);
             populateDefaultProviderOptions();
             populateOwnerUserOptions();
-            refreshRoutePreview();
             refreshRawApiKeyInputState();
         }
 
@@ -8996,10 +9043,6 @@
         });
         generationModeInput.addEventListener("change", refreshRawApiKeyInputState);
         rawApiKeyInput.addEventListener("input", refreshRawApiKeyInputState);
-        routeModeInput.addEventListener("change", refreshRoutePreview);
-        manualFallbackInput.addEventListener("change", refreshRoutePreview);
-        defaultProviderSelect.addEventListener("change", refreshRoutePreview);
-        providerSelector.addEventListener("change", refreshRoutePreview);
         insightGroupBySelect?.addEventListener("change", async () => {
             await loadCostInsights({ manual: false });
         });
@@ -9277,18 +9320,10 @@
                     <article class="api-key-chip-card">
                         <strong>${escapeHtml(provider.name)}</strong>
                         <span>${escapeHtml(provider.enabled ? "已启用" : "已禁用")}</span>
-                        <div>${statusBadge(provider.health_status)}</div>
+                        <div>${providerAvailabilityBadge(provider.health_status)}</div>
                     </article>
                 `).join("")
                 : '<div class="empty-state">当前没有授权中转站</div>';
-            renderRoutePolicyGuideInto({
-                modeCards: document.getElementById("api-key-detail-route-cards"),
-                liveSummary: document.getElementById("api-key-detail-route-summary"),
-                routeMode: detail.route_mode,
-                defaultProviderId: detail.default_provider_id,
-                manualAllowFallback: detail.manual_allow_fallback,
-                providers: detail.allowed_providers.map((provider) => ({ ...provider, id: provider.id })),
-            });
             document.getElementById("api-key-detail-model-distribution").innerHTML = analytics.model_distribution.length
                 ? analytics.model_distribution.map((item) => `
                     <article class="api-key-telemetry-card">
@@ -10067,6 +10102,473 @@
         });
     }
 
+    async function initBenchmark() {
+        const form = document.getElementById("benchmark-form");
+        const startBtn = document.getElementById("benchmark-start-btn");
+        const stopBtn = document.getElementById("benchmark-stop-btn");
+        const statusPill = document.getElementById("benchmark-status-pill");
+        const progressMeta = document.getElementById("benchmark-progress-meta");
+        const progressBar = document.getElementById("benchmark-progress-bar");
+        const liveGrid = document.getElementById("benchmark-live-grid");
+        const logWindow = document.getElementById("benchmark-log-window");
+        const resultEmpty = document.getElementById("benchmark-result-empty");
+        const resultView = document.getElementById("benchmark-result-view");
+        const summaryList = document.getElementById("benchmark-summary-list");
+        const stageTable = document.getElementById("benchmark-stage-table");
+        const htmlReportLink = document.getElementById("benchmark-html-report-link");
+        const jsonReportLink = document.getElementById("benchmark-json-report-link");
+        if (!form || !startBtn || !stopBtn || !statusPill || !progressMeta || !progressBar || !liveGrid || !logWindow || !resultEmpty || !resultView || !summaryList || !stageTable || !htmlReportLink || !jsonReportLink) {
+            return;
+        }
+
+        let currentJobId = null;
+        let pollTimer = null;
+        const STATUS_LABELS = {
+            running: "运行中",
+            completed: "已完成",
+            failed: "失败",
+            stopped: "已停止",
+        };
+
+        function readNumber(id, fallback = 0) {
+            const input = document.getElementById(id);
+            const value = Number(input?.value ?? fallback);
+            return Number.isFinite(value) ? value : fallback;
+        }
+
+        function readText(id) {
+            return String(document.getElementById(id)?.value || "").trim();
+        }
+
+        function collectBenchmarkPayload() {
+            const modes = [];
+            if (document.getElementById("benchmark-mode-json")?.checked) modes.push("json");
+            if (document.getElementById("benchmark-mode-stream")?.checked) modes.push("stream");
+            if (!modes.length) {
+                throw new Error("请至少选择一种测试模式");
+            }
+            return {
+                proxy_base_url: readText("benchmark-proxy-base-url"),
+                raw_api_key: readText("benchmark-raw-api-key"),
+                endpoint: readText("benchmark-endpoint") || "chat",
+                modes,
+                model_name: readText("benchmark-model-name"),
+                concurrency: readNumber("benchmark-concurrency", 100),
+                probe_min_concurrency: readNumber("benchmark-probe-min-concurrency", 0),
+                probe_max_concurrency: readNumber("benchmark-probe-max-concurrency", 0),
+                max_probe_rounds: readNumber("benchmark-max-probe-rounds", 10),
+                probe_scale: readNumber("benchmark-probe-scale", 1.5),
+                sample_requests: readNumber("benchmark-sample-requests", 300),
+                requests_per_concurrency: readNumber("benchmark-requests-per-concurrency", 2),
+                warmup_requests: readNumber("benchmark-warmup-requests", 12),
+                client_timeout_s: readNumber("benchmark-client-timeout-s", 180),
+                request_timeout_s: readNumber("benchmark-request-timeout-s", 180),
+                boundary_max_rounds: readNumber("benchmark-boundary-max-rounds", 8),
+                progress_interval_s: readNumber("benchmark-progress-interval-s", 0.5),
+                success_rate_threshold: readNumber("benchmark-success-rate-threshold", 0.99),
+                timeout_error_threshold: readNumber("benchmark-timeout-error-threshold", 0),
+                busy_error_threshold: readNumber("benchmark-busy-error-threshold", 0),
+                prompt: readText("benchmark-prompt") || "请用两句话简洁回答：并发压测探针。",
+            };
+        }
+
+        function setBenchmarkPolling(enabled) {
+            if (pollTimer) {
+                window.clearInterval(pollTimer);
+                pollTimer = null;
+            }
+            if (enabled && currentJobId) {
+                pollTimer = window.setInterval(refreshCurrentJob, 1200);
+            }
+        }
+
+        function renderBenchmarkStatus(job) {
+            const status = job?.status || "idle";
+            statusPill.className = `benchmark-status-pill ${status === "running" ? "is-running" : status === "completed" ? "is-completed" : status === "failed" ? "is-failed" : status === "stopped" ? "is-stopped" : ""}`;
+            statusPill.textContent = STATUS_LABELS[status] || "未开始";
+            startBtn.disabled = status === "running";
+            stopBtn.disabled = status !== "running";
+        }
+
+        function formatMetric(value, suffix = "") {
+            if (value === null || value === undefined || value === "") return "-";
+            const numberValue = Number(value);
+            if (!Number.isFinite(numberValue)) return String(value);
+            return `${numberValue.toFixed(numberValue >= 100 ? 1 : 2)}${suffix}`;
+        }
+
+        function renderBenchmarkProgress(job) {
+            const progress = job?.progress || {};
+            const percent = Number(progress.percent || 0);
+            progressBar.style.width = `${Math.max(0, Math.min(100, percent))}%`;
+            if (job?.status === "running" && progress.total) {
+                progressMeta.textContent = `${progress.mode || "-"} 模式，并发 ${progress.concurrency || "-"}，${progress.done || 0}/${progress.total || 0}，${percent.toFixed(1)}%`;
+            } else if (job?.status === "completed") {
+                progressMeta.textContent = "探测已完成，可查看阶段结果和报告。";
+                progressBar.style.width = "100%";
+            } else if (job?.status === "failed") {
+                progressMeta.textContent = job.error_message || "探测失败，请查看日志。";
+            } else if (job?.status === "stopped") {
+                progressMeta.textContent = "任务已停止。";
+            } else {
+                progressMeta.textContent = "等待启动...";
+                progressBar.style.width = "0%";
+            }
+            liveGrid.innerHTML = `
+                <article><span>模式</span><strong>${escapeHtml(progress.mode || "-")}</strong></article>
+                <article><span>并发</span><strong>${escapeHtml(progress.concurrency ?? "-")}</strong></article>
+                <article><span>进度</span><strong>${escapeHtml(progress.total ? `${progress.done}/${progress.total}` : "-")}</strong></article>
+                <article><span>RPS</span><strong>${escapeHtml(progress.rps ?? "-")}</strong></article>
+            `;
+        }
+
+        function renderBenchmarkLogs(job) {
+            const logs = Array.isArray(job?.logs) ? job.logs : [];
+            logWindow.textContent = logs.length ? logs.join("\n") : "等待任务日志...";
+            logWindow.scrollTop = logWindow.scrollHeight;
+        }
+
+        function renderBenchmarkReports(job) {
+            htmlReportLink.href = job?.html_report_available ? `/api/benchmark/real-concurrency/jobs/${job.job_id}/report/html` : "#";
+            jsonReportLink.href = job?.json_report_available ? `/api/benchmark/real-concurrency/jobs/${job.job_id}/report/json` : "#";
+            htmlReportLink.classList.toggle("disabled", !job?.html_report_available);
+            jsonReportLink.classList.toggle("disabled", !job?.json_report_available);
+        }
+
+        function renderBenchmarkSummary(job) {
+            const summaries = Array.isArray(job?.summaries) ? job.summaries : [];
+            const config = job?.config || {};
+            const stageResults = Array.isArray(job?.stage_results) ? job.stage_results : [];
+            const stableStages = stageResults.filter((item) => item.stable);
+            const unstableStages = stageResults.filter((item) => !item.stable);
+            const highestStable = stableStages.length ? Math.max(...stableStages.map((item) => Number(item.concurrency || 0))) : "-";
+            const firstUnstable = unstableStages.length ? Math.min(...unstableStages.map((item) => Number(item.concurrency || 0))) : "-";
+            summaryList.innerHTML = `
+                <article><span>最高稳定并发</span><strong>${escapeHtml(highestStable)}</strong></article>
+                <article><span>首次不稳定并发</span><strong>${escapeHtml(firstUnstable)}</strong></article>
+                <article><span>基准并发</span><strong>${escapeHtml(config.concurrency ?? "-")}</strong></article>
+                <article><span>测试模式</span><strong>${escapeHtml(Array.isArray(config.modes) ? config.modes.join(" / ") : "-")}</strong></article>
+                ${summaries.map((item) => `<article><span>结果总结</span><strong>${escapeHtml(item)}</strong></article>`).join("")}
+            `;
+        }
+
+        function renderBenchmarkStageTable(job) {
+            const rows = Array.isArray(job?.stage_results) ? job.stage_results : [];
+            if (!rows.length) {
+                stageTable.innerHTML = '<div class="playground-provider-list-empty">暂无阶段数据，任务运行后会自动刷新。</div>';
+                return;
+            }
+            stageTable.innerHTML = `
+                <table>
+                    <thead>
+                        <tr>
+                            <th>模式</th>
+                            <th>并发</th>
+                            <th>状态</th>
+                            <th>成功</th>
+                            <th>成功率</th>
+                            <th>RPS</th>
+                            <th>P95(ms)</th>
+                            <th>最大延迟(ms)</th>
+                            <th>首包 P95(ms)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${rows.map((item) => `
+                            <tr>
+                                <td>${escapeHtml(item.mode || "-")}</td>
+                                <td>${escapeHtml(item.concurrency ?? "-")}</td>
+                                <td class="${item.stable ? "benchmark-stage-stable" : "benchmark-stage-unstable"}">${item.stable ? "稳定" : "不稳定"}</td>
+                                <td>${escapeHtml(item.success_requests ?? "-")}/${escapeHtml(item.total_requests ?? "-")}</td>
+                                <td>${escapeHtml(formatMetric(item.success_rate, "%"))}</td>
+                                <td>${escapeHtml(formatMetric(item.throughput_rps))}</td>
+                                <td>${escapeHtml(formatMetric(item.latency_p95_ms))}</td>
+                                <td>${escapeHtml(formatMetric(item.latency_max_ms))}</td>
+                                <td>${escapeHtml(formatMetric(item.first_byte_p95_ms))}</td>
+                            </tr>
+                        `).join("")}
+                    </tbody>
+                </table>
+            `;
+        }
+
+        function renderBenchmarkResult(job) {
+            const hasResult = Boolean(job) && ((Array.isArray(job.stage_results) && job.stage_results.length) || (Array.isArray(job.summaries) && job.summaries.length));
+            resultEmpty.classList.toggle("hidden", hasResult);
+            resultView.classList.toggle("hidden", !hasResult);
+            if (!hasResult) {
+                summaryList.innerHTML = "";
+                stageTable.innerHTML = "";
+                return;
+            }
+            renderBenchmarkSummary(job);
+            renderBenchmarkStageTable(job);
+        }
+
+        function renderBenchmarkJob(job) {
+            if (job?.job_id) currentJobId = job.job_id;
+            renderBenchmarkStatus(job);
+            renderBenchmarkProgress(job);
+            renderBenchmarkLogs(job);
+            renderBenchmarkReports(job);
+            renderBenchmarkResult(job);
+            setBenchmarkPolling(job?.status === "running");
+        }
+
+        async function refreshCurrentJob() {
+            if (!currentJobId) return;
+            try {
+                const job = await api.get(`/api/benchmark/real-concurrency/jobs/${currentJobId}`);
+                renderBenchmarkJob(job);
+            } catch (error) {
+                setBenchmarkPolling(false);
+                showToast(error.message, "error");
+            }
+        }
+
+        async function loadLatestJob() {
+            try {
+                const jobs = await api.get("/api/benchmark/real-concurrency/jobs");
+                if (Array.isArray(jobs) && jobs.length) {
+                    renderBenchmarkJob(jobs[0]);
+                } else {
+                    renderBenchmarkStatus(null);
+                    renderBenchmarkProgress(null);
+                }
+            } catch (error) {
+                showToast(error.message, "error");
+            }
+        }
+
+        form.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            let payload;
+            try {
+                payload = collectBenchmarkPayload();
+                if (!payload.proxy_base_url) throw new Error("请填写项目代理地址");
+            } catch (error) {
+                showToast(error.message, "error");
+                return;
+            }
+            try {
+                setButtonLoading(startBtn, true);
+                logWindow.textContent = "任务启动中...";
+                const job = await api.post("/api/benchmark/real-concurrency/start", payload);
+                renderBenchmarkJob(job);
+                showToast("并发探测已启动");
+            } catch (error) {
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(startBtn, false);
+            }
+        });
+
+        stopBtn.addEventListener("click", async () => {
+            if (!currentJobId) return;
+            try {
+                setButtonLoading(stopBtn, true);
+                const job = await api.post(`/api/benchmark/real-concurrency/jobs/${currentJobId}/stop`, {});
+                renderBenchmarkJob(job);
+                showToast("任务已停止");
+            } catch (error) {
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(stopBtn, false);
+            }
+        });
+
+        pageCleanupHandlers.push(() => setBenchmarkPolling(false));
+        await loadLatestJob();
+    }
+
+    async function initOperationsPage() {
+        const root = document.querySelector(".operations-ring-grid");
+        if (!root) return;
+        const refreshBtn = document.getElementById("operations-refresh-btn");
+        const windowSelect = document.getElementById("operations-window-minutes");
+        let loading = false;
+
+        const setText = (id, value) => {
+            const node = document.getElementById(id);
+            if (node) node.textContent = value;
+        };
+        const percentValue = (value) => Math.max(0, Math.min(100, Number(value) || 0));
+        const setWidth = (id, value) => {
+            const node = document.getElementById(id);
+            if (node) node.style.width = `${percentValue(value)}%`;
+        };
+        const setRing = (id, value) => {
+            const node = document.getElementById(id);
+            if (node) node.style.setProperty("--value", String(percentValue(value)));
+        };
+        const setDot = (id, healthy) => {
+            const node = document.getElementById(id);
+            if (node) node.dataset.tone = healthy ? "ok" : "danger";
+        };
+        const setRingTone = (id, value) => {
+            const card = document.getElementById(id)?.closest(".operations-ring-card");
+            if (!card) return;
+            const normalized = Number(value) || 0;
+            card.dataset.tone = normalized >= 90 ? "danger" : normalized >= 75 ? "warn" : "ok";
+        };
+        const capacityPercent = (current, max) => {
+            const limit = Number(max || 0);
+            if (limit <= 0) return 0;
+            return (Number(current || 0) / limit) * 100;
+        };
+        const renderMiniBar = (label, value, percent, tone = "ok") => `
+            <div class="operations-mini-bar" data-tone="${tone}">
+                <span>${escapeHtml(label)}</span>
+                <strong>${escapeHtml(value)}</strong>
+                <i><b style="width: ${percentValue(percent)}%"></b></i>
+            </div>
+        `;
+
+        function renderProviders(providers) {
+            const body = document.getElementById("operations-provider-table-body");
+            if (!body) return;
+            const rows = Array.isArray(providers) ? providers : [];
+            if (!rows.length) {
+                body.innerHTML = '<tr><td colspan="8"><div class="empty-state">暂无中转站数据</div></td></tr>';
+                return;
+            }
+            body.innerHTML = rows.map((item) => {
+                const requestPercent = capacityPercent(item.active_requests, item.max_active_requests);
+                const streamPercent = capacityPercent(item.active_streams, item.max_active_streams);
+                const qpsPercent = capacityPercent(item.current_qps, item.max_qps);
+                const failureRate = Number(item.failure_rate || 0);
+                const tone = failureRate >= 20 ? "danger" : failureRate >= 5 ? "warn" : "ok";
+                return `
+                    <tr>
+                        <td><strong>${escapeHtml(item.provider_name || "-")}</strong></td>
+                        <td>${providerAvailabilityBadge(item.health_status || "unknown")}</td>
+                        <td>${renderMiniBar(`${formatNumber(item.active_requests || 0)}/${formatNumber(item.max_active_requests || 0)}`, "", requestPercent, requestPercent >= 90 ? "danger" : requestPercent >= 75 ? "warn" : "ok")}</td>
+                        <td>${renderMiniBar(`${formatNumber(item.active_streams || 0)}/${formatNumber(item.max_active_streams || 0)}`, "", streamPercent, streamPercent >= 90 ? "danger" : streamPercent >= 75 ? "warn" : "ok")}</td>
+                        <td>${renderMiniBar(`${Number(item.current_qps || 0).toFixed(2)}/${formatNumber(item.max_qps || 0)}`, "", qpsPercent, qpsPercent >= 90 ? "danger" : qpsPercent >= 75 ? "warn" : "ok")}</td>
+                        <td>${formatNumber(item.total_requests || 0)}</td>
+                        <td><span class="operations-rate" data-tone="${tone}">${formatPercent(failureRate)}</span></td>
+                        <td>${formatLatencyMs(item.avg_first_token_latency_ms)}</td>
+                    </tr>
+                `;
+            }).join("");
+        }
+
+        function renderMetrics(metrics) {
+            const host = metrics.host || {};
+            const process = host.process || {};
+            const memory = host.memory || {};
+            const disk = host.disk || {};
+            const projectDisk = host.project_disk || {};
+            const redis = metrics.redis || {};
+            const runtime = metrics.runtime || {};
+            const traffic = metrics.traffic || {};
+            const background = metrics.background || {};
+            const alerts = Array.isArray(metrics.alerts) ? metrics.alerts : [];
+            const statusLabel = metrics.status === "ready" ? "正常" : "降级";
+            const cpuPercent = host.cpu_percent;
+            const memoryPercent = memory.percent;
+            const processPercent = process.memory_percent;
+            const diskPercent = projectDisk.percent ?? disk.percent;
+            const totalRequests = Number(traffic.total_requests || 0);
+
+            setText("operations-hero-status", statusLabel);
+            setText("operations-hero-active", formatNumber(redis.active_requests || 0));
+            setText("operations-hero-p95", formatLatencyMs(traffic.p95_latency_ms));
+            setText("operations-refresh-label", "5s");
+            setText("operations-ring-cpu-value", formatPercent(cpuPercent));
+            setText("operations-ring-cpu-sub", `${formatNumber(host.cpu_count || 0)} 核`);
+            setText("operations-ring-memory-value", formatPercent(memoryPercent));
+            setText("operations-ring-memory-sub", formatBytes(memory.used_bytes));
+            setText("operations-ring-process-value", formatPercent(processPercent));
+            setText("operations-ring-process-sub", formatBytes(process.memory_rss_bytes));
+            setText("operations-ring-disk-value", formatPercent(diskPercent));
+            setText("operations-ring-disk-sub", formatBytes(projectDisk.used_bytes ?? disk.used_bytes));
+
+            setRing("operations-ring-cpu", cpuPercent);
+            setRing("operations-ring-memory", memoryPercent);
+            setRing("operations-ring-process", processPercent);
+            setRing("operations-ring-disk", diskPercent);
+            setRingTone("operations-ring-cpu", cpuPercent);
+            setRingTone("operations-ring-memory", memoryPercent);
+            setRingTone("operations-ring-process", processPercent);
+            setRingTone("operations-ring-disk", diskPercent);
+
+            setText("operations-total-requests", formatNumber(totalRequests));
+            setText("operations-success-requests", formatNumber(traffic.success_requests || 0));
+            setText("operations-failed-requests", formatNumber(traffic.failed_requests || 0));
+            setText("operations-status-429", formatNumber(traffic.status_429 || 0));
+            setText("operations-status-5xx", formatNumber(traffic.status_5xx || 0));
+            setText("operations-stream-requests", formatNumber(traffic.stream_requests || 0));
+            setText("operations-image-requests", formatNumber(traffic.image_requests || 0));
+            setText("operations-backlog", formatNumber(background.pending_finalize_logs || 0));
+            setWidth("operations-total-bar", totalRequests ? 100 : 0);
+            setWidth("operations-success-bar", totalRequests ? (Number(traffic.success_requests || 0) / totalRequests) * 100 : 0);
+            setWidth("operations-failed-bar", traffic.failure_rate || 0);
+            setWidth("operations-429-bar", traffic.status_429_rate || 0);
+            setWidth("operations-5xx-bar", traffic.status_5xx_rate || 0);
+            setWidth("operations-stream-bar", totalRequests ? (Number(traffic.stream_requests || 0) / totalRequests) * 100 : 0);
+            setWidth("operations-image-bar", totalRequests ? (Number(traffic.image_requests || 0) / totalRequests) * 100 : 0);
+            setWidth("operations-backlog-bar", Math.min(100, (Number(background.pending_finalize_logs || 0) / 1000) * 100));
+
+            setText("operations-active-requests", formatNumber(redis.active_requests || 0));
+            setText("operations-active-streams", formatNumber(redis.active_streams || 0));
+            setText("operations-worker-active", formatNumber(runtime.worker_active_requests || 0));
+            setDot("operations-redis-dot", redis.ok);
+            setDot("operations-latency-dot", Number(traffic.status_5xx_rate || 0) < 1 && Number(traffic.failure_rate || 0) < 5);
+            setText("operations-p50-latency", formatLatencyMs(traffic.p50_latency_ms));
+            setText("operations-p95-latency", formatLatencyMs(traffic.p95_latency_ms));
+            setText("operations-p99-latency", formatLatencyMs(traffic.p99_latency_ms));
+            setText("operations-ttfb", formatLatencyMs(traffic.avg_first_token_latency_ms));
+
+            const concurrencyBars = document.getElementById("operations-concurrency-bars");
+            if (concurrencyBars) {
+                concurrencyBars.innerHTML = [
+                    renderMiniBar("活跃", formatNumber(redis.active_requests || 0), Math.min(100, (Number(redis.active_requests || 0) / 900) * 100)),
+                    renderMiniBar("流式", formatNumber(redis.active_streams || 0), Math.min(100, (Number(redis.active_streams || 0) / 300) * 100)),
+                    renderMiniBar("租约", formatNumber(redis.token_finalize_backlog || 0), Math.min(100, (Number(redis.token_finalize_backlog || 0) / 1000) * 100), Number(redis.token_finalize_backlog || 0) >= 1000 ? "warn" : "ok"),
+                ].join("");
+            }
+            const latencyBars = document.getElementById("operations-latency-bars");
+            if (latencyBars) {
+                latencyBars.innerHTML = [
+                    renderMiniBar("失败率", formatPercent(traffic.failure_rate || 0), traffic.failure_rate || 0, Number(traffic.failure_rate || 0) >= 5 ? "danger" : "ok"),
+                    renderMiniBar("429", formatPercent(traffic.status_429_rate || 0), traffic.status_429_rate || 0, Number(traffic.status_429_rate || 0) >= 5 ? "warn" : "ok"),
+                    renderMiniBar("告警", formatNumber(alerts.length), Math.min(100, alerts.length * 20), alerts.length ? "warn" : "ok"),
+                ].join("");
+            }
+            renderProviders(metrics.providers || []);
+        }
+
+        async function loadOperationsMetrics(manual = false) {
+            if (loading) return;
+            loading = true;
+            try {
+                setButtonLoading(refreshBtn, manual);
+                const windowMinutes = Number(windowSelect?.value || 5);
+                const metrics = await api.get(`/api/metrics/system?window_minutes=${encodeURIComponent(windowMinutes)}&refresh_alerts=true`);
+                renderMetrics(metrics);
+                if (manual) {
+                    setButtonTransientFeedback(refreshBtn, "success", { successText: "已刷新" });
+                    showToast("运维监控已刷新");
+                }
+            } catch (error) {
+                if (manual) {
+                    setButtonTransientFeedback(refreshBtn, "error", { errorText: "失败" });
+                    showToast(error.message, "error");
+                }
+            } finally {
+                loading = false;
+                setButtonLoading(refreshBtn, false);
+            }
+        }
+
+        refreshBtn?.addEventListener("click", () => loadOperationsMetrics(true));
+        windowSelect?.addEventListener("change", () => loadOperationsMetrics(true));
+        await loadOperationsMetrics(false);
+        const timer = window.setInterval(() => loadOperationsMetrics(false), 5000);
+        registerPageCleanup(() => window.clearInterval(timer));
+    }
+
     async function initializePage() {
         try {
             runPageCleanup();
@@ -10081,6 +10583,8 @@
             if (page === "models") await initModels();
             if (page === "settings") await initSettings();
             if (page === "playground") await initPlayground();
+            if (page === "benchmark") await initBenchmark();
+            if (page === "operations") await initOperationsPage();
             if (page === "users") await initUsersPage();
             if (page === "alerts") await initAlertsPage();
             if (page === "user-home") await initUserHome();

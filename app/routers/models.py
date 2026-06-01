@@ -103,6 +103,19 @@ def batch_update_model_context_window(
     ]
 
 
+@router.post("/api/models/test-all", dependencies=[Depends(require_admin_api_user)])
+async def test_all_model_health(db: Session = Depends(get_db)) -> list[dict]:
+    return await ModelCatalogService.test_all_model_health(db)
+
+
+@router.post("/api/models/{model_name}/test", dependencies=[Depends(require_admin_api_user)])
+async def test_model_health(model_name: str, db: Session = Depends(get_db)) -> dict:
+    try:
+        return await ModelCatalogService.test_model_health(db, model_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.get("/api/models/{model_name}", response_model=ModelCatalogDetailOut, dependencies=[Depends(require_admin_api_user)])
 def get_model_detail(model_name: str, db: Session = Depends(get_db)) -> ModelCatalogDetailOut:
     detail = ModelCatalogService.get_model_detail(db, model_name)

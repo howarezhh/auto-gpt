@@ -1,0 +1,158 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero-panel hero-panel-compact operations-hero">
+    <div class="operations-hero-title">
+        <div class="eyebrow">运维监控</div>
+        <h2>实时运行大盘</h2>
+    </div>
+    <div class="operations-hero-metrics">
+        <article class="operations-hero-chip">
+            <span>状态</span>
+            <strong id="operations-hero-status">-</strong>
+        </article>
+        <article class="operations-hero-chip">
+            <span>并发</span>
+            <strong id="operations-hero-active">-</strong>
+        </article>
+        <article class="operations-hero-chip">
+            <span>P95</span>
+            <strong id="operations-hero-p95">-</strong>
+        </article>
+        <article class="operations-hero-chip">
+            <span>刷新</span>
+            <strong id="operations-refresh-label">5s</strong>
+        </article>
+    </div>
+    <div class="operations-hero-actions">
+        <select class="field-input monitor-window-select" id="operations-window-minutes" aria-label="统计窗口">
+            <option value="5" selected>5 分钟</option>
+            <option value="15">15 分钟</option>
+            <option value="60">1 小时</option>
+            <option value="1440">1 天</option>
+        </select>
+        <button class="btn btn-accent interactive-btn" id="operations-refresh-btn" type="button">刷新</button>
+    </div>
+</section>
+
+<section class="operations-ring-grid" aria-label="资源占用">
+    <article class="operations-ring-card" data-tone="ok">
+        <div class="operations-ring" id="operations-ring-cpu" style="--value: 0">
+            <span id="operations-ring-cpu-value">-</span>
+        </div>
+        <div class="operations-ring-meta">
+            <strong>CPU</strong>
+            <span id="operations-ring-cpu-sub">-</span>
+        </div>
+    </article>
+    <article class="operations-ring-card" data-tone="ok">
+        <div class="operations-ring" id="operations-ring-memory" style="--value: 0">
+            <span id="operations-ring-memory-value">-</span>
+        </div>
+        <div class="operations-ring-meta">
+            <strong>内存</strong>
+            <span id="operations-ring-memory-sub">-</span>
+        </div>
+    </article>
+    <article class="operations-ring-card" data-tone="ok">
+        <div class="operations-ring" id="operations-ring-process" style="--value: 0">
+            <span id="operations-ring-process-value">-</span>
+        </div>
+        <div class="operations-ring-meta">
+            <strong>进程</strong>
+            <span id="operations-ring-process-sub">-</span>
+        </div>
+    </article>
+    <article class="operations-ring-card" data-tone="ok">
+        <div class="operations-ring" id="operations-ring-disk" style="--value: 0">
+            <span id="operations-ring-disk-value">-</span>
+        </div>
+        <div class="operations-ring-meta">
+            <strong>项目目录</strong>
+            <span id="operations-ring-disk-sub">-</span>
+        </div>
+    </article>
+</section>
+
+<section class="operations-metric-grid" aria-label="请求指标">
+    <article class="operations-metric-tile"><span>请求</span><strong id="operations-total-requests">-</strong><div class="operations-bar"><span id="operations-total-bar"></span></div></article>
+    <article class="operations-metric-tile"><span>成功</span><strong id="operations-success-requests">-</strong><div class="operations-bar"><span id="operations-success-bar"></span></div></article>
+    <article class="operations-metric-tile"><span>失败</span><strong id="operations-failed-requests">-</strong><div class="operations-bar"><span id="operations-failed-bar"></span></div></article>
+    <article class="operations-metric-tile"><span>429</span><strong id="operations-status-429">-</strong><div class="operations-bar"><span id="operations-429-bar"></span></div></article>
+    <article class="operations-metric-tile"><span>5xx</span><strong id="operations-status-5xx">-</strong><div class="operations-bar"><span id="operations-5xx-bar"></span></div></article>
+    <article class="operations-metric-tile"><span>流式</span><strong id="operations-stream-requests">-</strong><div class="operations-bar"><span id="operations-stream-bar"></span></div></article>
+    <article class="operations-metric-tile"><span>图片</span><strong id="operations-image-requests">-</strong><div class="operations-bar"><span id="operations-image-bar"></span></div></article>
+    <article class="operations-metric-tile"><span>积压</span><strong id="operations-backlog">-</strong><div class="operations-bar"><span id="operations-backlog-bar"></span></div></article>
+</section>
+
+<section class="operations-board-grid">
+    <article class="panel-card operations-visual-card">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">并发</div>
+                <h3>全局租约</h3>
+            </div>
+            <span class="operations-status-dot" id="operations-redis-dot"></span>
+        </div>
+        <div class="operations-gauge-row">
+            <div class="operations-gauge">
+                <strong id="operations-active-requests">-</strong>
+                <span>请求</span>
+            </div>
+            <div class="operations-gauge">
+                <strong id="operations-active-streams">-</strong>
+                <span>流式</span>
+            </div>
+            <div class="operations-gauge">
+                <strong id="operations-worker-active">-</strong>
+                <span>Worker</span>
+            </div>
+        </div>
+        <div class="operations-bars" id="operations-concurrency-bars"></div>
+    </article>
+
+    <article class="panel-card operations-visual-card">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">延迟</div>
+                <h3>响应质量</h3>
+            </div>
+            <span class="operations-status-dot" id="operations-latency-dot"></span>
+        </div>
+        <div class="operations-latency-grid">
+            <div><span>P50</span><strong id="operations-p50-latency">-</strong></div>
+            <div><span>P95</span><strong id="operations-p95-latency">-</strong></div>
+            <div><span>P99</span><strong id="operations-p99-latency">-</strong></div>
+            <div><span>TTFB</span><strong id="operations-ttfb">-</strong></div>
+        </div>
+        <div class="operations-bars" id="operations-latency-bars"></div>
+    </article>
+</section>
+
+<section class="panel-card section-shell operations-provider-panel">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">Provider</div>
+            <h3>容量矩阵</h3>
+        </div>
+    </div>
+    <div class="table-shell">
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>中转站</th>
+                    <th>整体可用性</th>
+                    <th>请求</th>
+                    <th>流式</th>
+                    <th>QPS</th>
+                    <th>窗口</th>
+                    <th>失败率</th>
+                    <th>首包</th>
+                </tr>
+            </thead>
+            <tbody id="operations-provider-table-body">
+                <tr><td colspan="8"><div class="empty-state">加载中...</div></td></tr>
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

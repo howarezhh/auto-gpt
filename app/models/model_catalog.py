@@ -23,6 +23,8 @@ class ModelCatalog(Base):
     context_window_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pricing_mode: Mapped[str] = mapped_column(Text, nullable=False, default="fixed")
+    pricing_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     input_price_per_1k: Mapped[Decimal | None] = mapped_column(Numeric(DB_PRICE_PRECISION, DB_PRICE_SCALE), nullable=True)
     output_price_per_1k: Mapped[Decimal | None] = mapped_column(Numeric(DB_PRICE_PRECISION, DB_PRICE_SCALE), nullable=True)
     cache_price_per_1k: Mapped[Decimal | None] = mapped_column(Numeric(DB_PRICE_PRECISION, DB_PRICE_SCALE), nullable=True)

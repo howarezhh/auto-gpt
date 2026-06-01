@@ -18,6 +18,7 @@ from app.models.request_log import RequestLog
 from app.routers.auth import router as auth_router
 from app.routers.api_keys import router as api_keys_router
 from app.routers.api_key_policy_templates import router as api_key_policy_templates_router
+from app.routers.benchmark import router as benchmark_router
 from app.routers.playground_api import router as playground_api_router
 from app.routers.dashboard import router as dashboard_router
 from app.routers.conversations import router as conversations_router
@@ -186,10 +187,14 @@ def _migrate_cache_price_columns(db) -> None:
             "context_window_tokens": "ALTER TABLE model_catalogs ADD COLUMN context_window_tokens INTEGER",
             "max_input_tokens": "ALTER TABLE model_catalogs ADD COLUMN max_input_tokens INTEGER",
             "max_output_tokens": "ALTER TABLE model_catalogs ADD COLUMN max_output_tokens INTEGER",
+            "pricing_mode": "ALTER TABLE model_catalogs ADD COLUMN pricing_mode TEXT NOT NULL DEFAULT 'fixed'",
+            "pricing_json": "ALTER TABLE model_catalogs ADD COLUMN pricing_json TEXT",
         },
         "request_logs": {
             "channel_price_cache_per_1k": f"ALTER TABLE request_logs ADD COLUMN channel_price_cache_per_1k {price_type}",
             "model_reasoning_effort": "ALTER TABLE request_logs ADD COLUMN model_reasoning_effort TEXT",
+            "pricing_tier_key": "ALTER TABLE request_logs ADD COLUMN pricing_tier_key TEXT",
+            "pricing_tier_name": "ALTER TABLE request_logs ADD COLUMN pricing_tier_name TEXT",
         },
     }
     changed = False
@@ -265,6 +270,8 @@ def _migrate_request_log_columns(db) -> None:
         "billing_event_id": "ALTER TABLE request_logs ADD COLUMN billing_event_id TEXT",
         "billing_attempt_count": "ALTER TABLE request_logs ADD COLUMN billing_attempt_count INTEGER NOT NULL DEFAULT 0",
         "billing_error": "ALTER TABLE request_logs ADD COLUMN billing_error TEXT",
+        "pricing_tier_key": "ALTER TABLE request_logs ADD COLUMN pricing_tier_key TEXT",
+        "pricing_tier_name": "ALTER TABLE request_logs ADD COLUMN pricing_tier_name TEXT",
         "token_finalize_attempt_count": "ALTER TABLE request_logs ADD COLUMN token_finalize_attempt_count INTEGER NOT NULL DEFAULT 0",
         "token_finalize_error": "ALTER TABLE request_logs ADD COLUMN token_finalize_error TEXT",
         "billing_multiplier": f"ALTER TABLE request_logs ADD COLUMN billing_multiplier {multiplier_type}",
@@ -344,6 +351,8 @@ def _migrate_request_log_columns(db) -> None:
         "supports_responses": "ALTER TABLE model_catalogs ADD COLUMN supports_responses BOOLEAN NOT NULL DEFAULT 1",
         "max_input_tokens": "ALTER TABLE model_catalogs ADD COLUMN max_input_tokens INTEGER",
         "max_output_tokens": "ALTER TABLE model_catalogs ADD COLUMN max_output_tokens INTEGER",
+        "pricing_mode": "ALTER TABLE model_catalogs ADD COLUMN pricing_mode TEXT NOT NULL DEFAULT 'fixed'",
+        "pricing_json": "ALTER TABLE model_catalogs ADD COLUMN pricing_json TEXT",
     }
     changed_model_catalogs = False
     for column, ddl in model_catalog_additions.items():
@@ -1116,4 +1125,5 @@ app.include_router(settings_router, dependencies=[Depends(require_admin_api_user
 app.include_router(logs_router, dependencies=[Depends(require_admin_api_user)])
 app.include_router(metrics_router, dependencies=[Depends(require_admin_api_user)])
 app.include_router(playground_api_router, dependencies=[Depends(require_admin_api_user)])
+app.include_router(benchmark_router, dependencies=[Depends(require_admin_api_user)])
 app.include_router(proxy_router)

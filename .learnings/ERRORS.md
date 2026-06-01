@@ -28,6 +28,36 @@ Start Docker Desktop Linux Engine before running compose verification, or verify
 - Related Files: docker-compose.postgres.yml
 
 ---
+
+## [ERR-20260601-001] powershell_quoted_range_and_pipe_patterns
+
+**Logged**: 2026-06-01T22:04:53+08:00
+**Priority**: low
+**Status**: pending
+**Area**: infra
+
+### Summary
+PowerShell commands passed through `pwsh -Command` can misparse regex pipe patterns and range expressions when quoting is not explicit enough.
+
+### Error
+```text
+project_disk: The term 'project_disk' is not recognized as a name of a cmdlet...
+Select-Object: Cannot bind parameter 'Index'. Cannot convert value "35..65" to type "System.Int32".
+```
+
+### Context
+- Command attempted: `rg -n "PROJECT_DISK_CACHE_SECONDS|project_disk|..." ...`
+- Command attempted: `Get-Content ... | Select-Object -Index 35..65`
+- Environment: Windows workspace using PowerShell 7 via `pwsh`.
+
+### Suggested Fix
+Use single-quoted regex patterns inside the PowerShell command string, or prefer `rg -C` for context. For `Select-Object -Index`, ensure the range is evaluated by PowerShell rather than passed as a string.
+
+### Metadata
+- Reproducible: yes
+- Related Files: none
+
+---
 ## [ERR-20260531-001] powershell_nested_regex_escaping
 
 **Logged**: 2026-05-31T14:45:00+08:00

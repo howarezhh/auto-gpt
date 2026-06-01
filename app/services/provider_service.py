@@ -24,6 +24,7 @@ from app.schemas.provider import (
 )
 from app.services.cache_service import CacheService
 from app.services.log_service import LogService
+from app.services.model_pricing_service import ModelPricingService
 from app.services.provider_capacity_service import (
     ProviderCapacityService,
     ProviderCapacitySnapshot,
@@ -31,7 +32,7 @@ from app.services.provider_capacity_service import (
 )
 from app.services.setting_service import SettingService
 from app.services.upstream_client import UpstreamClientService
-from app.utils.decimal_utils import multiply_price_and_multiplier, to_multiplier_decimal
+from app.utils.decimal_utils import to_multiplier_decimal
 from app.utils.json_utils import dumps_json, loads_json
 
 
@@ -797,9 +798,13 @@ class ProviderService:
         for config in model_configs:
             if config.model_name in catalogs_by_name:
                 continue
-            cache_price = config.cache_price_per_1k
-            if cache_price is None:
-                cache_price = config.input_price_per_1k
+            normalized_pricing = ModelPricingService.normalize_catalog_pricing(
+                pricing_mode=None,
+                pricing_json=None,
+                input_price_per_1k=config.input_price_per_1k,
+                output_price_per_1k=config.output_price_per_1k,
+                cache_price_per_1k=config.cache_price_per_1k,
+            )
             catalog = ModelCatalog(
                 model_name=config.model_name,
                 display_name=None,
@@ -812,9 +817,11 @@ class ProviderService:
                 context_window_tokens=config.context_window_tokens,
                 max_input_tokens=config.max_input_tokens,
                 max_output_tokens=config.max_output_tokens,
-                input_price_per_1k=config.input_price_per_1k,
-                output_price_per_1k=config.output_price_per_1k,
-                cache_price_per_1k=cache_price,
+                pricing_mode=normalized_pricing["pricing_mode"],
+                pricing_json=ModelPricingService.pricing_json_to_db_value(normalized_pricing["pricing_json"]),
+                input_price_per_1k=normalized_pricing["input_price_per_1k"],
+                output_price_per_1k=normalized_pricing["output_price_per_1k"],
+                cache_price_per_1k=normalized_pricing["cache_price_per_1k"],
             )
             db.add(catalog)
             db.flush()
@@ -838,21 +845,17 @@ class ProviderService:
         provider_model.context_window_tokens = catalog.context_window_tokens
         provider_model.max_input_tokens = catalog.max_input_tokens
         provider_model.max_output_tokens = catalog.max_output_tokens
-        if catalog.input_price_per_1k is not None:
-            provider_model.input_price_per_1k = multiply_price_and_multiplier(catalog.input_price_per_1k, provider_model.price_multiplier)
-        else:
-            provider_model.input_price_per_1k = None
-        if catalog.output_price_per_1k is not None:
-            provider_model.output_price_per_1k = multiply_price_and_multiplier(catalog.output_price_per_1k, provider_model.price_multiplier)
-        else:
-            provider_model.output_price_per_1k = None
-        catalog_cache_price = catalog.cache_price_per_1k
-        if catalog_cache_price is None:
-            catalog_cache_price = catalog.input_price_per_1k
-        if catalog_cache_price is not None:
-            provider_model.cache_price_per_1k = multiply_price_and_multiplier(catalog_cache_price, provider_model.price_multiplier)
-        else:
-            provider_model.cache_price_per_1k = None
+        resolved_prices = ModelPricingService.resolve_catalog_prices_for_provider(
+            pricing_mode=catalog.pricing_mode,
+            pricing_json=catalog.pricing_json,
+            input_price_per_1k=catalog.input_price_per_1k,
+            output_price_per_1k=catalog.output_price_per_1k,
+            cache_price_per_1k=catalog.cache_price_per_1k,
+            price_multiplier=provider_model.price_multiplier,
+        )
+        provider_model.input_price_per_1k = resolved_prices["input_price_per_1k"]
+        provider_model.output_price_per_1k = resolved_prices["output_price_per_1k"]
+        provider_model.cache_price_per_1k = resolved_prices["cache_price_per_1k"]
 
     @staticmethod
     def _sync_models_json(provider: Provider) -> None:

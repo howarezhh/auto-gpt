@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
@@ -14,6 +16,8 @@ from app.models.provider_model import ProviderModel
 from app.models.user_account import UserAccount
 from app.schemas.model_catalog import ModelCatalogCreate, ModelCatalogUpdate, ModelProviderBindingIn
 from app.services.cache_service import CacheService
+from app.services.health_service import HealthService
+from app.services.model_pricing_service import ModelPricingService
 from app.services.provider_service import ProviderService
 from app.utils.decimal_utils import (
     MULTIPLIER_QUANT,
@@ -29,6 +33,8 @@ from app.utils.json_utils import dumps_json, loads_json
 
 class ModelCatalogService:
     """负责模型目录管理、provider 绑定和目录同步。"""
+
+    MODEL_HEALTH_MAX_PARALLEL_MODELS = 6
 
     @staticmethod
     def _catalog_supports_tools(catalog: ModelCatalog) -> bool:
@@ -122,6 +128,13 @@ class ModelCatalogService:
         """创建模型目录项并同步 provider 绑定。"""
         if ModelCatalogService.get_catalog(db, payload.model_name) is not None:
             raise ValueError("模型已存在")
+        normalized_pricing = ModelPricingService.normalize_catalog_pricing(
+            pricing_mode=payload.pricing_mode,
+            pricing_json=payload.pricing_json,
+            input_price_per_1k=payload.input_price_per_1k,
+            output_price_per_1k=payload.output_price_per_1k,
+            cache_price_per_1k=payload.cache_price_per_1k,
+        )
         catalog = ModelCatalog(
             model_name=payload.model_name,
             display_name=payload.display_name,
@@ -134,13 +147,11 @@ class ModelCatalogService:
             context_window_tokens=payload.context_window_tokens,
             max_input_tokens=payload.max_input_tokens,
             max_output_tokens=payload.max_output_tokens,
-            input_price_per_1k=payload.input_price_per_1k,
-            output_price_per_1k=payload.output_price_per_1k,
-            cache_price_per_1k=(
-                payload.cache_price_per_1k
-                if payload.cache_price_per_1k is not None
-                else payload.input_price_per_1k
-            ),
+            pricing_mode=normalized_pricing["pricing_mode"],
+            pricing_json=ModelPricingService.pricing_json_to_db_value(normalized_pricing["pricing_json"]),
+            input_price_per_1k=normalized_pricing["input_price_per_1k"],
+            output_price_per_1k=normalized_pricing["output_price_per_1k"],
+            cache_price_per_1k=normalized_pricing["cache_price_per_1k"],
             speed_label=payload.speed_label,
             remark=payload.remark,
         )
@@ -157,11 +168,29 @@ class ModelCatalogService:
         """更新模型目录项，并联动同步价格、能力和绑定关系。"""
         data = payload.model_dump(exclude_unset=True, exclude={"provider_bindings"})
         provider_bindings = payload.provider_bindings if "provider_bindings" in payload.model_fields_set else None
-        if "cache_price_per_1k" in data and data["cache_price_per_1k"] is None:
-            data["cache_price_per_1k"] = data.get("input_price_per_1k", catalog.input_price_per_1k)
+        pricing_field_names = {
+            "pricing_mode",
+            "pricing_json",
+            "input_price_per_1k",
+            "output_price_per_1k",
+            "cache_price_per_1k",
+        }
+        if pricing_field_names & set(data):
+            normalized_pricing = ModelPricingService.normalize_catalog_pricing(
+                pricing_mode=data.get("pricing_mode", catalog.pricing_mode),
+                pricing_json=data.get("pricing_json", ModelPricingService.parse_pricing_json(catalog.pricing_json)),
+                input_price_per_1k=data.get("input_price_per_1k", catalog.input_price_per_1k),
+                output_price_per_1k=data.get("output_price_per_1k", catalog.output_price_per_1k),
+                cache_price_per_1k=data.get("cache_price_per_1k", catalog.cache_price_per_1k),
+            )
+            data["pricing_mode"] = normalized_pricing["pricing_mode"]
+            data["pricing_json"] = ModelPricingService.pricing_json_to_db_value(normalized_pricing["pricing_json"])
+            data["input_price_per_1k"] = normalized_pricing["input_price_per_1k"]
+            data["output_price_per_1k"] = normalized_pricing["output_price_per_1k"]
+            data["cache_price_per_1k"] = normalized_pricing["cache_price_per_1k"]
         for field, value in data.items():
             setattr(catalog, field, value)
-        changed_price_fields = set(data) & {"input_price_per_1k", "output_price_per_1k", "cache_price_per_1k"}
+        changed_price_fields = set(data) & pricing_field_names
         if changed_price_fields:
             ModelCatalogService._sync_provider_prices_from_catalog(db, catalog, price_fields=changed_price_fields)
         if {
@@ -214,6 +243,42 @@ class ModelCatalogService:
         return catalogs
 
     @staticmethod
+    async def test_model_health(db: Session, model_name: str) -> dict[str, Any]:
+        """并行测试单个目录模型在所有绑定渠道上的可用性。"""
+        catalogs, providers = ModelCatalogService._load_catalogs_and_providers(db)
+        catalog = next((item for item in catalogs if item.model_name == model_name), None)
+        if catalog is None:
+            raise ValueError("模型不存在")
+        raw_result = await ModelCatalogService._probe_catalog_health(catalog, providers)
+        return ModelCatalogService._finalize_catalog_health_test(
+            db,
+            raw_result,
+            request_path="/model-catalog-test",
+        )
+
+    @staticmethod
+    async def test_all_model_health(db: Session) -> list[dict[str, Any]]:
+        """并行测试全部目录模型；模型之间并行，单模型渠道之间也并行。"""
+        catalogs, providers = ModelCatalogService._load_catalogs_and_providers(db)
+        if not catalogs:
+            return []
+        model_semaphore = asyncio.Semaphore(ModelCatalogService.MODEL_HEALTH_MAX_PARALLEL_MODELS)
+
+        async def run_catalog(catalog: ModelCatalog) -> dict[str, Any]:
+            async with model_semaphore:
+                return await ModelCatalogService._probe_catalog_health(catalog, providers)
+
+        raw_results = await asyncio.gather(*(run_catalog(catalog) for catalog in catalogs))
+        return [
+            ModelCatalogService._finalize_catalog_health_test(
+                db,
+                raw_result,
+                request_path="/model-catalog-test-all",
+            )
+            for raw_result in raw_results
+        ]
+
+    @staticmethod
     def delete_model(db: Session, catalog: ModelCatalog) -> None:
         """删除模型目录项，并清理 provider 绑定和授权范围。"""
         model_name = catalog.model_name
@@ -261,6 +326,8 @@ class ModelCatalogService:
                     context_window_tokens=ModelCatalogService._pick_max_int(items, field_name="context_window_tokens"),
                     max_input_tokens=ModelCatalogService._pick_max_int(items, field_name="max_input_tokens"),
                     max_output_tokens=ModelCatalogService._pick_max_int(items, field_name="max_output_tokens"),
+                    pricing_mode=ModelPricingService.PRICING_MODE_FIXED,
+                    pricing_json=None,
                     input_price_per_1k=ModelCatalogService._pick_base_price(items, field_name="input_price_per_1k"),
                     output_price_per_1k=ModelCatalogService._pick_base_price(items, field_name="output_price_per_1k"),
                     cache_price_per_1k=ModelCatalogService._pick_base_price(items, field_name="cache_price_per_1k"),
@@ -368,6 +435,8 @@ class ModelCatalogService:
                     "context_window_tokens": catalog.context_window_tokens,
                     "max_input_tokens": catalog.max_input_tokens,
                     "max_output_tokens": catalog.max_output_tokens,
+                    "pricing_mode": catalog.pricing_mode,
+                    "pricing_json": ModelPricingService.serialize_pricing_json(catalog.pricing_json),
                     "input_price_per_1k": min(filtered_input_prices) if filtered_input_prices else catalog.input_price_per_1k,
                     "output_price_per_1k": min(filtered_output_prices) if filtered_output_prices else catalog.output_price_per_1k,
                     "cache_price_per_1k": (
@@ -443,6 +512,7 @@ class ModelCatalogService:
 
     @staticmethod
     def _serialize_catalog(catalog: ModelCatalog, providers: list[Provider], *, include_all_providers: bool = False) -> dict:
+        serialized_pricing_json = ModelPricingService.serialize_pricing_json(catalog.pricing_json)
         provider_model_map = {
             provider.id: next((item for item in provider.provider_models if item.model_name == catalog.model_name), None)
             for provider in providers
@@ -500,6 +570,7 @@ class ModelCatalogService:
             item for item in active_bindings if ModelCatalogService._is_binding_available_for_catalog_display(item)
         ]
         enabled_bindings = [item for item in active_bindings if ModelCatalogService._is_binding_routable(item)]
+        health_status = "healthy" if enabled_bindings else "unhealthy"
         input_prices = [item["effective_input_price_per_1k"] for item in enabled_bindings if item["effective_input_price_per_1k"] is not None]
         output_prices = [item["effective_output_price_per_1k"] for item in enabled_bindings if item["effective_output_price_per_1k"] is not None]
         cache_prices = [item["effective_cache_price_per_1k"] for item in enabled_bindings if item["effective_cache_price_per_1k"] is not None]
@@ -521,6 +592,8 @@ class ModelCatalogService:
             "context_window_tokens": catalog.context_window_tokens,
             "max_input_tokens": catalog.max_input_tokens,
             "max_output_tokens": catalog.max_output_tokens,
+            "pricing_mode": catalog.pricing_mode,
+            "pricing_json": serialized_pricing_json,
             "input_price_per_1k": catalog.input_price_per_1k,
             "output_price_per_1k": catalog.output_price_per_1k,
             "cache_price_per_1k": catalog.cache_price_per_1k,
@@ -530,6 +603,9 @@ class ModelCatalogService:
             "bound_provider_count": len(active_bindings),
             "available_provider_count": len(available_bindings),
             "enabled_provider_count": len(enabled_bindings),
+            "health_status": health_status,
+            "healthy_provider_count": len(enabled_bindings),
+            "unhealthy_provider_count": max(0, len(active_bindings) - len(enabled_bindings)),
             "lowest_input_price_per_1k": min(input_prices) if input_prices else catalog.input_price_per_1k,
             "lowest_output_price_per_1k": min(output_prices) if output_prices else catalog.output_price_per_1k,
             "lowest_cache_price_per_1k": (
@@ -599,14 +675,17 @@ class ModelCatalogService:
             provider_model.priority = binding.priority
             provider_model.weight = binding.weight
             provider_model.price_multiplier = to_multiplier_decimal(binding.price_multiplier)
-            if catalog.input_price_per_1k is not None:
-                provider_model.input_price_per_1k = multiply_price_and_multiplier(catalog.input_price_per_1k, provider_model.price_multiplier)
-            if catalog.output_price_per_1k is not None:
-                provider_model.output_price_per_1k = multiply_price_and_multiplier(catalog.output_price_per_1k, provider_model.price_multiplier)
-            if catalog.cache_price_per_1k is not None:
-                provider_model.cache_price_per_1k = multiply_price_and_multiplier(catalog.cache_price_per_1k, provider_model.price_multiplier)
-            elif catalog.input_price_per_1k is not None:
-                provider_model.cache_price_per_1k = multiply_price_and_multiplier(catalog.input_price_per_1k, provider_model.price_multiplier)
+            resolved_prices = ModelPricingService.resolve_catalog_prices_for_provider(
+                pricing_mode=catalog.pricing_mode,
+                pricing_json=catalog.pricing_json,
+                input_price_per_1k=catalog.input_price_per_1k,
+                output_price_per_1k=catalog.output_price_per_1k,
+                cache_price_per_1k=catalog.cache_price_per_1k,
+                price_multiplier=provider_model.price_multiplier,
+            )
+            provider_model.input_price_per_1k = resolved_prices["input_price_per_1k"]
+            provider_model.output_price_per_1k = resolved_prices["output_price_per_1k"]
+            provider_model.cache_price_per_1k = resolved_prices["cache_price_per_1k"]
             ProviderService.refresh_provider_state(provider)
 
         for provider in providers:
@@ -620,7 +699,6 @@ class ModelCatalogService:
 
     @staticmethod
     def _sync_provider_prices_from_catalog(db: Session, catalog: ModelCatalog, *, price_fields: set[str] | None = None) -> None:
-        fields = price_fields or {"input_price_per_1k", "output_price_per_1k", "cache_price_per_1k"}
         provider_models = list(
             db.scalars(
                 select(ProviderModel)
@@ -628,24 +706,17 @@ class ModelCatalogService:
             )
         )
         for provider_model in provider_models:
-            if "input_price_per_1k" in fields:
-                if catalog.input_price_per_1k is not None:
-                    provider_model.input_price_per_1k = multiply_price_and_multiplier(catalog.input_price_per_1k, provider_model.price_multiplier)
-                else:
-                    provider_model.input_price_per_1k = None
-            if "output_price_per_1k" in fields:
-                if catalog.output_price_per_1k is not None:
-                    provider_model.output_price_per_1k = multiply_price_and_multiplier(catalog.output_price_per_1k, provider_model.price_multiplier)
-                else:
-                    provider_model.output_price_per_1k = None
-            if "cache_price_per_1k" in fields:
-                source_cache_price = catalog.cache_price_per_1k
-                if source_cache_price is None:
-                    source_cache_price = catalog.input_price_per_1k
-                if source_cache_price is not None:
-                    provider_model.cache_price_per_1k = multiply_price_and_multiplier(source_cache_price, provider_model.price_multiplier)
-                else:
-                    provider_model.cache_price_per_1k = None
+            resolved_prices = ModelPricingService.resolve_catalog_prices_for_provider(
+                pricing_mode=catalog.pricing_mode,
+                pricing_json=catalog.pricing_json,
+                input_price_per_1k=catalog.input_price_per_1k,
+                output_price_per_1k=catalog.output_price_per_1k,
+                cache_price_per_1k=catalog.cache_price_per_1k,
+                price_multiplier=provider_model.price_multiplier,
+            )
+            provider_model.input_price_per_1k = resolved_prices["input_price_per_1k"]
+            provider_model.output_price_per_1k = resolved_prices["output_price_per_1k"]
+            provider_model.cache_price_per_1k = resolved_prices["cache_price_per_1k"]
 
     @staticmethod
     def _sync_provider_model_shared_fields(provider_model: ProviderModel, catalog: ModelCatalog) -> bool:
@@ -669,22 +740,131 @@ class ModelCatalogService:
             if getattr(provider_model, field) != getattr(catalog, field):
                 setattr(provider_model, field, getattr(catalog, field))
                 changed = True
-        expected_input = multiply_price_and_multiplier(catalog.input_price_per_1k, provider_model.price_multiplier)
-        expected_output = multiply_price_and_multiplier(catalog.output_price_per_1k, provider_model.price_multiplier)
-        catalog_cache_price = catalog.cache_price_per_1k
-        if catalog_cache_price is None:
-            catalog_cache_price = catalog.input_price_per_1k
-        expected_cache = multiply_price_and_multiplier(catalog_cache_price, provider_model.price_multiplier)
+        resolved_prices = ModelPricingService.resolve_catalog_prices_for_provider(
+            pricing_mode=catalog.pricing_mode,
+            pricing_json=catalog.pricing_json,
+            input_price_per_1k=catalog.input_price_per_1k,
+            output_price_per_1k=catalog.output_price_per_1k,
+            cache_price_per_1k=catalog.cache_price_per_1k,
+            price_multiplier=provider_model.price_multiplier,
+        )
         for field, expected in (
-            ("input_price_per_1k", expected_input),
-            ("output_price_per_1k", expected_output),
-            ("cache_price_per_1k", expected_cache),
+            ("input_price_per_1k", resolved_prices["input_price_per_1k"]),
+            ("output_price_per_1k", resolved_prices["output_price_per_1k"]),
+            ("cache_price_per_1k", resolved_prices["cache_price_per_1k"]),
         ):
             current = getattr(provider_model, field)
             if not ModelCatalogService._nullable_decimal_equal(current, expected, quant=PRICE_QUANT):
                 setattr(provider_model, field, expected)
                 changed = True
         return changed
+
+    @staticmethod
+    def _collect_catalog_test_targets(
+        catalog: ModelCatalog,
+        providers: list[Provider],
+    ) -> list[tuple[Provider, ProviderModel]]:
+        targets: list[tuple[Provider, ProviderModel]] = []
+        for provider in providers:
+            provider_model = next((item for item in provider.provider_models if item.model_name == catalog.model_name), None)
+            if provider_model is not None:
+                targets.append((provider, provider_model))
+        return targets
+
+    @staticmethod
+    async def _probe_catalog_health(catalog: ModelCatalog, providers: list[Provider]) -> dict[str, Any]:
+        targets = ModelCatalogService._collect_catalog_test_targets(catalog, providers)
+        if not targets:
+            return {"catalog": catalog, "channel_results": []}
+        channel_semaphore = asyncio.Semaphore(max(1, int(HealthService.MAX_PARALLEL_MODEL_PROBES)))
+
+        async def run_channel(provider: Provider, provider_model: ProviderModel) -> tuple[Provider, ProviderModel, dict[str, Any]]:
+            async with channel_semaphore:
+                result = (
+                    await HealthService._run_provider_model_checks(
+                        provider,
+                        [provider_model],
+                    )
+                )[0]
+                return provider, provider_model, result
+
+        channel_results = await asyncio.gather(*(run_channel(provider, provider_model) for provider, provider_model in targets))
+        return {"catalog": catalog, "channel_results": channel_results}
+
+    @staticmethod
+    def _finalize_catalog_health_test(
+        db: Session,
+        raw_result: dict[str, Any],
+        *,
+        request_path: str,
+    ) -> dict[str, Any]:
+        catalog: ModelCatalog = raw_result["catalog"]
+        channel_payloads: list[dict[str, Any]] = []
+        for provider, provider_model, model_result in raw_result.get("channel_results") or []:
+            HealthService._persist_model_health_result(
+                db,
+                provider,
+                provider_model,
+                model_result,
+                request_path=request_path,
+            )
+            channel_payloads.append(
+                ModelCatalogService._serialize_model_channel_test_result(
+                    provider,
+                    provider_model,
+                    model_result,
+                )
+            )
+        healthy_channel_count = sum(1 for item in channel_payloads if item["available"])
+        total_channel_count = len(channel_payloads)
+        health_status = "healthy" if healthy_channel_count > 0 else "unhealthy"
+        latency_ms = max((int(item.get("latency_ms") or 0) for item in channel_payloads), default=0)
+        return {
+            "model_name": catalog.model_name,
+            "display_name": catalog.display_name,
+            "success": health_status == "healthy",
+            "health_status": health_status,
+            "healthy_channel_count": healthy_channel_count,
+            "total_channel_count": total_channel_count,
+            "channel_results": channel_payloads,
+            "latency_ms": latency_ms,
+        }
+
+    @staticmethod
+    def _serialize_model_channel_test_result(
+        provider: Provider,
+        provider_model: ProviderModel,
+        model_result: dict[str, Any],
+    ) -> dict[str, Any]:
+        result_health_status = str(model_result.get("health_status") or provider_model.health_status or "unknown")
+        provider_success = bool(model_result.get("provider_success", model_result.get("success")))
+        available = (
+            bool(provider.enabled)
+            and bool(provider_model.enabled)
+            and not bool(provider.maintenance_mode_enabled)
+            and provider.circuit_state != "open"
+            and provider_model.circuit_state != "open"
+            and provider_success
+            and result_health_status != "unhealthy"
+        )
+        message = str(model_result.get("message") or "")
+        if len(message) > 180:
+            message = f"{message[:177]}..."
+        return {
+            "provider_id": provider.id,
+            "provider_name": provider.name,
+            "provider_model_id": provider_model.id,
+            "model_name": provider_model.model_name,
+            "provider_enabled": provider.enabled,
+            "model_enabled": provider_model.enabled,
+            "success": bool(model_result.get("success")),
+            "provider_success": provider_success,
+            "available": available,
+            "health_status": result_health_status,
+            "status_code": model_result.get("status_code"),
+            "latency_ms": int(model_result.get("latency_ms") or 0),
+            "message": message,
+        }
 
     @staticmethod
     def _sync_provider_capabilities_from_catalog(db: Session, catalog: ModelCatalog) -> None:
@@ -713,6 +893,9 @@ class ModelCatalogService:
     @staticmethod
     def _pick_base_price(provider_models: list[ProviderModel], *, field_name: str):
         values = [getattr(item, field_name) for item in provider_models if getattr(item, field_name) is not None]
+        positive_values = [item for item in values if item > 0]
+        if positive_values:
+            return min(positive_values)
         return min(values) if values else None
 
     @staticmethod

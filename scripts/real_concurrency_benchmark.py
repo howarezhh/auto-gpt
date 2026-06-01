@@ -14,7 +14,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from html import escape
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import httpx
 
@@ -138,11 +138,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup-requests", type=int, default=12, help="正式探测前的预热请求数。")
     parser.add_argument("--client-timeout-s", type=float, default=180.0, help="单请求客户端超时秒数。")
     parser.add_argument("--request-timeout-s", type=float, default=180.0, help="httpx 超时秒数。")
+    parser.add_argument("--boundary-max-rounds", type=int, default=8, help="首次失稳后继续细化边界的最大轮数。")
     parser.add_argument("--progress-interval-s", type=float, default=0.5, help="进度刷新间隔秒数。")
     parser.add_argument("--success-rate-threshold", type=float, default=0.99, help="判定稳定的最低成功率。")
     parser.add_argument("--timeout-error-threshold", type=int, default=0, help="判定稳定时允许的超时错误个数。")
     parser.add_argument("--busy-error-threshold", type=int, default=0, help="判定稳定时允许的 429/503/504 个数。")
-    parser.add_argument("--raw-api-key", default="", help="若已存在可用 API Key，可直接传入；否则脚本会尝试自动创建夹具。")
+    parser.add_argument(
+        "--raw-api-key",
+        default=os.environ.get("REAL_BENCHMARK_RAW_API_KEY", ""),
+        help="若已存在可用 API Key，可直接传入；为空时优先读取 REAL_BENCHMARK_RAW_API_KEY，否则脚本会尝试自动创建夹具。",
+    )
     parser.add_argument("--upstream-base-url", default=DEFAULT_UPSTREAM_BASE_URL, help="自动创建夹具时使用的上游地址。")
     parser.add_argument("--upstream-api-key", default=os.environ.get("REAL_UPSTREAM_API_KEY", ""), help="自动创建夹具时使用的真实上游 Key。")
     parser.add_argument("--provider-name", default=DEFAULT_PROVIDER_NAME)
@@ -261,6 +266,8 @@ async def run_single_request(
                     bytes_read += len(chunk)
                 if response.status_code >= 400:
                     error = f"http_{response.status_code}"
+                elif bytes_read <= 0:
+                    error = "empty_stream"
         else:
             response = await client.post(url, headers=headers, json=payload)
             status_code = response.status_code
@@ -268,9 +275,16 @@ async def run_single_request(
             bytes_read = len(response.content)
             if response.status_code >= 400:
                 error = f"http_{response.status_code}"
+            elif bytes_read <= 0:
+                error = "empty_response"
+            else:
+                try:
+                    response.json()
+                except json.JSONDecodeError as exc:
+                    error = f"invalid_json: {exc.msg}"
         total_latency_ms = (time.perf_counter() - started) * 1000
         return RequestResult(
-            ok=(status_code is not None and status_code < 400),
+            ok=(status_code is not None and status_code < 400 and error is None),
             status_code=status_code,
             total_latency_ms=total_latency_ms,
             first_byte_latency_ms=first_byte_latency_ms,
@@ -299,6 +313,7 @@ async def execute_stage(
     prompt: str,
     concurrency: int,
     total_requests: int,
+    client_timeout_s: float,
     request_timeout_s: float,
     progress_interval_s: float,
 ) -> tuple[list[RequestResult], float]:
@@ -358,13 +373,27 @@ async def execute_stage(
                 except asyncio.QueueEmpty:
                     return
                 try:
-                    result = await run_single_request(
-                        client,
-                        url=urls[index % len(urls)],
-                        headers=headers,
-                        payload=payload,
-                        stream=stream,
-                    )
+                    started = time.perf_counter()
+                    try:
+                        result = await asyncio.wait_for(
+                            run_single_request(
+                                client,
+                                url=urls[index % len(urls)],
+                                headers=headers,
+                                payload=payload,
+                                stream=stream,
+                            ),
+                            timeout=max(1.0, client_timeout_s),
+                        )
+                    except asyncio.TimeoutError:
+                        result = RequestResult(
+                            ok=False,
+                            status_code=None,
+                            total_latency_ms=(time.perf_counter() - started) * 1000,
+                            first_byte_latency_ms=None,
+                            bytes_read=0,
+                            error="TimeoutError: client timeout reached",
+                        )
                     results.append(result)
                     stats["done"] += 1
                     if result.ok:
@@ -388,6 +417,53 @@ async def execute_stage(
         await reporter_task
 
     return results, time.perf_counter() - started
+
+
+async def run_stage_probe(
+    *,
+    endpoint: str,
+    mode: str,
+    urls: list[str],
+    raw_api_key: str,
+    model_name: str,
+    prompt: str,
+    concurrency: int,
+    sample_requests: int,
+    requests_per_concurrency: int,
+    client_timeout_s: float,
+    request_timeout_s: float,
+    progress_interval_s: float,
+    success_rate_threshold: float,
+    timeout_error_threshold: int,
+    busy_error_threshold: int,
+) -> StageMetrics:
+    total_requests = max(sample_requests, concurrency * max(1, requests_per_concurrency))
+    results, duration_s = await execute_stage(
+        endpoint=endpoint,
+        mode=mode,
+        urls=urls,
+        raw_api_key=raw_api_key,
+        model_name=model_name,
+        prompt=prompt,
+        concurrency=concurrency,
+        total_requests=total_requests,
+        client_timeout_s=client_timeout_s,
+        request_timeout_s=request_timeout_s,
+        progress_interval_s=progress_interval_s,
+    )
+    metrics = summarize_stage(
+        endpoint=endpoint,
+        mode=mode,
+        concurrency=concurrency,
+        total_requests=total_requests,
+        duration_s=duration_s,
+        results=results,
+        success_rate_threshold=success_rate_threshold,
+        timeout_error_threshold=timeout_error_threshold,
+        busy_error_threshold=busy_error_threshold,
+    )
+    print_stage_summary(metrics)
+    return metrics
 
 
 def summarize_stage(
@@ -486,19 +562,20 @@ async def run_mode_probe(
     concurrency_plan: list[int],
     sample_requests: int,
     requests_per_concurrency: int,
+    client_timeout_s: float,
     request_timeout_s: float,
     progress_interval_s: float,
     success_rate_threshold: float,
     timeout_error_threshold: int,
     busy_error_threshold: int,
+    boundary_max_rounds: int,
 ) -> ModeReport:
-    stage_results: list[StageMetrics] = []
+    stage_by_concurrency: dict[int, StageMetrics] = {}
     highest_stable: int | None = None
     first_unstable: int | None = None
 
     for concurrency in concurrency_plan:
-        total_requests = max(sample_requests, concurrency * max(1, requests_per_concurrency))
-        results, duration_s = await execute_stage(
+        metrics = await run_stage_probe(
             endpoint=endpoint,
             mode=mode,
             urls=urls,
@@ -506,29 +583,58 @@ async def run_mode_probe(
             model_name=model_name,
             prompt=prompt,
             concurrency=concurrency,
-            total_requests=total_requests,
+            sample_requests=sample_requests,
+            requests_per_concurrency=requests_per_concurrency,
+            client_timeout_s=client_timeout_s,
             request_timeout_s=request_timeout_s,
             progress_interval_s=progress_interval_s,
-        )
-        metrics = summarize_stage(
-            endpoint=endpoint,
-            mode=mode,
-            concurrency=concurrency,
-            total_requests=total_requests,
-            duration_s=duration_s,
-            results=results,
             success_rate_threshold=success_rate_threshold,
             timeout_error_threshold=timeout_error_threshold,
             busy_error_threshold=busy_error_threshold,
         )
-        stage_results.append(metrics)
-        print_stage_summary(metrics)
+        stage_by_concurrency[concurrency] = metrics
         if metrics.stable:
             highest_stable = concurrency
             continue
         first_unstable = concurrency
         break
 
+    refine_rounds = 0
+    while (
+        highest_stable is not None
+        and first_unstable is not None
+        and (first_unstable - highest_stable) > 1
+        and refine_rounds < max(0, boundary_max_rounds)
+    ):
+        concurrency = (highest_stable + first_unstable) // 2
+        if concurrency in stage_by_concurrency:
+            break
+        print(f"[refine] mode={mode} boundary={highest_stable}-{first_unstable} try={concurrency}")
+        metrics = await run_stage_probe(
+            endpoint=endpoint,
+            mode=mode,
+            urls=urls,
+            raw_api_key=raw_api_key,
+            model_name=model_name,
+            prompt=prompt,
+            concurrency=concurrency,
+            sample_requests=sample_requests,
+            requests_per_concurrency=requests_per_concurrency,
+            client_timeout_s=client_timeout_s,
+            request_timeout_s=request_timeout_s,
+            progress_interval_s=progress_interval_s,
+            success_rate_threshold=success_rate_threshold,
+            timeout_error_threshold=timeout_error_threshold,
+            busy_error_threshold=busy_error_threshold,
+        )
+        stage_by_concurrency[concurrency] = metrics
+        if metrics.stable:
+            highest_stable = concurrency
+        else:
+            first_unstable = concurrency
+        refine_rounds += 1
+
+    stage_results = [stage_by_concurrency[key] for key in sorted(stage_by_concurrency)]
     if highest_stable is None:
         summary = "未找到满足稳定阈值的并发档位。"
         recommended = None
@@ -539,6 +645,7 @@ async def run_mode_probe(
         recommended = max(1, int(math.floor(highest_stable * 0.8)))
         summary = (
             f"最高稳定并发为 {highest_stable}，首次不稳定档位为 {first_unstable}，"
+            f"经边界细化后当前可确认稳定上限约为 {highest_stable}，"
             f"建议日常保守运行并发约 {recommended}。"
         )
 
@@ -756,6 +863,11 @@ def build_stage_table(stage_results: list[StageMetrics]) -> str:
     rows = []
     for item in stage_results:
         reason = "；".join(item.unstable_reasons) if item.unstable_reasons else "-"
+        first_byte_cell = (
+            f"<td>{item.first_byte_p95_ms:.2f}</td>"
+            if item.first_byte_p95_ms is not None
+            else "<td>-</td>"
+        )
         rows.append(
             "<tr>"
             f"<td>{item.concurrency}</td>"
@@ -764,7 +876,7 @@ def build_stage_table(stage_results: list[StageMetrics]) -> str:
             f"<td>{item.throughput_rps:.2f}</td>"
             f"<td>{item.latency_p95_ms:.2f}</td>"
             f"<td>{item.latency_max_ms:.2f}</td>"
-            f"<td>{item.first_byte_p95_ms:.2f}</td>" if item.first_byte_p95_ms is not None else "<td>-</td>"
+            f"{first_byte_cell}"
             f"<td>{'稳定' if item.stable else '不稳定'}</td>"
             f"<td>{escape(reason)}</td>"
             "</tr>"
@@ -1002,6 +1114,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 prompt=args.prompt,
                 concurrency=warmup_concurrency,
                 total_requests=max(args.warmup_requests, warmup_concurrency),
+                client_timeout_s=max(1.0, args.client_timeout_s),
                 request_timeout_s=args.request_timeout_s,
                 progress_interval_s=args.progress_interval_s,
             )
@@ -1032,11 +1145,13 @@ async def main_async(args: argparse.Namespace) -> int:
                 concurrency_plan=concurrency_plan,
                 sample_requests=max(1, args.sample_requests),
                 requests_per_concurrency=max(1, args.requests_per_concurrency),
+                client_timeout_s=max(1.0, args.client_timeout_s),
                 request_timeout_s=max(1.0, args.request_timeout_s),
                 progress_interval_s=max(0.1, args.progress_interval_s),
                 success_rate_threshold=args.success_rate_threshold,
                 timeout_error_threshold=max(0, args.timeout_error_threshold),
                 busy_error_threshold=max(0, args.busy_error_threshold),
+                boundary_max_rounds=max(0, args.boundary_max_rounds),
             )
             mode_reports.append(mode_report)
 

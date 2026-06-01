@@ -7,11 +7,13 @@ from sqlalchemy.orm import Session
 
 from app.models.api_client_billing_record import ApiClientBillingRecord
 from app.models.api_client_key import ApiClientKey
+from app.models.model_catalog import ModelCatalog
 from app.models.provider_model import ProviderModel
 from app.models.request_log import RequestLog
 from app.models.user_account import UserAccount
 from app.models.user_account_billing_record import UserAccountBillingRecord
 from app.schemas.api_key import ApiKeyBillingRecordOut, ApiKeyBillingSummaryOut
+from app.services.model_pricing_service import ModelPricingService
 from app.utils.decimal_utils import (
     MONEY_QUANT,
     decimal_to_float,
@@ -53,21 +55,43 @@ class BillingService:
         provider_model = db.get(ProviderModel, log.resolved_provider_model_id)
         if provider_model is None:
             return {"prompt_cost": BillingService.to_decimal(0), "completion_cost": BillingService.to_decimal(0), "total_cost": BillingService.to_decimal(0), "billing_status": "price_unresolved"}
+        catalog = db.scalar(select(ModelCatalog).where(ModelCatalog.model_name == provider_model.model_name))
 
-        log.billing_multiplier = to_multiplier_decimal(provider_model.price_multiplier)
-        log.channel_price_input_per_1k = provider_model.input_price_per_1k
-        log.channel_price_output_per_1k = provider_model.output_price_per_1k
-        log.channel_price_cache_per_1k = (
-            provider_model.cache_price_per_1k
-            if provider_model.cache_price_per_1k is not None
-            else provider_model.input_price_per_1k
-        )
         prompt_tokens = max(0, int(log.prompt_tokens or 0))
         completion_tokens = max(0, int(log.completion_tokens or 0))
         cache_read_tokens = max(0, int(log.cache_read_tokens or 0))
-        input_price = to_price_decimal(provider_model.input_price_per_1k)
-        output_price = to_price_decimal(provider_model.output_price_per_1k)
-        cache_price = to_price_decimal(provider_model.cache_price_per_1k) if provider_model.cache_price_per_1k is not None else input_price
+        if catalog is not None:
+            resolved_prices = ModelPricingService.resolve_catalog_prices_for_provider(
+                pricing_mode=catalog.pricing_mode,
+                pricing_json=catalog.pricing_json,
+                input_price_per_1k=catalog.input_price_per_1k,
+                output_price_per_1k=catalog.output_price_per_1k,
+                cache_price_per_1k=catalog.cache_price_per_1k,
+                price_multiplier=provider_model.price_multiplier,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
+        else:
+            resolved_prices = {
+                "pricing_mode": "fixed",
+                "pricing_json": None,
+                "tier_key": None,
+                "tier_name": None,
+                "input_price_per_1k": to_price_decimal(provider_model.input_price_per_1k),
+                "output_price_per_1k": to_price_decimal(provider_model.output_price_per_1k),
+                "cache_price_per_1k": to_price_decimal(provider_model.cache_price_per_1k)
+                if provider_model.cache_price_per_1k is not None
+                else to_price_decimal(provider_model.input_price_per_1k),
+            }
+        log.billing_multiplier = to_multiplier_decimal(provider_model.price_multiplier)
+        log.channel_price_input_per_1k = resolved_prices["input_price_per_1k"]
+        log.channel_price_output_per_1k = resolved_prices["output_price_per_1k"]
+        log.channel_price_cache_per_1k = resolved_prices["cache_price_per_1k"]
+        log.pricing_tier_key = resolved_prices.get("tier_key")
+        log.pricing_tier_name = resolved_prices.get("tier_name")
+        input_price = to_price_decimal(resolved_prices["input_price_per_1k"])
+        output_price = to_price_decimal(resolved_prices["output_price_per_1k"])
+        cache_price = to_price_decimal(resolved_prices["cache_price_per_1k"]) if resolved_prices["cache_price_per_1k"] is not None else input_price
 
         if input_price is None and output_price is None:
             return {"prompt_cost": BillingService.to_decimal(0), "completion_cost": BillingService.to_decimal(0), "total_cost": BillingService.to_decimal(0), "billing_status": "price_unset"}
@@ -212,7 +236,6 @@ class BillingService:
             balance_after = BillingService.to_decimal(api_key.balance_amount)
 
         if new_amount > 0:
-            provider_model = db.get(ProviderModel, log.resolved_provider_model_id) if log.resolved_provider_model_id else None
             if existing_record is None:
                 existing_record = ApiClientBillingRecord(
                     api_client_key_id=api_key.id,
@@ -228,12 +251,8 @@ class BillingService:
             existing_record.prompt_tokens = log.prompt_tokens
             existing_record.completion_tokens = log.completion_tokens
             existing_record.total_tokens = log.total_tokens
-            existing_record.unit_input_price_per_1k = (
-                to_price_decimal(provider_model.input_price_per_1k) if provider_model and provider_model.input_price_per_1k is not None else None
-            )
-            existing_record.unit_output_price_per_1k = (
-                to_price_decimal(provider_model.output_price_per_1k) if provider_model and provider_model.output_price_per_1k is not None else None
-            )
+            existing_record.unit_input_price_per_1k = to_price_decimal(log.channel_price_input_per_1k)
+            existing_record.unit_output_price_per_1k = to_price_decimal(log.channel_price_output_per_1k)
             existing_record.remark = log.message
         elif existing_record is not None:
             db.delete(existing_record)
@@ -242,7 +261,6 @@ class BillingService:
             select(UserAccountBillingRecord).where(UserAccountBillingRecord.request_log_id == log.id)
         ) if owner_user is not None else None
         if owner_user is not None and new_amount > 0:
-            provider_model = db.get(ProviderModel, log.resolved_provider_model_id) if log.resolved_provider_model_id else None
             if existing_user_record is None:
                 existing_user_record = UserAccountBillingRecord(
                     user_account_id=owner_user.id,
@@ -259,12 +277,8 @@ class BillingService:
             existing_user_record.prompt_tokens = log.prompt_tokens
             existing_user_record.completion_tokens = log.completion_tokens
             existing_user_record.total_tokens = log.total_tokens
-            existing_user_record.unit_input_price_per_1k = (
-                to_price_decimal(provider_model.input_price_per_1k) if provider_model and provider_model.input_price_per_1k is not None else None
-            )
-            existing_user_record.unit_output_price_per_1k = (
-                to_price_decimal(provider_model.output_price_per_1k) if provider_model and provider_model.output_price_per_1k is not None else None
-            )
+            existing_user_record.unit_input_price_per_1k = to_price_decimal(log.channel_price_input_per_1k)
+            existing_user_record.unit_output_price_per_1k = to_price_decimal(log.channel_price_output_per_1k)
             existing_user_record.remark = log.message
         elif existing_user_record is not None:
             db.delete(existing_user_record)

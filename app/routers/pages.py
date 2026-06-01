@@ -30,8 +30,8 @@ templates = Jinja2Templates(directory="app/templates")
 def _build_dashboard_stat_cards(stats: dict) -> list[dict]:
     return [
         {"id": "provider_count", "label": "总中转站数", "value": stats["provider_count"]},
-        {"id": "healthy_count", "label": "健康中转站", "value": stats["healthy_count"]},
-        {"id": "unhealthy_count", "label": "异常中转站", "value": stats["unhealthy_count"]},
+        {"id": "healthy_count", "label": "全部可用中转站", "value": stats["healthy_count"]},
+        {"id": "unhealthy_count", "label": "全部不可用中转站", "value": stats["unhealthy_count"]},
         {"id": "model_count", "label": "模型总数", "value": stats["model_count"]},
         {"id": "recent_requests", "label": "24h 请求量", "value": stats["recent_requests"]},
         {"id": "recent_tokens", "label": "24h Token 用量", "value": stats["recent_tokens"]},
@@ -220,6 +220,40 @@ def playground_page(request: Request, db: Session = Depends(get_db)) -> HTMLResp
     if isinstance(current_user, RedirectResponse):
         return current_user
     return templates.TemplateResponse("playground.html", {"request": request, "page_name": "playground", "portal_type": "admin", "current_user": current_user})
+
+
+@router.get("/benchmark", response_class=HTMLResponse)
+def benchmark_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
+    current_user = require_admin_html(request, db)
+    if isinstance(current_user, RedirectResponse):
+        return current_user
+    return templates.TemplateResponse(
+        "benchmark.html",
+        {
+            "request": request,
+            "page_name": "benchmark",
+            "title": "真实并发探测",
+            "portal_type": "admin",
+            "current_user": current_user,
+        },
+    )
+
+
+@router.get("/operations", response_class=HTMLResponse)
+def operations_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
+    current_user = require_admin_html(request, db)
+    if isinstance(current_user, RedirectResponse):
+        return current_user
+    return templates.TemplateResponse(
+        "operations.html",
+        {
+            "request": request,
+            "page_name": "operations",
+            "title": "运维监控",
+            "portal_type": "admin",
+            "current_user": current_user,
+        },
+    )
 
 
 @router.get("/docs", response_class=HTMLResponse)

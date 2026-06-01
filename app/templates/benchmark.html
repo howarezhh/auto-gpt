@@ -1,0 +1,187 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero-panel hero-panel-compact cockpit-hero benchmark-hero">
+    <div class="cockpit-hero-copy">
+        <div class="eyebrow">性能探测</div>
+        <h2>真实并发探测</h2>
+        <p>面向纯文本流式与非流式请求发起真实压测，持续展示任务进度、阶段指标和最终报告。</p>
+        <div class="hero-actions">
+            <a class="btn btn-accent interactive-btn" href="#benchmark-runner">启动探测</a>
+            <a class="btn btn-ghost interactive-btn" href="#benchmark-result">查看结果</a>
+        </div>
+    </div>
+    <div class="cockpit-hero-aside">
+        <div class="cockpit-aside-label">默认基准并发</div>
+        <div class="cockpit-aside-value">100</div>
+        <div class="cockpit-aside-copy">只发送文本，不包含工具和图片请求。结果报告会保存到 <code>data/benchmark-reports</code>。</div>
+        <div class="cockpit-health-bar"><span class="cockpit-health-fill-full"></span></div>
+        <div class="cockpit-aside-meta">
+            <span>json</span>
+            <span>stream</span>
+        </div>
+    </div>
+</section>
+
+<nav class="page-anchor-bar">
+    <a class="page-anchor-link" href="#benchmark-runner">压测配置</a>
+    <a class="page-anchor-link" href="#benchmark-progress">过程观察</a>
+    <a class="page-anchor-link" href="#benchmark-result">结果报告</a>
+</nav>
+
+<section class="benchmark-layout anchor-section-offset" id="benchmark-runner">
+    <div class="panel-card section-shell">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">任务配置</div>
+                <h3>压测参数</h3>
+            </div>
+        </div>
+        <form id="benchmark-form" class="form-grid">
+            <label class="form-span-2">
+                <span>项目代理地址</span>
+                <input class="field-input" id="benchmark-proxy-base-url" type="url" value="http://127.0.0.1:8000" required>
+            </label>
+            <label class="form-span-2">
+                <span>项目 API Key</span>
+                <input class="field-input" id="benchmark-raw-api-key" type="password" autocomplete="off" placeholder="留空则读取服务端环境变量 REAL_BENCHMARK_RAW_API_KEY">
+            </label>
+            <label>
+                <span>请求入口</span>
+                <select class="field-input" id="benchmark-endpoint">
+                    <option value="chat">/v1/chat/completions</option>
+                    <option value="responses">/v1/responses</option>
+                </select>
+            </label>
+            <label>
+                <span>模型</span>
+                <input class="field-input" id="benchmark-model-name" type="text" placeholder="留空则由脚本自动选择">
+            </label>
+            <label>
+                <span>基准并发</span>
+                <input class="field-input" id="benchmark-concurrency" type="number" min="1" max="5000" value="100" required>
+            </label>
+            <label>
+                <span>最大探测并发</span>
+                <input class="field-input" id="benchmark-probe-max-concurrency" type="number" min="0" max="20000" value="0">
+            </label>
+            <fieldset class="benchmark-mode-field form-span-2">
+                <legend>测试模式</legend>
+                <label class="toggle-row">
+                    <input id="benchmark-mode-json" type="checkbox" checked>
+                    <span>非流式 json</span>
+                </label>
+                <label class="toggle-row">
+                    <input id="benchmark-mode-stream" type="checkbox" checked>
+                    <span>流式 stream</span>
+                </label>
+            </fieldset>
+            <details class="benchmark-advanced form-span-2">
+                <summary>高级参数</summary>
+                <div class="form-grid benchmark-advanced-grid">
+                    <label>
+                        <span>起始并发</span>
+                        <input class="field-input" id="benchmark-probe-min-concurrency" type="number" min="0" max="5000" value="0">
+                    </label>
+                    <label>
+                        <span>探测轮数</span>
+                        <input class="field-input" id="benchmark-max-probe-rounds" type="number" min="1" max="30" value="10">
+                    </label>
+                    <label>
+                        <span>放大倍率</span>
+                        <input class="field-input" id="benchmark-probe-scale" type="number" min="1.1" max="5" step="0.1" value="1.5">
+                    </label>
+                    <label>
+                        <span>每轮最少请求</span>
+                        <input class="field-input" id="benchmark-sample-requests" type="number" min="1" max="200000" value="300">
+                    </label>
+                    <label>
+                        <span>请求倍数</span>
+                        <input class="field-input" id="benchmark-requests-per-concurrency" type="number" min="1" max="100" value="2">
+                    </label>
+                    <label>
+                        <span>预热请求</span>
+                        <input class="field-input" id="benchmark-warmup-requests" type="number" min="0" max="10000" value="12">
+                    </label>
+                    <label>
+                        <span>客户端超时 s</span>
+                        <input class="field-input" id="benchmark-client-timeout-s" type="number" min="1" max="3600" step="1" value="180">
+                    </label>
+                    <label>
+                        <span>请求超时 s</span>
+                        <input class="field-input" id="benchmark-request-timeout-s" type="number" min="1" max="3600" step="1" value="180">
+                    </label>
+                    <label>
+                        <span>边界细化轮数</span>
+                        <input class="field-input" id="benchmark-boundary-max-rounds" type="number" min="0" max="20" value="8">
+                    </label>
+                    <label>
+                        <span>进度刷新 s</span>
+                        <input class="field-input" id="benchmark-progress-interval-s" type="number" min="0.1" max="10" step="0.1" value="0.5">
+                    </label>
+                    <label>
+                        <span>成功率阈值</span>
+                        <input class="field-input" id="benchmark-success-rate-threshold" type="number" min="0" max="1" step="0.001" value="0.99">
+                    </label>
+                    <label>
+                        <span>允许超时数</span>
+                        <input class="field-input" id="benchmark-timeout-error-threshold" type="number" min="0" max="100000" value="0">
+                    </label>
+                    <label>
+                        <span>允许繁忙数</span>
+                        <input class="field-input" id="benchmark-busy-error-threshold" type="number" min="0" max="100000" value="0">
+                    </label>
+                    <label class="form-span-2">
+                        <span>文本提示词</span>
+                        <textarea class="field-input" id="benchmark-prompt" rows="3">请用两句话简洁回答：并发压测探针。</textarea>
+                    </label>
+                </div>
+            </details>
+            <div class="form-actions form-span-2">
+                <button class="btn btn-ghost interactive-btn" id="benchmark-stop-btn" type="button" disabled>停止任务</button>
+                <button class="btn btn-accent interactive-btn" id="benchmark-start-btn" type="submit">开始探测</button>
+            </div>
+        </form>
+    </div>
+
+    <div class="panel-card section-shell benchmark-live-panel" id="benchmark-progress">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">实时过程</div>
+                <h3>当前任务</h3>
+            </div>
+            <span class="benchmark-status-pill" id="benchmark-status-pill">未开始</span>
+        </div>
+        <div class="benchmark-progress-shell">
+            <div class="benchmark-progress-meta" id="benchmark-progress-meta">等待启动...</div>
+            <div class="benchmark-progress-track" aria-hidden="true">
+                <span id="benchmark-progress-bar"></span>
+            </div>
+        </div>
+        <div class="benchmark-live-grid" id="benchmark-live-grid">
+            <article><span>模式</span><strong>-</strong></article>
+            <article><span>并发</span><strong>-</strong></article>
+            <article><span>进度</span><strong>-</strong></article>
+            <article><span>RPS</span><strong>-</strong></article>
+        </div>
+        <div class="benchmark-log-window" id="benchmark-log-window">等待任务日志...</div>
+    </div>
+</section>
+
+<section class="panel-card section-shell anchor-section-offset" id="benchmark-result">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">探测结果</div>
+            <h3>阶段指标与报告</h3>
+        </div>
+        <div class="benchmark-report-actions">
+            <a class="btn btn-ghost interactive-btn disabled" id="benchmark-json-report-link" href="#" target="_blank" rel="noopener">JSON 报告</a>
+            <a class="btn btn-accent interactive-btn disabled" id="benchmark-html-report-link" href="#" target="_blank" rel="noopener">HTML 报告</a>
+        </div>
+    </div>
+    <div class="playground-output-empty" id="benchmark-result-empty">任务完成后会在这里展示最高稳定并发、首次不稳定并发和阶段数据。</div>
+    <div class="benchmark-result-view hidden" id="benchmark-result-view">
+        <div class="benchmark-summary-list" id="benchmark-summary-list"></div>
+        <div class="benchmark-stage-table" id="benchmark-stage-table"></div>
+    </div>
+</section>
+{% endblock %}

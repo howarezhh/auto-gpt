@@ -63,6 +63,8 @@ class RequestLog(Base):
     billing_event_id: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
     billing_attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     billing_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pricing_tier_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pricing_tier_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     token_finalize_attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     token_finalize_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     billing_multiplier: Mapped[Decimal | None] = mapped_column(Numeric(DB_MULTIPLIER_PRECISION, DB_MULTIPLIER_SCALE), nullable=True)

@@ -30,6 +30,7 @@ class UserAuthService:
         "/models",
         "/settings",
         "/playground",
+        "/benchmark",
         "/docs",
         "/api-keys",
         "/logs",
