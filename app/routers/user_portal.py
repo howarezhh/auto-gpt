@@ -115,6 +115,7 @@ def _build_user_api_key_payload(
     route_mode: RouteMode,
     default_provider_id: str | None,
     manual_allow_fallback: bool,
+    route_exhausted_retry_infinite_enabled: bool,
     allowed_provider_ids: list[int],
 ) -> dict:
     parsed_default_provider_id = _parse_optional_int_form(default_provider_id, field_label="默认中转站")
@@ -142,6 +143,7 @@ def _build_user_api_key_payload(
         "default_provider_id": parsed_default_provider_id,
         "owner_user_id": current_user_id,
         "manual_allow_fallback": manual_allow_fallback,
+        "route_exhausted_retry_infinite_enabled": route_exhausted_retry_infinite_enabled,
         "allowed_provider_ids": normalized_allowed_provider_ids,
     }
 
@@ -639,6 +641,7 @@ def create_user_api_key(
     route_mode: RouteMode = Form(default="failover"),
     default_provider_id: str | None = Form(default=None),
     manual_allow_fallback: str | None = Form(default=None),
+    route_exhausted_retry_infinite_enabled: str | None = Form(default=None),
     allowed_provider_ids: list[int] = Form(default=[]),
     db: Session = Depends(get_db),
 ):
@@ -658,6 +661,7 @@ def create_user_api_key(
                 route_mode=route_mode,
                 default_provider_id=default_provider_id,
                 manual_allow_fallback=manual_allow_fallback == "on",
+                route_exhausted_retry_infinite_enabled=route_exhausted_retry_infinite_enabled == "on",
                 allowed_provider_ids=allowed_provider_ids,
             )
         )
@@ -678,6 +682,7 @@ def update_user_api_key(
     route_mode: RouteMode = Form(default="failover"),
     default_provider_id: str | None = Form(default=None),
     manual_allow_fallback: str | None = Form(default=None),
+    route_exhausted_retry_infinite_enabled: str | None = Form(default=None),
     allowed_provider_ids: list[int] = Form(default=[]),
     db: Session = Depends(get_db),
 ):
@@ -700,6 +705,7 @@ def update_user_api_key(
                 route_mode=route_mode,
                 default_provider_id=default_provider_id,
                 manual_allow_fallback=manual_allow_fallback == "on",
+                route_exhausted_retry_infinite_enabled=route_exhausted_retry_infinite_enabled == "on",
                 allowed_provider_ids=allowed_provider_ids,
             )
         )

@@ -19,6 +19,8 @@ DEFAULT_SETTING = {
     "manual_allow_fallback": True,
     "global_timeout_ms": 30000,
     "global_max_retries": 2,
+    "route_exhausted_retry_max_wait_seconds": 600,
+    "route_exhausted_retry_infinite_enabled": False,
     "global_max_request_tokens": 0,
     "max_v1_request_body_bytes": 20971520,
     "max_v1_chat_request_body_bytes": 0,

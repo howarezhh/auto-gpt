@@ -3,21 +3,21 @@
 <section class="hero-panel hero-panel-compact cockpit-hero benchmark-hero">
     <div class="cockpit-hero-copy">
         <div class="eyebrow">性能探测</div>
-        <h2>真实并发探测</h2>
-        <p>面向纯文本流式与非流式请求发起真实压测，持续展示任务进度、阶段指标和最终报告。</p>
+        <h2>真实流式并发探测</h2>
+        <p>仅走项目对外流式文本接口，使用真实外部 API Key 和所选模型逐个压测，不指定渠道，让项目按自身分发策略真实响应。</p>
         <div class="hero-actions">
             <a class="btn btn-accent interactive-btn" href="#benchmark-runner">启动探测</a>
             <a class="btn btn-ghost interactive-btn" href="#benchmark-result">查看结果</a>
         </div>
     </div>
     <div class="cockpit-hero-aside">
-        <div class="cockpit-aside-label">默认基准并发</div>
-        <div class="cockpit-aside-value">100</div>
-        <div class="cockpit-aside-copy">只发送文本，不包含工具和图片请求。结果报告会保存到 <code>data/benchmark-reports</code>。</div>
+        <div class="cockpit-aside-label">探测边界</div>
+        <div class="cockpit-aside-value">流式文本</div>
+        <div class="cockpit-aside-copy">默认只探测外部流式文本链路。结果报告会保存到 <code>data/benchmark-reports</code>，并按模型展示吞吐、P95 与首事件延迟。</div>
         <div class="cockpit-health-bar"><span class="cockpit-health-fill-full"></span></div>
         <div class="cockpit-aside-meta">
-            <span>json</span>
-            <span>stream</span>
+            <span>真实 API Key</span>
+            <span>多模型</span>
         </div>
     </div>
 </section>
@@ -42,19 +42,19 @@
                 <input class="field-input" id="benchmark-proxy-base-url" type="url" value="http://127.0.0.1:8000" required>
             </label>
             <label class="form-span-2">
-                <span>项目 API Key</span>
-                <input class="field-input" id="benchmark-raw-api-key" type="password" autocomplete="off" placeholder="留空则读取服务端环境变量 REAL_BENCHMARK_RAW_API_KEY">
+                <span>外部 API Key</span>
+                <input class="field-input" id="benchmark-raw-api-key" type="password" autocomplete="off" placeholder="填写外部用户实际调用项目时使用的 API Key" required>
             </label>
             <label>
-                <span>请求入口</span>
+                <span>流式入口</span>
                 <select class="field-input" id="benchmark-endpoint">
                     <option value="chat">/v1/chat/completions</option>
                     <option value="responses">/v1/responses</option>
                 </select>
             </label>
             <label>
-                <span>模型</span>
-                <input class="field-input" id="benchmark-model-name" type="text" placeholder="留空则由脚本自动选择">
+                <span>输出上限 tok</span>
+                <input class="field-input" id="benchmark-max-output-tokens" type="number" min="1" max="8192" value="128">
             </label>
             <label>
                 <span>基准并发</span>
@@ -64,70 +64,253 @@
                 <span>最大探测并发</span>
                 <input class="field-input" id="benchmark-probe-max-concurrency" type="number" min="0" max="20000" value="0">
             </label>
-            <fieldset class="benchmark-mode-field form-span-2">
-                <legend>测试模式</legend>
-                <label class="toggle-row">
-                    <input id="benchmark-mode-json" type="checkbox" checked>
-                    <span>非流式 json</span>
-                </label>
-                <label class="toggle-row">
-                    <input id="benchmark-mode-stream" type="checkbox" checked>
-                    <span>流式 stream</span>
-                </label>
-            </fieldset>
+            <section class="benchmark-model-picker form-span-2" aria-labelledby="benchmark-model-picker-title">
+                <div class="benchmark-model-picker-head">
+                    <div>
+                        <div class="panel-kicker">模型范围</div>
+                        <h4 id="benchmark-model-picker-title">选择要真实探测的模型</h4>
+                    </div>
+                    <div class="benchmark-model-picker-actions">
+                        <button class="btn btn-ghost interactive-btn" id="benchmark-model-select-all" type="button">全选当前可见</button>
+                        <button class="btn btn-ghost interactive-btn" id="benchmark-model-clear" type="button">清空</button>
+                    </div>
+                </div>
+                <div class="benchmark-model-picker-toolbar">
+                    <label class="benchmark-model-search">
+                        <span>筛选模型</span>
+                        <input class="field-input" id="benchmark-model-search" type="search" placeholder="输入模型名快速筛选">
+                    </label>
+                    <div class="benchmark-model-picker-meta" id="benchmark-model-picker-meta">正在加载模型列表...</div>
+                </div>
+                <div class="benchmark-model-list" id="benchmark-model-list"></div>
+                <div class="playground-provider-list-empty hidden" id="benchmark-model-empty">当前没有已绑定且可用于该流式入口的模型。</div>
+            </section>
             <details class="benchmark-advanced form-span-2">
                 <summary>高级参数</summary>
                 <div class="form-grid benchmark-advanced-grid">
                     <label>
-                        <span>起始并发</span>
+                        <span class="settings-field-label">
+                            <span>起始并发</span>
+                            <span class="settings-help">
+                                <button class="settings-help-btn" type="button" aria-label="查看起始并发说明" data-settings-tooltip-trigger="true">
+                                    <i class="bi bi-question-circle" aria-hidden="true"></i>
+                                </button>
+                                <div class="settings-tooltip-content hidden">
+                                    <div class="settings-tooltip-title">起始并发说明</div>
+                                    <div class="settings-tooltip-copy">探测第一轮从这个并发值开始。填 `0` 时会自动按“基准并发的四分之一，且不低于 10”推算。</div>
+                                </div>
+                            </span>
+                        </span>
                         <input class="field-input" id="benchmark-probe-min-concurrency" type="number" min="0" max="5000" value="0">
                     </label>
                     <label>
-                        <span>探测轮数</span>
+                        <span class="settings-field-label">
+                            <span>探测轮数</span>
+                            <span class="settings-help">
+                                <button class="settings-help-btn" type="button" aria-label="查看探测轮数说明" data-settings-tooltip-trigger="true">
+                                    <i class="bi bi-question-circle" aria-hidden="true"></i>
+                                </button>
+                                <div class="settings-tooltip-content hidden">
+                                    <div class="settings-tooltip-title">探测轮数说明</div>
+                                    <div class="settings-tooltip-copy">控制并发阶梯最多扩张多少轮。轮数越多，覆盖的并发档位越细，但整体探测耗时也会更长。</div>
+                                </div>
+                            </span>
+                        </span>
                         <input class="field-input" id="benchmark-max-probe-rounds" type="number" min="1" max="30" value="10">
                     </label>
                     <label>
-                        <span>放大倍率</span>
+                        <span class="settings-field-label">
+                            <span>放大倍率</span>
+                            <span class="settings-help">
+                                <button class="settings-help-btn" type="button" aria-label="查看放大倍率说明" data-settings-tooltip-trigger="true">
+                                    <i class="bi bi-question-circle" aria-hidden="true"></i>
+                                </button>
+                                <div class="settings-tooltip-content hidden">
+                                    <div class="settings-tooltip-title">放大倍率说明</div>
+                                    <div class="settings-tooltip-copy">每轮并发大致按这个倍率向上放大，用来更快逼近上限。值越大越激进，值越小越细致。</div>
+                                </div>
+                            </span>
+                        </span>
                         <input class="field-input" id="benchmark-probe-scale" type="number" min="1.1" max="5" step="0.1" value="1.5">
                     </label>
                     <label>
-                        <span>每轮最少请求</span>
+                        <span class="settings-field-label">
+                            <span>每轮最少请求</span>
+                            <span class="settings-help">
+                                <button class="settings-help-btn" type="button" aria-label="查看每轮最少请求说明" data-settings-tooltip-trigger="true">
+                                    <i class="bi bi-question-circle" aria-hidden="true"></i>
+                                </button>
+                                <div class="settings-tooltip-content hidden">
+                                    <div class="settings-tooltip-title">每轮最少请求说明</div>
+                                    <div class="settings-tooltip-copy">每个并发档位至少发这么多请求，用来避免样本太少导致结论波动。值越大，结果越稳，但耗时也越长。</div>
+                                </div>
+                            </span>
+                        </span>
                         <input class="field-input" id="benchmark-sample-requests" type="number" min="1" max="200000" value="300">
                     </label>
                     <label>
-                        <span>请求倍数</span>
+                        <span class="settings-field-label">
+                            <span>请求倍数</span>
+                            <span class="settings-help">
+                                <button class="settings-help-btn" type="button" aria-label="查看请求倍数说明" data-settings-tooltip-trigger="true">
+                                    <i class="bi bi-question-circle" aria-hidden="true"></i>
+                                </button>
+                                <div class="settings-tooltip-content hidden">
+                                    <div class="settings-tooltip-title">请求倍数说明</div>
+                                    <div class="settings-tooltip-copy">每轮总请求数至少会按“并发数 × 请求倍数”计算。它能保证高并发时样本量不会太低。</div>
+                                </div>
+                            </span>
+                        </span>
                         <input class="field-input" id="benchmark-requests-per-concurrency" type="number" min="1" max="100" value="2">
                     </label>
                     <label>
-                        <span>预热请求</span>
+                        <span class="settings-field-label">
+                            <span>预热请求</span>
+                            <span class="settings-help">
+                                <button class="settings-help-btn" type="button" aria-label="查看预热请求说明" data-settings-tooltip-trigger="true">
+                                    <i class="bi bi-question-circle" aria-hidden="true"></i>
+                                </button>
+                                <div class="settings-tooltip-content hidden">
+                                    <div class="settings-tooltip-title">预热请求说明</div>
+                                    <div class="settings-tooltip-copy">正式探测前先发一小批流式请求，让连接池、路由缓存和上游链路进入稳定状态。填 `0` 表示跳过预热。</div>
+                                </div>
+                            </span>
+                        </span>
                         <input class="field-input" id="benchmark-warmup-requests" type="number" min="0" max="10000" value="12">
                     </label>
                     <label>
-                        <span>客户端超时 s</span>
+                        <span class="settings-field-label">
+                            <span>客户端超时 s</span>
+                            <span class="settings-help">
+                                <button class="settings-help-btn" type="button" aria-label="查看客户端超时说明" data-settings-tooltip-trigger="true">
+                                    <i class="bi bi-question-circle" aria-hidden="true"></i>
+                                </button>
+                                <div class="settings-tooltip-content hidden">
+                                    <div class="settings-tooltip-title">客户端超时说明</div>
+                                    <div class="settings-tooltip-copy">单个请求在压测器侧允许等待的最长时间。超过后会记为超时失败，用于限制极端长连接拖慢整轮探测。</div>
+                                </div>
+                            </span>
+                        </span>
                         <input class="field-input" id="benchmark-client-timeout-s" type="number" min="1" max="3600" step="1" value="180">
                     </label>
                     <label>
-                        <span>请求超时 s</span>
+                        <span class="settings-field-label">
+                            <span>请求超时 s</span>
+                            <span class="settings-help">
+                                <button class="settings-help-btn" type="button" aria-label="查看请求超时说明" data-settings-tooltip-trigger="true">
+                                    <i class="bi bi-question-circle" aria-hidden="true"></i>
+                                </button>
+                                <div class="settings-tooltip-content hidden">
+                                    <div class="settings-tooltip-title">请求超时说明</div>
+                                    <div class="settings-tooltip-copy">底层 HTTP 客户端的请求超时配置。它控制连接、读取等网络层等待上限，通常应不大于或接近客户端超时。</div>
+                                </div>
+                            </span>
+                        </span>
                         <input class="field-input" id="benchmark-request-timeout-s" type="number" min="1" max="3600" step="1" value="180">
                     </label>
                     <label>
-                        <span>边界细化轮数</span>
+                        <span class="settings-field-label">
+                            <span>边界细化轮数</span>
+                            <span class="settings-help">
+                                <button class="settings-help-btn" type="button" aria-label="查看边界细化轮数说明" data-settings-tooltip-trigger="true">
+                                    <i class="bi bi-question-circle" aria-hidden="true"></i>
+                                </button>
+                                <div class="settings-tooltip-content hidden">
+                                    <div class="settings-tooltip-title">边界细化轮数说明</div>
+                                    <div class="settings-tooltip-copy">首次出现不稳定后，会在“最高稳定档位”和“首次不稳定档位”之间继续细化。轮数越多，稳定上限定位越细。</div>
+                                </div>
+                            </span>
+                        </span>
                         <input class="field-input" id="benchmark-boundary-max-rounds" type="number" min="0" max="20" value="8">
                     </label>
                     <label>
-                        <span>进度刷新 s</span>
+                        <span class="settings-field-label">
+                            <span>进度刷新 s</span>
+                            <span class="settings-help">
+                                <button class="settings-help-btn" type="button" aria-label="查看进度刷新说明" data-settings-tooltip-trigger="true">
+                                    <i class="bi bi-question-circle" aria-hidden="true"></i>
+                                </button>
+                                <div class="settings-tooltip-content hidden">
+                                    <div class="settings-tooltip-title">进度刷新说明</div>
+                                    <div class="settings-tooltip-copy">前端和日志面板读取进度事件的刷新间隔。值越小刷新越频繁，但日志滚动和浏览器渲染也会更频繁。</div>
+                                </div>
+                            </span>
+                        </span>
                         <input class="field-input" id="benchmark-progress-interval-s" type="number" min="0.1" max="10" step="0.1" value="0.5">
                     </label>
                     <label>
-                        <span>成功率阈值</span>
+                        <span class="settings-field-label">
+                            <span>成功率阈值</span>
+                            <span class="settings-help">
+                                <button class="settings-help-btn" type="button" aria-label="查看成功率阈值说明" data-settings-tooltip-trigger="true">
+                                    <i class="bi bi-question-circle" aria-hidden="true"></i>
+                                </button>
+                                <div class="settings-tooltip-content hidden">
+                                    <div class="settings-tooltip-title">成功率阈值说明</div>
+                                    <div class="settings-tooltip-copy">只有当一个并发档位的成功率达到这里，才会被视为稳定。比如 `0.99` 表示至少 99% 请求成功。</div>
+                                </div>
+                            </span>
+                        </span>
                         <input class="field-input" id="benchmark-success-rate-threshold" type="number" min="0" max="1" step="0.001" value="0.99">
                     </label>
                     <label>
-                        <span>允许超时数</span>
+                        <span class="settings-field-label">
+                            <span>P95 阈值 ms</span>
+                            <span class="settings-help">
+                                <button class="settings-help-btn" type="button" aria-label="查看 P95 阈值说明" data-settings-tooltip-trigger="true">
+                                    <i class="bi bi-question-circle" aria-hidden="true"></i>
+                                </button>
+                                <div class="settings-tooltip-content hidden">
+                                    <div class="settings-tooltip-title">P95 阈值说明</div>
+                                    <div class="settings-tooltip-copy">当某档位的总请求 P95 延迟高于这里时，即使成功率够高，也会判为不稳定。填 `0` 表示不限制。</div>
+                                </div>
+                            </span>
+                        </span>
+                        <input class="field-input" id="benchmark-latency-p95-threshold-ms" type="number" min="0" max="600000" step="1" value="0">
+                    </label>
+                    <label>
+                        <span class="settings-field-label">
+                            <span>首事件 P95 阈值 ms</span>
+                            <span class="settings-help">
+                                <button class="settings-help-btn" type="button" aria-label="查看首事件 P95 阈值说明" data-settings-tooltip-trigger="true">
+                                    <i class="bi bi-question-circle" aria-hidden="true"></i>
+                                </button>
+                                <div class="settings-tooltip-content hidden">
+                                    <div class="settings-tooltip-title">首事件 P95 阈值说明</div>
+                                    <div class="settings-tooltip-copy">首事件延迟反映流式开始吐字的速度。若 P95 首事件延迟高于这里，也会视为该档位不稳定。填 `0` 表示不限制。</div>
+                                </div>
+                            </span>
+                        </span>
+                        <input class="field-input" id="benchmark-first-event-p95-threshold-ms" type="number" min="0" max="600000" step="1" value="0">
+                    </label>
+                    <label>
+                        <span class="settings-field-label">
+                            <span>允许超时数</span>
+                            <span class="settings-help">
+                                <button class="settings-help-btn" type="button" aria-label="查看允许超时数说明" data-settings-tooltip-trigger="true">
+                                    <i class="bi bi-question-circle" aria-hidden="true"></i>
+                                </button>
+                                <div class="settings-tooltip-content hidden">
+                                    <div class="settings-tooltip-title">允许超时数说明</div>
+                                    <div class="settings-tooltip-copy">单个并发档位允许出现的超时请求个数。超过这个值后，该档位会直接判定为不稳定。</div>
+                                </div>
+                            </span>
+                        </span>
                         <input class="field-input" id="benchmark-timeout-error-threshold" type="number" min="0" max="100000" value="0">
                     </label>
                     <label>
-                        <span>允许繁忙数</span>
+                        <span class="settings-field-label">
+                            <span>允许繁忙数</span>
+                            <span class="settings-help">
+                                <button class="settings-help-btn" type="button" aria-label="查看允许繁忙数说明" data-settings-tooltip-trigger="true">
+                                    <i class="bi bi-question-circle" aria-hidden="true"></i>
+                                </button>
+                                <div class="settings-tooltip-content hidden">
+                                    <div class="settings-tooltip-title">允许繁忙数说明</div>
+                                    <div class="settings-tooltip-copy">允许的 `429 / 503 / 504` 繁忙或过载错误个数。超过后说明该档位已经超出系统可稳定承载范围。</div>
+                                </div>
+                            </span>
+                        </span>
                         <input class="field-input" id="benchmark-busy-error-threshold" type="number" min="0" max="100000" value="0">
                     </label>
                     <label class="form-span-2">
@@ -158,6 +341,8 @@
             </div>
         </div>
         <div class="benchmark-live-grid" id="benchmark-live-grid">
+            <article><span>模型</span><strong>-</strong></article>
+            <article><span>入口</span><strong>-</strong></article>
             <article><span>模式</span><strong>-</strong></article>
             <article><span>并发</span><strong>-</strong></article>
             <article><span>进度</span><strong>-</strong></article>

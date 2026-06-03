@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -95,6 +96,40 @@ class ProviderModelConfigUpdate(BaseModel):
 
 class ProviderBatchConnectivityTestRequest(BaseModel):
     provider_ids: list[int] = Field(default_factory=list)
+
+
+class ProviderBatchImportRequest(BaseModel):
+    content: str = Field(..., min_length=1)
+    dry_run: bool = True
+    skip_duplicates: bool = True
+
+    @field_validator("content")
+    @classmethod
+    def normalize_content(cls, value: str) -> str:
+        return value.strip()
+
+
+class ProviderBatchImportItemOut(BaseModel):
+    index: int
+    name: str | None = None
+    base_url: str | None = None
+    model_count: int = 0
+    valid: bool = False
+    skipped: bool = False
+    created: bool = False
+    errors: list[str] = Field(default_factory=list)
+    provider: dict[str, Any] | None = None
+
+
+class ProviderBatchImportResponse(BaseModel):
+    total: int
+    valid_count: int
+    created_count: int = 0
+    skipped_count: int = 0
+    failed_count: int = 0
+    dry_run: bool
+    template: str | None = None
+    items: list[ProviderBatchImportItemOut]
 
 
 class ProviderBase(BaseModel):
@@ -244,6 +279,53 @@ class ProviderOut(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class ProviderOptionOut(BaseModel):
+    id: int
+    name: str
+    group_name: str | None = None
+    region_tag: str | None = None
+    enabled: bool
+    health_status: str
+    models: list[str] = Field(default_factory=list)
+
+
+class ProviderPlaygroundModelOut(BaseModel):
+    id: int
+    model_name: str
+    enabled: bool
+    supports_stream: bool = True
+    supports_vision: bool = False
+    supports_tools: bool = False
+    supports_image_generation: bool = False
+    supports_chat_completions: bool = True
+    supports_responses: bool = True
+
+
+class ProviderPlaygroundOut(BaseModel):
+    id: int
+    name: str
+    group_name: str | None = None
+    region_tag: str | None = None
+    enabled: bool
+    health_status: str
+    models: list[str] = Field(default_factory=list)
+    model_configs: list[ProviderPlaygroundModelOut] = Field(default_factory=list)
+
+
+class ProviderSummaryOut(BaseModel):
+    id: int
+    name: str
+    group_name: str | None = None
+    region_tag: str | None = None
+    enabled: bool
+    priority: int
+    weight: int
+    health_status: str
+    circuit_state: str
+    last_latency_ms: int | None = None
+    models: list[str] = Field(default_factory=list)
 
 
 class ProviderCredentialRotateIn(BaseModel):

@@ -429,6 +429,7 @@ class ApiKeyService:
             "route_mode": api_client_key.route_mode,
             "default_provider_id": default_provider_id,
             "manual_allow_fallback": api_client_key.manual_allow_fallback,
+            "route_exhausted_retry_infinite_enabled": api_client_key.route_exhausted_retry_infinite_enabled,
             "allowed_provider_ids": allowed_provider_ids,
             "allowed_model_names": loads_json(api_client_key.allowed_model_names_json, []),
             "allowed_endpoint_paths": loads_json(api_client_key.allowed_endpoint_paths_json, []),
@@ -589,6 +590,7 @@ class ApiKeyService:
             default_provider_id=default_provider_id,
             manual_allow_fallback=api_client_key.manual_allow_fallback,
             allowed_provider_ids=allowed_provider_ids,
+            route_exhausted_retry_infinite_enabled=api_client_key.route_exhausted_retry_infinite_enabled,
             preferred_provider_ids=loads_json(api_client_key.preferred_provider_ids_json, []),
             preferred_region_tags=loads_json(api_client_key.preferred_region_tags_json, []),
             max_candidate_count=api_client_key.max_candidate_count,
@@ -646,6 +648,12 @@ class ApiKeyService:
             return True
         normalized_path = request_path.strip()
         if normalized_path in allowed_paths:
+            return True
+        if normalized_path.startswith("/v1/chat/completions/") and "/v1/chat/completions" in allowed_paths:
+            return True
+        if normalized_path.startswith("/v1/responses/") and "/v1/responses" in allowed_paths:
+            return True
+        if normalized_path.startswith("/v1/files/") and "/v1/files" in allowed_paths:
             return True
         if normalized_path in {"/v1/images/generations", "/v1/images/edits", "/v1/images/variations"} and "/v1/responses" in allowed_paths:
             return True

@@ -15,6 +15,8 @@ class AppSetting(Base):
     manual_allow_fallback: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     global_timeout_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=30000)
     global_max_retries: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
+    route_exhausted_retry_max_wait_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=600)
+    route_exhausted_retry_infinite_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     global_max_request_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     max_v1_request_body_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=20971520)
     max_v1_chat_request_body_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

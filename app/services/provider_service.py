@@ -1,3 +1,5 @@
+import json
+import re
 from collections import defaultdict
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -14,6 +16,8 @@ from app.models.api_client_key_provider_binding import ApiClientKeyProviderBindi
 from app.models.api_client_key import ApiClientKey
 from app.models.app_setting import AppSetting
 from app.schemas.provider import (
+    ProviderBatchImportRequest,
+    ProviderBatchImportResponse,
     ProviderCreate,
     ProviderDiscoverModelsIn,
     ProviderDiscoverModelsResponse,
@@ -40,6 +44,8 @@ class ProviderService:
     """负责 provider 及其模型挂载的管理、能力推断与状态维护。"""
 
     QUALITY_WINDOW_MINUTES = 24 * 60
+    QUALITY_CACHE_TTL_SECONDS = 15
+    AVAILABILITY_CACHE_TTL_SECONDS = 30
     VISION_MODEL_HINTS = ("gpt-4o", "gpt-4.1", "gpt-5")
     TOOL_CAPABLE_MODEL_HINTS = ("gpt-4o", "gpt-4.1", "gpt-5", "o3", "o4", "claude", "qwen", "deepseek", "glm")
     IMAGE_GENERATION_MODEL_HINTS = ("gpt-4o", "gpt-4.1", "gpt-5")
@@ -53,6 +59,36 @@ class ProviderService:
         "exception",
         "client_cancelled",
     }
+    BATCH_IMPORT_TEMPLATE = """# 中转站批量导入模板
+
+每个中转站使用一段键值内容，段落之间用空行或 --- 分隔。AI 根据用户提供的中转站信息生成时，必须保留字段名。
+
+名称: 中文渠道名
+Base URL: https://example.com/v1
+API Key: sk-xxxx
+类型: openai_compatible
+分组: 第三方聚合
+地区: hk
+优先级: 100
+权重: 100
+超时毫秒: 30000
+最大重试次数: 1
+最大活跃请求: 1000
+最大流式请求: 1000
+最大 QPS:
+最大错误率: 80
+首 Token 超时秒: 60
+模型: gpt-5.4, gpt-5.5, gpt-4.1-mini
+启用: 是
+备注: 可选备注
+
+---
+
+名称: 第二个中文渠道名
+Base URL: https://another.example.com/v1
+API Key: sk-yyyy
+模型: gpt-5.5, gpt-5.4-mini
+"""
 
     @staticmethod
     def _infer_model_capabilities(model_name: str) -> dict[str, bool]:
@@ -144,6 +180,24 @@ class ProviderService:
         providers = ProviderService.list_providers(db)
         metrics = ProviderService._build_quality_metrics(db, providers)
         return [ProviderService.provider_to_dict(provider, metrics=metrics) for provider in providers]
+
+    @staticmethod
+    def list_provider_option_dicts(db: Session) -> list[dict]:
+        """返回适合下拉框和筛选器使用的轻量 provider 列表。"""
+        providers = ProviderService.list_providers(db)
+        return [ProviderService.provider_to_option_dict(provider) for provider in providers]
+
+    @staticmethod
+    def list_provider_playground_dicts(db: Session) -> list[dict]:
+        """返回适合调用测试等页面使用的轻量 provider 列表。"""
+        providers = ProviderService.list_providers(db)
+        return [ProviderService.provider_to_playground_dict(provider) for provider in providers]
+
+    @staticmethod
+    def list_provider_summary_dicts(db: Session) -> list[dict]:
+        """返回适合概览页使用的轻量 provider 列表。"""
+        providers = ProviderService.list_providers(db)
+        return [ProviderService.provider_to_summary_dict(provider) for provider in providers]
 
     @staticmethod
     def list_provider_model_mounts(
@@ -258,6 +312,331 @@ class ProviderService:
         ProviderService.invalidate_provider_runtime_cache()
         db.refresh(provider)
         return provider
+
+    @staticmethod
+    def batch_import_providers(db: Session, payload: ProviderBatchImportRequest) -> ProviderBatchImportResponse:
+        """按模板解析并批量创建 provider。"""
+        parsed_items = ProviderService._parse_batch_import_content(payload.content)
+        existing_names = set(db.scalars(select(Provider.name)))
+        result_items: list[dict] = []
+        created_count = 0
+        skipped_count = 0
+        failed_count = 0
+
+        for index, raw_item in enumerate(parsed_items, start=1):
+            errors: list[str] = []
+            provider_payload = ProviderService._normalize_batch_provider_item(raw_item, errors)
+            name = provider_payload.get("name") if provider_payload else raw_item.get("name")
+            base_url = provider_payload.get("base_url") if provider_payload else raw_item.get("base_url")
+            model_count = len(provider_payload.get("model_configs", [])) if provider_payload else 0
+            skipped = False
+            created = False
+            provider_dict = None
+
+            if provider_payload and provider_payload["name"] in existing_names:
+                if payload.skip_duplicates:
+                    skipped = True
+                    skipped_count += 1
+                else:
+                    errors.append("中转站名称已存在")
+
+            if provider_payload and not errors and not payload.dry_run and not skipped:
+                try:
+                    provider = ProviderService.create_provider(db, ProviderCreate(**provider_payload))
+                    settings = SettingService.get_or_create(db)
+                    if settings.default_provider_id is None:
+                        settings.default_provider_id = provider.id
+                        db.commit()
+                    existing_names.add(provider.name)
+                    provider_dict = ProviderService.provider_to_dict(
+                        provider,
+                        metrics=ProviderService._build_quality_metrics(db, [provider]),
+                    )
+                    created = True
+                    created_count += 1
+                except Exception as exc:
+                    errors.append(str(exc))
+
+            if errors:
+                failed_count += 1
+
+            result_items.append({
+                "index": index,
+                "name": name,
+                "base_url": base_url,
+                "model_count": model_count,
+                "valid": provider_payload is not None and not errors,
+                "skipped": skipped,
+                "created": created,
+                "errors": errors,
+                "provider": provider_dict,
+            })
+
+        valid_count = sum(1 for item in result_items if item["valid"])
+        return ProviderBatchImportResponse(
+            total=len(result_items),
+            valid_count=valid_count,
+            created_count=created_count,
+            skipped_count=skipped_count,
+            failed_count=failed_count,
+            dry_run=payload.dry_run,
+            template=ProviderService.BATCH_IMPORT_TEMPLATE,
+            items=result_items,
+        )
+
+    @staticmethod
+    def _parse_batch_import_content(content: str) -> list[dict]:
+        normalized = (content or "").strip()
+        if not normalized:
+            return []
+        parsed_json = ProviderService._try_parse_batch_import_json(normalized)
+        if parsed_json is not None:
+            return parsed_json
+        blocks = ProviderService._split_batch_import_blocks(normalized)
+        return [item for item in (ProviderService._parse_batch_import_block(block) for block in blocks) if item]
+
+    @staticmethod
+    def _try_parse_batch_import_json(content: str) -> list[dict] | None:
+        try:
+            payload = json.loads(content)
+        except Exception:
+            return None
+        if isinstance(payload, dict):
+            raw_items = payload.get("providers") or payload.get("items") or payload.get("channels")
+        else:
+            raw_items = payload
+        if not isinstance(raw_items, list):
+            return None
+        return [item for item in raw_items if isinstance(item, dict)]
+
+    @staticmethod
+    def _split_batch_import_blocks(content: str) -> list[str]:
+        lines = content.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        blocks: list[list[str]] = []
+        current: list[str] = []
+        for raw_line in lines:
+            line = raw_line.strip()
+            if not line or line in {"---", "----"}:
+                if current:
+                    blocks.append(current)
+                    current = []
+                continue
+            if line.startswith("#"):
+                continue
+            if not current and not re.match(r"^([^:=：]+)\s*[:=：]\s*(.*)$", line):
+                continue
+            current.append(raw_line)
+        if current:
+            blocks.append(current)
+        return ["\n".join(block).strip() for block in blocks if block]
+
+    @staticmethod
+    def _parse_batch_import_block(block: str) -> dict:
+        item: dict[str, str] = {}
+        current_key: str | None = None
+        for raw_line in block.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            match = re.match(r"^([^:=：]+)\s*[:=：]\s*(.*)$", line)
+            if match:
+                current_key = ProviderService._normalize_batch_import_key(match.group(1))
+                if not current_key:
+                    continue
+                item[current_key] = match.group(2).strip()
+                continue
+            if current_key:
+                item[current_key] = f"{item.get(current_key, '')}\n{line}".strip()
+        return item
+
+    @staticmethod
+    def _normalize_batch_import_key(raw_key: str) -> str | None:
+        normalized = re.sub(r"\s+", "", (raw_key or "").strip().lower())
+        aliases = {
+            "名称": "name",
+            "渠道名称": "name",
+            "中转站名称": "name",
+            "name": "name",
+            "baseurl": "base_url",
+            "base_url": "base_url",
+            "地址": "base_url",
+            "接口地址": "base_url",
+            "中转站地址": "base_url",
+            "api地址": "base_url",
+            "apikey": "api_key",
+            "api_key": "api_key",
+            "key": "api_key",
+            "密钥": "api_key",
+            "api密钥": "api_key",
+            "类型": "provider_type",
+            "type": "provider_type",
+            "providertype": "provider_type",
+            "provider_type": "provider_type",
+            "分组": "group_name",
+            "渠道分组": "group_name",
+            "group": "group_name",
+            "groupname": "group_name",
+            "group_name": "group_name",
+            "地区": "region_tag",
+            "区域": "region_tag",
+            "region": "region_tag",
+            "regiontag": "region_tag",
+            "region_tag": "region_tag",
+            "优先级": "priority",
+            "priority": "priority",
+            "权重": "weight",
+            "weight": "weight",
+            "超时毫秒": "timeout_ms",
+            "timeout": "timeout_ms",
+            "timeoutms": "timeout_ms",
+            "timeout_ms": "timeout_ms",
+            "最大重试次数": "max_retries",
+            "重试次数": "max_retries",
+            "maxretries": "max_retries",
+            "max_retries": "max_retries",
+            "最大活跃请求": "max_active_requests",
+            "最大并发请求": "max_active_requests",
+            "maxactiverequests": "max_active_requests",
+            "max_active_requests": "max_active_requests",
+            "最大流式请求": "max_active_streams",
+            "最大流式并发": "max_active_streams",
+            "maxactivestreams": "max_active_streams",
+            "max_active_streams": "max_active_streams",
+            "最大qps": "max_qps",
+            "qps": "max_qps",
+            "maxqps": "max_qps",
+            "max_qps": "max_qps",
+            "最大错误率": "max_error_rate",
+            "最大错误率%": "max_error_rate",
+            "maxerrorrate": "max_error_rate",
+            "max_error_rate": "max_error_rate",
+            "首token超时秒": "first_token_timeout_sec",
+            "首tok超时秒": "first_token_timeout_sec",
+            "firsttokentimeoutsec": "first_token_timeout_sec",
+            "first_token_timeout_sec": "first_token_timeout_sec",
+            "模型": "models",
+            "模型列表": "models",
+            "models": "models",
+            "model": "models",
+            "启用": "enabled",
+            "enabled": "enabled",
+            "备注": "remark",
+            "remark": "remark",
+        }
+        return aliases.get(normalized)
+
+    @staticmethod
+    def _normalize_batch_provider_item(raw_item: dict, errors: list[str]) -> dict | None:
+        normalized = {
+            ProviderService._normalize_batch_import_key(str(key)): value
+            for key, value in raw_item.items()
+            if ProviderService._normalize_batch_import_key(str(key))
+        }
+        name = ProviderService._clean_optional_text(normalized.get("name"))
+        base_url = ProviderService._clean_optional_text(normalized.get("base_url"))
+        api_key = ProviderService._clean_optional_text(normalized.get("api_key"))
+        if not name:
+            errors.append("缺少名称")
+        if not base_url:
+            errors.append("缺少 Base URL")
+        if not api_key:
+            errors.append("缺少 API Key")
+        model_names = ProviderService._parse_batch_model_names(normalized.get("models"))
+        if not model_names:
+            errors.append("至少需要填写一个模型")
+        if errors:
+            return None
+        model_configs = [ProviderService._build_model_config_input_from_name(model_name).model_dump() for model_name in model_names]
+        provider_payload = {
+            "name": name,
+            "base_url": base_url.rstrip("/"),
+            "api_key": api_key,
+            "provider_type": ProviderService._clean_optional_text(normalized.get("provider_type")) or "openai_compatible",
+            "group_name": ProviderService._clean_optional_text(normalized.get("group_name")),
+            "region_tag": ProviderService._clean_optional_text(normalized.get("region_tag")),
+            "enabled": ProviderService._parse_batch_bool(normalized.get("enabled"), default=True),
+            "priority": ProviderService._parse_batch_int(normalized.get("priority"), default=100, minimum=0),
+            "weight": ProviderService._parse_batch_int(normalized.get("weight"), default=100, minimum=0),
+            "timeout_ms": ProviderService._parse_batch_int(normalized.get("timeout_ms"), default=30000, minimum=1000),
+            "max_retries": ProviderService._parse_batch_int(normalized.get("max_retries"), default=1, minimum=0),
+            "max_active_requests": ProviderService._parse_batch_nullable_int(normalized.get("max_active_requests"), default=1000),
+            "max_active_streams": ProviderService._parse_batch_nullable_int(normalized.get("max_active_streams"), default=1000),
+            "max_qps": ProviderService._parse_batch_nullable_int(normalized.get("max_qps"), default=None),
+            "max_error_rate": ProviderService._parse_batch_float(normalized.get("max_error_rate"), default=80.0),
+            "first_token_timeout_sec": ProviderService._parse_batch_nullable_int(normalized.get("first_token_timeout_sec"), default=60),
+            "models": model_names,
+            "model_configs": model_configs,
+            "remark": ProviderService._clean_optional_text(normalized.get("remark")),
+        }
+        try:
+            return ProviderCreate(**provider_payload).model_dump()
+        except Exception as exc:
+            errors.append(str(exc))
+            return None
+
+    @staticmethod
+    def _clean_optional_text(value) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    @staticmethod
+    def _parse_batch_model_names(value) -> list[str]:
+        if isinstance(value, list):
+            raw_items = value
+        else:
+            raw_items = re.split(r"[,，、\n;；]+", str(value or ""))
+        names: list[str] = []
+        seen: set[str] = set()
+        for raw_item in raw_items:
+            model_name = str(raw_item or "").strip()
+            if not model_name or model_name in seen:
+                continue
+            seen.add(model_name)
+            names.append(model_name)
+        return names
+
+    @staticmethod
+    def _parse_batch_bool(value, *, default: bool) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        normalized = str(value).strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on", "是", "启用", "开启"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off", "否", "停用", "关闭"}:
+            return False
+        return default
+
+    @staticmethod
+    def _parse_batch_int(value, *, default: int, minimum: int | None = None) -> int:
+        try:
+            parsed = int(float(str(value).strip()))
+        except Exception:
+            parsed = default
+        if minimum is not None:
+            parsed = max(minimum, parsed)
+        return parsed
+
+    @staticmethod
+    def _parse_batch_nullable_int(value, *, default: int | None) -> int | None:
+        text = str(value or "").strip()
+        if text == "":
+            return default
+        parsed = ProviderService._parse_batch_int(text, default=default or 0, minimum=0)
+        return parsed if parsed > 0 else None
+
+    @staticmethod
+    def _parse_batch_float(value, *, default: float) -> float:
+        text = str(value or "").strip().replace("%", "")
+        if text == "":
+            return default
+        try:
+            return float(text)
+        except Exception:
+            return default
 
     @staticmethod
     def update_provider(db: Session, provider: Provider, payload: ProviderUpdate) -> Provider:
@@ -439,6 +818,55 @@ class ProviderService:
         }
 
     @staticmethod
+    def provider_to_option_dict(provider: Provider) -> dict:
+        return {
+            "id": provider.id,
+            "name": provider.name,
+            "group_name": provider.group_name,
+            "region_tag": provider.region_tag,
+            "enabled": provider.enabled,
+            "health_status": provider.health_status,
+            "models": [item.model_name for item in provider.provider_models],
+        }
+
+    @staticmethod
+    def provider_to_playground_dict(provider: Provider) -> dict:
+        return {
+            **ProviderService.provider_to_option_dict(provider),
+            "base_url": provider.base_url,
+            "model_configs": [
+                {
+                    "id": item.id,
+                    "model_name": item.model_name,
+                    "enabled": item.enabled,
+                    "supports_stream": item.supports_stream,
+                    "supports_vision": item.supports_vision,
+                    "supports_tools": ProviderService.provider_model_supports_tools(item),
+                    "supports_image_generation": ProviderService.provider_model_supports_image_generation(item),
+                    "supports_chat_completions": item.supports_chat_completions,
+                    "supports_responses": item.supports_responses,
+                }
+                for item in provider.provider_models
+            ],
+        }
+
+    @staticmethod
+    def provider_to_summary_dict(provider: Provider) -> dict:
+        return {
+            "id": provider.id,
+            "name": provider.name,
+            "group_name": provider.group_name,
+            "region_tag": provider.region_tag,
+            "enabled": provider.enabled,
+            "priority": provider.priority,
+            "weight": provider.weight,
+            "health_status": provider.health_status,
+            "circuit_state": provider.circuit_state,
+            "last_latency_ms": provider.last_latency_ms,
+            "models": [item.model_name for item in provider.provider_models],
+        }
+
+    @staticmethod
     def get_effective_circuit_breaker_threshold(db: Session, provider: Provider) -> int:
         if provider.circuit_breaker_threshold_override is not None and provider.circuit_breaker_threshold_override > 0:
             return provider.circuit_breaker_threshold_override
@@ -553,23 +981,29 @@ class ProviderService:
     ) -> list[dict]:
         normalized_window_hours = max(1, min(window_hours, 24 * 30))
         normalized_bucket_minutes = max(5, min(bucket_minutes, 24 * 60))
+        cache_key = f"provider-availability:{provider.id}:{normalized_window_hours}:{normalized_bucket_minutes}"
+        cached = CacheService.get(cache_key)
+        if isinstance(cached, list):
+            return cached
         since = datetime.utcnow() - timedelta(hours=normalized_window_hours)
-        logs = list(
-            db.scalars(
-                select(RequestLog)
-                .where(
-                    RequestLog.provider_id == provider.id,
-                    RequestLog.created_at >= since,
-                    LogService._route_traffic_expr(),
-                )
-                .order_by(RequestLog.created_at.asc(), RequestLog.id.asc())
+        logs = db.execute(
+            select(
+                RequestLog.created_at,
+                RequestLog.success,
+                RequestLog.latency_ms,
             )
-        )
+            .where(
+                RequestLog.provider_id == provider.id,
+                RequestLog.created_at >= since,
+                LogService._route_traffic_expr(),
+            )
+            .order_by(RequestLog.created_at.asc(), RequestLog.id.asc())
+        ).all()
         buckets: dict[datetime, dict] = {}
-        for item in logs:
-            if item.created_at is None:
+        for created_at, success, latency_ms in logs:
+            if created_at is None:
                 continue
-            minute_floor = item.created_at.replace(second=0, microsecond=0)
+            minute_floor = created_at.replace(second=0, microsecond=0)
             bucket_minute = minute_floor.minute - (minute_floor.minute % normalized_bucket_minutes)
             bucket_start = minute_floor.replace(minute=bucket_minute)
             current = buckets.setdefault(
@@ -583,10 +1017,10 @@ class ProviderService:
                 },
             )
             current["total_requests"] += 1
-            current["success_requests"] += 1 if item.success else 0
-            current["failed_requests"] += 0 if item.success else 1
-            if item.latency_ms is not None:
-                current["latency_values"].append(float(item.latency_ms))
+            current["success_requests"] += 1 if success else 0
+            current["failed_requests"] += 0 if success else 1
+            if latency_ms is not None:
+                current["latency_values"].append(float(latency_ms))
         results = []
         for bucket_start in sorted(buckets.keys()):
             current = buckets[bucket_start]
@@ -596,7 +1030,7 @@ class ProviderService:
             current["success_rate"] = round((success_requests / total_requests) * 100, 2) if total_requests else 0.0
             current["avg_latency_ms"] = round(sum(latency_values) / len(latency_values), 2) if latency_values else None
             results.append(current)
-        return results
+        return CacheService.set(cache_key, results, ttl_seconds=ProviderService.AVAILABILITY_CACHE_TTL_SECONDS)
 
     @staticmethod
     def provider_model_to_dict(provider_model: ProviderModel, *, metrics: dict | None = None) -> dict:
@@ -866,6 +1300,8 @@ class ProviderService:
         CacheService.invalidate_prefix("route-candidates")
         CacheService.invalidate_prefix("v1-models")
         CacheService.invalidate_prefix("providers-runtime")
+        CacheService.invalidate_prefix("provider-quality")
+        CacheService.invalidate_prefix("provider-availability")
 
     @staticmethod
     def _build_quality_metrics(db: Session, providers: list[Provider]) -> dict[str, dict]:
@@ -877,50 +1313,7 @@ class ProviderService:
         }
         if not provider_ids:
             return {"providers": {}, "provider_models": {}}
-
-        since = datetime.utcnow() - timedelta(minutes=ProviderService.QUALITY_WINDOW_MINUTES)
-        logs = list(
-            db.scalars(
-                select(RequestLog).where(
-                    RequestLog.created_at >= since,
-                    LogService._route_traffic_expr(),
-                )
-            )
-        )
-
-        provider_stats: dict[int, dict] = defaultdict(ProviderService._empty_quality_accumulator)
-        model_stats: dict[int, dict] = defaultdict(ProviderService._empty_quality_accumulator)
-
-        for log in logs:
-            trace = loads_json(log.trace_json, [])
-            if isinstance(trace, list):
-                for item in trace:
-                    if not isinstance(item, dict):
-                        continue
-                    provider_id = item.get("provider_id")
-                    provider_model_id = item.get("provider_model_id")
-                    result = item.get("result")
-                    if not isinstance(provider_id, int) or provider_id not in provider_ids:
-                        continue
-                    if result in ProviderService.TRACE_TERMINAL_SUCCESS_RESULTS:
-                        ProviderService._register_attempt(provider_stats[provider_id], success=True)
-                        if isinstance(provider_model_id, int) and provider_model_id in provider_model_map:
-                            ProviderService._register_attempt(model_stats[provider_model_id], success=True)
-                    elif result in ProviderService.TRACE_TERMINAL_FAILURE_RESULTS:
-                        ProviderService._register_attempt(provider_stats[provider_id], success=False)
-                        if isinstance(provider_model_id, int) and provider_model_id in provider_model_map:
-                            ProviderService._register_attempt(model_stats[provider_model_id], success=False)
-
-            if (
-                log.success
-                and isinstance(log.provider_id, int)
-                and log.provider_id in provider_ids
-                and isinstance(log.resolved_provider_model_id, int)
-                and log.resolved_provider_model_id in provider_model_map
-                and log.first_token_latency_ms is not None
-            ):
-                ProviderService._register_first_token(provider_stats[log.provider_id], log.first_token_latency_ms)
-                ProviderService._register_first_token(model_stats[log.resolved_provider_model_id], log.first_token_latency_ms)
+        provider_stats, model_stats = ProviderService._load_quality_accumulators(db)
 
         provider_metrics = {
             provider.id: ProviderService._finalize_quality_snapshot(
@@ -939,6 +1332,75 @@ class ProviderService:
             for provider_model in provider_model_map.values()
         }
         return {"providers": provider_metrics, "provider_models": provider_model_metrics}
+
+    @staticmethod
+    def _load_quality_accumulators(db: Session) -> tuple[dict[int, dict], dict[int, dict]]:
+        cache_key = "provider-quality:accumulators"
+        cached = CacheService.get(cache_key)
+        if isinstance(cached, dict):
+            cached_provider_stats = cached.get("providers")
+            cached_model_stats = cached.get("provider_models")
+            if isinstance(cached_provider_stats, dict) and isinstance(cached_model_stats, dict):
+                return (
+                    {int(key): value for key, value in cached_provider_stats.items()},
+                    {int(key): value for key, value in cached_model_stats.items()},
+                )
+
+        since = datetime.utcnow() - timedelta(minutes=ProviderService.QUALITY_WINDOW_MINUTES)
+        rows = db.execute(
+            select(
+                RequestLog.provider_id,
+                RequestLog.resolved_provider_model_id,
+                RequestLog.success,
+                RequestLog.first_token_latency_ms,
+                RequestLog.trace_json,
+            ).where(
+                RequestLog.created_at >= since,
+                LogService._route_traffic_expr(),
+            )
+        ).all()
+
+        provider_stats: dict[int, dict] = defaultdict(ProviderService._empty_quality_accumulator)
+        model_stats: dict[int, dict] = defaultdict(ProviderService._empty_quality_accumulator)
+
+        for provider_id, resolved_provider_model_id, success, first_token_latency_ms, trace_json in rows:
+            trace = loads_json(trace_json, [])
+            if isinstance(trace, list):
+                for item in trace:
+                    if not isinstance(item, dict):
+                        continue
+                    trace_provider_id = item.get("provider_id")
+                    provider_model_id = item.get("provider_model_id")
+                    result = item.get("result")
+                    if not isinstance(trace_provider_id, int):
+                        continue
+                    if result in ProviderService.TRACE_TERMINAL_SUCCESS_RESULTS:
+                        ProviderService._register_attempt(provider_stats[trace_provider_id], success=True)
+                        if isinstance(provider_model_id, int):
+                            ProviderService._register_attempt(model_stats[provider_model_id], success=True)
+                    elif result in ProviderService.TRACE_TERMINAL_FAILURE_RESULTS:
+                        ProviderService._register_attempt(provider_stats[trace_provider_id], success=False)
+                        if isinstance(provider_model_id, int):
+                            ProviderService._register_attempt(model_stats[provider_model_id], success=False)
+
+            if (
+                success
+                and isinstance(provider_id, int)
+                and isinstance(resolved_provider_model_id, int)
+                and first_token_latency_ms is not None
+            ):
+                ProviderService._register_first_token(provider_stats[provider_id], first_token_latency_ms)
+                ProviderService._register_first_token(model_stats[resolved_provider_model_id], first_token_latency_ms)
+
+        CacheService.set(
+            cache_key,
+            {
+                "providers": {str(key): value for key, value in provider_stats.items()},
+                "provider_models": {str(key): value for key, value in model_stats.items()},
+            },
+            ttl_seconds=ProviderService.QUALITY_CACHE_TTL_SECONDS,
+        )
+        return provider_stats, model_stats
 
     @staticmethod
     def _empty_quality_accumulator() -> dict[str, int | float]:

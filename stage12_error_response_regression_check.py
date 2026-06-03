@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import httpx
+from sqlalchemy import select
 
 
 TEMP_DB_PATH = Path("data/stage12-error-response.db")
@@ -18,13 +19,24 @@ from fastapi.testclient import TestClient
 
 from app.database import SessionLocal
 from app.main import app
+from app.models.model_catalog import ModelCatalog
 from app.services.proxy_service import ProxyService
+from app.services.setting_service import SettingService
+from app.services.model_catalog_service import ModelCatalogService
 from app.services.user_auth_service import USER_ROLE_ADMIN, UserAuthService
 
 
 def _assert(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
+
+
+def _enable_all_model_catalogs() -> None:
+    with SessionLocal() as db:
+        for catalog in db.scalars(select(ModelCatalog)):
+            catalog.enabled = True
+        db.commit()
+    ModelCatalogService.invalidate_model_runtime_cache()
 
 
 def _login(client: TestClient, *, identifier: str, password: str) -> None:
@@ -126,11 +138,18 @@ def main() -> None:
         _bootstrap_admin(client)
         primary = _create_provider(client, name="stage12-primary", priority=10)
         secondary = _create_provider(client, name="stage12-secondary", priority=20)
+        _enable_all_model_catalogs()
         api_key = _create_api_key(
             client,
             default_provider_id=primary["id"],
             allowed_provider_ids=[primary["id"], secondary["id"]],
         )
+        with SessionLocal() as db:
+            setting = SettingService.get_or_create(db)
+            setting.route_exhausted_retry_max_wait_seconds = 0
+            setting.route_exhausted_retry_infinite_enabled = False
+            db.commit()
+            SettingService.invalidate_runtime_cache()
 
         with patch.object(ProxyService, "_forward_json_with_endpoint_fallback", side_effect=_raise_connect_error):
             non_stream_response = client.post(

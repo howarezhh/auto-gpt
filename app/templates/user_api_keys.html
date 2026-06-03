@@ -208,6 +208,10 @@
                             <span>手动回退</span>
                             <strong>{{ '开启' if item.manual_allow_fallback else '关闭' }}</strong>
                         </div>
+                        <div>
+                            <span>重试模式</span>
+                            <strong>{{ '无限重试' if item.route_exhausted_retry_infinite_enabled else '正常重试' }}</strong>
+                        </div>
                     </div>
 
                     <div class="user-key-object-footer">
@@ -281,6 +285,13 @@
                                     <div class="field-checkbox">
                                         <input id="user-api-key-fallback-{{ item.id }}" name="manual_allow_fallback" type="checkbox" {% if item.manual_allow_fallback %}checked{% endif %}>
                                         <label for="user-api-key-fallback-{{ item.id }}">开启</label>
+                                    </div>
+                                </label>
+                                <label>
+                                    <span>候选耗尽无限重试</span>
+                                    <div class="field-checkbox">
+                                        <input id="user-api-key-infinite-retry-{{ item.id }}" name="route_exhausted_retry_infinite_enabled" type="checkbox" {% if item.route_exhausted_retry_infinite_enabled %}checked{% endif %}>
+                                        <label for="user-api-key-infinite-retry-{{ item.id }}">开启</label>
                                     </div>
                                 </label>
                                 <div class="form-span-2">
@@ -374,6 +385,13 @@
                     <div class="field-checkbox">
                         <input id="user-api-key-create-fallback" name="manual_allow_fallback" type="checkbox" checked>
                         <label for="user-api-key-create-fallback">开启</label>
+                    </div>
+                </label>
+                <label>
+                    <span>候选耗尽无限重试</span>
+                    <div class="field-checkbox">
+                        <input id="user-api-key-create-infinite-retry" name="route_exhausted_retry_infinite_enabled" type="checkbox">
+                        <label for="user-api-key-create-infinite-retry">开启</label>
                     </div>
                 </label>
                 <div class="form-span-2">

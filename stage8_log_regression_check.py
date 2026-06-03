@@ -12,6 +12,7 @@ if TEMP_DB_PATH.exists():
     TEMP_DB_PATH.unlink()
 os.environ["DATABASE_URL"] = "sqlite:///./data/stage8-log-regression.db"
 os.environ["ENABLE_SCHEDULER"] = "false"
+os.environ["ASYNC_REQUEST_LOG_ENABLED"] = "false"
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -19,10 +20,12 @@ from sqlalchemy import select
 from app.database import SessionLocal
 from app.main import app
 from app.models.api_client_key import ApiClientKey
+from app.models.model_catalog import ModelCatalog
 from app.models.provider import Provider
 from app.models.request_log import RequestLog
 from app.models.user_account import UserAccount
 from app.services.log_service import LogService
+from app.services.model_catalog_service import ModelCatalogService
 from app.services.proxy_service import ProxyService
 from app.services.user_auth_service import USER_ROLE_ADMIN, UserAuthService
 
@@ -197,11 +200,15 @@ def main() -> None:
                 provider_model.price_multiplier = 1.5
                 provider_model.input_price_per_1k = 0.003
                 provider_model.output_price_per_1k = 0.006
+                model_catalog = db.scalar(select(ModelCatalog).where(ModelCatalog.model_name == "log-model"))
+                _assert(model_catalog is not None, "model catalog missing")
+                model_catalog.enabled = True
                 user_a.balance_amount = 50
                 user_a.total_recharge_amount = 50
                 user_b.balance_amount = 50
                 user_b.total_recharge_amount = 50
                 db.commit()
+                ModelCatalogService.invalidate_model_runtime_cache()
                 user_a_id = user_a.id
                 user_b_id = user_b.id
 
@@ -328,12 +335,12 @@ def main() -> None:
             forwarded_chat = next((item for item in FORWARDED_PAYLOADS if item["endpoint_path"] == "/chat/completions" and item["payload"].get("metadata", {}).get("session_id") == "sess-u1"), None)
             _assert(forwarded_chat is not None, f"forwarded chat payload missing: {FORWARDED_PAYLOADS}")
             _assert(forwarded_chat["payload"].get("reasoning_effort") == "medium", f"chat reasoning_effort not forwarded: {forwarded_chat}")
-            _assert("model_reasoning_effort" not in forwarded_chat["payload"], f"chat alias should be normalized away: {forwarded_chat}")
+            _assert(forwarded_chat["payload"].get("model_reasoning_effort") == "medium", f"chat reasoning alias not preserved: {forwarded_chat}")
 
             forwarded_responses = next((item for item in FORWARDED_PAYLOADS if item["endpoint_path"] == "/responses" and item["payload"].get("metadata", {}).get("session_id") == "sess-u3"), None)
             _assert(forwarded_responses is not None, f"forwarded responses payload missing: {FORWARDED_PAYLOADS}")
             _assert(forwarded_responses["payload"].get("reasoning", {}).get("effort") == "high", f"responses reasoning.effort not forwarded: {forwarded_responses}")
-            _assert("model_reasoning_effort" not in forwarded_responses["payload"], f"responses alias should be normalized away: {forwarded_responses}")
+            _assert(forwarded_responses["payload"].get("model_reasoning_effort") == "high", f"responses reasoning alias not preserved: {forwarded_responses}")
 
             filter_options_response = client.get("/api/logs/filter-options?exclude_health_checks=true")
             _assert(filter_options_response.status_code == 200, f"filter options failed: {filter_options_response.text}")

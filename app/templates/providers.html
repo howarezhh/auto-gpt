@@ -8,6 +8,7 @@
         </div>
         <div class="hero-actions">
             <button class="btn btn-accent interactive-btn" id="add-provider-btn" type="button">新增中转站</button>
+            <button class="btn btn-ghost interactive-btn" id="provider-batch-import-open-btn" type="button">批量导入</button>
             <button class="btn btn-ghost interactive-btn" id="providers-check-all-btn" type="button">检查全部</button>
         </div>
     </div>
@@ -396,6 +397,33 @@
             <div class="form-actions form-span-2">
                 <button class="btn btn-ghost interactive-btn" id="provider-form-cancel" type="button">取消</button>
                 <button class="btn btn-accent interactive-btn" id="provider-submit-btn" type="submit">保存</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div class="modal-shell hidden" id="provider-batch-import-modal" aria-hidden="true">
+    <div class="modal-card modal-lg provider-modal-card provider-batch-import-card" role="dialog" aria-modal="true" aria-labelledby="provider-batch-import-modal-title" tabindex="-1">
+        <div class="modal-head">
+            <div>
+                <div class="panel-kicker">批量导入</div>
+                <h2 id="provider-batch-import-modal-title">批量导入中转站</h2>
+            </div>
+            <button class="icon-btn interactive-btn" id="provider-batch-import-close" type="button" aria-label="关闭批量导入窗口">×</button>
+        </div>
+        <form id="provider-batch-import-form" class="form-grid provider-batch-import-form">
+            <label class="form-span-2" for="provider-batch-import-content">
+                <span>导入列表文本</span>
+                <textarea class="field-input provider-batch-import-textarea" id="provider-batch-import-content" rows="14" placeholder="粘贴 AI 按模板生成的中转站批量导入列表"></textarea>
+            </label>
+            <div class="provider-batch-import-actions form-span-2">
+                <button class="btn btn-ghost interactive-btn" id="provider-batch-import-template-btn" type="button">填入模板</button>
+                <button class="btn btn-ghost interactive-btn" id="provider-batch-import-copy-template-btn" type="button">复制模板</button>
+                <button class="btn btn-ghost interactive-btn" id="provider-batch-import-preview-btn" type="button">预览校验</button>
+                <button class="btn btn-accent interactive-btn" id="provider-batch-import-submit-btn" type="submit" disabled>确认导入</button>
+            </div>
+            <div class="provider-batch-import-result form-span-2" id="provider-batch-import-result" aria-live="polite">
+                <div class="empty-state">粘贴列表文本后先预览校验，通过后再确认导入。</div>
             </div>
         </form>
     </div>

@@ -58,9 +58,8 @@
 
 <nav class="page-anchor-bar users-anchor-bar" aria-label="用户管理导航">
     <a class="page-anchor-link" href="#users-create">创建账号</a>
-    <a class="page-anchor-link" href="#users-filter">搜索筛选</a>
-    <a class="page-anchor-link" href="#users-batch">批量额度</a>
     <a class="page-anchor-link" href="#users-registry">账号目录</a>
+    <a class="page-anchor-link" href="#users-batch">批量额度</a>
 </nav>
 
 <section class="stats-grid users-metric-grid anchor-section-offset">
@@ -140,14 +139,22 @@
     </aside>
 </section>
 
-<section class="panel-card section-shell users-filter-panel anchor-section-offset" id="users-filter">
-    <div class="section-subhead">
+<section class="panel-card section-shell users-registry-section anchor-section-offset" id="users-registry">
+    <div class="section-subhead users-registry-headline">
         <div>
-            <div class="panel-kicker">搜索筛选</div>
-            <h3>按角色、状态和关键词聚焦目标账号</h3>
+            <div class="panel-kicker">账号目录</div>
+            <h3>筛选、查看与治理账号</h3>
+        </div>
+        <div class="users-registry-toolbar">
+            <label class="users-select-toolbar" for="users-check-all-visible">
+                <input id="users-check-all-visible" type="checkbox" aria-label="选择本页">
+                <span>选择本页</span>
+            </label>
+            <div class="table-muted">先筛选账号，再直接治理当前命中结果。</div>
         </div>
     </div>
-    <form class="filter-grid users-filter-form" method="get" action="/users">
+
+    <form class="filter-grid users-directory-filter-form" method="get" action="/users">
         <label>
             <span>关键词</span>
             <input class="field-input" name="keyword" value="{{ filters.keyword }}" placeholder="账号 ID / 用户名 / 邮箱">
@@ -176,29 +183,133 @@
                 {% endfor %}
             </select>
         </label>
-        <div class="form-actions">
+        <div class="form-actions users-directory-filter-actions">
             <button class="btn btn-accent interactive-btn" type="submit">应用筛选</button>
             <a class="btn btn-ghost interactive-btn" href="/users" data-shell-link>清空筛选</a>
         </div>
     </form>
-    <div class="users-filter-snapshot">
-        <article class="users-filter-stat">
-            <span>关键词</span>
-            <strong>{{ filters.keyword or '未限定' }}</strong>
+
+    <div class="users-directory-summary" aria-label="账号目录筛选摘要">
+        <article class="users-directory-stat">
+            <span>当前命中</span>
+            <strong>{{ pagination.total }} 条</strong>
         </article>
-        <article class="users-filter-stat">
+        <article class="users-directory-stat">
+            <span>页码</span>
+            <strong>第 {{ pagination.page }} / {{ pagination.total_pages }} 页</strong>
+        </article>
+        <article class="users-directory-stat">
             <span>角色</span>
             <strong>{{ '全部' if not filters.role else ('管理员' if filters.role == 'admin' else '普通用户') }}</strong>
         </article>
-        <article class="users-filter-stat">
+        <article class="users-directory-stat">
             <span>状态</span>
             <strong>{{ '全部' if not filters.enabled else ('启用中' if filters.enabled == 'true' else '已禁用') }}</strong>
         </article>
-        <article class="users-filter-stat">
-            <span>分页</span>
-            <strong>第 {{ pagination.page }} / {{ pagination.total_pages }} 页</strong>
-        </article>
     </div>
+
+    {% if users %}
+    <div class="table-shell users-directory-table-shell">
+        <table class="data-table users-directory-table">
+            <thead>
+                <tr>
+                    <th>批量</th>
+                    <th>账号</th>
+                    <th>角色与状态</th>
+                    <th>账户概览</th>
+                    <th>时间信息</th>
+                    <th>运维动作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for user in users %}
+                <tr>
+                    <td data-label="批量">
+                        <label class="users-select-card users-select-card-inline" for="users-batch-{{ user.id }}">
+                            <input id="users-batch-{{ user.id }}" type="checkbox" data-user-batch-id="{{ user.id }}">
+                            <span>纳入批量</span>
+                        </label>
+                    </td>
+                    <td data-label="账号">
+                        <div class="users-cell-stack">
+                            <strong>{{ user.username }}</strong>
+                            <div class="table-muted">#{{ user.id }} · {{ user.email }}</div>
+                            <a class="table-action-btn users-detail-link" href="/users/{{ user.id }}" data-shell-link>查看详情</a>
+                        </div>
+                    </td>
+                    <td data-label="角色与状态">
+                        <div class="users-cell-stack">
+                            <div class="users-registry-pills">
+                                <span class="status-badge status-{{ 'healthy' if user.enabled else 'unhealthy' }}">{{ '启用中' if user.enabled else '已禁用' }}</span>
+                                <span class="users-role-pill users-role-pill-{{ user.role }}">{{ '管理员' if user.role == 'admin' else '普通用户' }}</span>
+                            </div>
+                            <div class="table-muted">{{ '管理员治理' if user.role == 'admin' else '普通用户接入' }}</div>
+                        </div>
+                    </td>
+                    <td data-label="账户概览">
+                        <div class="users-cell-stack">
+                            <strong>API Key {{ key_counts.get(user.id, 0) }}</strong>
+                            <div class="table-muted">余额 {{ '%.6f'|format(user.balance_amount or 0) }}</div>
+                            <div class="table-muted">冻结 {{ '%.6f'|format(user.frozen_amount or 0) }}</div>
+                        </div>
+                    </td>
+                    <td data-label="时间信息">
+                        <div class="users-cell-stack">
+                            <strong>{{ user.last_login_at.strftime('%Y-%m-%d %H:%M:%S') if user.last_login_at else '未登录' }}</strong>
+                            <div class="table-muted">最近登录</div>
+                            <div class="table-muted">创建于 {{ user.created_at.strftime('%Y-%m-%d %H:%M:%S') if user.created_at else '-' }}</div>
+                        </div>
+                    </td>
+                    <td data-label="运维动作">
+                        <div class="users-cell-stack">
+                            <div class="table-actions">
+                                <form method="post" action="/users/{{ user.id }}/toggle">
+                                    <input type="hidden" name="return_to" value="{{ current_query }}">
+                                    <button class="table-action-btn" type="submit">{{ '禁用账号' if user.enabled else '启用账号' }}</button>
+                                </form>
+                                <form method="post" action="/users/{{ user.id }}/role">
+                                    <input type="hidden" name="return_to" value="{{ current_query }}">
+                                    <input name="role" type="hidden" value="{{ 'user' if user.role == 'admin' else 'admin' }}">
+                                    <button class="table-action-btn" type="submit">{{ '降为用户' if user.role == 'admin' else '升为管理员' }}</button>
+                                </form>
+                                <form method="post" action="/users/{{ user.id }}/delete" onsubmit="return window.confirm('确认删除该用户及其名下 API 密钥吗？');">
+                                    <input type="hidden" name="return_to" value="{{ current_query }}">
+                                    <button class="table-action-btn" type="submit">删除账号</button>
+                                </form>
+                            </div>
+                            <form class="table-inline-form users-table-password-form" method="post" action="/users/{{ user.id }}/password">
+                                <input type="hidden" name="return_to" value="{{ current_query }}">
+                                <label class="visually-hidden" for="users-password-{{ user.id }}">为 {{ user.username }} 输入新密码</label>
+                                <input class="field-input table-inline-input" id="users-password-{{ user.id }}" name="password" type="password" placeholder="输入新密码后重置" required>
+                                <button class="table-action-btn" type="submit">重置密码</button>
+                            </form>
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    <div class="logs-pagination-bar topbar-actions users-directory-pagination">
+        <div class="logs-page-meta">第 {{ pagination.page }} / {{ pagination.total_pages }} 页，共 {{ pagination.total }} 条</div>
+        <div class="logs-page-actions">
+            {% if pagination.has_prev %}
+            <a class="topbar-btn" href="/users?keyword={{ filters.keyword | urlencode }}&role={{ filters.role | urlencode }}&enabled={{ filters.enabled | urlencode }}&page_size={{ pagination.page_size }}&page={{ pagination.prev_page }}" data-shell-link>上一页</a>
+            {% endif %}
+            {% if pagination.has_next %}
+            <a class="topbar-btn" href="/users?keyword={{ filters.keyword | urlencode }}&role={{ filters.role | urlencode }}&enabled={{ filters.enabled | urlencode }}&page_size={{ pagination.page_size }}&page={{ pagination.next_page }}" data-shell-link>下一页</a>
+            {% endif %}
+        </div>
+    </div>
+    {% else %}
+    <div class="empty-state users-empty-state">
+        <p>当前筛选条件下没有可治理的账号，可以先放宽筛选或直接创建新账号。</p>
+        <div class="users-empty-actions">
+            <a class="btn btn-ghost interactive-btn" href="/users" data-shell-link>查看全部账号</a>
+            <a class="btn btn-accent interactive-btn" href="#users-create">创建账号</a>
+        </div>
+    </div>
+    {% endif %}
 </section>
 
 <section class="panel-card section-shell users-batch-section anchor-section-offset" id="users-batch">
@@ -213,7 +324,7 @@
         <div class="users-batch-selection-bar">
             <label class="users-batch-selection">
                 <span>已选用户 ID</span>
-                <input class="field-input users-batch-selection-input" id="users-batch-user-ids-preview" value="" placeholder="在下方账号目录勾选后自动填充" disabled>
+                <input class="field-input users-batch-selection-input" id="users-batch-user-ids-preview" value="" placeholder="在上方账号目录勾选后自动填充" disabled>
             </label>
             <div class="users-batch-submit-wrap">
                 <small class="table-muted">只有已打开“本次修改”的额度项才会提交。</small>
@@ -365,133 +476,4 @@
     </form>
 </section>
 
-<section class="panel-card section-shell users-registry-section anchor-section-offset" id="users-registry">
-    <div class="section-subhead users-registry-headline">
-        <div>
-            <div class="panel-kicker">账号目录</div>
-            <h3>按列表治理当前筛选结果</h3>
-        </div>
-        <div class="users-registry-toolbar">
-            <label class="users-select-toolbar" for="users-check-all-visible">
-                <input id="users-check-all-visible" type="checkbox" aria-label="选择本页">
-                <span>选择本页</span>
-            </label>
-            <div class="table-muted">保留服务端分页、角色筛选、状态筛选与关键词检索，便于集中治理。</div>
-        </div>
-    </div>
-
-    {% if users %}
-    <div class="logs-pagination-bar topbar-actions users-directory-pagination">
-        <div class="logs-page-meta">第 {{ pagination.page }} / {{ pagination.total_pages }} 页，共 {{ pagination.total }} 条</div>
-        <div class="logs-page-actions">
-            {% if pagination.has_prev %}
-            <a class="topbar-btn" href="/users?keyword={{ filters.keyword | urlencode }}&role={{ filters.role | urlencode }}&enabled={{ filters.enabled | urlencode }}&page_size={{ pagination.page_size }}&page={{ pagination.prev_page }}" data-shell-link>上一页</a>
-            {% endif %}
-            {% if pagination.has_next %}
-            <a class="topbar-btn" href="/users?keyword={{ filters.keyword | urlencode }}&role={{ filters.role | urlencode }}&enabled={{ filters.enabled | urlencode }}&page_size={{ pagination.page_size }}&page={{ pagination.next_page }}" data-shell-link>下一页</a>
-            {% endif %}
-        </div>
-    </div>
-    <div class="table-shell users-directory-table-shell">
-        <table class="data-table users-directory-table">
-            <thead>
-                <tr>
-                    <th>批量</th>
-                    <th>账号</th>
-                    <th>角色与状态</th>
-                    <th>账户概览</th>
-                    <th>时间信息</th>
-                    <th>运维动作</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for user in users %}
-                <tr>
-                    <td data-label="批量">
-                        <label class="users-select-card users-select-card-inline" for="users-batch-{{ user.id }}">
-                            <input id="users-batch-{{ user.id }}" type="checkbox" data-user-batch-id="{{ user.id }}">
-                            <span>纳入批量</span>
-                        </label>
-                    </td>
-                    <td data-label="账号">
-                        <div class="users-cell-stack">
-                            <strong>{{ user.username }}</strong>
-                            <div class="table-muted">#{{ user.id }} · {{ user.email }}</div>
-                            <a class="table-action-btn users-detail-link" href="/users/{{ user.id }}" data-shell-link>查看详情</a>
-                        </div>
-                    </td>
-                    <td data-label="角色与状态">
-                        <div class="users-cell-stack">
-                            <div class="users-registry-pills">
-                                <span class="status-badge status-{{ 'healthy' if user.enabled else 'unhealthy' }}">{{ '启用中' if user.enabled else '已禁用' }}</span>
-                                <span class="users-role-pill users-role-pill-{{ user.role }}">{{ '管理员' if user.role == 'admin' else '普通用户' }}</span>
-                            </div>
-                            <div class="table-muted">{{ '管理员治理' if user.role == 'admin' else '普通用户接入' }}</div>
-                        </div>
-                    </td>
-                    <td data-label="账户概览">
-                        <div class="users-cell-stack">
-                            <strong>API Key {{ key_counts.get(user.id, 0) }}</strong>
-                            <div class="table-muted">余额 {{ '%.6f'|format(user.balance_amount or 0) }}</div>
-                            <div class="table-muted">冻结 {{ '%.6f'|format(user.frozen_amount or 0) }}</div>
-                        </div>
-                    </td>
-                    <td data-label="时间信息">
-                        <div class="users-cell-stack">
-                            <strong>{{ user.last_login_at.strftime('%Y-%m-%d %H:%M:%S') if user.last_login_at else '未登录' }}</strong>
-                            <div class="table-muted">最近登录</div>
-                            <div class="table-muted">创建于 {{ user.created_at.strftime('%Y-%m-%d %H:%M:%S') if user.created_at else '-' }}</div>
-                        </div>
-                    </td>
-                    <td data-label="运维动作">
-                        <div class="users-cell-stack">
-                            <div class="table-actions">
-                                <form method="post" action="/users/{{ user.id }}/toggle">
-                                    <input type="hidden" name="return_to" value="{{ current_query }}">
-                                    <button class="table-action-btn" type="submit">{{ '禁用账号' if user.enabled else '启用账号' }}</button>
-                                </form>
-                                <form method="post" action="/users/{{ user.id }}/role">
-                                    <input type="hidden" name="return_to" value="{{ current_query }}">
-                                    <input name="role" type="hidden" value="{{ 'user' if user.role == 'admin' else 'admin' }}">
-                                    <button class="table-action-btn" type="submit">{{ '降为用户' if user.role == 'admin' else '升为管理员' }}</button>
-                                </form>
-                                <form method="post" action="/users/{{ user.id }}/delete" onsubmit="return window.confirm('确认删除该用户及其名下 API 密钥吗？');">
-                                    <input type="hidden" name="return_to" value="{{ current_query }}">
-                                    <button class="table-action-btn" type="submit">删除账号</button>
-                                </form>
-                            </div>
-                            <form class="table-inline-form users-table-password-form" method="post" action="/users/{{ user.id }}/password">
-                                <input type="hidden" name="return_to" value="{{ current_query }}">
-                                <label class="visually-hidden" for="users-password-{{ user.id }}">为 {{ user.username }} 输入新密码</label>
-                                <input class="field-input table-inline-input" id="users-password-{{ user.id }}" name="password" type="password" placeholder="输入新密码后重置" required>
-                                <button class="table-action-btn" type="submit">重置密码</button>
-                            </form>
-                        </div>
-                    </td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-    </div>
-    <div class="logs-pagination-bar topbar-actions users-directory-pagination">
-        <div class="logs-page-meta">第 {{ pagination.page }} / {{ pagination.total_pages }} 页，共 {{ pagination.total }} 条</div>
-        <div class="logs-page-actions">
-            {% if pagination.has_prev %}
-            <a class="topbar-btn" href="/users?keyword={{ filters.keyword | urlencode }}&role={{ filters.role | urlencode }}&enabled={{ filters.enabled | urlencode }}&page_size={{ pagination.page_size }}&page={{ pagination.prev_page }}" data-shell-link>上一页</a>
-            {% endif %}
-            {% if pagination.has_next %}
-            <a class="topbar-btn" href="/users?keyword={{ filters.keyword | urlencode }}&role={{ filters.role | urlencode }}&enabled={{ filters.enabled | urlencode }}&page_size={{ pagination.page_size }}&page={{ pagination.next_page }}" data-shell-link>下一页</a>
-            {% endif %}
-        </div>
-    </div>
-    {% else %}
-    <div class="empty-state users-empty-state">
-        <p>当前筛选条件下没有可治理的账号，可以先放宽筛选或直接创建新账号。</p>
-        <div class="users-empty-actions">
-            <a class="btn btn-ghost interactive-btn" href="/users" data-shell-link>查看全部账号</a>
-            <a class="btn btn-accent interactive-btn" href="#users-create">创建账号</a>
-        </div>
-    </div>
-    {% endif %}
-</section>
 {% endblock %}

@@ -104,7 +104,7 @@ def _effective_request_body_limit(setting, endpoint_path: str) -> int:
     """计算某个 v1 端点实际生效的请求体大小限制。"""
     global_limit = int(getattr(setting, "max_v1_request_body_bytes", 0) or 0)
     endpoint_limit = 0
-    if endpoint_path == "/chat/completions":
+    if endpoint_path in {"/chat/completions", "/completions"}:
         endpoint_limit = int(getattr(setting, "max_v1_chat_request_body_bytes", 0) or 0)
     elif endpoint_path in {"/responses", "/images/generations", "/images/edits", "/images/variations"}:
         endpoint_limit = int(getattr(setting, "max_v1_responses_request_body_bytes", 0) or 0)
@@ -252,6 +252,53 @@ async def _prepare_v1_body_limit_context(request: Request, *, endpoint_path: str
             },
         )
     return setting, limit, max_logged_body_bytes
+
+
+async def _read_v1_multipart_payload(request: Request, *, endpoint_path: str) -> tuple[list[tuple[str, str]], list[tuple[str, tuple[str, bytes, str]]]]:
+    """读取 OpenAI 兼容 multipart 请求并生成安全日志摘要。"""
+    _setting, _limit, max_logged_body_bytes = await _prepare_v1_body_limit_context(request, endpoint_path=endpoint_path)
+    form = await request.form()
+    fields: list[tuple[str, str]] = []
+    files: list[tuple[str, tuple[str, bytes, str]]] = []
+    summary_items: list[dict[str, object]] = []
+    for field_name, value in form.multi_items():
+        if hasattr(value, "read") and hasattr(value, "filename"):
+            content = await value.read()
+            filename = str(getattr(value, "filename", None) or "upload")
+            content_type = str(getattr(value, "content_type", None) or "application/octet-stream")
+            files.append((field_name, (filename, content, content_type)))
+            summary_items.append(
+                {
+                    "field": field_name,
+                    "type": "file",
+                    "filename": filename,
+                    "content_type": content_type,
+                    "file_size_bytes": len(content),
+                }
+            )
+        else:
+            text_value = str(value)
+            fields.append((field_name, text_value))
+            summary_items.append(
+                {
+                    "field": field_name,
+                    "type": "string",
+                    "bytes": len(text_value.encode("utf-8", errors="ignore")),
+                }
+            )
+    request.state.v1_request_body_structure_json = _truncate_json_for_log(
+        {
+            "_summary": "multipart request structure only; file bytes and field values omitted",
+            "structure": {
+                "type": "multipart",
+                "items": summary_items,
+                "field_count": len(fields),
+                "file_count": len(files),
+            },
+        },
+        max_logged_body_bytes,
+    )
+    return fields, files
 
 
 async def _upload_to_data_url(upload_file, *, field_name: str) -> dict[str, object]:
@@ -616,6 +663,213 @@ async def chat_completions(
     return result
 
 
+@router.post("/v1/completions", response_model=None)
+async def completions(
+    request: Request,
+    response: Response,
+    api_client_auth: ApiClientAuthContext = Depends(require_api_client_auth),
+):
+    source_ip = ApiKeyService.extract_source_ip(request)
+    payload = await _read_limited_v1_json_payload(request, endpoint_path="/completions")
+    if payload.get("stream") is True:
+        lease = await _acquire_request_concurrency(request=request, api_client_auth=api_client_auth, is_stream=True)
+        try:
+            stream, provider, trace, latency_ms = await ProxyService.forward_stream_request(
+                endpoint_path="/completions",
+                payload=payload,
+                log_type="chat",
+                route_context=api_client_auth.route_context,
+                api_client_auth=api_client_auth,
+                trace_id=getattr(request.state, "trace_id", None),
+                source_ip=source_ip,
+            )
+            headers = build_proxy_response_headers(
+                provider_id=provider.id,
+                provider_name=provider.name,
+                latency_ms=latency_ms,
+                trace_length=len(trace),
+                trace_id=getattr(request.state, "trace_id", None),
+            )
+            return StreamingResponse(
+                _release_after_stream(stream, lease, trace_id=getattr(request.state, "trace_id", None)),
+                media_type="text/event-stream",
+                headers=headers,
+            )
+        except Exception:
+            await _release_request_concurrency(lease)
+            raise
+
+    lease = await _acquire_request_concurrency(request=request, api_client_auth=api_client_auth, is_stream=False)
+    try:
+        result, provider, trace, latency_ms = await ProxyService.forward_json_request(
+            endpoint_path="/completions",
+            payload=payload,
+            log_type="chat",
+            route_context=api_client_auth.route_context,
+            api_client_auth=api_client_auth,
+            trace_id=getattr(request.state, "trace_id", None),
+            source_ip=source_ip,
+        )
+    finally:
+        await _release_request_concurrency(lease)
+    for key, value in build_proxy_response_headers(
+        provider_id=provider.id,
+        provider_name=provider.name,
+        latency_ms=latency_ms,
+        trace_length=len(trace),
+        trace_id=getattr(request.state, "trace_id", None),
+    ).items():
+        response.headers[key] = value
+    return result
+
+
+@router.get("/v1/chat/completions", response_model=None)
+async def list_chat_completions(
+    request: Request,
+    response: Response,
+    api_client_auth: ApiClientAuthContext = Depends(require_api_client_auth),
+):
+    lease = await _acquire_request_concurrency(request=request, api_client_auth=api_client_auth, is_stream=False)
+    try:
+        result, provider, trace, latency_ms = await ProxyService.list_chat_completions(
+            query_items=list(request.query_params.multi_items()),
+            route_context=api_client_auth.route_context,
+            api_client_auth=api_client_auth,
+            trace_id=getattr(request.state, "trace_id", None),
+            source_ip=ApiKeyService.extract_source_ip(request),
+        )
+    finally:
+        await _release_request_concurrency(lease)
+    for key, value in build_proxy_response_headers(
+        provider_id=provider.id,
+        provider_name=provider.name,
+        latency_ms=latency_ms,
+        trace_length=len(trace),
+        trace_id=getattr(request.state, "trace_id", None),
+    ).items():
+        response.headers[key] = value
+    return result
+
+
+@router.get("/v1/chat/completions/{completion_id}", response_model=None)
+async def retrieve_chat_completion(
+    completion_id: str,
+    request: Request,
+    response: Response,
+    api_client_auth: ApiClientAuthContext = Depends(require_api_client_auth),
+):
+    lease = await _acquire_request_concurrency(request=request, api_client_auth=api_client_auth, is_stream=False)
+    try:
+        result, provider, trace, latency_ms = await ProxyService.retrieve_chat_completion(
+            completion_id=completion_id,
+            route_context=api_client_auth.route_context,
+            api_client_auth=api_client_auth,
+            trace_id=getattr(request.state, "trace_id", None),
+            source_ip=ApiKeyService.extract_source_ip(request),
+        )
+    finally:
+        await _release_request_concurrency(lease)
+    for key, value in build_proxy_response_headers(
+        provider_id=provider.id,
+        provider_name=provider.name,
+        latency_ms=latency_ms,
+        trace_length=len(trace),
+        trace_id=getattr(request.state, "trace_id", None),
+    ).items():
+        response.headers[key] = value
+    return result
+
+
+@router.get("/v1/chat/completions/{completion_id}/messages", response_model=None)
+async def list_chat_completion_messages(
+    completion_id: str,
+    request: Request,
+    response: Response,
+    api_client_auth: ApiClientAuthContext = Depends(require_api_client_auth),
+):
+    lease = await _acquire_request_concurrency(request=request, api_client_auth=api_client_auth, is_stream=False)
+    try:
+        result, provider, trace, latency_ms = await ProxyService.list_chat_completion_messages(
+            completion_id=completion_id,
+            query_items=list(request.query_params.multi_items()),
+            route_context=api_client_auth.route_context,
+            api_client_auth=api_client_auth,
+            trace_id=getattr(request.state, "trace_id", None),
+            source_ip=ApiKeyService.extract_source_ip(request),
+        )
+    finally:
+        await _release_request_concurrency(lease)
+    for key, value in build_proxy_response_headers(
+        provider_id=provider.id,
+        provider_name=provider.name,
+        latency_ms=latency_ms,
+        trace_length=len(trace),
+        trace_id=getattr(request.state, "trace_id", None),
+    ).items():
+        response.headers[key] = value
+    return result
+
+
+@router.post("/v1/chat/completions/{completion_id}", response_model=None)
+async def update_chat_completion(
+    completion_id: str,
+    request: Request,
+    response: Response,
+    api_client_auth: ApiClientAuthContext = Depends(require_api_client_auth),
+):
+    payload = await _read_limited_v1_json_payload(request, endpoint_path="/chat/completions")
+    lease = await _acquire_request_concurrency(request=request, api_client_auth=api_client_auth, is_stream=False)
+    try:
+        result, provider, trace, latency_ms = await ProxyService.update_chat_completion(
+            completion_id=completion_id,
+            payload=payload,
+            route_context=api_client_auth.route_context,
+            api_client_auth=api_client_auth,
+            trace_id=getattr(request.state, "trace_id", None),
+            source_ip=ApiKeyService.extract_source_ip(request),
+        )
+    finally:
+        await _release_request_concurrency(lease)
+    for key, value in build_proxy_response_headers(
+        provider_id=provider.id,
+        provider_name=provider.name,
+        latency_ms=latency_ms,
+        trace_length=len(trace),
+        trace_id=getattr(request.state, "trace_id", None),
+    ).items():
+        response.headers[key] = value
+    return result
+
+
+@router.delete("/v1/chat/completions/{completion_id}", response_model=None)
+async def delete_chat_completion(
+    completion_id: str,
+    request: Request,
+    response: Response,
+    api_client_auth: ApiClientAuthContext = Depends(require_api_client_auth),
+):
+    lease = await _acquire_request_concurrency(request=request, api_client_auth=api_client_auth, is_stream=False)
+    try:
+        result, provider, trace, latency_ms = await ProxyService.delete_chat_completion(
+            completion_id=completion_id,
+            route_context=api_client_auth.route_context,
+            api_client_auth=api_client_auth,
+            trace_id=getattr(request.state, "trace_id", None),
+            source_ip=ApiKeyService.extract_source_ip(request),
+        )
+    finally:
+        await _release_request_concurrency(lease)
+    for key, value in build_proxy_response_headers(
+        provider_id=provider.id,
+        provider_name=provider.name,
+        latency_ms=latency_ms,
+        trace_length=len(trace),
+        trace_id=getattr(request.state, "trace_id", None),
+    ).items():
+        response.headers[key] = value
+    return result
+
+
 @router.post("/v1/responses", response_model=None)
 async def responses(
     request: Request,
@@ -662,6 +916,209 @@ async def responses(
             api_client_auth=api_client_auth,
             trace_id=getattr(request.state, "trace_id", None),
             source_ip=source_ip,
+        )
+    finally:
+        await _release_request_concurrency(lease)
+    for key, value in build_proxy_response_headers(
+        provider_id=provider.id,
+        provider_name=provider.name,
+        latency_ms=latency_ms,
+        trace_length=len(trace),
+        trace_id=getattr(request.state, "trace_id", None),
+    ).items():
+        response.headers[key] = value
+    return result
+
+
+@router.post("/v1/embeddings", response_model=None)
+async def embeddings(
+    request: Request,
+    response: Response,
+    api_client_auth: ApiClientAuthContext = Depends(require_api_client_auth),
+):
+    payload = await _read_limited_v1_json_payload(request, endpoint_path="/embeddings")
+    lease = await _acquire_request_concurrency(request=request, api_client_auth=api_client_auth, is_stream=False)
+    try:
+        result, provider, trace, latency_ms = await ProxyService.forward_json_request(
+            endpoint_path="/embeddings",
+            payload=payload,
+            log_type="embeddings",
+            route_context=api_client_auth.route_context,
+            api_client_auth=api_client_auth,
+            trace_id=getattr(request.state, "trace_id", None),
+            source_ip=ApiKeyService.extract_source_ip(request),
+        )
+    finally:
+        await _release_request_concurrency(lease)
+    for key, value in build_proxy_response_headers(
+        provider_id=provider.id,
+        provider_name=provider.name,
+        latency_ms=latency_ms,
+        trace_length=len(trace),
+        trace_id=getattr(request.state, "trace_id", None),
+    ).items():
+        response.headers[key] = value
+    return result
+
+
+@router.post("/v1/moderations", response_model=None)
+async def moderations(
+    request: Request,
+    response: Response,
+    api_client_auth: ApiClientAuthContext = Depends(require_api_client_auth),
+):
+    payload = await _read_limited_v1_json_payload(request, endpoint_path="/moderations")
+    lease = await _acquire_request_concurrency(request=request, api_client_auth=api_client_auth, is_stream=False)
+    try:
+        result, provider, trace, latency_ms = await ProxyService.create_moderation(
+            payload=payload,
+            route_context=api_client_auth.route_context,
+            api_client_auth=api_client_auth,
+            trace_id=getattr(request.state, "trace_id", None),
+            source_ip=ApiKeyService.extract_source_ip(request),
+        )
+    finally:
+        await _release_request_concurrency(lease)
+    for key, value in build_proxy_response_headers(
+        provider_id=provider.id,
+        provider_name=provider.name,
+        latency_ms=latency_ms,
+        trace_length=len(trace),
+        trace_id=getattr(request.state, "trace_id", None),
+    ).items():
+        response.headers[key] = value
+    return result
+
+
+@router.get("/v1/files", response_model=None)
+async def list_files(
+    request: Request,
+    response: Response,
+    api_client_auth: ApiClientAuthContext = Depends(require_api_client_auth),
+):
+    lease = await _acquire_request_concurrency(request=request, api_client_auth=api_client_auth, is_stream=False)
+    try:
+        result, provider, trace, latency_ms = await ProxyService.list_files(
+            query_items=list(request.query_params.multi_items()),
+            route_context=api_client_auth.route_context,
+            api_client_auth=api_client_auth,
+            trace_id=getattr(request.state, "trace_id", None),
+            source_ip=ApiKeyService.extract_source_ip(request),
+        )
+    finally:
+        await _release_request_concurrency(lease)
+    for key, value in build_proxy_response_headers(
+        provider_id=provider.id,
+        provider_name=provider.name,
+        latency_ms=latency_ms,
+        trace_length=len(trace),
+        trace_id=getattr(request.state, "trace_id", None),
+    ).items():
+        response.headers[key] = value
+    return result
+
+
+@router.post("/v1/files", response_model=None)
+async def upload_file(
+    request: Request,
+    response: Response,
+    api_client_auth: ApiClientAuthContext = Depends(require_api_client_auth),
+):
+    form_fields, form_files = await _read_v1_multipart_payload(request, endpoint_path="/files")
+    lease = await _acquire_request_concurrency(request=request, api_client_auth=api_client_auth, is_stream=False)
+    try:
+        result, provider, trace, latency_ms = await ProxyService.upload_file(
+            form_fields=form_fields,
+            form_files=form_files,
+            route_context=api_client_auth.route_context,
+            api_client_auth=api_client_auth,
+            trace_id=getattr(request.state, "trace_id", None),
+            source_ip=ApiKeyService.extract_source_ip(request),
+        )
+    finally:
+        await _release_request_concurrency(lease)
+    for key, value in build_proxy_response_headers(
+        provider_id=provider.id,
+        provider_name=provider.name,
+        latency_ms=latency_ms,
+        trace_length=len(trace),
+        trace_id=getattr(request.state, "trace_id", None),
+    ).items():
+        response.headers[key] = value
+    return result
+
+
+@router.get("/v1/files/{file_id}/content", response_model=None)
+async def retrieve_file_content(
+    file_id: str,
+    request: Request,
+    api_client_auth: ApiClientAuthContext = Depends(require_api_client_auth),
+):
+    lease = await _acquire_request_concurrency(request=request, api_client_auth=api_client_auth, is_stream=False)
+    try:
+        content, content_type, provider, trace, latency_ms = await ProxyService.retrieve_file_content(
+            file_id=file_id,
+            route_context=api_client_auth.route_context,
+            api_client_auth=api_client_auth,
+            trace_id=getattr(request.state, "trace_id", None),
+            source_ip=ApiKeyService.extract_source_ip(request),
+        )
+    finally:
+        await _release_request_concurrency(lease)
+    headers = build_proxy_response_headers(
+        provider_id=provider.id,
+        provider_name=provider.name,
+        latency_ms=latency_ms,
+        trace_length=len(trace),
+        trace_id=getattr(request.state, "trace_id", None),
+    )
+    return Response(content=content, media_type=content_type, headers=headers)
+
+
+@router.get("/v1/files/{file_id}", response_model=None)
+async def retrieve_file(
+    file_id: str,
+    request: Request,
+    response: Response,
+    api_client_auth: ApiClientAuthContext = Depends(require_api_client_auth),
+):
+    lease = await _acquire_request_concurrency(request=request, api_client_auth=api_client_auth, is_stream=False)
+    try:
+        result, provider, trace, latency_ms = await ProxyService.retrieve_file(
+            file_id=file_id,
+            route_context=api_client_auth.route_context,
+            api_client_auth=api_client_auth,
+            trace_id=getattr(request.state, "trace_id", None),
+            source_ip=ApiKeyService.extract_source_ip(request),
+        )
+    finally:
+        await _release_request_concurrency(lease)
+    for key, value in build_proxy_response_headers(
+        provider_id=provider.id,
+        provider_name=provider.name,
+        latency_ms=latency_ms,
+        trace_length=len(trace),
+        trace_id=getattr(request.state, "trace_id", None),
+    ).items():
+        response.headers[key] = value
+    return result
+
+
+@router.delete("/v1/files/{file_id}", response_model=None)
+async def delete_file(
+    file_id: str,
+    request: Request,
+    response: Response,
+    api_client_auth: ApiClientAuthContext = Depends(require_api_client_auth),
+):
+    lease = await _acquire_request_concurrency(request=request, api_client_auth=api_client_auth, is_stream=False)
+    try:
+        result, provider, trace, latency_ms = await ProxyService.delete_file(
+            file_id=file_id,
+            route_context=api_client_auth.route_context,
+            api_client_auth=api_client_auth,
+            trace_id=getattr(request.state, "trace_id", None),
+            source_ip=ApiKeyService.extract_source_ip(request),
         )
     finally:
         await _release_request_concurrency(lease)
@@ -878,6 +1335,36 @@ async def retrieve_response(
     return result
 
 
+@router.get("/v1/responses/{response_id}/input_items", response_model=None)
+async def list_response_input_items(
+    response_id: str,
+    request: Request,
+    response: Response,
+    api_client_auth: ApiClientAuthContext = Depends(require_api_client_auth),
+):
+    lease = await _acquire_request_concurrency(request=request, api_client_auth=api_client_auth, is_stream=False)
+    try:
+        result, provider, trace, latency_ms = await ProxyService.list_response_input_items(
+            response_id=response_id,
+            query_items=list(request.query_params.multi_items()),
+            route_context=api_client_auth.route_context,
+            api_client_auth=api_client_auth,
+            trace_id=getattr(request.state, "trace_id", None),
+            source_ip=ApiKeyService.extract_source_ip(request),
+        )
+    finally:
+        await _release_request_concurrency(lease)
+    for key, value in build_proxy_response_headers(
+        provider_id=provider.id,
+        provider_name=provider.name,
+        latency_ms=latency_ms,
+        trace_length=len(trace),
+        trace_id=getattr(request.state, "trace_id", None),
+    ).items():
+        response.headers[key] = value
+    return result
+
+
 @router.post("/v1/responses/{response_id}/cancel", response_model=None)
 async def cancel_response(
     response_id: str,
@@ -888,6 +1375,35 @@ async def cancel_response(
     lease = await _acquire_request_concurrency(request=request, api_client_auth=api_client_auth, is_stream=False)
     try:
         result, provider, trace, latency_ms = await ProxyService.cancel_response(
+            response_id=response_id,
+            route_context=api_client_auth.route_context,
+            api_client_auth=api_client_auth,
+            trace_id=getattr(request.state, "trace_id", None),
+            source_ip=ApiKeyService.extract_source_ip(request),
+        )
+    finally:
+        await _release_request_concurrency(lease)
+    for key, value in build_proxy_response_headers(
+        provider_id=provider.id,
+        provider_name=provider.name,
+        latency_ms=latency_ms,
+        trace_length=len(trace),
+        trace_id=getattr(request.state, "trace_id", None),
+    ).items():
+        response.headers[key] = value
+    return result
+
+
+@router.delete("/v1/responses/{response_id}", response_model=None)
+async def delete_response(
+    response_id: str,
+    request: Request,
+    response: Response,
+    api_client_auth: ApiClientAuthContext = Depends(require_api_client_auth),
+):
+    lease = await _acquire_request_concurrency(request=request, api_client_auth=api_client_auth, is_stream=False)
+    try:
+        result, provider, trace, latency_ms = await ProxyService.delete_response(
             response_id=response_id,
             route_context=api_client_auth.route_context,
             api_client_auth=api_client_auth,
@@ -927,6 +1443,66 @@ async def list_models(
         await _release_request_concurrency(lease)
 
 
+@router.get("/v1/models/{model_id:path}", response_model=None)
+async def retrieve_model(
+    model_id: str,
+    request: Request,
+    api_client_auth: ApiClientAuthContext = Depends(require_api_client_auth),
+) -> JSONResponse | dict:
+    lease = await _acquire_request_concurrency(request=request, api_client_auth=api_client_auth, is_stream=False)
+    try:
+        result = await ProxyService.async_list_models(route_context=api_client_auth.route_context, api_client_auth=api_client_auth)
+        models = result.get("data") if isinstance(result, dict) else []
+        model_payload = next(
+            (
+                item
+                for item in models
+                if isinstance(item, dict) and str(item.get("id") or "") == model_id
+            ),
+            None,
+        )
+        if model_payload is not None:
+            await run_in_threadpool(
+                _log_v1_model_retrieve_request,
+                request_path=request.url.path,
+                trace_id=getattr(request.state, "trace_id", None),
+                source_ip=ApiKeyService.extract_source_ip(request),
+                api_client_auth=api_client_auth,
+                model_id=model_id,
+                success=True,
+                status_code=status.HTTP_200_OK,
+                error_code=None,
+            )
+            return model_payload
+        detail = {
+            "request_path": request.url.path,
+            "model": model_id,
+            "message": "Requested model is not available for this API key or route policy",
+        }
+        await run_in_threadpool(
+            _log_v1_model_retrieve_request,
+            request_path=request.url.path,
+            trace_id=getattr(request.state, "trace_id", None),
+            source_ip=ApiKeyService.extract_source_ip(request),
+            api_client_auth=api_client_auth,
+            model_id=model_id,
+            success=False,
+            status_code=status.HTTP_404_NOT_FOUND,
+            error_code="model_not_found",
+        )
+        payload = OpenAIErrorService.build_error_payload(
+            message=detail["message"],
+            code="model_not_found",
+            trace_id=getattr(request.state, "trace_id", None),
+            error_type="invalid_request_error",
+            retryable=False,
+            detail=detail,
+        )
+        return JSONResponse(status_code=status.HTTP_404_NOT_FOUND, content=payload, headers=_build_v1_cors_headers(request))
+    finally:
+        await _release_request_concurrency(lease)
+
+
 @router.options("/v1", response_model=None)
 @router.options("/v1/{path:path}", response_model=None)
 async def v1_options(request: Request) -> Response:
@@ -950,13 +1526,29 @@ async def unsupported_v1_endpoint(
     trace_id = getattr(request.state, "trace_id", None)
     supported_endpoints = [
         "GET /v1/models",
+        "GET /v1/models/{model}",
+        "POST /v1/completions",
         "POST /v1/chat/completions",
+        "GET /v1/chat/completions",
+        "GET /v1/chat/completions/{completion_id}",
+        "GET /v1/chat/completions/{completion_id}/messages",
+        "POST /v1/chat/completions/{completion_id}",
+        "DELETE /v1/chat/completions/{completion_id}",
         "POST /v1/responses",
+        "POST /v1/embeddings",
+        "POST /v1/moderations",
+        "GET /v1/files",
+        "POST /v1/files",
+        "GET /v1/files/{file_id}",
+        "GET /v1/files/{file_id}/content",
+        "DELETE /v1/files/{file_id}",
         "POST /v1/images/generations",
         "POST /v1/images/edits",
         "POST /v1/images/variations",
         "GET /v1/responses/{response_id}",
+        "GET /v1/responses/{response_id}/input_items",
         "POST /v1/responses/{response_id}/cancel",
+        "DELETE /v1/responses/{response_id}",
     ]
     legacy_images_hint = None
     if request_path.startswith("/v1/images/"):
@@ -1049,7 +1641,7 @@ def _build_v1_cors_headers(request: Request) -> dict[str, str]:
     origin = request.headers.get("origin")
     return {
         "Access-Control-Allow-Origin": origin or "*",
-        "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+        "Access-Control-Allow-Methods": "GET,POST,DELETE,OPTIONS",
         "Access-Control-Allow-Headers": (
             request.headers.get("access-control-request-headers")
             or "authorization,content-type,x-request-id,x-trace-id"
@@ -1177,6 +1769,54 @@ def _log_v1_models_request(
             api_client_policy_snapshot_json=api_client_auth.policy_snapshot_json,
             response_body_json=dumps_json({"object": "list", "model_count": model_count}),
             trace=[{"result": "models_list_success", "model_count": model_count, "latency_ms": 0}],
+            attempt_count=1,
+            schedule_token_fill=False,
+        )
+    finally:
+        db.close()
+
+
+def _log_v1_model_retrieve_request(
+    *,
+    request_path: str,
+    trace_id: str | None,
+    source_ip: str | None,
+    api_client_auth: ApiClientAuthContext,
+    model_id: str,
+    success: bool,
+    status_code: int,
+    error_code: str | None,
+) -> None:
+    api_key = api_client_auth.api_client_key
+    db = SessionLocal()
+    try:
+        LogService.create_log(
+            db,
+            log_type="models",
+            trace_id=trace_id,
+            request_path=request_path,
+            source_ip=source_ip,
+            http_method="GET",
+            model_name=model_id,
+            requested_model=model_id,
+            success=success,
+            status_code=status_code,
+            message="model retrieve success" if success else "model retrieve failed",
+            error_type=None if success else "invalid_request_error",
+            error_code=error_code,
+            retryable=False,
+            api_client_key_id=api_key.id,
+            api_client_key_name=api_key.name,
+            api_client_key_prefix=api_key.key_prefix,
+            user_account_id=api_key.owner_user_id,
+            user_account_name=api_key.owner_user.username if api_key.owner_user else None,
+            api_client_auth_result="authenticated",
+            api_client_remaining_tokens=api_client_auth.remaining_tokens,
+            api_client_remaining_requests_daily=api_client_auth.remaining_requests_daily,
+            api_client_remaining_cost_daily=api_client_auth.remaining_cost_daily,
+            api_client_policy_snapshot_json=api_client_auth.policy_snapshot_json,
+            response_body_json=dumps_json({"object": "model", "id": model_id} if success else {"error": {"code": error_code, "model": model_id}}),
+            trace=[{"result": "model_retrieve_success" if success else "model_retrieve_failed", "model": model_id, "latency_ms": 0}],
             attempt_count=1,
             schedule_token_fill=False,
         )

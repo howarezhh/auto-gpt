@@ -13,6 +13,8 @@ class SettingUpdate(BaseModel):
     manual_allow_fallback: bool = True
     global_timeout_ms: int = Field(default=30000, ge=0)
     global_max_retries: int = Field(default=2, ge=0)
+    route_exhausted_retry_max_wait_seconds: int = Field(default=600, ge=0, le=600)
+    route_exhausted_retry_infinite_enabled: bool = False
     global_max_request_tokens: int = Field(default=0, ge=0)
     max_v1_request_body_bytes: int = Field(default=20971520, ge=0)
     max_v1_chat_request_body_bytes: int = Field(default=0, ge=0)

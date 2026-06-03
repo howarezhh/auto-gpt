@@ -22,10 +22,11 @@ from app.models.alert_event import AlertEvent
 from app.models.provider import Provider
 from app.models.request_log import RequestLog
 from app.scheduler import scheduler
-from app.services.concurrency_service import ConcurrencyService
 from app.services.log_service import LogService
+from app.services.request_log_queue_service import RequestLogQueueService
 from app.services.provider_capacity_service import ProviderCapacityService, ProviderCapacityUnavailableError
 from app.services.runtime_state_service import RuntimeStateService
+from app.services.setting_service import SettingService
 from app.utils.json_utils import dumps_json
 
 
@@ -33,7 +34,7 @@ PROCESS_STARTED_AT = time.time()
 
 
 class SystemMetricsService:
-    TRAFFIC_LOG_TYPES = ("chat", "responses")
+    TRAFFIC_LOG_TYPES = ("chat", "responses", "moderations", "files")
     ACTIVE_REQUEST_WARNING_THRESHOLD = 900
     ACTIVE_STREAM_WARNING_THRESHOLD = 300
     ERROR_RATE_5XX_WARNING_THRESHOLD = 1.0
@@ -58,10 +59,18 @@ class SystemMetricsService:
     ) -> dict[str, Any]:
         window_minutes = max(1, min(int(window_minutes or 5), 1440))
         database = cls._database_snapshot(db)
+        limits = cls._limits_snapshot(db) if database["ok"] else cls._limits_snapshot(None)
         redis_snapshot = cls._redis_snapshot()
+        redis_snapshot.update(limits)
         runtime = cls._runtime_snapshot()
         host = cls._host_snapshot()
         traffic = cls._traffic_snapshot(db, window_minutes=window_minutes) if database["ok"] else cls._empty_traffic()
+        bucket_minutes = cls._bucket_minutes(window_minutes)
+        timeseries = (
+            LogService.metric_timeseries(db, window_minutes=window_minutes, bucket_minutes=bucket_minutes)
+            if database["ok"]
+            else []
+        )
         providers = cls._provider_snapshot(db, window_minutes=window_minutes) if database["ok"] else []
         background = cls._background_snapshot(db) if database["ok"] else cls._empty_background()
         pool = cls._database_pool_snapshot()
@@ -80,6 +89,8 @@ class SystemMetricsService:
             "runtime": runtime,
             "host": host,
             "traffic": traffic,
+            "timeseries": timeseries,
+            "bucket_minutes": bucket_minutes,
             "providers": providers,
             "background": background,
         }
@@ -183,6 +194,7 @@ class SystemMetricsService:
                 "active_requests": None,
                 "active_streams": None,
                 "token_finalize_backlog": None,
+                "request_log_queue": {"queued": None, "processing": None, "total": None},
                 "error": "REDIS_URL is empty",
             }
         started = time.perf_counter()
@@ -195,6 +207,7 @@ class SystemMetricsService:
                     "concurrency:global:active",
                     "concurrency:global:streams",
                 ])
+                request_log_queue = cls._request_log_queue_snapshot(client)
                 return {
                     "ok": True,
                     "status": "ok",
@@ -202,6 +215,7 @@ class SystemMetricsService:
                     "active_requests": int(active_values[0] or 0),
                     "active_streams": int(active_values[1] or 0),
                     "token_finalize_backlog": cls._count_redis_keys(client, "token_usage:finalize:dedupe:*", limit=1001),
+                    "request_log_queue": request_log_queue,
                     "scheduler_jobs": cls._scheduler_job_states(client),
                     "error": None,
                 }
@@ -216,8 +230,42 @@ class SystemMetricsService:
                 "active_requests": None,
                 "active_streams": None,
                 "token_finalize_backlog": None,
+                "request_log_queue": {"queued": None, "processing": None, "total": None},
                 "error": str(exc),
             }
+
+    @staticmethod
+    def _request_log_queue_snapshot(client: Redis) -> dict[str, int | None]:
+        try:
+            queued = int(client.llen(RequestLogQueueService.QUEUE_KEY) or 0)
+            processing = int(client.llen(RequestLogQueueService.PROCESSING_KEY) or 0)
+            return {"queued": queued, "processing": processing, "total": queued + processing}
+        except Exception:
+            return {"queued": None, "processing": None, "total": None}
+
+    @staticmethod
+    def _limits_snapshot(db: Session | None) -> dict[str, Any]:
+        try:
+            setting = SettingService.get_or_create(db) if db is not None else None
+        except Exception:
+            if db is not None:
+                db.rollback()
+            setting = None
+        settings = get_settings()
+        return {
+            "max_active_requests": int(getattr(setting, "global_max_active_requests", settings.global_max_active_requests) or 0),
+            "max_active_streams": int(getattr(setting, "global_max_active_streams", settings.global_max_active_streams) or 0),
+        }
+
+    @staticmethod
+    def _bucket_minutes(window_minutes: int) -> int:
+        if window_minutes <= 15:
+            return 1
+        if window_minutes <= 60:
+            return 5
+        if window_minutes <= 360:
+            return 15
+        return 60
 
     @staticmethod
     def _count_redis_keys(client: Redis, pattern: str, *, limit: int) -> int:
@@ -399,6 +447,7 @@ class SystemMetricsService:
         failed = total - success
         status_429 = int(row.status_429 or 0)
         status_5xx = int(row.status_5xx or 0)
+        window_seconds = max(1, window_minutes * 60)
         latencies = list(
             db.scalars(
                 select(RequestLog.latency_ms)
@@ -420,6 +469,8 @@ class SystemMetricsService:
             "failure_rate": round((failed / total) * 100, 2) if total else 0.0,
             "status_429_rate": round((status_429 / total) * 100, 2) if total else 0.0,
             "status_5xx_rate": round((status_5xx / total) * 100, 2) if total else 0.0,
+            "qps": round(total / window_seconds, 4),
+            "stream_qps": round(int(row.stream_requests or 0) / window_seconds, 4),
             "p50_latency_ms": cls._percentile(latencies, 50),
             "p95_latency_ms": cls._percentile(latencies, 95),
             "p99_latency_ms": cls._percentile(latencies, 99),
@@ -500,6 +551,7 @@ class SystemMetricsService:
                     RequestLog.request_path != "/v1/models",
                     RequestLog.log_type.in_(cls.TRAFFIC_LOG_TYPES),
                     LogService._non_health_check_expr(),
+                    RequestLog.api_client_key_id.is_not(None),
                     RequestLog.billing_finalized_at.is_(None),
                 )
             ) or 0
@@ -509,6 +561,7 @@ class SystemMetricsService:
                 select(func.count()).select_from(RequestLog).where(
                     RequestLog.log_type.in_(cls.TRAFFIC_LOG_TYPES),
                     LogService._non_health_check_expr(),
+                    RequestLog.api_client_key_id.is_not(None),
                     RequestLog.billing_error.is_not(None),
                     RequestLog.billing_finalized_at.is_(None),
                 )
@@ -519,6 +572,7 @@ class SystemMetricsService:
                 select(func.count()).select_from(RequestLog).where(
                     RequestLog.log_type.in_(cls.TRAFFIC_LOG_TYPES),
                     LogService._non_health_check_expr(),
+                    RequestLog.api_client_key_id.is_not(None),
                     RequestLog.token_finalize_error.is_not(None),
                     RequestLog.billing_finalized_at.is_(None),
                 )
@@ -543,6 +597,8 @@ class SystemMetricsService:
             "failure_rate": 0.0,
             "status_429_rate": 0.0,
             "status_5xx_rate": 0.0,
+            "qps": 0.0,
+            "stream_qps": 0.0,
             "p50_latency_ms": None,
             "p95_latency_ms": None,
             "p99_latency_ms": None,
@@ -591,23 +647,31 @@ class SystemMetricsService:
         background = metrics.get("background", {})
         active_requests = redis_snapshot.get("active_requests")
         active_streams = redis_snapshot.get("active_streams")
-        if active_requests is not None and active_requests >= cls.ACTIVE_REQUEST_WARNING_THRESHOLD:
+        active_request_threshold = cls._capacity_warning_threshold(
+            redis_snapshot.get("max_active_requests"),
+            cls.ACTIVE_REQUEST_WARNING_THRESHOLD,
+        )
+        active_stream_threshold = cls._capacity_warning_threshold(
+            redis_snapshot.get("max_active_streams"),
+            cls.ACTIVE_STREAM_WARNING_THRESHOLD,
+        )
+        if active_requests is not None and active_requests >= active_request_threshold:
             events["monitoring:global_active_requests"] = cls._event(
                 "monitoring:global_active_requests",
                 "failure_rate",
                 "danger",
                 "全局活跃请求接近容量上限",
-                f"Redis 全局活跃请求 {active_requests}，阈值 {cls.ACTIVE_REQUEST_WARNING_THRESHOLD}",
-                {"active_requests": active_requests, "threshold": cls.ACTIVE_REQUEST_WARNING_THRESHOLD},
+                f"Redis 全局活跃请求 {active_requests}，阈值 {active_request_threshold}",
+                {"active_requests": active_requests, "threshold": active_request_threshold},
             )
-        if active_streams is not None and active_streams >= cls.ACTIVE_STREAM_WARNING_THRESHOLD:
+        if active_streams is not None and active_streams >= active_stream_threshold:
             events["monitoring:global_active_streams"] = cls._event(
                 "monitoring:global_active_streams",
                 "failure_rate",
                 "danger",
                 "全局流式请求达到容量上限",
-                f"Redis 全局活跃流式请求 {active_streams}，阈值 {cls.ACTIVE_STREAM_WARNING_THRESHOLD}",
-                {"active_streams": active_streams, "threshold": cls.ACTIVE_STREAM_WARNING_THRESHOLD},
+                f"Redis 全局活跃流式请求 {active_streams}，阈值 {active_stream_threshold}",
+                {"active_streams": active_streams, "threshold": active_stream_threshold},
             )
         if not redis_snapshot.get("ok"):
             events["monitoring:redis_unavailable"] = cls._event(
@@ -695,6 +759,13 @@ class SystemMetricsService:
         return events
 
     @staticmethod
+    def _capacity_warning_threshold(configured_limit: Any, fallback: int) -> int:
+        limit = int(configured_limit or 0)
+        if limit <= 0:
+            return fallback
+        return max(1, int(limit * 0.9))
+
+    @staticmethod
     def _event(
         alert_key: str,
         alert_type: str,
@@ -712,7 +783,6 @@ class SystemMetricsService:
             "payload": payload,
         }
 
-    @staticmethod
     @staticmethod
     def _percentile(values: list[Any], percentile: int) -> float | None:
         if not values:

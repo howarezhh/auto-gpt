@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from unittest.mock import patch
 
 
 TEMP_DB_PATH = Path("data/stage9-regression.db")
@@ -16,11 +17,13 @@ from sqlalchemy import select
 from app.database import SessionLocal
 from app.main import app
 from app.models.api_client_key import ApiClientKey
+from app.models.model_catalog import ModelCatalog
 from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
 from app.models.user_account import UserAccount
 from app.services.api_key_service import ApiKeyService
 from app.services.health_service import HealthService
+from app.services.model_catalog_service import ModelCatalogService
 from app.services.proxy_service import ProxyService
 from app.services.router_service import RoutePolicyContext, RouterService
 from app.services.user_auth_service import USER_ROLE_ADMIN, UserAuthService
@@ -176,19 +179,31 @@ def _assert_non_stream_model_is_filtered(*, provider_id: int) -> None:
         _assert(candidates == [], f"non-stream model should be filtered when require_stream=true: {candidates}")
 
 
+def _enable_all_model_catalogs() -> None:
+    with SessionLocal() as db:
+        for catalog in db.scalars(select(ModelCatalog)):
+            catalog.enabled = True
+        db.commit()
+    ModelCatalogService.invalidate_model_runtime_cache()
+
+
 def _assert_last_used_touch_is_batched(raw_api_key: str, api_key_id: int) -> None:
+    ApiKeyService._pending_last_used_ids.clear()
+    ApiKeyService._last_used_flush_scheduled = False
     with SessionLocal() as db:
         api_key = db.get(ApiClientKey, api_key_id)
         _assert(api_key is not None, "api key missing before auth check")
         _assert(api_key.last_used_at is None, f"last_used_at should start empty: {api_key.last_used_at}")
 
-    with SessionLocal() as db:
-        auth = ApiKeyService.authenticate_request(db, f"Bearer {raw_api_key}")
-        _assert(auth.api_client_key.id == api_key_id, "auth returned unexpected api key")
-        db.expire_all()
-        reloaded = db.get(ApiClientKey, api_key_id)
-        _assert(reloaded is not None, "api key missing after auth")
-        _assert(reloaded.last_used_at is None, "authenticate_request should not synchronously commit last_used_at")
+    with patch("app.services.api_key_service.scheduler") as scheduler_mock:
+        scheduler_mock.running = True
+        with SessionLocal() as db:
+            auth = ApiKeyService.authenticate_request(db, f"Bearer {raw_api_key}")
+            _assert(auth.api_client_key.id == api_key_id, "auth returned unexpected api key")
+            db.expire_all()
+            reloaded = db.get(ApiClientKey, api_key_id)
+            _assert(reloaded is not None, "api key missing after auth")
+            _assert(reloaded.last_used_at is None, "authenticate_request should not synchronously commit last_used_at")
 
     _assert(api_key_id in ApiKeyService._pending_last_used_ids, "api key should be queued for batched last_used refresh")
     ApiKeyService.flush_pending_last_used_touches()
@@ -215,6 +230,7 @@ def _assert_responses_image_native_passthrough(*, provider_id: int) -> None:
             ],
             "previous_response_id": "resp_123",
             "reasoning": {"effort": "medium"},
+            "model_reasoning_effort": "medium",
             "store": False,
             "include": ["output_text"],
             "text": {
@@ -241,6 +257,7 @@ def _assert_responses_image_native_passthrough(*, provider_id: int) -> None:
     request_payload = dict(prepared.request_payload)
     _assert(request_payload.get("previous_response_id") == "resp_123", f"previous_response_id not preserved: {request_payload}")
     _assert(isinstance(request_payload.get("reasoning"), dict), f"reasoning not preserved: {request_payload}")
+    _assert(request_payload.get("model_reasoning_effort") == "medium", f"reasoning alias not preserved: {request_payload}")
     _assert(request_payload.get("store") is False, f"store not preserved: {request_payload}")
     _assert(request_payload.get("include") == ["output_text"], f"include not preserved: {request_payload}")
     _assert(isinstance(request_payload.get("text"), dict), f"text config not preserved: {request_payload}")
@@ -341,6 +358,7 @@ def main() -> None:
             supports_vision=True,
             priority=30,
         )
+        _enable_all_model_catalogs()
 
         _assert_stream_routing_uses_supported_provider(expected_provider_id=stream_enabled_provider["id"])
         _assert_non_stream_model_is_filtered(provider_id=stream_disabled_provider["id"])

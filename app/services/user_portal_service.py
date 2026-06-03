@@ -551,6 +551,7 @@ class UserPortalService:
                     default_provider_id=api_key.default_provider_id if api_key.default_provider_id in provider_ids else None,
                     manual_allow_fallback=api_key.manual_allow_fallback,
                     allowed_provider_ids=sorted(provider_ids),
+                    route_exhausted_retry_infinite_enabled=api_key.route_exhausted_retry_infinite_enabled,
                 ),
             ):
                 if model.provider.id not in provider_ids:
@@ -592,6 +593,7 @@ class UserPortalService:
                     default_provider_id=selected_key.default_provider_id,
                     manual_allow_fallback=selected_key.manual_allow_fallback,
                     allowed_provider_ids=[binding.provider_id for binding in selected_key.provider_bindings],
+                    route_exhausted_retry_infinite_enabled=selected_key.route_exhausted_retry_infinite_enabled,
                 )
                 candidates = RouterService.order_candidates(
                     db,

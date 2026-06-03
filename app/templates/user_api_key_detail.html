@@ -111,6 +111,13 @@ resp = client.responses.create(
 print(resp.output_text)</pre>
             </article>
             <article class="api-key-chip-card form-span-2">
+                <strong>Embeddings 示例</strong>
+                <pre class="code-block">curl {{ external_base_url }}/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer {{ api_key.raw_api_key or 'YOUR_KEY' }}" \
+  -d '{"model":"YOUR_EMBEDDING_MODEL","input":"用于向量检索的文本"}'</pre>
+            </article>
+            <article class="api-key-chip-card form-span-2">
                 <strong>文生图示例（Responses + image_generation）</strong>
                 <pre class="code-block">curl {{ external_base_url }}/v1/responses \
   -H "Content-Type: application/json" \
@@ -225,6 +232,7 @@ print(resp.output_text)</pre>
                 <strong>路由模式</strong>
                 <span>{{ api_key.route_mode }}</span>
                 <span>手动回退：{{ '开启' if api_key.manual_allow_fallback else '关闭' }}</span>
+                <span>重试模式：{{ '无限重试' if api_key.route_exhausted_retry_infinite_enabled else '正常重试' }}</span>
             </article>
             <article class="api-key-chip-card">
                 <strong>默认中转站</strong>

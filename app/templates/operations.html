@@ -19,8 +19,8 @@
             <strong id="operations-hero-p95">-</strong>
         </article>
         <article class="operations-hero-chip">
-            <span>刷新</span>
-            <strong id="operations-refresh-label">5s</strong>
+            <span>QPS</span>
+            <strong id="operations-hero-qps">-</strong>
         </article>
     </div>
     <div class="operations-hero-actions">
@@ -125,6 +125,26 @@
             <div><span>TTFB</span><strong id="operations-ttfb">-</strong></div>
         </div>
         <div class="operations-bars" id="operations-latency-bars"></div>
+    </article>
+
+    <article class="panel-card operations-visual-card operations-trend-card">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">趋势</div>
+                <h3>请求 / 失败</h3>
+            </div>
+        </div>
+        <div class="monitor-chart monitor-chart-compact operations-chart" id="operations-traffic-chart"></div>
+    </article>
+
+    <article class="panel-card operations-visual-card operations-trend-card">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">趋势</div>
+                <h3>QPS / P95</h3>
+            </div>
+        </div>
+        <div class="monitor-chart monitor-chart-compact operations-chart" id="operations-latency-chart"></div>
     </article>
 </section>
 

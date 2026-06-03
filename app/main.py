@@ -38,6 +38,7 @@ from app.services.api_key_auth_cache import ApiKeyAuthCache
 from app.services.api_key_service import ApiClientAuthError
 from app.services.log_service import LogService
 from app.services.model_catalog_service import ModelCatalogService
+from app.services.model_mapping_service import ModelMappingService
 from app.services.openai_error_service import OpenAIErrorService
 from app.services.provider_service import ProviderService
 from app.services.redis_service import RedisService
@@ -74,7 +75,9 @@ def init_database(*, allow_production_ddl: bool = False) -> None:
     try:
         _migrate_provider_capacity_columns(db)
         _migrate_app_setting_concurrency_columns(db)
+        _migrate_api_client_key_columns(db)
         _migrate_cache_price_columns(db)
+        _migrate_model_mapping_table(db)
         if _is_sqlite_session(db):
             _migrate_request_log_columns(db)
         else:
@@ -128,8 +131,12 @@ def _migrate_app_setting_concurrency_columns(db) -> None:
     """为 app_settings 表补充并发、超时与限额字段。"""
     existing_columns = _get_table_columns(db, "app_settings")
     runtime_settings = get_settings()
+    dialect_name = db.get_bind().dialect.name
+    false_default = "FALSE" if dialect_name == "postgresql" else "0"
     additions = {
         "global_max_request_tokens": "ALTER TABLE app_settings ADD COLUMN global_max_request_tokens INTEGER DEFAULT 0",
+        "route_exhausted_retry_max_wait_seconds": "ALTER TABLE app_settings ADD COLUMN route_exhausted_retry_max_wait_seconds INTEGER DEFAULT 600",
+        "route_exhausted_retry_infinite_enabled": f"ALTER TABLE app_settings ADD COLUMN route_exhausted_retry_infinite_enabled BOOLEAN DEFAULT {false_default}",
         "max_v1_request_body_bytes": "ALTER TABLE app_settings ADD COLUMN max_v1_request_body_bytes INTEGER DEFAULT 20971520",
         "max_v1_chat_request_body_bytes": "ALTER TABLE app_settings ADD COLUMN max_v1_chat_request_body_bytes INTEGER DEFAULT 0",
         "max_v1_responses_request_body_bytes": "ALTER TABLE app_settings ADD COLUMN max_v1_responses_request_body_bytes INTEGER DEFAULT 0",
@@ -230,6 +237,36 @@ def _migrate_cache_price_columns(db) -> None:
         ))
     if changed:
         db.commit()
+
+
+def _migrate_api_client_key_columns(db) -> None:
+    """为 api_client_keys 表补充 API Key 管理运行字段。"""
+    existing_columns = _get_table_columns(db, "api_client_keys")
+    if not existing_columns:
+        return
+    dialect_name = db.get_bind().dialect.name
+    false_default = "FALSE" if dialect_name == "postgresql" else "0"
+    additions = {
+        "route_exhausted_retry_infinite_enabled": f"ALTER TABLE api_client_keys ADD COLUMN route_exhausted_retry_infinite_enabled BOOLEAN NOT NULL DEFAULT {false_default}",
+    }
+    changed = False
+    for column, ddl in additions.items():
+        if column in existing_columns:
+            continue
+        db.execute(text(ddl))
+        changed = True
+    if changed:
+        db.commit()
+
+
+def _migrate_model_mapping_table(db) -> None:
+    """补齐模型映射配置表与索引。"""
+    inspector = inspect(db.get_bind())
+    if "model_mappings" in inspector.get_table_names():
+        return
+    Base.metadata.tables["model_mappings"].create(bind=db.get_bind(), checkfirst=True)
+    db.commit()
+    ModelMappingService.invalidate_cache()
 
 
 def _migrate_request_log_columns(db) -> None:
@@ -393,6 +430,7 @@ def _migrate_request_log_columns(db) -> None:
         "latency_bias": "ALTER TABLE api_client_keys ADD COLUMN latency_bias INTEGER NOT NULL DEFAULT 1",
         "success_rate_bias": "ALTER TABLE api_client_keys ADD COLUMN success_rate_bias INTEGER NOT NULL DEFAULT 1",
         "cost_bias": "ALTER TABLE api_client_keys ADD COLUMN cost_bias INTEGER NOT NULL DEFAULT 0",
+        "route_exhausted_retry_infinite_enabled": "ALTER TABLE api_client_keys ADD COLUMN route_exhausted_retry_infinite_enabled BOOLEAN NOT NULL DEFAULT 0",
     }
     changed_api_keys = False
     for column, ddl in api_key_additions.items():
@@ -455,6 +493,8 @@ def _migrate_request_log_columns(db) -> None:
         "mask_sensitive_fields": "ALTER TABLE app_settings ADD COLUMN mask_sensitive_fields BOOLEAN NOT NULL DEFAULT 1",
         "max_logged_body_bytes": "ALTER TABLE app_settings ADD COLUMN max_logged_body_bytes INTEGER NOT NULL DEFAULT 16384",
         "global_max_request_tokens": "ALTER TABLE app_settings ADD COLUMN global_max_request_tokens INTEGER NOT NULL DEFAULT 0",
+        "route_exhausted_retry_max_wait_seconds": "ALTER TABLE app_settings ADD COLUMN route_exhausted_retry_max_wait_seconds INTEGER NOT NULL DEFAULT 600",
+        "route_exhausted_retry_infinite_enabled": "ALTER TABLE app_settings ADD COLUMN route_exhausted_retry_infinite_enabled BOOLEAN NOT NULL DEFAULT 0",
         "max_v1_request_body_bytes": "ALTER TABLE app_settings ADD COLUMN max_v1_request_body_bytes INTEGER NOT NULL DEFAULT 20971520",
         "max_v1_chat_request_body_bytes": "ALTER TABLE app_settings ADD COLUMN max_v1_chat_request_body_bytes INTEGER NOT NULL DEFAULT 0",
         "max_v1_responses_request_body_bytes": "ALTER TABLE app_settings ADD COLUMN max_v1_responses_request_body_bytes INTEGER NOT NULL DEFAULT 0",
@@ -697,7 +737,7 @@ def _reject_oversized_v1_request_by_content_length(request: Request) -> JSONResp
 def _effective_v1_body_limit(app_setting: AppSetting, request_path: str) -> int:
     global_limit = int(getattr(app_setting, "max_v1_request_body_bytes", 0) or 0)
     endpoint_limit = 0
-    if request_path == "/v1/chat/completions":
+    if request_path in {"/v1/chat/completions", "/v1/completions"}:
         endpoint_limit = int(getattr(app_setting, "max_v1_chat_request_body_bytes", 0) or 0)
     elif request_path == "/v1/responses":
         endpoint_limit = int(getattr(app_setting, "max_v1_responses_request_body_bytes", 0) or 0)
@@ -714,7 +754,7 @@ def _apply_v1_cors_headers(request: Request, response) -> None:
         return
     origin = request.headers.get("origin")
     response.headers["Access-Control-Allow-Origin"] = origin or "*"
-    response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+    response.headers["Access-Control-Allow-Methods"] = "GET,POST,DELETE,OPTIONS"
     response.headers["Access-Control-Allow-Headers"] = (
         request.headers.get("access-control-request-headers")
         or "authorization,content-type,x-request-id,x-trace-id"

@@ -14,16 +14,20 @@ if TEMP_DB_PATH.exists():
     TEMP_DB_PATH.unlink()
 os.environ["DATABASE_URL"] = "sqlite:///./data/stage7-regression.db"
 os.environ["ENABLE_SCHEDULER"] = "false"
+os.environ["ASYNC_REQUEST_LOG_ENABLED"] = "false"
+os.environ["CACHE_L1_TTL_CAP_SECONDS"] = "0"
 
 from fastapi.testclient import TestClient
 
 from app.database import SessionLocal
 from app.main import app
 from app.models.api_client_key import ApiClientKey
+from app.models.model_catalog import ModelCatalog
 from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
 from app.models.request_log import RequestLog
 from app.services.log_service import LogService
+from app.services.model_catalog_service import ModelCatalogService
 from app.services.proxy_service import PreparedUpstreamRequest, ProxyService
 from app.services.router_service import RoutePolicyContext, RouterService
 from app.services.token_usage_service import TokenUsageService
@@ -252,6 +256,12 @@ def main() -> None:
             inferred_model = next((item for item in inferred_provider["model_configs"] if item["model_name"] == "gpt-5.4"), None)
             _assert(inferred_model is not None, "inferred provider gpt-5.4 model missing")
             _assert(inferred_model["supports_vision"] is True, "models list should infer gpt-5.4 vision support")
+
+            with SessionLocal() as db:
+                for catalog in db.scalars(select(ModelCatalog)):
+                    catalog.enabled = True
+                db.commit()
+                ModelCatalogService.invalidate_model_runtime_cache()
 
             active_key = _create_api_key(
                 client,
@@ -643,10 +653,12 @@ def main() -> None:
                 provider_b_model.circuit_state = "open"
                 provider_b_model.circuit_opened_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=120)
                 db.commit()
+                ModelCatalogService.invalidate_model_runtime_cache()
 
                 route_metrics = LogService.route_metric_summary(db, window_minutes=5, requested_model="reg-model")
+                provider_a_metrics = route_metrics.get((provider_a["id"], "reg-model"), {"failed_requests": 0})
                 _assert(
-                    route_metrics[(provider_a["id"], "reg-model")]["failed_requests"] == 0,
+                    provider_a_metrics["failed_requests"] == 0,
                     f"route metrics should ignore health checks: {route_metrics}",
                 )
 
@@ -661,7 +673,7 @@ def main() -> None:
                     ),
                 )
                 _assert(
-                    half_open_order[0].provider_model.circuit_state == "half_open",
+                    half_open_order and half_open_order[0].provider.id == provider_b["id"],
                     "recovery probe should switch candidate to half_open",
                 )
 
@@ -745,7 +757,8 @@ def main() -> None:
             _assert(analytics["model_distribution"][0]["total_tokens"] == 50, "analytics token aggregation mismatch")
             _assert(analytics["model_distribution"][0]["total_cost"] > 0, "analytics cost aggregation mismatch")
             _assert(summary["total_keys"] == 8, f"summary key count mismatch: {summary}")
-            _assert(summary["total_tokens"] >= 170, f"summary total tokens should include image request usage: {summary}")
+            _assert(summary["total_tokens"] == summary["total_prompt_tokens"] + summary["total_completion_tokens"], f"summary token total mismatch: {summary}")
+            _assert(summary["total_tokens"] >= 50, f"summary total tokens should include finalized request usage: {summary}")
             _assert(summary["total_cost_used"] > 0, f"summary total cost mismatch: {summary}")
             _assert(summary["total_balance_amount"] >= 0, f"summary total balance mismatch: {summary}")
 

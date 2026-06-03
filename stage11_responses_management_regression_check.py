@@ -10,6 +10,7 @@ if TEMP_DB_PATH.exists():
     TEMP_DB_PATH.unlink()
 os.environ["DATABASE_URL"] = "sqlite:///./data/stage11-responses-management.db"
 os.environ["ENABLE_SCHEDULER"] = "false"
+os.environ["ASYNC_REQUEST_LOG_ENABLED"] = "false"
 
 from fastapi.testclient import TestClient
 
@@ -84,25 +85,35 @@ def _create_provider(client: TestClient, *, name: str, priority: int) -> dict:
     return response.json()
 
 
-def _create_api_key(client: TestClient, *, default_provider_id: int, allowed_provider_ids: list[int]) -> dict:
+def _create_api_key(
+    client: TestClient,
+    *,
+    default_provider_id: int,
+    allowed_provider_ids: list[int],
+    name: str = "stage11-key",
+    allowed_endpoint_paths: list[str] | None = None,
+) -> dict:
+    payload = {
+        "name": name,
+        "remark": "stage11 responses management key",
+        "enabled": True,
+        "token_limit_total": 5000,
+        "route_mode": "failover",
+        "default_provider_id": default_provider_id,
+        "manual_allow_fallback": True,
+        "allowed_provider_ids": allowed_provider_ids,
+    }
+    if allowed_endpoint_paths is not None:
+        payload["allowed_endpoint_paths"] = allowed_endpoint_paths
     response = client.post(
         "/api/api-keys",
-        json={
-            "name": "stage11-key",
-            "remark": "stage11 responses management key",
-            "enabled": True,
-            "token_limit_total": 5000,
-            "route_mode": "failover",
-            "default_provider_id": default_provider_id,
-            "manual_allow_fallback": True,
-            "allowed_provider_ids": allowed_provider_ids,
-        },
+        json=payload,
     )
     _assert(response.status_code == 201, f"create api key failed: {response.text}")
     return response.json()
 
 
-async def _fake_send_response_management_request(provider, *, method: str, request_path: str, query_items):
+async def _fake_send_response_management_request(provider, *, method: str, request_path: str, query_items, payload=None):
     CAPTURED_CALLS.append(
         {
             "provider_name": provider.name,
@@ -116,6 +127,19 @@ async def _fake_send_response_management_request(provider, *, method: str, reque
             status_code=404,
             detail={"message": "response not found", "code": "response_not_found"},
         )
+    if method == "GET" and request_path.endswith("/input_items"):
+        return {
+            "object": "list",
+            "data": [
+                {
+                    "id": "item_stage11",
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hello"}],
+                }
+            ],
+            "has_more": False,
+        }, "upstream-stage11-input-items"
     if method == "GET":
         return {
             "id": "resp_stage11",
@@ -124,6 +148,12 @@ async def _fake_send_response_management_request(provider, *, method: str, reque
             "model": "stage11-model",
             "output_text": "hello from secondary",
         }, "upstream-stage11-get"
+    if method == "DELETE":
+        return {
+            "id": "resp_stage11",
+            "object": "response.deleted",
+            "deleted": True,
+        }, "upstream-stage11-delete"
     return {
         "id": "resp_stage11",
         "object": "response",
@@ -142,6 +172,13 @@ def main() -> None:
                 client,
                 default_provider_id=primary["id"],
                 allowed_provider_ids=[primary["id"], secondary["id"]],
+            )
+            restricted_api_key = _create_api_key(
+                client,
+                default_provider_id=primary["id"],
+                allowed_provider_ids=[primary["id"], secondary["id"]],
+                name="stage11-responses-only-key",
+                allowed_endpoint_paths=["/v1/responses"],
             )
 
             retrieve_response = client.get(
@@ -169,13 +206,41 @@ def main() -> None:
                 f"cancel should fall through to secondary provider: {cancel_response.headers}",
             )
 
+            input_items_response = client.get(
+                "/v1/responses/resp_stage11/input_items",
+                headers={"Authorization": f"Bearer {restricted_api_key['raw_api_key']}"},
+                params=[("limit", "20")],
+            )
+            _assert(input_items_response.status_code == 200, f"input_items response failed: {input_items_response.text}")
+            input_items_body = input_items_response.json()
+            _assert(input_items_body["object"] == "list", f"input_items body mismatch: {input_items_body}")
+            _assert(input_items_body["data"][0]["id"] == "item_stage11", f"input_items data mismatch: {input_items_body}")
+
+            delete_response = client.delete(
+                "/v1/responses/resp_stage11",
+                headers={"Authorization": f"Bearer {restricted_api_key['raw_api_key']}"},
+            )
+            _assert(delete_response.status_code == 200, f"delete response failed: {delete_response.text}")
+            delete_body = delete_response.json()
+            _assert(delete_body["deleted"] is True, f"delete body mismatch: {delete_body}")
+
     retrieve_calls = [item for item in CAPTURED_CALLS if item["method"] == "GET"]
     cancel_calls = [item for item in CAPTURED_CALLS if item["method"] == "POST"]
-    _assert(len(retrieve_calls) == 2, f"retrieve should try two providers: {retrieve_calls}")
+    delete_calls = [item for item in CAPTURED_CALLS if item["method"] == "DELETE"]
+    _assert(len(retrieve_calls) == 4, f"GET management calls should try two providers per endpoint: {retrieve_calls}")
     _assert(len(cancel_calls) == 2, f"cancel should try two providers: {cancel_calls}")
+    _assert(len(delete_calls) == 2, f"delete should try two providers: {delete_calls}")
     _assert(
         retrieve_calls[0]["query_items"] == [("include", "output[0].content[0].text")],
         f"retrieve query params should be forwarded: {retrieve_calls}",
+    )
+    _assert(
+        retrieve_calls[2]["request_path"] == "/responses/resp_stage11/input_items",
+        f"input_items path should be forwarded: {retrieve_calls}",
+    )
+    _assert(
+        retrieve_calls[2]["query_items"] == [("limit", "20")],
+        f"input_items query params should be forwarded: {retrieve_calls}",
     )
     _assert(
         all(item["request_path"].startswith("/responses/resp_stage11") for item in CAPTURED_CALLS),
@@ -185,14 +250,22 @@ def main() -> None:
         logs = (
             db.query(RequestLog)
             .filter(RequestLog.log_type == "responses")
-            .filter(RequestLog.request_path.in_(["/v1/responses/resp_stage11", "/v1/responses/resp_stage11/cancel"]))
+            .filter(
+                RequestLog.request_path.in_(
+                    [
+                        "/v1/responses/resp_stage11",
+                        "/v1/responses/resp_stage11/cancel",
+                        "/v1/responses/resp_stage11/input_items",
+                    ]
+                )
+            )
             .order_by(RequestLog.id.asc())
             .all()
         )
-        _assert(len(logs) == 2, f"responses management should create two request logs: {logs}")
+        _assert(len(logs) == 4, f"responses management should create four request logs: {logs}")
         _assert(all(item.success for item in logs), f"responses management logs should be successful: {logs}")
         _assert(all(item.provider_id == secondary["id"] for item in logs), f"logs should record selected provider: {logs}")
-        _assert({item.http_method for item in logs} == {"GET", "POST"}, f"logs should record methods: {logs}")
+        _assert({item.http_method for item in logs} == {"GET", "POST", "DELETE"}, f"logs should record methods: {logs}")
         _assert(all(item.api_client_key_id is not None for item in logs), f"logs should include API Key context: {logs}")
         _assert(all(item.attempt_count == 2 for item in logs), f"logs should include both provider attempts: {logs}")
 

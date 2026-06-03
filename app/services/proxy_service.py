@@ -26,6 +26,7 @@ from app.services.api_key_service import ApiKeyService
 from app.services.api_key_service import ApiClientAuthContext
 from app.services.cache_service import CacheService
 from app.services.log_service import LogService
+from app.services.model_mapping_service import ModelMappingResolution, ModelMappingService
 from app.services.openai_error_service import OpenAIErrorService
 from app.services.provider_capacity_service import (
     ProviderCapacityExceededError,
@@ -104,6 +105,23 @@ class StreamTimeoutError(Exception):
 UpstreamStreamResponse = httpx.Response | AiohttpStreamResponse
 UpstreamJsonResponse = httpx.Response | AiohttpJsonResponse
 
+
+class RouteExhaustedRetrySignal(Exception):
+    """用于把候选耗尽等待重试从递归调用改为外层循环。"""
+
+    def __init__(
+        self,
+        *,
+        route_retry_started_at: float,
+        route_retry_round: int,
+        route_retry_trace: list[dict],
+        route_retry_attempt_count: int,
+    ) -> None:
+        super().__init__("route exhausted retry requested")
+        self.route_retry_started_at = route_retry_started_at
+        self.route_retry_round = route_retry_round
+        self.route_retry_trace = route_retry_trace
+        self.route_retry_attempt_count = route_retry_attempt_count
 
 class ProxyService:
     """处理鉴权、路由、转发、限流和响应适配的核心代理服务。"""
@@ -399,6 +417,7 @@ class ProxyService:
         trace_id: str | None,
         source_ip: str | None,
         request_body_json: str | None,
+        requested_model: str | None = None,
         request_path_for_log: str | None = None,
     ) -> None:
         trace = [{
@@ -416,7 +435,7 @@ class ProxyService:
             log_type=log_type,
             trace_id=trace_id,
             model_name=model_name,
-            requested_model=model_name,
+            requested_model=requested_model or model_name,
             tenant_name=api_client_auth.api_client_key.tenant_name if api_client_auth else None,
             project_name=api_client_auth.api_client_key.project_name if api_client_auth else None,
             app_name=api_client_auth.api_client_key.app_name if api_client_auth else None,
@@ -927,7 +946,28 @@ class ProxyService:
         return await ProxyService.forward_stream_request(endpoint_path="/responses", payload=payload, log_type="responses")
 
     @staticmethod
-    async def forward_json_request(
+    async def forward_json_request(db: Session | None = None, **kwargs) -> tuple[dict[str, Any], Provider, list[dict], int]:
+        route_retry_started_at = kwargs.pop("route_retry_started_at", None)
+        route_retry_round = int(kwargs.pop("route_retry_round", 0) or 0)
+        route_retry_trace = kwargs.pop("route_retry_trace", None)
+        route_retry_attempt_count = int(kwargs.pop("route_retry_attempt_count", 0) or 0)
+        while True:
+            try:
+                return await ProxyService._forward_json_request_once(
+                    db,
+                    **kwargs,
+                    route_retry_started_at=route_retry_started_at,
+                    route_retry_round=route_retry_round,
+                    route_retry_trace=route_retry_trace,
+                    route_retry_attempt_count=route_retry_attempt_count,
+                )
+            except RouteExhaustedRetrySignal as signal:
+                route_retry_started_at = signal.route_retry_started_at
+                route_retry_round = signal.route_retry_round
+                route_retry_trace = signal.route_retry_trace
+                route_retry_attempt_count = signal.route_retry_attempt_count
+    @staticmethod
+    async def _forward_json_request_once(
         db: Session | None = None,
         *,
         endpoint_path: str,
@@ -942,9 +982,14 @@ class ProxyService:
         public_endpoint_path: str | None = None,
         response_transform: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         suppress_success_log: bool = False,
+        route_retry_started_at: float | None = None,
+        route_retry_round: int = 0,
+        route_retry_trace: list[dict] | None = None,
+        route_retry_attempt_count: int = 0,
     ) -> tuple[dict[str, Any], Provider, list[dict], int]:
         payload = ProxyService._normalize_reasoning_request_payload(endpoint_path=endpoint_path, payload=payload)
         model_name = payload.get("model")
+        requested_model_name = model_name
         has_image_input = ProxyService._payload_has_image(payload)
         has_image = ProxyService._payload_needs_image_transport(payload)
         require_tools = ProxyService._payload_uses_tools(payload)
@@ -955,6 +1000,28 @@ class ProxyService:
         request_id = uuid4().hex
         reasoning_level = LogService.extract_reasoning_level(payload)
         model_reasoning_effort = LogService.extract_model_reasoning_effort(payload)
+        if api_client_auth is not None and not ApiKeyService.is_model_allowed(api_client_auth.api_client_key, requested_model_name):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"message": "Requested model is not allowed for this api key", "code": "model_not_allowed"},
+            )
+        mapping_resolution = await ModelMappingService.resolve_for_request(
+            source_model_name=requested_model_name if isinstance(requested_model_name, str) else None,
+            route_context=route_context,
+            api_client_auth=api_client_auth,
+            sticky_key=ProxyService._extract_sticky_key(payload),
+            forced_provider_id=forced_provider_id,
+            require_vision=has_image_input,
+            require_stream=False,
+            require_tools=require_tools,
+            require_image_generation=require_image_generation,
+            require_chat_completions=endpoint_path == "/chat/completions",
+            require_responses=endpoint_path == "/responses",
+        )
+        model_mapping_unavailable = ProxyService._model_mapping_unavailable(mapping_resolution)
+        if mapping_resolution is not None and not model_mapping_unavailable and mapping_resolution.selected_model_name != requested_model_name:
+            payload = {**payload, "model": mapping_resolution.selected_model_name}
+            model_name = mapping_resolution.selected_model_name
         token_limit_error = ProxyService._build_request_token_limit_error(
             setting=setting,
             payload=payload,
@@ -978,6 +1045,7 @@ class ProxyService:
                 api_client_auth=api_client_auth,
                 trace_id=trace_id,
                 source_ip=source_ip,
+                requested_model=requested_model_name,
                 request_path_for_log=effective_log_request_path,
                 request_body_json=ProxyService._serialize_payload_for_logging(
                     payload,
@@ -1010,6 +1078,7 @@ class ProxyService:
                 api_client_auth=api_client_auth,
                 trace_id=trace_id,
                 source_ip=source_ip,
+                requested_model=requested_model_name,
                 request_path_for_log=effective_log_request_path,
                 request_body_json=ProxyService._serialize_payload_for_logging(
                     payload,
@@ -1026,30 +1095,35 @@ class ProxyService:
             preserve_request_content_when_disabled=True,
             structure_only=True,
         )
-        if api_client_auth is not None and not ApiKeyService.is_model_allowed(api_client_auth.api_client_key, model_name):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail={"message": "Requested model is not allowed for this api key", "code": "model_not_allowed"},
-            )
         if payload.get("stream") is True:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={"message": f"Use stream endpoint handler for {effective_public_endpoint_path}", "code": "invalid_stream_mode"},
             )
 
+        trace: list[dict] = list(route_retry_trace or [])
+        ProxyService._append_model_mapping_trace(trace, mapping_resolution)
+        last_upstream_error: dict[str, Any] | None = None
+        attempt_count = max(0, int(route_retry_attempt_count or 0))
+        route_retry_started_at = route_retry_started_at or time.perf_counter()
+
         try:
-            candidates = await RouterService.async_order_candidates(
-                db,
-                model_name=model_name,
-                sticky_key=ProxyService._extract_sticky_key(payload),
-                forced_provider_id=forced_provider_id,
-                route_context=route_context,
-                require_vision=has_image_input,
-                require_stream=False,
-                require_tools=require_tools,
-                require_image_generation=require_image_generation,
-                require_chat_completions=endpoint_path == "/chat/completions",
-                require_responses=endpoint_path == "/responses",
+            candidates = (
+                []
+                if model_mapping_unavailable
+                else await RouterService.async_order_candidates(
+                    db,
+                    model_name=model_name,
+                    sticky_key=ProxyService._extract_sticky_key(payload),
+                    forced_provider_id=forced_provider_id,
+                    route_context=route_context,
+                    require_vision=has_image_input,
+                    require_stream=False,
+                    require_tools=require_tools,
+                    require_image_generation=require_image_generation,
+                    require_chat_completions=endpoint_path == "/chat/completions",
+                    require_responses=endpoint_path == "/responses",
+                )
             )
         except ProviderCapacityUnavailableError as exc:
             raise HTTPException(
@@ -1057,19 +1131,26 @@ class ProxyService:
                 detail={"message": str(exc), "code": exc.code},
             ) from exc
         if not candidates:
-            route_diagnostics = await RouterService.async_diagnose_candidate_unavailability(
-                model_name=model_name,
-                forced_provider_id=forced_provider_id,
-                route_context=route_context,
-                require_vision=has_image_input,
-                require_stream=False,
-                require_tools=require_tools,
-                require_image_generation=require_image_generation,
-                require_chat_completions=endpoint_path == "/chat/completions",
-                require_responses=endpoint_path == "/responses",
-                is_stream=False,
+            route_diagnostics = (
+                ProxyService._model_mapping_unavailable_diagnostics(mapping_resolution)
+                if model_mapping_unavailable
+                else await RouterService.async_diagnose_candidate_unavailability(
+                    model_name=model_name,
+                    forced_provider_id=forced_provider_id,
+                    route_context=route_context,
+                    require_vision=has_image_input,
+                    require_stream=False,
+                    require_tools=require_tools,
+                    require_image_generation=require_image_generation,
+                    require_chat_completions=endpoint_path == "/chat/completions",
+                    require_responses=endpoint_path == "/responses",
+                    is_stream=False,
+                )
             )
-            if require_image_generation:
+            if model_mapping_unavailable:
+                route_message = "No available mapped target model"
+                error_code = "model_mapping_target_not_available"
+            elif require_image_generation:
                 route_message = "No native image-generation-capable provider for requested model"
                 error_code = "model_image_generation_not_available"
             elif require_tools:
@@ -1078,12 +1159,73 @@ class ProxyService:
             else:
                 route_message = "No available provider for requested model"
                 error_code = "model_not_available"
+            retryable_route_exhausted = ProxyService._should_retry_route_diagnostics(route_diagnostics)
+            sleep_seconds = (
+                ProxyService._route_exhausted_retry_sleep_seconds(
+                    setting,
+                    started_at=route_retry_started_at,
+                    retry_round=route_retry_round,
+                    route_context=route_context,
+                )
+                if retryable_route_exhausted
+                else 0.0
+            )
+            if sleep_seconds > 0:
+                ProxyService._append_route_exhausted_retry_trace(
+                    trace,
+                    reason="route_candidates_exhausted",
+                    sleep_seconds=sleep_seconds,
+                    started_at=route_retry_started_at,
+                    retry_round=route_retry_round,
+                    setting=setting,
+                    route_context=route_context,
+                    diagnostics=route_diagnostics,
+                )
+                await asyncio.sleep(sleep_seconds)
+                raise RouteExhaustedRetrySignal(
+                    route_retry_started_at=route_retry_started_at,
+                    route_retry_round=route_retry_round + 1,
+                    route_retry_trace=trace,
+                    route_retry_attempt_count=attempt_count,
+                )
+            if retryable_route_exhausted and not ProxyService._route_exhausted_retry_infinite_enabled(setting, route_context) and ProxyService._route_exhausted_retry_max_wait_seconds(setting) > 0:
+                await ProxyService._raise_final_error_async(
+                    db,
+                    model_name=model_name,
+                    endpoint_path=endpoint_path,
+                    log_type=log_type,
+                    trace=trace + [{"result": "route_candidates_exhausted", "diagnostic": route_diagnostics}],
+                    upstream_error=ProxyService._build_route_exhausted_retry_upstream_error(
+                        setting,
+                        started_at=route_retry_started_at,
+                        attempt_count=attempt_count,
+                        trace_id=trace_id,
+                        last_upstream_error=None,
+                    ),
+                    requested_model=requested_model_name,
+                    request_id=request_id,
+                    conversation_key=conversation_key,
+                    session_id=session_id,
+                    resolved_provider_model_id=None,
+                    is_stream=False,
+                    has_image=has_image,
+                    request_body_json=request_body_json,
+                    request_payload=payload,
+                    schedule_token_fill=setting.enable_token_logging,
+                    reasoning_level=reasoning_level,
+                    attempt_count=attempt_count,
+                    model_reasoning_effort=model_reasoning_effort,
+                    api_client_auth=api_client_auth,
+                    trace_id=trace_id,
+                    source_ip=source_ip,
+                    request_path_for_log=effective_log_request_path,
+                )
             await ProxyService._run_db_write(
                 LogService.create_log,
                 log_type=log_type,
                 trace_id=trace_id,
                 model_name=model_name,
-                requested_model=model_name,
+                requested_model=requested_model_name,
                 tenant_name=api_client_auth.api_client_key.tenant_name if api_client_auth else None,
                 project_name=api_client_auth.api_client_key.project_name if api_client_auth else None,
                 app_name=api_client_auth.api_client_key.app_name if api_client_auth else None,
@@ -1106,8 +1248,8 @@ class ProxyService:
                 error_code=error_code,
                 retryable=False,
                 **ProxyService._build_api_client_log_kwargs(api_client_auth, auth_result="authenticated"),
-                trace=[{"result": "route_candidates_exhausted", "diagnostic": route_diagnostics}],
-                attempt_count=0,
+                trace=trace + [{"result": "route_candidates_exhausted", "diagnostic": route_diagnostics}],
+                attempt_count=attempt_count,
                 token_request_payload=payload,
                 schedule_token_fill=setting.enable_token_logging,
             )
@@ -1121,10 +1263,6 @@ class ProxyService:
                     "route_diagnostics": route_diagnostics,
                 },
             )
-
-        trace: list[dict] = []
-        last_upstream_error: dict[str, Any] | None = None
-        attempt_count = 0
 
         for candidate in candidates:
             provider = candidate.provider
@@ -1152,6 +1290,11 @@ class ProxyService:
                         "cache_write_tokens": None,
                     }
                     client_response = response_transform(response) if response_transform is not None else response
+                    client_response = ProxyService._restore_mapped_response_model(
+                        client_response,
+                        mapping_resolution=mapping_resolution,
+                        requested_model=requested_model_name,
+                    )
                     finish_reason = ProxyService._extract_finish_reason(response)
                     response_body_json = ProxyService._serialize_payload_for_logging(client_response, setting=setting)
                     response_text = (
@@ -1169,7 +1312,7 @@ class ProxyService:
                             provider_id=provider.id,
                             provider_name=provider.name,
                             model_name=model_name,
-                            requested_model=model_name,
+                            requested_model=requested_model_name,
                             tenant_name=api_client_auth.api_client_key.tenant_name if api_client_auth else None,
                             project_name=api_client_auth.api_client_key.project_name if api_client_auth else None,
                             app_name=api_client_auth.api_client_key.app_name if api_client_auth else None,
@@ -1334,6 +1477,40 @@ class ProxyService:
                         db=db,
                     )
 
+        if ProxyService._should_retry_route_upstream_error(last_upstream_error):
+            sleep_seconds = ProxyService._route_exhausted_retry_sleep_seconds(
+                setting,
+                started_at=route_retry_started_at,
+                retry_round=route_retry_round,
+                    route_context=route_context,
+                )
+            if sleep_seconds > 0:
+                ProxyService._append_route_exhausted_retry_trace(
+                    trace,
+                    reason="all_candidates_failed",
+                    sleep_seconds=sleep_seconds,
+                    started_at=route_retry_started_at,
+                    retry_round=route_retry_round,
+                    setting=setting,
+                    route_context=route_context,
+                    upstream_error=last_upstream_error,
+                )
+                await asyncio.sleep(sleep_seconds)
+                raise RouteExhaustedRetrySignal(
+                    route_retry_started_at=route_retry_started_at,
+                    route_retry_round=route_retry_round + 1,
+                    route_retry_trace=trace,
+                    route_retry_attempt_count=attempt_count,
+                )
+            if not ProxyService._route_exhausted_retry_infinite_enabled(setting, route_context) and ProxyService._route_exhausted_retry_max_wait_seconds(setting) > 0:
+                last_upstream_error = ProxyService._build_route_exhausted_retry_upstream_error(
+                    setting,
+                    started_at=route_retry_started_at,
+                    attempt_count=attempt_count,
+                    trace_id=trace_id,
+                    last_upstream_error=last_upstream_error,
+                )
+
         await ProxyService._raise_final_error_async(
             db,
             model_name=model_name,
@@ -1341,7 +1518,7 @@ class ProxyService:
             log_type=log_type,
             trace=trace,
             upstream_error=last_upstream_error,
-            requested_model=model_name,
+            requested_model=requested_model_name,
             request_id=request_id,
             conversation_key=conversation_key,
             session_id=session_id,
@@ -1361,7 +1538,28 @@ class ProxyService:
         )
 
     @staticmethod
-    async def forward_stream_request(
+    async def forward_stream_request(db: Session | None = None, **kwargs) -> tuple[AsyncIterator[bytes], Provider, list[dict], int]:
+        route_retry_started_at = kwargs.pop("route_retry_started_at", None)
+        route_retry_round = int(kwargs.pop("route_retry_round", 0) or 0)
+        route_retry_trace = kwargs.pop("route_retry_trace", None)
+        route_retry_attempt_count = int(kwargs.pop("route_retry_attempt_count", 0) or 0)
+        while True:
+            try:
+                return await ProxyService._forward_stream_request_once(
+                    db,
+                    **kwargs,
+                    route_retry_started_at=route_retry_started_at,
+                    route_retry_round=route_retry_round,
+                    route_retry_trace=route_retry_trace,
+                    route_retry_attempt_count=route_retry_attempt_count,
+                )
+            except RouteExhaustedRetrySignal as signal:
+                route_retry_started_at = signal.route_retry_started_at
+                route_retry_round = signal.route_retry_round
+                route_retry_trace = signal.route_retry_trace
+                route_retry_attempt_count = signal.route_retry_attempt_count
+    @staticmethod
+    async def _forward_stream_request_once(
         db: Session | None = None,
         *,
         endpoint_path: str,
@@ -1374,9 +1572,14 @@ class ProxyService:
         source_ip: str | None = None,
         request_path_for_log: str | None = None,
         public_endpoint_path: str | None = None,
+        route_retry_started_at: float | None = None,
+        route_retry_round: int = 0,
+        route_retry_trace: list[dict] | None = None,
+        route_retry_attempt_count: int = 0,
     ) -> tuple[AsyncIterator[bytes], Provider, list[dict], int]:
         payload = ProxyService._normalize_reasoning_request_payload(endpoint_path=endpoint_path, payload=payload)
         model_name = payload.get("model")
+        requested_model_name = model_name
         has_image_input = ProxyService._payload_has_image(payload)
         has_image = ProxyService._payload_needs_image_transport(payload)
         require_tools = ProxyService._payload_uses_tools(payload)
@@ -1387,6 +1590,28 @@ class ProxyService:
         request_id = uuid4().hex
         reasoning_level = LogService.extract_reasoning_level(payload)
         model_reasoning_effort = LogService.extract_model_reasoning_effort(payload)
+        if api_client_auth is not None and not ApiKeyService.is_model_allowed(api_client_auth.api_client_key, requested_model_name):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"message": "Requested model is not allowed for this api key", "code": "model_not_allowed"},
+            )
+        mapping_resolution = await ModelMappingService.resolve_for_request(
+            source_model_name=requested_model_name if isinstance(requested_model_name, str) else None,
+            route_context=route_context,
+            api_client_auth=api_client_auth,
+            sticky_key=ProxyService._extract_sticky_key(payload),
+            forced_provider_id=forced_provider_id,
+            require_vision=has_image_input,
+            require_stream=True,
+            require_tools=require_tools,
+            require_image_generation=require_image_generation,
+            require_chat_completions=endpoint_path == "/chat/completions",
+            require_responses=endpoint_path == "/responses",
+        )
+        model_mapping_unavailable = ProxyService._model_mapping_unavailable(mapping_resolution)
+        if mapping_resolution is not None and not model_mapping_unavailable and mapping_resolution.selected_model_name != requested_model_name:
+            payload = {**payload, "model": mapping_resolution.selected_model_name}
+            model_name = mapping_resolution.selected_model_name
         token_limit_error = ProxyService._build_request_token_limit_error(
             setting=setting,
             payload=payload,
@@ -1410,6 +1635,7 @@ class ProxyService:
                 api_client_auth=api_client_auth,
                 trace_id=trace_id,
                 source_ip=source_ip,
+                requested_model=requested_model_name,
                 request_path_for_log=effective_log_request_path,
             )
         long_output_error = ProxyService._build_long_output_error(
@@ -1436,6 +1662,7 @@ class ProxyService:
                 api_client_auth=api_client_auth,
                 trace_id=trace_id,
                 source_ip=source_ip,
+                requested_model=requested_model_name,
                 request_path_for_log=effective_log_request_path,
             )
         conversation_key = ProxyService._extract_conversation_key(payload, request_id)
@@ -1446,24 +1673,28 @@ class ProxyService:
             preserve_request_content_when_disabled=True,
             structure_only=True,
         )
-        if api_client_auth is not None and not ApiKeyService.is_model_allowed(api_client_auth.api_client_key, model_name):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail={"message": "Requested model is not allowed for this api key", "code": "model_not_allowed"},
-            )
+        trace: list[dict] = list(route_retry_trace or [])
+        ProxyService._append_model_mapping_trace(trace, mapping_resolution)
+        last_upstream_error: dict[str, Any] | None = None
+        attempt_count = max(0, int(route_retry_attempt_count or 0))
+        route_retry_started_at = route_retry_started_at or time.perf_counter()
         try:
-            candidates = await RouterService.async_order_candidates(
-                db,
-                model_name=model_name,
-                sticky_key=ProxyService._extract_sticky_key(payload),
-                forced_provider_id=forced_provider_id,
-                route_context=route_context,
-                require_vision=has_image_input,
-                require_stream=True,
-                require_tools=require_tools,
-                require_image_generation=require_image_generation,
-                require_chat_completions=endpoint_path == "/chat/completions",
-                require_responses=endpoint_path == "/responses",
+            candidates = (
+                []
+                if model_mapping_unavailable
+                else await RouterService.async_order_candidates(
+                    db,
+                    model_name=model_name,
+                    sticky_key=ProxyService._extract_sticky_key(payload),
+                    forced_provider_id=forced_provider_id,
+                    route_context=route_context,
+                    require_vision=has_image_input,
+                    require_stream=True,
+                    require_tools=require_tools,
+                    require_image_generation=require_image_generation,
+                    require_chat_completions=endpoint_path == "/chat/completions",
+                    require_responses=endpoint_path == "/responses",
+                )
             )
         except ProviderCapacityUnavailableError as exc:
             raise HTTPException(
@@ -1471,19 +1702,26 @@ class ProxyService:
                 detail={"message": str(exc), "code": exc.code},
             ) from exc
         if not candidates:
-            route_diagnostics = await RouterService.async_diagnose_candidate_unavailability(
-                model_name=model_name,
-                forced_provider_id=forced_provider_id,
-                route_context=route_context,
-                require_vision=has_image_input,
-                require_stream=True,
-                require_tools=require_tools,
-                require_image_generation=require_image_generation,
-                require_chat_completions=endpoint_path == "/chat/completions",
-                require_responses=endpoint_path == "/responses",
-                is_stream=True,
+            route_diagnostics = (
+                ProxyService._model_mapping_unavailable_diagnostics(mapping_resolution)
+                if model_mapping_unavailable
+                else await RouterService.async_diagnose_candidate_unavailability(
+                    model_name=model_name,
+                    forced_provider_id=forced_provider_id,
+                    route_context=route_context,
+                    require_vision=has_image_input,
+                    require_stream=True,
+                    require_tools=require_tools,
+                    require_image_generation=require_image_generation,
+                    require_chat_completions=endpoint_path == "/chat/completions",
+                    require_responses=endpoint_path == "/responses",
+                    is_stream=True,
+                )
             )
-            if require_image_generation:
+            if model_mapping_unavailable:
+                route_message = "No available mapped target model"
+                error_code = "model_mapping_target_not_available"
+            elif require_image_generation:
                 route_message = "No native image-generation-capable provider for requested model"
                 error_code = "model_image_generation_not_available"
             elif require_tools:
@@ -1492,12 +1730,73 @@ class ProxyService:
             else:
                 route_message = "No available provider for requested model"
                 error_code = "model_not_available"
+            retryable_route_exhausted = ProxyService._should_retry_route_diagnostics(route_diagnostics)
+            sleep_seconds = (
+                ProxyService._route_exhausted_retry_sleep_seconds(
+                    setting,
+                    started_at=route_retry_started_at,
+                    retry_round=route_retry_round,
+                    route_context=route_context,
+                )
+                if retryable_route_exhausted
+                else 0.0
+            )
+            if sleep_seconds > 0:
+                ProxyService._append_route_exhausted_retry_trace(
+                    trace,
+                    reason="route_candidates_exhausted",
+                    sleep_seconds=sleep_seconds,
+                    started_at=route_retry_started_at,
+                    retry_round=route_retry_round,
+                    setting=setting,
+                    route_context=route_context,
+                    diagnostics=route_diagnostics,
+                )
+                await asyncio.sleep(sleep_seconds)
+                raise RouteExhaustedRetrySignal(
+                    route_retry_started_at=route_retry_started_at,
+                    route_retry_round=route_retry_round + 1,
+                    route_retry_trace=trace,
+                    route_retry_attempt_count=attempt_count,
+                )
+            if retryable_route_exhausted and not ProxyService._route_exhausted_retry_infinite_enabled(setting, route_context) and ProxyService._route_exhausted_retry_max_wait_seconds(setting) > 0:
+                await ProxyService._raise_final_error_async(
+                    db,
+                    model_name=model_name,
+                    endpoint_path=endpoint_path,
+                    log_type=log_type,
+                    trace=trace + [{"result": "route_candidates_exhausted", "diagnostic": route_diagnostics}],
+                    upstream_error=ProxyService._build_route_exhausted_retry_upstream_error(
+                        setting,
+                        started_at=route_retry_started_at,
+                        attempt_count=attempt_count,
+                        trace_id=trace_id,
+                        last_upstream_error=None,
+                    ),
+                    requested_model=requested_model_name,
+                    request_id=request_id,
+                    conversation_key=conversation_key,
+                    session_id=session_id,
+                    resolved_provider_model_id=None,
+                    is_stream=True,
+                    has_image=has_image,
+                    request_body_json=request_body_json,
+                    request_payload=payload,
+                    schedule_token_fill=setting.enable_token_logging,
+                    reasoning_level=reasoning_level,
+                    attempt_count=attempt_count,
+                    model_reasoning_effort=model_reasoning_effort,
+                    api_client_auth=api_client_auth,
+                    trace_id=trace_id,
+                    source_ip=source_ip,
+                    request_path_for_log=effective_log_request_path,
+                )
             await ProxyService._run_db_write(
                 LogService.create_log,
                 log_type=log_type,
                 trace_id=trace_id,
                 model_name=model_name,
-                requested_model=model_name,
+                requested_model=requested_model_name,
                 tenant_name=api_client_auth.api_client_key.tenant_name if api_client_auth else None,
                 project_name=api_client_auth.api_client_key.project_name if api_client_auth else None,
                 app_name=api_client_auth.api_client_key.app_name if api_client_auth else None,
@@ -1520,8 +1819,8 @@ class ProxyService:
                 error_code=error_code,
                 retryable=False,
                 **ProxyService._build_api_client_log_kwargs(api_client_auth, auth_result="authenticated"),
-                trace=[{"result": "route_candidates_exhausted", "diagnostic": route_diagnostics}],
-                attempt_count=0,
+                trace=trace + [{"result": "route_candidates_exhausted", "diagnostic": route_diagnostics}],
+                attempt_count=attempt_count,
                 token_request_payload=payload,
                 schedule_token_fill=setting.enable_token_logging,
             )
@@ -1535,10 +1834,6 @@ class ProxyService:
                     "route_diagnostics": route_diagnostics,
                 },
             )
-
-        trace: list[dict] = []
-        last_upstream_error: dict[str, Any] | None = None
-        attempt_count = 0
 
         for candidate in candidates:
             provider = candidate.provider
@@ -1657,14 +1952,14 @@ class ProxyService:
                                         for downstream_chunk in ProxyService._adapt_chat_stream_chunk_to_responses_events(
                                             upstream_chunk,
                                             state=downstream_transform_state or ProxyService._create_responses_stream_state(payload=payload),
-                                            requested_model=str(payload.get("model") or ""),
+                                            requested_model=str(requested_model_name or payload.get("model") or ""),
                                         ):
                                             yield downstream_chunk
                                     elif prepared.adapt_responses_response_to_chat:
                                         for downstream_chunk in ProxyService._adapt_responses_stream_chunk_to_chat_events(
                                             upstream_chunk,
                                             state=chat_stream_transform_state or ProxyService._create_chat_stream_state(payload=payload),
-                                            requested_model=str(payload.get("model") or ""),
+                                            requested_model=str(requested_model_name or payload.get("model") or ""),
                                         ):
                                             yield downstream_chunk
                                     else:
@@ -1724,7 +2019,7 @@ class ProxyService:
                                 "provider_id": provider.id,
                                 "provider_name": provider.name,
                                 "model_name": model_name,
-                                "requested_model": model_name,
+                                "requested_model": requested_model_name,
                                 "tenant_name": api_client_auth.api_client_key.tenant_name if api_client_auth else None,
                                 "project_name": api_client_auth.api_client_key.project_name if api_client_auth else None,
                                 "app_name": api_client_auth.api_client_key.app_name if api_client_auth else None,
@@ -1926,6 +2221,40 @@ class ProxyService:
                         db=db,
                     )
 
+        if ProxyService._should_retry_route_upstream_error(last_upstream_error):
+            sleep_seconds = ProxyService._route_exhausted_retry_sleep_seconds(
+                setting,
+                started_at=route_retry_started_at,
+                retry_round=route_retry_round,
+                    route_context=route_context,
+                )
+            if sleep_seconds > 0:
+                ProxyService._append_route_exhausted_retry_trace(
+                    trace,
+                    reason="all_candidates_failed",
+                    sleep_seconds=sleep_seconds,
+                    started_at=route_retry_started_at,
+                    retry_round=route_retry_round,
+                    setting=setting,
+                    route_context=route_context,
+                    upstream_error=last_upstream_error,
+                )
+                await asyncio.sleep(sleep_seconds)
+                raise RouteExhaustedRetrySignal(
+                    route_retry_started_at=route_retry_started_at,
+                    route_retry_round=route_retry_round + 1,
+                    route_retry_trace=trace,
+                    route_retry_attempt_count=attempt_count,
+                )
+            if not ProxyService._route_exhausted_retry_infinite_enabled(setting, route_context) and ProxyService._route_exhausted_retry_max_wait_seconds(setting) > 0:
+                last_upstream_error = ProxyService._build_route_exhausted_retry_upstream_error(
+                    setting,
+                    started_at=route_retry_started_at,
+                    attempt_count=attempt_count,
+                    trace_id=trace_id,
+                    last_upstream_error=last_upstream_error,
+                )
+
         await ProxyService._raise_final_error_async(
             db,
             model_name=model_name,
@@ -1933,7 +2262,7 @@ class ProxyService:
             log_type=log_type,
             trace=trace,
             upstream_error=last_upstream_error,
-            requested_model=model_name,
+            requested_model=requested_model_name,
             request_id=request_id,
             conversation_key=conversation_key,
             session_id=session_id,
@@ -2621,7 +2950,6 @@ class ProxyService:
     @staticmethod
     def _normalize_reasoning_request_payload(*, endpoint_path: str, payload: dict[str, Any]) -> dict[str, Any]:
         normalized = dict(payload)
-        normalized.pop("model_reasoning_effort", None)
         effort = LogService.extract_model_reasoning_effort(payload)
         if effort is None:
             return normalized
@@ -2634,7 +2962,6 @@ class ProxyService:
                 normalized["reasoning"] = merged_reasoning
             else:
                 normalized["reasoning"] = {"effort": effort}
-            normalized.pop("reasoning_effort", None)
             return normalized
         if not isinstance(normalized.get("reasoning_effort"), str):
             normalized["reasoning_effort"] = effort
@@ -3005,6 +3332,140 @@ class ProxyService:
         return max(1, min(int(provider.max_retries or 1), int(setting.global_max_retries or 1), 2))
 
     @staticmethod
+    def _route_exhausted_retry_infinite_enabled(
+        setting: Any,
+        route_context: RoutePolicyContext | None = None,
+    ) -> bool:
+        if route_context is not None:
+            return bool(getattr(route_context, "route_exhausted_retry_infinite_enabled", False))
+        return bool(getattr(setting, "route_exhausted_retry_infinite_enabled", False))
+
+    @staticmethod
+    def _route_exhausted_retry_max_wait_seconds(setting: Any) -> int:
+        value = getattr(setting, "route_exhausted_retry_max_wait_seconds", 600)
+        try:
+            return max(0, min(int(value or 0), 600))
+        except (TypeError, ValueError):
+            return 600
+
+    @staticmethod
+    def _route_exhausted_retry_elapsed_seconds(*, started_at: float) -> float:
+        return max(0.0, time.perf_counter() - started_at)
+
+    @staticmethod
+    def _route_exhausted_retry_sleep_seconds(
+        setting: Any,
+        *,
+        started_at: float,
+        retry_round: int,
+        route_context: RoutePolicyContext | None = None,
+    ) -> float:
+        backoff_seconds = (1, 2, 5, 10, 15, 30)
+        wait_seconds = float(backoff_seconds[min(max(0, retry_round), len(backoff_seconds) - 1)])
+        if ProxyService._route_exhausted_retry_infinite_enabled(setting, route_context):
+            return wait_seconds
+        max_wait_seconds = ProxyService._route_exhausted_retry_max_wait_seconds(setting)
+        if max_wait_seconds <= 0:
+            return 0.0
+        elapsed_seconds = ProxyService._route_exhausted_retry_elapsed_seconds(started_at=started_at)
+        remaining_seconds = max_wait_seconds - elapsed_seconds
+        if remaining_seconds <= 0:
+            return 0.0
+        return max(0.0, min(wait_seconds, remaining_seconds))
+
+    @staticmethod
+    def _append_route_exhausted_retry_trace(
+        trace: list[dict],
+        *,
+        reason: str,
+        sleep_seconds: float,
+        started_at: float,
+        retry_round: int,
+        setting: Any,
+        route_context: RoutePolicyContext | None = None,
+        diagnostics: dict[str, Any] | None = None,
+        upstream_error: dict[str, Any] | None = None,
+    ) -> None:
+        infinite_retry_enabled = ProxyService._route_exhausted_retry_infinite_enabled(setting, route_context)
+        item: dict[str, Any] = {
+            "result": "route_exhausted_wait_retry",
+            "reason": reason,
+            "retry_round": retry_round + 1,
+            "sleep_seconds": round(sleep_seconds, 3),
+            "elapsed_seconds": round(ProxyService._route_exhausted_retry_elapsed_seconds(started_at=started_at), 3),
+            "max_wait_seconds": ProxyService._route_exhausted_retry_max_wait_seconds(setting),
+            "infinite_retry_enabled": infinite_retry_enabled,
+            "retry_mode": "infinite" if infinite_retry_enabled else "normal",
+        }
+        if diagnostics is not None:
+            item["diagnostic_summary"] = diagnostics.get("summary")
+            item["reason_counts"] = diagnostics.get("reason_counts")
+        if upstream_error is not None:
+            item["last_status_code"] = upstream_error.get("status_code")
+            item["last_error_code"] = ProxyService._error_code_from_detail(upstream_error.get("detail"))
+        trace.append(item)
+
+    @staticmethod
+    def _should_retry_route_diagnostics(diagnostics: dict[str, Any] | None) -> bool:
+        if not diagnostics:
+            return False
+        reason_counts = diagnostics.get("reason_counts") or {}
+        recoverable_reasons = {
+            "provider_capacity_exceeded",
+            "provider_failure_rate_limited",
+            "capacity_snapshot_unavailable",
+            "provider_circuit_open",
+            "model_circuit_open",
+            "model_unhealthy",
+        }
+        if any(int(reason_counts.get(reason) or 0) > 0 for reason in recoverable_reasons):
+            return True
+        return int(diagnostics.get("pre_capacity_candidate_count") or 0) > 0 and int(diagnostics.get("final_candidate_count") or 0) == 0
+
+    @staticmethod
+    def _should_retry_route_upstream_error(upstream_error: dict[str, Any] | None) -> bool:
+        if not upstream_error:
+            return False
+        try:
+            status_code = int(upstream_error.get("status_code") or 0)
+        except (TypeError, ValueError):
+            return False
+        if status_code == status.HTTP_429_TOO_MANY_REQUESTS:
+            return True
+        if 400 <= status_code < 500:
+            return status_code in {status.HTTP_408_REQUEST_TIMEOUT, status.HTTP_409_CONFLICT}
+        return status_code >= 500
+
+    @staticmethod
+    def _build_route_exhausted_retry_upstream_error(
+        setting: Any,
+        *,
+        started_at: float,
+        attempt_count: int,
+        trace_id: str | None,
+        last_upstream_error: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        elapsed_seconds = int(round(ProxyService._route_exhausted_retry_elapsed_seconds(started_at=started_at)))
+        max_wait_seconds = ProxyService._route_exhausted_retry_max_wait_seconds(setting)
+        detail: dict[str, Any] = {
+            "message": f"所有可用中转站在 {max_wait_seconds} 秒等待重试窗口内均不可用或请求失败，已停止内部重试。",
+            "code": "all_providers_unavailable_after_retry",
+            "attempt_count": attempt_count,
+            "elapsed_seconds": elapsed_seconds,
+            "max_wait_seconds": max_wait_seconds,
+            "retryable": True,
+        }
+        if trace_id:
+            detail["trace_id"] = trace_id
+        if last_upstream_error is not None:
+            detail["last_status_code"] = last_upstream_error.get("status_code")
+            detail["last_error"] = last_upstream_error.get("detail")
+        return {
+            "status_code": status.HTTP_503_SERVICE_UNAVAILABLE,
+            "detail": detail,
+        }
+
+    @staticmethod
     def _build_endpoint_fallback_request(
         *,
         requested_endpoint_path: str,
@@ -3062,6 +3523,49 @@ class ProxyService:
             request_payload=payload,
             adapt_chat_response_to_responses=False,
         )
+
+    @staticmethod
+    def _model_mapping_unavailable(mapping_resolution: ModelMappingResolution | None) -> bool:
+        return bool(
+            mapping_resolution is not None
+            and isinstance(mapping_resolution.trace, dict)
+            and mapping_resolution.trace.get("result") == "model_mapping_no_available_target"
+        )
+
+    @staticmethod
+    def _append_model_mapping_trace(trace: list[dict], mapping_resolution: ModelMappingResolution | None) -> None:
+        if mapping_resolution is None or not isinstance(mapping_resolution.trace, dict):
+            return
+        trace.append({"result": "model_mapping", **mapping_resolution.trace})
+
+    @staticmethod
+    def _model_mapping_unavailable_diagnostics(mapping_resolution: ModelMappingResolution | None) -> dict[str, Any]:
+        mapping_trace = mapping_resolution.trace if mapping_resolution is not None else {}
+        return {
+            "summary": "模型映射没有可用目标",
+            "reason_counts": {"model_mapping_target_not_available": 1},
+            "samples": [],
+            "model_mapping": mapping_trace,
+        }
+
+    @staticmethod
+    def _restore_mapped_response_model(
+        response: dict[str, Any],
+        *,
+        mapping_resolution: ModelMappingResolution | None,
+        requested_model: str | None,
+    ) -> dict[str, Any]:
+        if (
+            mapping_resolution is None
+            or not requested_model
+            or mapping_resolution.selected_model_name == requested_model
+            or not isinstance(response, dict)
+            or "model" not in response
+        ):
+            return response
+        restored = dict(response)
+        restored["model"] = requested_model
+        return restored
 
     @staticmethod
     def _build_responses_payload_from_chat_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -5026,6 +5530,21 @@ class ProxyService:
             for candidate in RouterService.get_available_candidates(db, route_context=route_context)
             if api_client_auth is None or ApiKeyService.is_model_allowed(api_client_auth.api_client_key, candidate.provider_model.model_name)
         }
+        for mapping in ModelMappingService.list_mappings(db):
+            if not mapping.get("enabled"):
+                continue
+            source_model_name = mapping.get("source_model_name")
+            if not source_model_name:
+                continue
+            if api_client_auth is not None and not ApiKeyService.is_model_allowed(api_client_auth.api_client_key, source_model_name):
+                continue
+            target_names = {
+                item.get("model_name")
+                for item in (mapping.get("targets") or [])
+                if item.get("enabled", True)
+            }
+            if target_names & model_set:
+                model_set.add(source_model_name)
         payload = {
             "object": "list",
             "data": [{"id": model_name, "object": "model", "owned_by": "aotu-gpt", "permission": []} for model_name in sorted(model_set)],
@@ -5098,6 +5617,339 @@ class ProxyService:
         )
 
     @staticmethod
+    async def list_response_input_items(
+        *,
+        response_id: str,
+        query_items: list[tuple[str, str]] | None = None,
+        route_context: RoutePolicyContext | None = None,
+        api_client_auth: ApiClientAuthContext | None = None,
+        trace_id: str | None = None,
+        source_ip: str | None = None,
+    ) -> tuple[dict[str, Any], Provider, list[dict], int]:
+        return await ProxyService._forward_response_management_request(
+            method="GET",
+            response_id=response_id,
+            action="input_items",
+            query_items=query_items,
+            route_context=route_context,
+            api_client_auth=api_client_auth,
+            trace_id=trace_id,
+            source_ip=source_ip,
+        )
+
+    @staticmethod
+    async def delete_response(
+        *,
+        response_id: str,
+        route_context: RoutePolicyContext | None = None,
+        api_client_auth: ApiClientAuthContext | None = None,
+        trace_id: str | None = None,
+        source_ip: str | None = None,
+    ) -> tuple[dict[str, Any], Provider, list[dict], int]:
+        return await ProxyService._forward_response_management_request(
+            method="DELETE",
+            response_id=response_id,
+            action=None,
+            query_items=None,
+            route_context=route_context,
+            api_client_auth=api_client_auth,
+            trace_id=trace_id,
+            source_ip=source_ip,
+        )
+
+    @staticmethod
+    async def list_chat_completions(
+        *,
+        query_items: list[tuple[str, str]] | None = None,
+        route_context: RoutePolicyContext | None = None,
+        api_client_auth: ApiClientAuthContext | None = None,
+        trace_id: str | None = None,
+        source_ip: str | None = None,
+    ) -> tuple[dict[str, Any], Provider, list[dict], int]:
+        return await ProxyService._forward_response_management_request(
+            method="GET",
+            response_id="chat-completions",
+            action=None,
+            query_items=query_items,
+            route_context=route_context,
+            api_client_auth=api_client_auth,
+            trace_id=trace_id,
+            source_ip=source_ip,
+            request_path_override="/chat/completions",
+            log_type="chat",
+            unavailable_message="No available provider for chat completions management request",
+            unavailable_code="chat_completion_provider_not_available",
+            not_found_message="Chat completions were not found in any authorized provider",
+            not_found_code="chat_completion_not_found",
+        )
+
+    @staticmethod
+    async def retrieve_chat_completion(
+        *,
+        completion_id: str,
+        route_context: RoutePolicyContext | None = None,
+        api_client_auth: ApiClientAuthContext | None = None,
+        trace_id: str | None = None,
+        source_ip: str | None = None,
+    ) -> tuple[dict[str, Any], Provider, list[dict], int]:
+        return await ProxyService._forward_response_management_request(
+            method="GET",
+            response_id=completion_id,
+            action=None,
+            query_items=None,
+            route_context=route_context,
+            api_client_auth=api_client_auth,
+            trace_id=trace_id,
+            source_ip=source_ip,
+            request_path_override=f"/chat/completions/{completion_id}",
+            log_type="chat",
+            unavailable_message="No available provider for chat completion management request",
+            unavailable_code="chat_completion_provider_not_available",
+            not_found_message="Chat completion was not found in any authorized provider",
+            not_found_code="chat_completion_not_found",
+        )
+
+    @staticmethod
+    async def list_chat_completion_messages(
+        *,
+        completion_id: str,
+        query_items: list[tuple[str, str]] | None = None,
+        route_context: RoutePolicyContext | None = None,
+        api_client_auth: ApiClientAuthContext | None = None,
+        trace_id: str | None = None,
+        source_ip: str | None = None,
+    ) -> tuple[dict[str, Any], Provider, list[dict], int]:
+        return await ProxyService._forward_response_management_request(
+            method="GET",
+            response_id=completion_id,
+            action=None,
+            query_items=query_items,
+            route_context=route_context,
+            api_client_auth=api_client_auth,
+            trace_id=trace_id,
+            source_ip=source_ip,
+            request_path_override=f"/chat/completions/{completion_id}/messages",
+            log_type="chat",
+            unavailable_message="No available provider for chat completion messages request",
+            unavailable_code="chat_completion_provider_not_available",
+            not_found_message="Chat completion messages were not found in any authorized provider",
+            not_found_code="chat_completion_not_found",
+        )
+
+    @staticmethod
+    async def update_chat_completion(
+        *,
+        completion_id: str,
+        payload: dict[str, Any],
+        route_context: RoutePolicyContext | None = None,
+        api_client_auth: ApiClientAuthContext | None = None,
+        trace_id: str | None = None,
+        source_ip: str | None = None,
+    ) -> tuple[dict[str, Any], Provider, list[dict], int]:
+        return await ProxyService._forward_response_management_request(
+            method="POST",
+            response_id=completion_id,
+            action=None,
+            query_items=None,
+            route_context=route_context,
+            api_client_auth=api_client_auth,
+            trace_id=trace_id,
+            source_ip=source_ip,
+            request_path_override=f"/chat/completions/{completion_id}",
+            payload=payload,
+            log_type="chat",
+            unavailable_message="No available provider for chat completion update request",
+            unavailable_code="chat_completion_provider_not_available",
+            not_found_message="Chat completion was not found in any authorized provider",
+            not_found_code="chat_completion_not_found",
+        )
+
+    @staticmethod
+    async def delete_chat_completion(
+        *,
+        completion_id: str,
+        route_context: RoutePolicyContext | None = None,
+        api_client_auth: ApiClientAuthContext | None = None,
+        trace_id: str | None = None,
+        source_ip: str | None = None,
+    ) -> tuple[dict[str, Any], Provider, list[dict], int]:
+        return await ProxyService._forward_response_management_request(
+            method="DELETE",
+            response_id=completion_id,
+            action=None,
+            query_items=None,
+            route_context=route_context,
+            api_client_auth=api_client_auth,
+            trace_id=trace_id,
+            source_ip=source_ip,
+            request_path_override=f"/chat/completions/{completion_id}",
+            log_type="chat",
+            unavailable_message="No available provider for chat completion delete request",
+            unavailable_code="chat_completion_provider_not_available",
+            not_found_message="Chat completion was not found in any authorized provider",
+            not_found_code="chat_completion_not_found",
+        )
+
+    @staticmethod
+    async def create_moderation(
+        *,
+        payload: dict[str, Any],
+        route_context: RoutePolicyContext | None = None,
+        api_client_auth: ApiClientAuthContext | None = None,
+        trace_id: str | None = None,
+        source_ip: str | None = None,
+    ) -> tuple[dict[str, Any], Provider, list[dict], int]:
+        return await ProxyService._forward_response_management_request(
+            method="POST",
+            response_id="moderations",
+            action=None,
+            query_items=None,
+            route_context=route_context,
+            api_client_auth=api_client_auth,
+            trace_id=trace_id,
+            source_ip=source_ip,
+            request_path_override="/moderations",
+            payload=payload,
+            log_type="moderations",
+            unavailable_message="No available provider for moderation request",
+            unavailable_code="moderation_provider_not_available",
+            not_found_message="Moderation endpoint was not found in any authorized provider",
+            not_found_code="moderation_not_found",
+        )
+
+    @staticmethod
+    async def list_files(
+        *,
+        query_items: list[tuple[str, str]] | None = None,
+        route_context: RoutePolicyContext | None = None,
+        api_client_auth: ApiClientAuthContext | None = None,
+        trace_id: str | None = None,
+        source_ip: str | None = None,
+    ) -> tuple[dict[str, Any], Provider, list[dict], int]:
+        return await ProxyService._forward_response_management_request(
+            method="GET",
+            response_id="files",
+            action=None,
+            query_items=query_items,
+            route_context=route_context,
+            api_client_auth=api_client_auth,
+            trace_id=trace_id,
+            source_ip=source_ip,
+            request_path_override="/files",
+            log_type="files",
+            unavailable_message="No available provider for files request",
+            unavailable_code="files_provider_not_available",
+            not_found_message="Files endpoint was not found in any authorized provider",
+            not_found_code="files_not_found",
+        )
+
+    @staticmethod
+    async def upload_file(
+        *,
+        form_fields: list[tuple[str, str]],
+        form_files: list[tuple[str, tuple[str, bytes, str]]],
+        route_context: RoutePolicyContext | None = None,
+        api_client_auth: ApiClientAuthContext | None = None,
+        trace_id: str | None = None,
+        source_ip: str | None = None,
+    ) -> tuple[dict[str, Any], Provider, list[dict], int]:
+        return await ProxyService._forward_response_management_request(
+            method="POST",
+            response_id="files",
+            action=None,
+            query_items=None,
+            route_context=route_context,
+            api_client_auth=api_client_auth,
+            trace_id=trace_id,
+            source_ip=source_ip,
+            request_path_override="/files",
+            form_fields=form_fields,
+            form_files=form_files,
+            log_type="files",
+            unavailable_message="No available provider for file upload request",
+            unavailable_code="files_provider_not_available",
+            not_found_message="File upload endpoint was not found in any authorized provider",
+            not_found_code="files_not_found",
+        )
+
+    @staticmethod
+    async def retrieve_file(
+        *,
+        file_id: str,
+        route_context: RoutePolicyContext | None = None,
+        api_client_auth: ApiClientAuthContext | None = None,
+        trace_id: str | None = None,
+        source_ip: str | None = None,
+    ) -> tuple[dict[str, Any], Provider, list[dict], int]:
+        return await ProxyService._forward_response_management_request(
+            method="GET",
+            response_id=file_id,
+            action=None,
+            query_items=None,
+            route_context=route_context,
+            api_client_auth=api_client_auth,
+            trace_id=trace_id,
+            source_ip=source_ip,
+            request_path_override=f"/files/{file_id}",
+            log_type="files",
+            unavailable_message="No available provider for file retrieve request",
+            unavailable_code="files_provider_not_available",
+            not_found_message="File was not found in any authorized provider",
+            not_found_code="file_not_found",
+        )
+
+    @staticmethod
+    async def delete_file(
+        *,
+        file_id: str,
+        route_context: RoutePolicyContext | None = None,
+        api_client_auth: ApiClientAuthContext | None = None,
+        trace_id: str | None = None,
+        source_ip: str | None = None,
+    ) -> tuple[dict[str, Any], Provider, list[dict], int]:
+        return await ProxyService._forward_response_management_request(
+            method="DELETE",
+            response_id=file_id,
+            action=None,
+            query_items=None,
+            route_context=route_context,
+            api_client_auth=api_client_auth,
+            trace_id=trace_id,
+            source_ip=source_ip,
+            request_path_override=f"/files/{file_id}",
+            log_type="files",
+            unavailable_message="No available provider for file delete request",
+            unavailable_code="files_provider_not_available",
+            not_found_message="File was not found in any authorized provider",
+            not_found_code="file_not_found",
+        )
+
+    @staticmethod
+    async def retrieve_file_content(
+        *,
+        file_id: str,
+        route_context: RoutePolicyContext | None = None,
+        api_client_auth: ApiClientAuthContext | None = None,
+        trace_id: str | None = None,
+        source_ip: str | None = None,
+    ) -> tuple[bytes, str, Provider, list[dict], int]:
+        return await ProxyService._forward_raw_management_request(
+            method="GET",
+            response_id=file_id,
+            request_path=f"/files/{file_id}/content",
+            query_items=None,
+            route_context=route_context,
+            api_client_auth=api_client_auth,
+            trace_id=trace_id,
+            source_ip=source_ip,
+            log_type="files",
+            unavailable_message="No available provider for file content request",
+            unavailable_code="files_provider_not_available",
+            not_found_message="File content was not found in any authorized provider",
+            not_found_code="file_content_not_found",
+        )
+
+    @staticmethod
     async def _forward_response_management_request(
         *,
         method: str,
@@ -5108,20 +5960,34 @@ class ProxyService:
         api_client_auth: ApiClientAuthContext | None,
         trace_id: str | None,
         source_ip: str | None,
+        request_path_override: str | None = None,
+        payload: dict[str, Any] | None = None,
+        form_fields: list[tuple[str, str]] | None = None,
+        form_files: list[tuple[str, tuple[str, bytes, str]]] | None = None,
+        log_type: str = "responses",
+        unavailable_message: str = "No available provider for responses management request",
+        unavailable_code: str = "response_provider_not_available",
+        not_found_message: str = "Response was not found in any authorized provider",
+        not_found_code: str = "response_not_found",
     ) -> tuple[dict[str, Any], Provider, list[dict], int]:
         total_started = time.perf_counter()
         request_id = uuid4().hex
+        request_path = request_path_override or f"/responses/{response_id}"
+        if request_path_override is None and action:
+            request_path = f"{request_path}/{action}"
+        request_model_name = payload.get("model") if isinstance(payload, dict) and isinstance(payload.get("model"), str) else None
         db = SessionLocal()
         try:
             providers = ProxyService._ordered_response_management_providers(db, route_context=route_context)
             if not providers:
                 detail = {
-                    "message": "No available provider for responses management request",
-                    "code": "response_provider_not_available",
+                    "message": unavailable_message,
+                    "code": unavailable_code,
                 }
                 await ProxyService._write_response_management_log(
+                    log_type=log_type,
                     method=method,
-                    request_path=f"/responses/{response_id}" + (f"/{action}" if action else ""),
+                    request_path=request_path,
                     response_id=response_id,
                     request_id=request_id,
                     provider=None,
@@ -5129,6 +5995,7 @@ class ProxyService:
                     trace_id=trace_id,
                     source_ip=source_ip,
                     api_client_auth=api_client_auth,
+                    model_name=request_model_name,
                     success=False,
                     status_code=status.HTTP_404_NOT_FOUND,
                     latency_ms=int((time.perf_counter() - total_started) * 1000),
@@ -5141,19 +6008,23 @@ class ProxyService:
 
         last_error: tuple[int, Any] | None = None
         trace: list[dict] = []
-        request_path = f"/responses/{response_id}"
-        if action:
-            request_path = f"{request_path}/{action}"
 
         for provider in providers:
             started = time.perf_counter()
             try:
                 async with ProviderCapacityService.async_lease(provider, is_stream=False):
+                    send_kwargs: dict[str, Any] = {
+                        "method": method,
+                        "request_path": request_path,
+                        "query_items": query_items,
+                        "payload": payload,
+                    }
+                    if form_fields is not None or form_files is not None:
+                        send_kwargs["form_fields"] = form_fields
+                        send_kwargs["form_files"] = form_files
                     response_json, upstream_request_id = await ProxyService._send_response_management_request(
                         provider,
-                        method=method,
-                        request_path=request_path,
-                        query_items=query_items,
+                        **send_kwargs,
                     )
                 latency_ms = int((time.perf_counter() - started) * 1000)
                 trace.append(
@@ -5168,6 +6039,7 @@ class ProxyService:
                     }
                 )
                 await ProxyService._write_response_management_log(
+                    log_type=log_type,
                     method=method,
                     request_path=request_path,
                     response_id=response_id,
@@ -5177,6 +6049,7 @@ class ProxyService:
                     trace_id=trace_id,
                     source_ip=source_ip,
                     api_client_auth=api_client_auth,
+                    model_name=request_model_name,
                     success=True,
                     status_code=200,
                     latency_ms=latency_ms,
@@ -5225,6 +6098,7 @@ class ProxyService:
                     }
                 )
                 await ProxyService._write_response_management_log(
+                    log_type=log_type,
                     method=method,
                     request_path=request_path,
                     response_id=response_id,
@@ -5234,6 +6108,7 @@ class ProxyService:
                     trace_id=trace_id,
                     source_ip=source_ip,
                     api_client_auth=api_client_auth,
+                    model_name=request_model_name,
                     success=False,
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                     latency_ms=int((time.perf_counter() - total_started) * 1000),
@@ -5260,6 +6135,7 @@ class ProxyService:
                 if ProxyService._should_continue_response_management_lookup(exc.response.status_code, detail):
                     continue
                 await ProxyService._write_response_management_log(
+                    log_type=log_type,
                     method=method,
                     request_path=request_path,
                     response_id=response_id,
@@ -5269,6 +6145,7 @@ class ProxyService:
                     trace_id=trace_id,
                     source_ip=source_ip,
                     api_client_auth=api_client_auth,
+                    model_name=request_model_name,
                     success=False,
                     status_code=exc.response.status_code,
                     latency_ms=int((time.perf_counter() - total_started) * 1000),
@@ -5293,6 +6170,7 @@ class ProxyService:
                 if ProxyService._should_continue_response_management_lookup(exc.status_code, exc.detail):
                     continue
                 await ProxyService._write_response_management_log(
+                    log_type=log_type,
                     method=method,
                     request_path=request_path,
                     response_id=response_id,
@@ -5302,6 +6180,7 @@ class ProxyService:
                     trace_id=trace_id,
                     source_ip=source_ip,
                     api_client_auth=api_client_auth,
+                    model_name=request_model_name,
                     success=False,
                     status_code=exc.status_code,
                     latency_ms=int((time.perf_counter() - total_started) * 1000),
@@ -5313,6 +6192,7 @@ class ProxyService:
         if last_error is not None:
             status_code, detail = last_error
             await ProxyService._write_response_management_log(
+                log_type=log_type,
                 method=method,
                 request_path=request_path,
                 response_id=response_id,
@@ -5322,6 +6202,7 @@ class ProxyService:
                 trace_id=trace_id,
                 source_ip=source_ip,
                 api_client_auth=api_client_auth,
+                model_name=request_model_name,
                 success=False,
                 status_code=status_code,
                 latency_ms=int((time.perf_counter() - total_started) * 1000),
@@ -5330,11 +6211,12 @@ class ProxyService:
             )
             raise HTTPException(status_code=status_code, detail=detail)
         detail = {
-            "message": "Response was not found in any authorized provider",
-            "code": "response_not_found",
-            "response_id": response_id,
+            "message": not_found_message,
+            "code": not_found_code,
+            "object_id": response_id,
         }
         await ProxyService._write_response_management_log(
+            log_type=log_type,
             method=method,
             request_path=request_path,
             response_id=response_id,
@@ -5344,6 +6226,7 @@ class ProxyService:
             trace_id=trace_id,
             source_ip=source_ip,
             api_client_auth=api_client_auth,
+            model_name=request_model_name,
             success=False,
             status_code=status.HTTP_404_NOT_FOUND,
             latency_ms=int((time.perf_counter() - total_started) * 1000),
@@ -5358,6 +6241,7 @@ class ProxyService:
     @staticmethod
     async def _write_response_management_log(
         *,
+        log_type: str = "responses",
         method: str,
         request_path: str,
         response_id: str,
@@ -5367,6 +6251,7 @@ class ProxyService:
         trace_id: str | None,
         source_ip: str | None,
         api_client_auth: ApiClientAuthContext | None,
+        model_name: str | None = None,
         success: bool,
         status_code: int,
         latency_ms: int,
@@ -5375,11 +6260,12 @@ class ProxyService:
     ) -> None:
         await ProxyService._run_db_write(
             LogService.create_log,
-            log_type="responses",
+            log_type=log_type,
             provider_id=provider.id if provider is not None else None,
             provider_name=provider.name if provider is not None else None,
             trace_id=trace_id,
-            requested_model=None,
+            model_name=model_name,
+            requested_model=model_name,
             tenant_name=api_client_auth.api_client_key.tenant_name if api_client_auth else None,
             project_name=api_client_auth.api_client_key.project_name if api_client_auth else None,
             app_name=api_client_auth.api_client_key.app_name if api_client_auth else None,
@@ -5460,7 +6346,285 @@ class ProxyService:
         method: str,
         request_path: str,
         query_items: list[tuple[str, str]] | None,
+        payload: dict[str, Any] | None = None,
+        form_fields: list[tuple[str, str]] | None = None,
+        form_files: list[tuple[str, tuple[str, bytes, str]]] | None = None,
     ) -> tuple[dict[str, Any], str | None]:
+        client = UpstreamClientService.get_client()
+        response = await client.request(
+            method.upper(),
+            f"{provider.base_url}{request_path}",
+            headers={"Authorization": f"Bearer {provider.api_key}"},
+            params=query_items,
+            json=payload if form_fields is None and form_files is None else None,
+            data=form_fields,
+            files=form_files,
+            timeout=ProxyService._build_httpx_timeout(provider, payload={}, is_stream=False),
+        )
+        response.raise_for_status()
+        if response.content:
+            return response.json(), ProxyService._extract_upstream_request_id(response)
+        return {"id": request_path.rsplit("/", 1)[-1], "object": "response"}, ProxyService._extract_upstream_request_id(response)
+
+    @staticmethod
+    async def _forward_raw_management_request(
+        *,
+        method: str,
+        response_id: str,
+        request_path: str,
+        query_items: list[tuple[str, str]] | None,
+        route_context: RoutePolicyContext | None,
+        api_client_auth: ApiClientAuthContext | None,
+        trace_id: str | None,
+        source_ip: str | None,
+        log_type: str,
+        unavailable_message: str,
+        unavailable_code: str,
+        not_found_message: str,
+        not_found_code: str,
+    ) -> tuple[bytes, str, Provider, list[dict], int]:
+        total_started = time.perf_counter()
+        request_id = uuid4().hex
+        db = SessionLocal()
+        try:
+            providers = ProxyService._ordered_response_management_providers(db, route_context=route_context)
+            if not providers:
+                detail = {"message": unavailable_message, "code": unavailable_code}
+                await ProxyService._write_response_management_log(
+                    log_type=log_type,
+                    method=method,
+                    request_path=request_path,
+                    response_id=response_id,
+                    request_id=request_id,
+                    provider=None,
+                    trace=[],
+                    trace_id=trace_id,
+                    source_ip=source_ip,
+                    api_client_auth=api_client_auth,
+                    model_name=None,
+                    success=False,
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    latency_ms=int((time.perf_counter() - total_started) * 1000),
+                    upstream_request_id=None,
+                    detail=detail,
+                )
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail)
+        finally:
+            db.close()
+
+        last_error: tuple[int, Any] | None = None
+        trace: list[dict] = []
+        for provider in providers:
+            started = time.perf_counter()
+            try:
+                async with ProviderCapacityService.async_lease(provider, is_stream=False):
+                    content, content_type, upstream_request_id = await ProxyService._send_raw_management_request(
+                        provider,
+                        method=method,
+                        request_path=request_path,
+                        query_items=query_items,
+                    )
+                latency_ms = int((time.perf_counter() - started) * 1000)
+                trace.append(
+                    {
+                        "provider_id": provider.id,
+                        "provider_name": provider.name,
+                        "request_path": f"/v1{request_path}",
+                        "result": "success",
+                        "latency_ms": latency_ms,
+                        "status_code": 200,
+                        "upstream_request_id": upstream_request_id,
+                    }
+                )
+                await ProxyService._write_response_management_log(
+                    log_type=log_type,
+                    method=method,
+                    request_path=request_path,
+                    response_id=response_id,
+                    request_id=request_id,
+                    provider=provider,
+                    trace=trace,
+                    trace_id=trace_id,
+                    source_ip=source_ip,
+                    api_client_auth=api_client_auth,
+                    model_name=None,
+                    success=True,
+                    status_code=200,
+                    latency_ms=latency_ms,
+                    upstream_request_id=upstream_request_id,
+                    detail=None,
+                )
+                return content, content_type, provider, trace, latency_ms
+            except ProviderCapacityExceededError as exc:
+                latency_ms = int((time.perf_counter() - started) * 1000)
+                detail = {
+                    "message": str(exc),
+                    "code": exc.code,
+                    "provider_id": provider.id,
+                    "provider_name": provider.name,
+                }
+                trace.append(
+                    {
+                        "provider_id": provider.id,
+                        "provider_name": provider.name,
+                        "request_path": f"/v1{request_path}",
+                        "result": "capacity_limited",
+                        "latency_ms": latency_ms,
+                        "status_code": status.HTTP_429_TOO_MANY_REQUESTS,
+                        "error": ProxyService._error_message_for_log(detail),
+                    }
+                )
+                last_error = (status.HTTP_429_TOO_MANY_REQUESTS, detail)
+                continue
+            except ProviderCapacityUnavailableError as exc:
+                detail = {
+                    "message": "Provider capacity state is unavailable",
+                    "code": "provider_capacity_unavailable",
+                    "provider_id": provider.id,
+                    "provider_name": provider.name,
+                }
+                await ProxyService._write_response_management_log(
+                    log_type=log_type,
+                    method=method,
+                    request_path=request_path,
+                    response_id=response_id,
+                    request_id=request_id,
+                    provider=provider,
+                    trace=trace,
+                    trace_id=trace_id,
+                    source_ip=source_ip,
+                    api_client_auth=api_client_auth,
+                    model_name=None,
+                    success=False,
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    latency_ms=int((time.perf_counter() - total_started) * 1000),
+                    upstream_request_id=None,
+                    detail=detail,
+                )
+                raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail) from exc
+            except httpx.HTTPStatusError as exc:
+                latency_ms = int((time.perf_counter() - started) * 1000)
+                error_body = await ProxyService._extract_response_error(exc.response)
+                detail = ProxyService._normalize_error_detail(error_body)
+                trace.append(
+                    {
+                        "provider_id": provider.id,
+                        "provider_name": provider.name,
+                        "request_path": f"/v1{request_path}",
+                        "result": ProxyService._classify_http_error(exc.response.status_code),
+                        "latency_ms": latency_ms,
+                        "status_code": exc.response.status_code,
+                        "error": ProxyService._error_message_for_log(detail),
+                    }
+                )
+                last_error = (exc.response.status_code, detail)
+                if ProxyService._should_continue_response_management_lookup(exc.response.status_code, detail):
+                    continue
+                await ProxyService._write_response_management_log(
+                    log_type=log_type,
+                    method=method,
+                    request_path=request_path,
+                    response_id=response_id,
+                    request_id=request_id,
+                    provider=provider,
+                    trace=trace,
+                    trace_id=trace_id,
+                    source_ip=source_ip,
+                    api_client_auth=api_client_auth,
+                    model_name=None,
+                    success=False,
+                    status_code=exc.response.status_code,
+                    latency_ms=int((time.perf_counter() - total_started) * 1000),
+                    upstream_request_id=None,
+                    detail=detail,
+                )
+                raise HTTPException(status_code=exc.response.status_code, detail=detail) from exc
+            except RequestsUpstreamHTTPError as exc:
+                latency_ms = int((time.perf_counter() - started) * 1000)
+                trace.append(
+                    {
+                        "provider_id": provider.id,
+                        "provider_name": provider.name,
+                        "request_path": f"/v1{request_path}",
+                        "result": ProxyService._classify_http_error(exc.status_code),
+                        "latency_ms": latency_ms,
+                        "status_code": exc.status_code,
+                        "error": ProxyService._error_message_for_log(exc.detail),
+                    }
+                )
+                last_error = (exc.status_code, exc.detail)
+                if ProxyService._should_continue_response_management_lookup(exc.status_code, exc.detail):
+                    continue
+                await ProxyService._write_response_management_log(
+                    log_type=log_type,
+                    method=method,
+                    request_path=request_path,
+                    response_id=response_id,
+                    request_id=request_id,
+                    provider=provider,
+                    trace=trace,
+                    trace_id=trace_id,
+                    source_ip=source_ip,
+                    api_client_auth=api_client_auth,
+                    model_name=None,
+                    success=False,
+                    status_code=exc.status_code,
+                    latency_ms=int((time.perf_counter() - total_started) * 1000),
+                    upstream_request_id=None,
+                    detail=exc.detail,
+                )
+                raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+        if last_error is not None:
+            status_code, detail = last_error
+            await ProxyService._write_response_management_log(
+                log_type=log_type,
+                method=method,
+                request_path=request_path,
+                response_id=response_id,
+                request_id=request_id,
+                provider=None,
+                trace=trace,
+                trace_id=trace_id,
+                source_ip=source_ip,
+                api_client_auth=api_client_auth,
+                model_name=None,
+                success=False,
+                status_code=status_code,
+                latency_ms=int((time.perf_counter() - total_started) * 1000),
+                upstream_request_id=None,
+                detail=detail,
+            )
+            raise HTTPException(status_code=status_code, detail=detail)
+        detail = {"message": not_found_message, "code": not_found_code, "object_id": response_id}
+        await ProxyService._write_response_management_log(
+            log_type=log_type,
+            method=method,
+            request_path=request_path,
+            response_id=response_id,
+            request_id=request_id,
+            provider=None,
+            trace=trace,
+            trace_id=trace_id,
+            source_ip=source_ip,
+            api_client_auth=api_client_auth,
+            model_name=None,
+            success=False,
+            status_code=status.HTTP_404_NOT_FOUND,
+            latency_ms=int((time.perf_counter() - total_started) * 1000),
+            upstream_request_id=None,
+            detail=detail,
+        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail)
+
+    @staticmethod
+    async def _send_raw_management_request(
+        provider: Provider,
+        *,
+        method: str,
+        request_path: str,
+        query_items: list[tuple[str, str]] | None,
+    ) -> tuple[bytes, str, str | None]:
         client = UpstreamClientService.get_client()
         response = await client.request(
             method.upper(),
@@ -5470,9 +6634,11 @@ class ProxyService:
             timeout=ProxyService._build_httpx_timeout(provider, payload={}, is_stream=False),
         )
         response.raise_for_status()
-        if response.content:
-            return response.json(), ProxyService._extract_upstream_request_id(response)
-        return {"id": request_path.rsplit("/", 1)[-1], "object": "response"}, ProxyService._extract_upstream_request_id(response)
+        return (
+            response.content,
+            response.headers.get("content-type") or "application/octet-stream",
+            ProxyService._extract_upstream_request_id(response),
+        )
 
     @staticmethod
     def _should_continue_response_management_lookup(status_code: int, detail: Any) -> bool:

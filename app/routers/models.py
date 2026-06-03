@@ -6,16 +6,47 @@ from app.schemas.model_catalog import (
     ModelCatalogBatchContextWindowUpdate,
     ModelCatalogCreate,
     ModelCatalogDetailOut,
+    ModelCatalogOptionOut,
     ModelCatalogOut,
 )
 from app.schemas.model_catalog import ModelCatalogPageOut, ModelCatalogUpdate, UserModelOut
+from app.schemas.model_mapping import (
+    ModelMappingCreate,
+    ModelMappingOut,
+    ModelMappingSelectionOut,
+    ModelMappingSelectionProbe,
+    ModelMappingUpdate,
+)
 from app.services.asset_service import AssetService
 from app.services.admin_audit_service import AdminAuditService
 from app.services.model_catalog_service import ModelCatalogService
+from app.services.model_mapping_service import ModelMappingService
 from app.services.user_auth_service import require_admin_api_user, require_session_api_user
 
 
 router = APIRouter(tags=["models"])
+
+
+def _normalize_test_features(payload: dict | None = None) -> set[str]:
+    raw_features = (payload or {}).get("features")
+    if not isinstance(raw_features, list):
+        raw_features = ["text"]
+    allowed = {"text", "vision", "tools", "image_generation"}
+    features = {str(item).strip() for item in raw_features if str(item).strip() in allowed}
+    return features or {"text"}
+
+
+def _phase_keys_from_test_features(features: set[str]) -> frozenset[str]:
+    phase_keys: set[str] = set()
+    if "text" in features:
+        phase_keys.update({"text", "text_stream"})
+    if "vision" in features:
+        phase_keys.add("vision")
+    if "tools" in features:
+        phase_keys.add("tools")
+    if "image_generation" in features:
+        phase_keys.add("image_generation")
+    return frozenset(phase_keys or {"text", "text_stream"})
 
 
 @router.get("/api/models", dependencies=[Depends(require_admin_api_user)])
@@ -40,6 +71,11 @@ def list_models(
             )
         )
     return [ModelCatalogOut(**item) for item in ModelCatalogService.list_model_dicts(db)]
+
+
+@router.get("/api/models/options", response_model=list[ModelCatalogOptionOut], dependencies=[Depends(require_admin_api_user)])
+def list_model_options(db: Session = Depends(get_db)) -> list[ModelCatalogOptionOut]:
+    return [ModelCatalogOptionOut(**item) for item in ModelCatalogService.list_model_option_dicts(db)]
 
 
 @router.post("/api/models", response_model=ModelCatalogDetailOut, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_admin_api_user)])
@@ -104,14 +140,21 @@ def batch_update_model_context_window(
 
 
 @router.post("/api/models/test-all", dependencies=[Depends(require_admin_api_user)])
-async def test_all_model_health(db: Session = Depends(get_db)) -> list[dict]:
-    return await ModelCatalogService.test_all_model_health(db)
+async def test_all_model_health(payload: dict | None = None, db: Session = Depends(get_db)) -> list[dict]:
+    return await ModelCatalogService.test_all_model_health(
+        db,
+        phase_keys=_phase_keys_from_test_features(_normalize_test_features(payload)),
+    )
 
 
 @router.post("/api/models/{model_name}/test", dependencies=[Depends(require_admin_api_user)])
-async def test_model_health(model_name: str, db: Session = Depends(get_db)) -> dict:
+async def test_model_health(model_name: str, payload: dict | None = None, db: Session = Depends(get_db)) -> dict:
     try:
-        return await ModelCatalogService.test_model_health(db, model_name)
+        return await ModelCatalogService.test_model_health(
+            db,
+            model_name,
+            phase_keys=_phase_keys_from_test_features(_normalize_test_features(payload)),
+        )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -178,6 +221,118 @@ def delete_model(
     return {"message": "deleted"}
 
 
+@router.get("/api/model-mappings", response_model=list[ModelMappingOut], dependencies=[Depends(require_admin_api_user)])
+def list_model_mappings(db: Session = Depends(get_db)) -> list[ModelMappingOut]:
+    return [ModelMappingOut(**item) for item in ModelMappingService.list_mappings(db)]
+
+
+@router.post("/api/model-mappings", response_model=ModelMappingOut, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_admin_api_user)])
+def create_model_mapping(
+    payload: ModelMappingCreate,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_admin_api_user),
+) -> ModelMappingOut:
+    try:
+        mapping = ModelMappingService.create_mapping(db, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    AdminAuditService.create_log(
+        db,
+        actor_user_id=current_user.id,
+        actor_username=current_user.username,
+        action="create",
+        entity_type="model_mapping",
+        entity_id=mapping.id,
+        entity_name=mapping.source_model_name,
+        summary=f"创建模型映射 {mapping.source_model_name}",
+        detail=payload.model_dump(),
+    )
+    return ModelMappingOut(**ModelMappingService.serialize_mapping(mapping))
+
+
+@router.put("/api/model-mappings/{source_model_name}", response_model=ModelMappingOut, dependencies=[Depends(require_admin_api_user)])
+def update_model_mapping(
+    source_model_name: str,
+    payload: ModelMappingUpdate,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_admin_api_user),
+) -> ModelMappingOut:
+    mapping = ModelMappingService.get_mapping(db, source_model_name)
+    if mapping is None:
+        raise HTTPException(status_code=404, detail="模型映射不存在")
+    try:
+        mapping = ModelMappingService.update_mapping(db, mapping, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    AdminAuditService.create_log(
+        db,
+        actor_user_id=current_user.id,
+        actor_username=current_user.username,
+        action="update",
+        entity_type="model_mapping",
+        entity_id=mapping.id,
+        entity_name=mapping.source_model_name,
+        summary=f"更新模型映射 {mapping.source_model_name}",
+        detail=payload.model_dump(exclude_unset=True),
+    )
+    return ModelMappingOut(**ModelMappingService.serialize_mapping(mapping))
+
+
+@router.delete("/api/model-mappings/{source_model_name}", dependencies=[Depends(require_admin_api_user)])
+def delete_model_mapping(
+    source_model_name: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_admin_api_user),
+) -> dict:
+    mapping = ModelMappingService.get_mapping(db, source_model_name)
+    if mapping is None:
+        raise HTTPException(status_code=404, detail="模型映射不存在")
+    entity_id = mapping.id
+    entity_name = mapping.source_model_name
+    ModelMappingService.delete_mapping(db, mapping)
+    AdminAuditService.create_log(
+        db,
+        actor_user_id=current_user.id,
+        actor_username=current_user.username,
+        action="delete",
+        entity_type="model_mapping",
+        entity_id=entity_id,
+        entity_name=entity_name,
+        summary=f"删除模型映射 {entity_name}",
+    )
+    return {"message": "deleted"}
+
+
+@router.post("/api/model-mappings/select", response_model=ModelMappingSelectionOut, dependencies=[Depends(require_admin_api_user)])
+async def select_model_mapping_target(payload: ModelMappingSelectionProbe) -> ModelMappingSelectionOut:
+    resolution = await ModelMappingService.resolve_for_request(
+        source_model_name=payload.source_model_name,
+        route_context=None,
+        api_client_auth=None,
+        sticky_key=payload.source_model_name,
+        forced_provider_id=None,
+        require_vision=payload.require_vision,
+        require_stream=payload.require_stream,
+        require_tools=payload.require_tools,
+        require_image_generation=payload.require_image_generation,
+        require_chat_completions=payload.require_chat_completions,
+        require_responses=payload.require_responses,
+    )
+    if resolution is None:
+        return ModelMappingSelectionOut(
+            mapped=False,
+            source_model_name=payload.source_model_name,
+            selected_model_name=payload.source_model_name,
+        )
+    return ModelMappingSelectionOut(
+        mapped=resolution.selected_model_name != resolution.source_model_name,
+        source_model_name=resolution.source_model_name,
+        selected_model_name=resolution.selected_model_name,
+        strategy=resolution.strategy,
+        trace=resolution.trace,
+    )
+
+
 @router.get("/api/user/models", response_model=list[UserModelOut])
 def list_user_models(current_user=Depends(require_session_api_user), db: Session = Depends(get_db)) -> list[UserModelOut]:
     return [UserModelOut(**item) for item in ModelCatalogService.list_user_models(db, user=current_user)]
@@ -199,3 +354,4 @@ def upload_user_asset(
         "public_path": asset.public_path,
         "asset_url": str(request.base_url).rstrip("/") + asset.public_path,
     }
+

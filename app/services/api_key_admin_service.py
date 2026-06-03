@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 from decimal import Decimal
 
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.api_client_billing_record import ApiClientBillingRecord
@@ -50,61 +50,127 @@ class ApiKeyAdminService:
         )
 
     @staticmethod
+    def _api_key_has_provider_expr():
+        return (
+            select(ApiClientKeyProviderBinding.id)
+            .where(ApiClientKeyProviderBinding.api_client_key_id == ApiClientKey.id)
+            .correlate(ApiClientKey)
+            .exists()
+        )
+
+    @staticmethod
+    def _api_key_status_expr(now: datetime):
+        has_provider = ApiKeyAdminService._api_key_has_provider_expr()
+        return case(
+            (ApiClientKey.enabled.is_(False), "disabled"),
+            (and_(ApiClientKey.expires_at.is_not(None), ApiClientKey.expires_at <= now), "expired"),
+            (
+                and_(
+                    ApiClientKey.token_limit_total.is_not(None),
+                    ApiClientKey.total_tokens_used >= ApiClientKey.token_limit_total,
+                ),
+                "quota_exhausted",
+            ),
+            (
+                and_(
+                    ApiClientKey.cost_limit_total.is_not(None),
+                    ApiClientKey.total_cost_used >= ApiClientKey.cost_limit_total,
+                ),
+                "cost_quota_exhausted",
+            ),
+            (
+                or_(
+                    and_(UserAccount.id.is_not(None), UserAccount.balance_amount <= 0),
+                    and_(
+                        UserAccount.id.is_(None),
+                        ApiClientKey.balance_amount.is_not(None),
+                        ApiClientKey.balance_amount <= 0,
+                    ),
+                ),
+                "balance_exhausted",
+            ),
+            (~has_provider, "unbound"),
+            else_="active",
+        )
+
+    @staticmethod
     def get_summary(db: Session) -> ApiKeySummaryOut:
-        api_keys = ApiKeyAdminService.list_api_keys(db)
         now = datetime.utcnow()
-        enabled_keys = 0
-        disabled_keys = 0
-        expired_keys = 0
-        quota_exhausted_keys = 0
-        unbound_keys = 0
-        for api_key in api_keys:
-            if api_key.enabled:
-                enabled_keys += 1
-            else:
-                disabled_keys += 1
-            if api_key.expires_at is not None and api_key.expires_at <= now:
-                expired_keys += 1
-            if api_key.token_limit_total is not None and api_key.total_tokens_used >= api_key.token_limit_total:
-                quota_exhausted_keys += 1
-            if not api_key.provider_bindings:
-                unbound_keys += 1
+        has_provider = ApiKeyAdminService._api_key_has_provider_expr()
+        key_count_row = db.execute(
+            select(
+                func.count(ApiClientKey.id).label("total_keys"),
+                func.sum(case((ApiClientKey.enabled.is_(True), 1), else_=0)).label("enabled_keys"),
+                func.sum(case((ApiClientKey.enabled.is_(False), 1), else_=0)).label("disabled_keys"),
+                func.sum(
+                    case(
+                        (
+                            and_(
+                                ApiClientKey.expires_at.is_not(None),
+                                ApiClientKey.expires_at <= now,
+                            ),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ).label("expired_keys"),
+                func.sum(
+                    case(
+                        (
+                            and_(
+                                ApiClientKey.token_limit_total.is_not(None),
+                                ApiClientKey.total_tokens_used >= ApiClientKey.token_limit_total,
+                            ),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ).label("quota_exhausted_keys"),
+                func.sum(case((~has_provider, 1), else_=0)).label("unbound_keys"),
+            )
+        ).one()
 
         aggregate_row = db.execute(
             select(
                 func.count(RequestLog.id).label("total_requests"),
-                func.sum(RequestLog.prompt_tokens).label("total_prompt_tokens"),
-                func.sum(RequestLog.completion_tokens).label("total_completion_tokens"),
-                func.sum(RequestLog.total_tokens).label("total_tokens"),
-                func.sum(RequestLog.total_cost).label("total_cost_used"),
             ).where(RequestLog.api_client_key_id.is_not(None))
         ).one()
-        total_balance_amount = 0.0
-        total_recharge_amount = 0.0
-        counted_user_ids: set[int] = set()
-        for item in api_keys:
-            if item.owner_user_id is not None and item.owner_user is not None:
-                if item.owner_user_id in counted_user_ids:
-                    continue
-                counted_user_ids.add(item.owner_user_id)
-                total_balance_amount += BillingService.to_float(item.owner_user.balance_amount) or 0
-                total_recharge_amount += BillingService.to_float(item.owner_user.total_recharge_amount) or 0
-                continue
-            total_balance_amount += float(item.balance_amount or 0)
-            total_recharge_amount += float(item.total_recharge_amount or 0)
+        key_usage_row = db.execute(
+            select(
+                func.sum(ApiClientKey.prompt_tokens_used).label("total_prompt_tokens"),
+                func.sum(ApiClientKey.completion_tokens_used).label("total_completion_tokens"),
+                func.sum(ApiClientKey.total_tokens_used).label("total_tokens"),
+                func.sum(ApiClientKey.total_cost_used).label("total_cost_used"),
+            )
+        ).one()
+        user_has_key = select(ApiClientKey.id).where(ApiClientKey.owner_user_id == UserAccount.id).exists()
+        owner_balance_row = db.execute(
+            select(
+                func.sum(UserAccount.balance_amount).label("balance_amount"),
+                func.sum(UserAccount.total_recharge_amount).label("total_recharge_amount"),
+            ).where(user_has_key)
+        ).one()
+        direct_balance_row = db.execute(
+            select(
+                func.sum(ApiClientKey.balance_amount).label("balance_amount"),
+                func.sum(ApiClientKey.total_recharge_amount).label("total_recharge_amount"),
+            ).where(ApiClientKey.owner_user_id.is_(None))
+        ).one()
+        total_balance_amount = float(owner_balance_row.balance_amount or 0) + float(direct_balance_row.balance_amount or 0)
+        total_recharge_amount = float(owner_balance_row.total_recharge_amount or 0) + float(direct_balance_row.total_recharge_amount or 0)
 
         return ApiKeySummaryOut(
-            total_keys=len(api_keys),
-            enabled_keys=enabled_keys,
-            disabled_keys=disabled_keys,
-            expired_keys=expired_keys,
-            quota_exhausted_keys=quota_exhausted_keys,
-            unbound_keys=unbound_keys,
+            total_keys=int(key_count_row.total_keys or 0),
+            enabled_keys=int(key_count_row.enabled_keys or 0),
+            disabled_keys=int(key_count_row.disabled_keys or 0),
+            expired_keys=int(key_count_row.expired_keys or 0),
+            quota_exhausted_keys=int(key_count_row.quota_exhausted_keys or 0),
+            unbound_keys=int(key_count_row.unbound_keys or 0),
             total_requests=int(aggregate_row.total_requests or 0),
-            total_prompt_tokens=int(aggregate_row.total_prompt_tokens or 0),
-            total_completion_tokens=int(aggregate_row.total_completion_tokens or 0),
-            total_tokens=int(aggregate_row.total_tokens or 0),
-            total_cost_used=float(aggregate_row.total_cost_used or 0),
+            total_prompt_tokens=int(key_usage_row.total_prompt_tokens or 0),
+            total_completion_tokens=int(key_usage_row.total_completion_tokens or 0),
+            total_tokens=int(key_usage_row.total_tokens or 0),
+            total_cost_used=float(key_usage_row.total_cost_used or 0),
             total_balance_amount=total_balance_amount,
             total_recharge_amount=total_recharge_amount,
         )
@@ -134,6 +200,8 @@ class ApiKeyAdminService:
         page_size: int,
     ) -> ApiKeyListResponse:
         normalized_keyword = keyword.strip().lower() if keyword and keyword.strip() else None
+        now = datetime.utcnow()
+        filters = []
         stmt = (
             select(ApiClientKey)
             .options(
@@ -141,7 +209,6 @@ class ApiKeyAdminService:
                 selectinload(ApiClientKey.owner_user),
             )
             .outerjoin(UserAccount, ApiClientKey.owner_user_id == UserAccount.id)
-            .distinct()
             .order_by(ApiClientKey.id.desc())
         )
         if normalized_keyword:
@@ -152,18 +219,28 @@ class ApiKeyAdminService:
                 func.lower(ApiClientKey.key_prefix).like(like_value),
                 func.lower(UserAccount.username).like(like_value),
             )
-            stmt = stmt.where(keyword_filter)
+            filters.append(keyword_filter)
         if enabled is not None:
-            stmt = stmt.where(ApiClientKey.enabled == enabled)
+            filters.append(ApiClientKey.enabled == enabled)
         if owner_user_id is not None:
-            stmt = stmt.where(ApiClientKey.owner_user_id == owner_user_id)
-        serialized_items = [ApiKeyAdminService.serialize_api_key(item) for item in db.scalars(stmt).unique()]
+            filters.append(ApiClientKey.owner_user_id == owner_user_id)
         if status:
-            serialized_items = [item for item in serialized_items if item["status"] == status]
-        total = len(serialized_items)
-        start = max(0, (page - 1) * page_size)
-        end = start + page_size
-        page_items = serialized_items[start:end]
+            filters.append(ApiKeyAdminService._api_key_status_expr(now) == status)
+        if filters:
+            stmt = stmt.where(*filters)
+        total = int(
+            db.scalar(
+                select(func.count(ApiClientKey.id))
+                .outerjoin(UserAccount, ApiClientKey.owner_user_id == UserAccount.id)
+                .where(*filters)
+            )
+            or 0
+        )
+        offset = max(0, (page - 1) * page_size)
+        page_items = [
+            ApiKeyAdminService.serialize_api_key(item)
+            for item in db.scalars(stmt.offset(offset).limit(page_size)).unique()
+        ]
         return ApiKeyListResponse(
             total=total,
             page=page,
@@ -224,6 +301,7 @@ class ApiKeyAdminService:
             default_provider_id=payload.default_provider_id,
             owner_user_id=payload.owner_user_id,
             manual_allow_fallback=payload.manual_allow_fallback,
+            route_exhausted_retry_infinite_enabled=payload.route_exhausted_retry_infinite_enabled,
             allowed_model_names_json=dumps_json(payload.allowed_model_names),
             allowed_endpoint_paths_json=dumps_json(payload.allowed_endpoint_paths),
             allowed_source_ips_json=dumps_json(payload.allowed_source_ips),
@@ -429,6 +507,7 @@ class ApiKeyAdminService:
             item.route_mode = payload.route_mode
             item.default_provider_id = payload.default_provider_id
             item.manual_allow_fallback = payload.manual_allow_fallback
+            item.route_exhausted_retry_infinite_enabled = payload.route_exhausted_retry_infinite_enabled
             ApiKeyAdminService._replace_provider_bindings(db, item, payload.allowed_provider_ids)
         db.commit()
         for item in items:
@@ -712,6 +791,7 @@ class ApiKeyAdminService:
             "owner_user_id": api_key.owner_user_id,
             "owner_user_name": api_key.owner_user.username if api_key.owner_user else None,
             "manual_allow_fallback": api_key.manual_allow_fallback,
+            "route_exhausted_retry_infinite_enabled": api_key.route_exhausted_retry_infinite_enabled,
             "allowed_provider_ids": [binding.provider_id for binding in api_key.provider_bindings],
             "allowed_model_names": loads_json(api_key.allowed_model_names_json, []),
             "allowed_endpoint_paths": loads_json(api_key.allowed_endpoint_paths_json, []),

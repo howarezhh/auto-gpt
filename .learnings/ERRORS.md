@@ -385,3 +385,156 @@ Validate `start_aliyun.sh` on the Ubuntu ECS host with `bash -n start_aliyun.sh`
 - Related Files: start_aliyun.sh
 
 ---
+## [ERR-20260603-001] nested_pwsh_rg_pipe_pattern
+
+**Logged**: 2026-06-03T00:00:00+08:00
+**Priority**: low
+**Status**: pending
+**Area**: infra
+
+### Summary
+Nested `pwsh -Command` with a double-quoted `rg` alternation pattern can let `|` be parsed by PowerShell instead of ripgrep.
+
+### Error
+```text
+The term 'stream' is not recognized as a name of a cmdlet, function, script file, or executable program.
+```
+
+### Context
+- Command attempted: `pwsh -Command "rg -n \"def forward_|stream|retry\" app/services/proxy_service.py"`
+- Environment: Codex shell command already runs under PowerShell, then invokes nested PowerShell 7 per project rule.
+
+### Suggested Fix
+Use single quotes inside the nested command for ripgrep patterns, for example `pwsh -Command "rg -n 'def forward_|stream|retry' app/services/proxy_service.py"`.
+
+### Metadata
+- Reproducible: yes
+- Related Files: none
+
+---
+
+## [ERR-20260603-001] powershell-and-apply-patch-in-chinese-path
+
+**Logged**: 2026-06-03T00:00:00+08:00
+**Priority**: medium
+**Status**: pending
+**Area**: infra
+
+### Summary
+apply_patch failed in the Chinese-path workspace, and PowerShell commands with variables or embedded quotes failed when not quoted carefully.
+
+### Error
+`	ext
+The system cannot find the path specified.
+ParserError from unescaped PowerShell variables or quote-heavy commands.
+`
+
+### Context
+- Workspace path contains Chinese characters.
+- apply_patch --help failed before reading patch input.
+- pwsh -Command snippets using variables or HTML/CSS quote-heavy strings failed when the outer shell expanded variables or parsed quotes.
+
+### Suggested Fix
+Use pwsh -NoLogo -Command with single-quoted command bodies for PowerShell variables, escape dollar signs when using double-quoted outer commands, and prefer small line-based replacements over nested here-strings in quote-heavy HTML/CSS edits.
+
+### Metadata
+- Reproducible: yes
+- Related Files: app/static/js/app.js, app/templates/user_api_keys.html, app/static/css/app.css
+
+---
+
+## [ERR-20260603-002] powershell_heredoc_not_bash
+
+**Logged**: 2026-06-03T10:50:00+08:00
+**Priority**: low
+**Status**: pending
+**Area**: infra
+
+### Summary
+PowerShell 7 does not support Bash-style python - <<'PY' heredoc redirection.
+
+### Error
+`	ext
+ParserError: Missing file specification after redirection operator.
+`
+
+### Context
+- Command attempted: inline Python smoke test using & '.\.venv\Scripts\python.exe' - <<'PY' in pwsh -Command.
+- Environment: Windows workspace where project requires PowerShell 7 commands.
+
+### Suggested Fix
+Use a PowerShell here-string piped into Python: @' ... '@ | & '.\.venv\Scripts\python.exe' -.
+
+### Metadata
+- Reproducible: yes
+- Related Files: none
+- See Also: ERR-20260603-001 nested_pwsh_rg_pipe_pattern
+
+---
+
+## [ERR-20260603-003] nested_pwsh_last_exitcode_expansion
+
+**Logged**: 2026-06-03T11:05:00+08:00
+**Priority**: low
+**Status**: pending
+**Area**: infra
+
+### Summary
+Nested `pwsh -Command` using double-quoted command text can let the outer shell expand `$LASTEXITCODE`, leaving `if ( -ne 0)` in the inner command.
+
+### Error
+```text
+-ne: The term '-ne' is not recognized as a name of a cmdlet, function, script file, or executable program.
+```
+
+### Context
+- Command attempted: run multiple Python regression scripts with an inline `$LASTEXITCODE` check.
+- Environment: Codex shell command runs under PowerShell and invokes PowerShell 7 per project rule.
+
+### Suggested Fix
+Wrap nested PowerShell script blocks in single quotes, for example `pwsh -Command '& { ... if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } ... }'`.
+
+### Metadata
+- Reproducible: yes
+- Related Files: none
+- See Also: ERR-20260603-001 nested_pwsh_rg_pipe_pattern
+
+---
+
+## [ERR-20260603-004] httpx_stream_response_text_before_read
+
+**Logged**: 2026-06-03T11:35:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+`TestClient.stream(...)` 返回的流式响应在消费前不能读取 `.text`，否则会触发 `httpx.ResponseNotRead`。
+
+### Error
+```text
+httpx.ResponseNotRead: Attempted to access streaming response content, without having called `read()`.
+```
+
+### Context
+- Command attempted: run `stage19_completions_regression_check.py`.
+- Environment: FastAPI `TestClient` / httpx streaming response test.
+
+### Suggested Fix
+流式断言先检查 `status_code`，正文通过 `iter_text()`、`iter_bytes()` 或显式 `read()` 后再断言；失败信息不要直接引用未读取流的 `.text`。
+
+### Metadata
+- Reproducible: yes
+- Related Files: stage19_completions_regression_check.py
+
+### Resolution
+- **Resolved**: 2026-06-03T11:35:00+08:00
+- **Notes**: 将失败提示从 `stream_response.text` 改为 `stream_response.status_code`，随后回归通过。
+
+---
+
+## 2026-06-03 PowerShell does not support Bash heredoc redirection
+
+- Context: Tried to run inline Python with `python - <<'PY'` inside PowerShell.
+- Error: `ParserError: Missing file specification after redirection operator.`
+- Fix: Use a PowerShell here-string piped into Python, e.g. `@' ... '@ | & $py -`.

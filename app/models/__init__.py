@@ -7,6 +7,7 @@ from app.models.app_setting import AppSetting
 from app.models.api_client_key import ApiClientKey
 from app.models.api_client_key_provider_binding import ApiClientKeyProviderBinding
 from app.models.model_catalog import ModelCatalog
+from app.models.model_mapping import ModelMapping
 from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
 from app.models.request_log import RequestLog
@@ -24,6 +25,7 @@ __all__ = [
     "ApiClientKey",
     "ApiClientKeyProviderBinding",
     "ModelCatalog",
+    "ModelMapping",
     "Provider",
     "ProviderModel",
     "RequestLog",
@@ -31,3 +33,4 @@ __all__ = [
     "UserAccount",
     "UserAccountBillingRecord",
 ]
+

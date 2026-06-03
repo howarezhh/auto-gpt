@@ -532,6 +532,7 @@ class TokenUsageService:
                     .where(RequestLog.request_path.is_not(None))
                     .where(RequestLog.request_path != "/v1/models")
                     .where(LogService._non_health_check_expr())
+                    .where(RequestLog.api_client_key_id.is_not(None))
                     .where(
                         or_(
                             RequestLog.prompt_tokens.is_(None),
@@ -757,8 +758,16 @@ class TokenUsageService:
             billing_delta = BillingService.finalize_request_log_billing(db, log)
             should_commit = True
         if should_commit:
+            force_auth_cache_invalidation = (
+                billing_delta is not None
+                and BillingService.to_decimal(billing_delta) != Decimal("0")
+            )
             db.commit()
-            TokenUsageService._invalidate_api_client_auth_cache_for_log(db, log)
+            TokenUsageService._invalidate_api_client_auth_cache_for_log(
+                db,
+                log,
+                force=force_auth_cache_invalidation,
+            )
         if billing_delta is not None:
             TokenUsageService._record_redis_usage_counters(
                 log,
@@ -797,10 +806,10 @@ class TokenUsageService:
         return True
 
     @staticmethod
-    def _invalidate_api_client_auth_cache_for_log(db, log: RequestLog) -> None:
+    def _invalidate_api_client_auth_cache_for_log(db, log: RequestLog, *, force: bool = False) -> None:
         if log.api_client_key_id is None:
             return
-        if not TokenUsageService._should_invalidate_auth_cache_for_usage(log.api_client_key_id):
+        if not force and not TokenUsageService._should_invalidate_auth_cache_for_usage(log.api_client_key_id):
             return
         try:
             from app.services.api_key_auth_cache import ApiKeyAuthCache

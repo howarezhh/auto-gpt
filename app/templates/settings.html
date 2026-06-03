@@ -37,6 +37,31 @@
             <span>全局最大重试次数</span>
             <input class="field-input" id="setting-global-max-retries" type="number">
         </label>
+        <label>
+            <span class="settings-field-label">
+                <span>候选耗尽等待重试（s）</span>
+                <span class="settings-help">
+                    <button class="settings-help-btn" type="button" aria-label="查看候选耗尽等待重试说明" data-settings-tooltip-trigger="true">
+                        <i class="bi bi-question-circle" aria-hidden="true"></i>
+                    </button>
+                    <div class="settings-tooltip-content hidden">
+                        <div class="settings-tooltip-title">候选耗尽等待重试说明</div>
+                        <div class="settings-tooltip-copy">外部用户调用 /v1 接口时，如果当前模型的可用中转站全部被容量、失败率、熔断或临时上游故障耗尽，系统会在这里设置的时间内等待并重新按路由策略选择候选。0 表示立即返回错误；最大 600 s，超过后停止内部重试并向调用方返回清晰错误。</div>
+                    </div>
+                </span>
+            </span>
+            <input class="field-input" id="setting-route-exhausted-retry-max-wait-seconds" type="number" min="0" max="600" placeholder="默认 600">
+        </label>
+        <label class="settings-switch-card">
+            <span class="settings-switch-copy">
+                <strong>候选耗尽无限重试</strong>
+                <small>开启后，非项目自身问题导致所有候选临时不可用时，会持续等待并重试；正常模式仍按等待窗口返回。</small>
+            </span>
+            <span class="settings-switch-control">
+                <input id="setting-route-exhausted-retry-infinite-enabled" type="checkbox">
+                <span class="settings-switch-slider"></span>
+            </span>
+        </label>
         <div class="form-span-2 settings-group" aria-labelledby="settings-health-group-title">
             <div class="settings-group-head">
                 <div class="panel-kicker">健康治理</div>

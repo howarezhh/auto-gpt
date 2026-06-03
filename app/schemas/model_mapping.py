@@ -1,0 +1,124 @@
+from datetime import datetime
+from typing import Any
+
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+class ModelMappingTarget(BaseModel):
+    model_name: str = Field(..., min_length=1)
+    enabled: bool = True
+    priority: int = Field(default=100, ge=0)
+    weight: int = Field(default=100, ge=0)
+
+    @field_validator("model_name")
+    @classmethod
+    def normalize_model_name(cls, value: str) -> str:
+        return value.strip()
+
+
+class ModelMappingBase(BaseModel):
+    source_model_name: str = Field(..., min_length=1)
+    enabled: bool = True
+    strategy: str = Field(default="auto", max_length=20)
+    targets: list[ModelMappingTarget] = Field(default_factory=list)
+    remark: str | None = None
+
+    @field_validator("source_model_name")
+    @classmethod
+    def normalize_source_model_name(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("strategy")
+    @classmethod
+    def normalize_strategy(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"auto", "priority", "weighted"}:
+            raise ValueError("strategy 必须是 auto、priority 或 weighted")
+        return normalized
+
+    @field_validator("remark")
+    @classmethod
+    def normalize_remark(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+    @model_validator(mode="after")
+    def validate_targets(self):
+        if not self.targets:
+            raise ValueError("至少需要配置一个目标模型")
+        target_names = [item.model_name for item in self.targets]
+        if len(target_names) != len(set(target_names)):
+            raise ValueError("目标模型不能重复")
+        if self.source_model_name in set(target_names):
+            raise ValueError("目标模型不能与源模型相同")
+        return self
+
+
+class ModelMappingCreate(ModelMappingBase):
+    pass
+
+
+class ModelMappingUpdate(BaseModel):
+    enabled: bool | None = None
+    strategy: str | None = Field(default=None, max_length=20)
+    targets: list[ModelMappingTarget] | None = None
+    remark: str | None = None
+
+    @field_validator("strategy")
+    @classmethod
+    def normalize_strategy(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().lower()
+        if normalized not in {"auto", "priority", "weighted"}:
+            raise ValueError("strategy 必须是 auto、priority 或 weighted")
+        return normalized
+
+    @field_validator("remark")
+    @classmethod
+    def normalize_remark(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+    @model_validator(mode="after")
+    def validate_targets(self):
+        if self.targets is not None:
+            if not self.targets:
+                raise ValueError("至少需要配置一个目标模型")
+            target_names = [item.model_name for item in self.targets]
+            if len(target_names) != len(set(target_names)):
+                raise ValueError("目标模型不能重复")
+        return self
+
+
+class ModelMappingOut(ModelMappingBase):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class ModelMappingSelectionProbe(BaseModel):
+    source_model_name: str = Field(..., min_length=1)
+    require_vision: bool = False
+    require_stream: bool = False
+    require_tools: bool = False
+    require_image_generation: bool = False
+    require_chat_completions: bool = False
+    require_responses: bool = False
+
+    @field_validator("source_model_name")
+    @classmethod
+    def normalize_source_model_name(cls, value: str) -> str:
+        return value.strip()
+
+
+class ModelMappingSelectionOut(BaseModel):
+    mapped: bool = False
+    source_model_name: str | None = None
+    selected_model_name: str | None = None
+    strategy: str | None = None
+    trace: dict[str, Any] | None = None

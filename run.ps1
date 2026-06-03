@@ -155,6 +155,97 @@ function Test-TcpEndpoint {
     }
 }
 
+function Resolve-RedisServerExe {
+    $commands = @(
+        (Get-Command redis-server -ErrorAction SilentlyContinue),
+        (Get-Command redis-server.exe -ErrorAction SilentlyContinue)
+    ) | Where-Object { $null -ne $_ }
+
+    foreach ($command in $commands) {
+        if (-not [string]::IsNullOrWhiteSpace($command.Source) -and (Test-Path -LiteralPath $command.Source)) {
+            return $command.Source
+        }
+    }
+
+    return $null
+}
+
+function Start-LocalRedisIfAvailable {
+    param(
+        [string]$ProjectRootPath,
+        [string]$HostName,
+        [int]$Port
+    )
+
+    if ($HostName -notin @("127.0.0.1", "localhost") -or $Port -le 0) {
+        return $false
+    }
+
+    if (Test-TcpEndpoint -HostName $HostName -Port $Port -TimeoutMs 500) {
+        return $true
+    }
+
+    $redisServerExe = Resolve-RedisServerExe
+    if ([string]::IsNullOrWhiteSpace($redisServerExe)) {
+        Write-Warning "未找到 redis-server.exe，无法自动启动本地 Redis。"
+        return $false
+    }
+
+    $logsDir = Join-Path $ProjectRootPath "logs"
+    $redisDataDir = Join-Path $ProjectRootPath "data\redis"
+    New-Item -ItemType Directory -Force -Path $logsDir | Out-Null
+    New-Item -ItemType Directory -Force -Path $redisDataDir | Out-Null
+
+    $stdoutLog = Join-Path $logsDir "redis-local.out.log"
+    $stderrLog = Join-Path $logsDir "redis-local.err.log"
+    $redisArgs = @(
+        "--port", "$Port",
+        "--bind", "127.0.0.1",
+        "--dir", $redisDataDir,
+        "--appendonly", "no"
+    )
+
+    Write-Host "检测到本地 Redis 未监听，尝试启动: $redisServerExe"
+    try {
+        $redisProcess = Start-Process `
+            -FilePath $redisServerExe `
+            -ArgumentList $redisArgs `
+            -WorkingDirectory $redisDataDir `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput $stdoutLog `
+            -RedirectStandardError $stderrLog `
+            -PassThru
+    }
+    catch {
+        Write-Warning "启动本地 Redis 失败: $($_.Exception.Message)"
+        return $false
+    }
+
+    for ($attempt = 1; $attempt -le 20; $attempt++) {
+        Start-Sleep -Milliseconds 250
+        if (Test-TcpEndpoint -HostName $HostName -Port $Port -TimeoutMs 300) {
+            Write-Host "本地 Redis 已启动: $HostName`:$Port (PID: $($redisProcess.Id))"
+            return $true
+        }
+
+        if ($redisProcess.HasExited) {
+            Write-Warning "本地 Redis 进程已退出，详见日志: $stdoutLog / $stderrLog"
+            return $false
+        }
+    }
+
+    try {
+        if ($null -ne $redisProcess -and -not $redisProcess.HasExited) {
+            Stop-Process -Id $redisProcess.Id -Force -ErrorAction SilentlyContinue
+        }
+    }
+    catch {
+    }
+
+    Write-Warning "本地 Redis 启动后未在 $HostName`:$Port 就绪，详见日志: $stdoutLog / $stderrLog"
+    return $false
+}
+
 function Set-LocalDevRuntimeFallbacks {
     param(
         [string]$ProjectRootPath
@@ -190,8 +281,15 @@ function Set-LocalDevRuntimeFallbacks {
         $redisEndpoint.Host -in @("127.0.0.1", "localhost") -and
         -not (Test-TcpEndpoint -HostName $redisEndpoint.Host -Port $redisEndpoint.Port)
     ) {
-        $env:REDIS_URL = ""
-        Write-Warning "检测到本地 Redis 不可用，当前进程临时禁用 Redis 依赖；管理端可启动，但实时并发/限流相关能力不可用。"
+        $redisStarted = Start-LocalRedisIfAvailable `
+            -ProjectRootPath $ProjectRootPath `
+            -HostName $redisEndpoint.Host `
+            -Port $redisEndpoint.Port
+
+        if (-not $redisStarted) {
+            $env:REDIS_URL = ""
+            Write-Warning "检测到本地 Redis 不可用且自动启动失败，当前进程临时禁用 Redis 依赖；管理端可启动，但实时并发/限流相关能力不可用。"
+        }
     }
 }
 

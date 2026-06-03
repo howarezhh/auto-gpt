@@ -37,6 +37,7 @@ class ApiKeyBase(BaseModel):
     default_provider_id: int | None = None
     owner_user_id: int | None = None
     manual_allow_fallback: bool = True
+    route_exhausted_retry_infinite_enabled: bool = False
     allowed_provider_ids: list[int] = Field(default_factory=list)
     allowed_model_names: list[str] = Field(default_factory=list)
     allowed_endpoint_paths: list[str] = Field(default_factory=list)
@@ -143,6 +144,7 @@ class ApiKeyUpdate(BaseModel):
     default_provider_id: int | None = None
     owner_user_id: int | None = None
     manual_allow_fallback: bool | None = None
+    route_exhausted_retry_infinite_enabled: bool | None = None
     allowed_provider_ids: list[int] | None = None
     allowed_model_names: list[str] | None = None
     allowed_endpoint_paths: list[str] | None = None
@@ -243,6 +245,7 @@ class ApiKeyOut(BaseModel):
     owner_user_id: int | None
     owner_user_name: str | None
     manual_allow_fallback: bool
+    route_exhausted_retry_infinite_enabled: bool
     allowed_provider_ids: list[int]
     allowed_model_names: list[str]
     allowed_endpoint_paths: list[str]
@@ -354,6 +357,7 @@ class ApiKeyBatchProviderUpdateIn(ApiKeyBatchActionIn):
     route_mode: RouteMode
     default_provider_id: int | None = None
     manual_allow_fallback: bool = True
+    route_exhausted_retry_infinite_enabled: bool = False
     allowed_provider_ids: list[int] = Field(default_factory=list)
 
     @field_validator("allowed_provider_ids")

@@ -27,7 +27,9 @@ class HealthService:
     MANUAL_CHECK_MIN_INTERVAL_SEC = 300
     PROBE_RETRY_MAX_ATTEMPTS = 2
     PROBE_RETRY_DELAY_SEC = 0.35
-    MAX_PARALLEL_MODEL_PROBES = 8
+    MAX_PARALLEL_MODEL_PROBES = 16
+    INTERACTIVE_TEXT_PROBE_PHASE_KEYS = frozenset({"text", "text_stream"})
+    INTERACTIVE_TEXT_PROBE_MAX_TOKENS = 1
     SCHEDULED_ACTIVE_MODEL_WINDOW_MINUTES = 30
     SCHEDULED_TEXT_PROBE_MAX_TOKENS = 4
     SCHEDULED_CAPABILITY_PROBE_MAX_TOKENS = 8
@@ -56,12 +58,18 @@ class HealthService:
         provider: Provider,
         *,
         include_disabled_models: bool = False,
+        phase_keys: set[str] | frozenset[str] | None = None,
+        text_probe_max_tokens: int | None = None,
+        capability_probe_max_tokens: int | None = None,
         progress_callback: HealthProgressCallback | None = None,
     ) -> dict:
         models_to_check = [item for item in provider.provider_models if include_disabled_models or item.enabled]
         model_results = await HealthService._run_provider_model_checks(
             provider,
             models_to_check,
+            phase_keys=phase_keys,
+            text_probe_max_tokens=text_probe_max_tokens,
+            capability_probe_max_tokens=capability_probe_max_tokens,
             progress_callback=progress_callback,
         )
         return HealthService._finalize_provider_check(db, provider, models_to_check, model_results)
@@ -72,26 +80,59 @@ class HealthService:
         *,
         provider_ids: list[int] | None = None,
         include_disabled_models: bool = True,
+        phase_keys: set[str] | frozenset[str] | None = None,
+        text_probe_max_tokens: int | None = None,
     ) -> list[dict]:
         providers = ProviderService.list_providers(db)
         if provider_ids:
             provider_map = {provider.id: provider for provider in providers}
             providers = [provider_map[provider_id] for provider_id in provider_ids if provider_id in provider_map]
+        endpoint_results_by_provider_id = {
+            provider.id: {provider_model.id: [] for provider_model in provider.provider_models}
+            for provider in providers
+        }
+
+        phase_groups_by_provider = {
+            provider.id: HealthService._build_probe_phase_groups(
+                provider,
+                phase_keys=phase_keys,
+                text_probe_max_tokens=text_probe_max_tokens,
+            )
+            for provider in providers
+        }
+        phase_count = max((len(groups) for groups in phase_groups_by_provider.values()), default=0)
+        for phase_index in range(phase_count):
+            await asyncio.gather(
+                *(
+                    HealthService._run_provider_phase_group(
+                        provider,
+                        [item for item in provider.provider_models if include_disabled_models or item.enabled],
+                        phase_groups_by_provider[provider.id][phase_index],
+                        phase_index=phase_index + 1,
+                        endpoint_results_by_model_id=endpoint_results_by_provider_id[provider.id],
+                    )
+                    for provider in providers
+                    if phase_index < len(phase_groups_by_provider[provider.id])
+                )
+            )
 
         results: list[dict] = []
         for provider in providers:
+            models_to_check = [item for item in provider.provider_models if include_disabled_models or item.enabled]
+            model_results = [
+                HealthService._build_model_result(
+                    provider,
+                    provider_model,
+                    endpoint_results_by_provider_id[provider.id].get(provider_model.id, []),
+                )
+                for provider_model in models_to_check
+            ]
             results.append(
                 {
                     "provider_id": provider.id,
                     "provider_name": provider.name,
                     "provider_enabled": provider.enabled,
-                    **(
-                        await HealthService.check_provider(
-                            db,
-                            provider,
-                            include_disabled_models=include_disabled_models,
-                        )
-                    ),
+                    **HealthService._finalize_provider_check(db, provider, models_to_check, model_results),
                 }
             )
         return results
@@ -104,6 +145,9 @@ class HealthService:
         *,
         stream_probe: bool = False,
         vision_probe: bool = False,
+        phase_keys: set[str] | frozenset[str] | None = None,
+        text_probe_max_tokens: int | None = None,
+        capability_probe_max_tokens: int | None = None,
     ) -> dict:
         model_result = (
             await HealthService._run_provider_model_checks(
@@ -111,6 +155,9 @@ class HealthService:
                 [provider_model],
                 stream_probe=stream_probe,
                 vision_probe=vision_probe,
+                phase_keys=phase_keys,
+                text_probe_max_tokens=text_probe_max_tokens,
+                capability_probe_max_tokens=capability_probe_max_tokens,
             )
         )[0]
         HealthService._persist_model_health_result(db, provider, provider_model, model_result)
@@ -363,6 +410,9 @@ class HealthService:
         db: Session,
         *,
         selective: bool = True,
+        phase_keys: set[str] | frozenset[str] | None = None,
+        text_probe_max_tokens: int | None = None,
+        capability_probe_max_tokens: int | None = None,
         progress_callback: HealthProgressCallback | None = None,
     ) -> list[dict]:
         providers = [provider for provider in ProviderService.list_providers(db) if provider.enabled]
@@ -408,33 +458,31 @@ class HealthService:
                     "provider_name": provider.name,
                 },
             )
-        phase_count = len(
-                HealthService._build_probe_phase_groups(
-                    providers[0],
-                    selective_capability_probes=selective,
-                    route_metrics=route_metrics,
-                    text_probe_max_tokens=HealthService.SCHEDULED_TEXT_PROBE_MAX_TOKENS,
-                    capability_probe_max_tokens=HealthService.SCHEDULED_CAPABILITY_PROBE_MAX_TOKENS,
-                )
-        ) if providers else 0
+        phase_groups_by_provider = {
+            provider.id: HealthService._build_probe_phase_groups(
+                provider,
+                phase_keys=phase_keys,
+                selective_capability_probes=selective,
+                route_metrics=route_metrics,
+                text_probe_max_tokens=text_probe_max_tokens or HealthService.SCHEDULED_TEXT_PROBE_MAX_TOKENS,
+                capability_probe_max_tokens=capability_probe_max_tokens or HealthService.SCHEDULED_CAPABILITY_PROBE_MAX_TOKENS,
+            )
+            for provider in providers
+        }
+        phase_count = max((len(groups) for groups in phase_groups_by_provider.values()), default=0)
         for phase_index in range(phase_count):
             await asyncio.gather(
                 *(
                     HealthService._run_provider_phase_group(
                         provider,
                         provider_models_map[provider.id],
-                        HealthService._build_probe_phase_groups(
-                            provider,
-                            selective_capability_probes=selective,
-                            route_metrics=route_metrics,
-                            text_probe_max_tokens=HealthService.SCHEDULED_TEXT_PROBE_MAX_TOKENS,
-                            capability_probe_max_tokens=HealthService.SCHEDULED_CAPABILITY_PROBE_MAX_TOKENS,
-                        )[phase_index],
+                        phase_groups_by_provider[provider.id][phase_index],
                         phase_index=phase_index + 1,
                         endpoint_results_by_model_id=endpoint_results_by_provider_id[provider.id],
                         progress_callback=progress_callback,
                     )
                     for provider in providers
+                    if phase_index < len(phase_groups_by_provider[provider.id])
                 )
             )
 
@@ -459,7 +507,7 @@ class HealthService:
                 }
             )
             for provider_model, model_result in zip(
-                [item for item in provider.provider_models if item.enabled],
+                models_to_check,
                 model_results,
                 strict=False,
             ):
@@ -575,7 +623,7 @@ class HealthService:
                 provider,
                 provider_model,
             ),
-            phase_keys={"tools", "vision", "image_generation"},
+            phase_keys={"tools", "vision"},
             level="l2_capability",
             capability_probe_max_tokens=HealthService.SCHEDULED_CAPABILITY_PROBE_MAX_TOKENS,
             update_health_state=False,
@@ -739,6 +787,7 @@ class HealthService:
                 "probes": [
                     {
                         "key": "chat_completions",
+                        "targets": lambda model: bool(model.supports_chat_completions),
                         "probe": lambda model: HealthService._probe_formal_endpoint(
                             provider,
                             model,
@@ -753,7 +802,44 @@ class HealthService:
                     },
                     {
                         "key": "responses",
+                        "targets": lambda model: bool(model.supports_responses),
                         "probe": lambda model: HealthService._probe_formal_endpoint(
+                            provider,
+                            model,
+                            endpoint_path="/responses",
+                            payload=HealthService._build_responses_probe_payload(
+                                model,
+                                vision_probe=vision_probe,
+                                max_output_tokens=text_max_tokens,
+                            ),
+                        ),
+                    },
+                ],
+            },
+            {
+                "key": "text_stream",
+                "label": "文字流式检查",
+                "targets": lambda model: bool(model.supports_stream),
+                "probes": [
+                    {
+                        "key": "chat_completions_stream",
+                        "targets": lambda model: bool(model.supports_chat_completions and model.supports_stream),
+                        "probe": lambda model: HealthService._probe_formal_stream_endpoint(
+                            provider,
+                            model,
+                            endpoint_path="/chat/completions",
+                            payload=HealthService._build_chat_probe_payload(
+                                model,
+                                vision_probe=vision_probe,
+                                stream_probe=True,
+                                max_tokens=text_max_tokens,
+                            ),
+                        ),
+                    },
+                    {
+                        "key": "responses_stream",
+                        "targets": lambda model: bool(model.supports_responses and model.supports_stream),
+                        "probe": lambda model: HealthService._probe_formal_stream_endpoint(
                             provider,
                             model,
                             endpoint_path="/responses",
@@ -926,6 +1012,7 @@ class HealthService:
             (provider_model, probe_spec["probe"])
             for provider_model in provider_models
             for probe_spec in probe_specs
+            if probe_spec.get("targets", lambda _model: True)(provider_model)
         ]
         if not phase_targets:
             return []
@@ -1189,8 +1276,6 @@ class HealthService:
             capabilities.append("tools")
         if provider_model.supports_vision:
             capabilities.append("vision")
-        if ProviderService.provider_model_supports_image_generation(provider_model):
-            capabilities.append("image_generation")
         return capabilities
 
     @staticmethod
@@ -1243,7 +1328,7 @@ class HealthService:
     def _determine_parallel_probe_limit(provider: Provider, target_count: int) -> int:
         configured_limit = provider.max_active_requests or 0
         if configured_limit <= 0:
-            return max(1, min(target_count, 4))
+            return max(1, min(target_count, 8))
         capacity_limit = max(1, int(configured_limit * 0.2))
         return max(1, min(target_count, capacity_limit, HealthService.MAX_PARALLEL_MODEL_PROBES))
 
@@ -1368,6 +1453,111 @@ class HealthService:
                 "message": message,
                 "trace": [],
             }
+
+    @staticmethod
+    async def _probe_formal_stream_endpoint(
+        provider: Provider,
+        provider_model: ProviderModel,
+        *,
+        endpoint_path: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        started = time.perf_counter()
+        setting = await ProxyService._get_setting_async()
+        endpoint_label = "chat/completions stream" if endpoint_path == "/chat/completions" else "responses stream"
+        native_support_label = f"原生支持 {endpoint_label}"
+        adapted_support_label = f"通过适配支持 {endpoint_label}"
+        unsupported_label = f"不支持 {endpoint_label}"
+        stream_context = None
+        exc_type = exc_value = exc_traceback = None
+        try:
+            stream_payload = dict(payload)
+            stream_payload["stream"] = True
+            response, _prepared, stream_context, fallback_trace = await ProxyService._open_stream_with_endpoint_fallback(
+                provider,
+                provider_model,
+                endpoint_path,
+                stream_payload,
+                started=started,
+                stream_connect_timeout_seconds=setting.stream_connect_timeout_seconds,
+            )
+            timeout_policy = ProxyService._build_stream_timeout_policy(provider=provider, setting=setting)
+            chunk = await ProxyService._read_next_stream_chunk(
+                response.aiter_bytes().__aiter__(),
+                first_chunk_latency_ms=None,
+                stream_started=time.perf_counter(),
+                timeout_policy=timeout_policy,
+            )
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            adapted = any(item.get("result") == "endpoint_fallback_success" for item in fallback_trace)
+            return {
+                "endpoint_path": endpoint_path,
+                "endpoint_label": endpoint_label,
+                "success": bool(chunk),
+                "native_success": bool(chunk) and not adapted,
+                "adapted_success": bool(chunk) and adapted,
+                "support_mode": "adapted" if adapted else "native",
+                "support_label": adapted_support_label if adapted else native_support_label,
+                "latency_ms": latency_ms,
+                "status_code": 200,
+                "message": "已收到流式首个数据块" if chunk else "流式响应为空",
+                "trace": fallback_trace,
+            }
+        except StopAsyncIteration as exc:
+            exc_type, exc_value, exc_traceback = type(exc), exc, exc.__traceback__
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            return {
+                "endpoint_path": endpoint_path,
+                "endpoint_label": endpoint_label,
+                "success": False,
+                "native_success": False,
+                "adapted_success": False,
+                "support_mode": "unsupported",
+                "support_label": unsupported_label,
+                "latency_ms": latency_ms,
+                "status_code": 200,
+                "message": "上游流式响应未返回任何数据",
+                "trace": [],
+            }
+        except httpx.HTTPStatusError as exc:
+            exc_type, exc_value, exc_traceback = type(exc), exc, exc.__traceback__
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            message = await HealthService._safe_error_text(exc.response)
+            return {
+                "endpoint_path": endpoint_path,
+                "endpoint_label": endpoint_label,
+                "success": False,
+                "native_success": False,
+                "adapted_success": False,
+                "support_mode": "unsupported",
+                "support_label": unsupported_label,
+                "latency_ms": latency_ms,
+                "status_code": exc.response.status_code,
+                "message": message,
+                "trace": [],
+            }
+        except Exception as exc:
+            exc_type, exc_value, exc_traceback = type(exc), exc, exc.__traceback__
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            status_code = getattr(exc, "status_code", None)
+            detail = getattr(exc, "detail", None)
+            message = ProxyService._error_message_for_log(detail) if detail is not None else str(exc)
+            return {
+                "endpoint_path": endpoint_path,
+                "endpoint_label": endpoint_label,
+                "success": False,
+                "native_success": False,
+                "adapted_success": False,
+                "support_mode": "unsupported",
+                "support_label": unsupported_label,
+                "latency_ms": latency_ms,
+                "status_code": status_code,
+                "message": message,
+                "trace": [],
+            }
+        finally:
+            if stream_context is not None:
+                await stream_context.__aexit__(exc_type, exc_value, exc_traceback)
 
     @staticmethod
     def _endpoint_results_to_trace(endpoint_results: list[dict], *, provider: Provider, provider_model: ProviderModel) -> list[dict]:

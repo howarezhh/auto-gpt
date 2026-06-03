@@ -110,6 +110,73 @@
 
 </section>
 
+<section class="panel-card section-shell model-mapping-panel">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">模型映射</div>
+            <h3>模型别名与多目标择优</h3>
+            <div class="table-muted">请求进入路由前按源模型解析目标模型；多目标仅在满足权限、能力、健康与容量约束后参与选择。</div>
+        </div>
+        <button class="btn btn-ghost interactive-btn" id="model-mapping-reset-btn" type="button">新建映射</button>
+    </div>
+    <div class="model-mapping-layout">
+        <form class="model-mapping-form" id="model-mapping-form">
+            <div class="model-mapping-form-grid">
+                <label>
+                    <span>源模型</span>
+                    <input class="field-input" id="model-mapping-source" list="model-name-options" required placeholder="例如 gpt-5.4">
+                </label>
+                <label>
+                    <span>选择策略</span>
+                    <select class="field-input" id="model-mapping-strategy">
+                        <option value="auto">自动择优</option>
+                        <option value="priority">优先级</option>
+                        <option value="weighted">权重分流</option>
+                    </select>
+                </label>
+                <label class="settings-switch-card model-mapping-enabled-card" for="model-mapping-enabled">
+                    <span class="settings-switch-copy">
+                        <strong>启用映射</strong>
+                        <small>关闭后源模型按普通模型路由。</small>
+                    </span>
+                    <span class="settings-switch-control">
+                        <input id="model-mapping-enabled" type="checkbox" checked>
+                        <span class="settings-switch-slider" aria-hidden="true"></span>
+                    </span>
+                </label>
+                <label>
+                    <span>备注</span>
+                    <input class="field-input" id="model-mapping-remark" placeholder="可选">
+                </label>
+            </div>
+            <datalist id="model-name-options"></datalist>
+            <div class="model-mapping-target-head">
+                <span>目标模型</span>
+                <button class="btn btn-ghost interactive-btn" id="model-mapping-add-target-btn" type="button">添加目标</button>
+            </div>
+            <div class="model-mapping-target-list" id="model-mapping-target-list"></div>
+            <div class="form-actions model-mapping-actions">
+                <button class="btn btn-ghost interactive-btn" id="model-mapping-cancel-btn" type="button">取消编辑</button>
+                <button class="btn btn-accent interactive-btn" id="model-mapping-submit-btn" type="submit">保存映射</button>
+            </div>
+        </form>
+        <div class="table-shell model-mapping-table-shell">
+            <table class="data-table model-mapping-table">
+                <thead>
+                    <tr>
+                        <th>源模型</th>
+                        <th>策略</th>
+                        <th>目标</th>
+                        <th>启用</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody id="model-mapping-table-body"></tbody>
+            </table>
+        </div>
+    </div>
+</section>
+
 <div class="modal-shell hidden" id="model-modal">
     <div class="modal-card modal-lg">
         <div class="modal-head">

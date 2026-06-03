@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session
 from app.database import SessionLocal, get_db
 from app.schemas.provider import (
     ProviderBatchConnectivityTestRequest,
+    ProviderBatchImportRequest,
+    ProviderBatchImportResponse,
     ProviderAvailabilityResponse,
     ProviderCredentialRotateIn,
     ProviderCreate,
@@ -17,7 +19,10 @@ from app.schemas.provider import (
     ProviderModelMountListResponse,
     ProviderModelConfigOut,
     ProviderModelConfigUpdate,
+    ProviderOptionOut,
     ProviderOut,
+    ProviderPlaygroundOut,
+    ProviderSummaryOut,
     ProviderUpdate,
 )
 from app.models.provider_model import ProviderModel
@@ -38,6 +43,28 @@ def _health_stream_headers() -> dict[str, str]:
         "Cache-Control": "no-cache, no-transform",
         "X-Accel-Buffering": "no",
     }
+
+
+def _normalize_test_features(payload: dict | None = None) -> set[str]:
+    raw_features = (payload or {}).get("features")
+    if not isinstance(raw_features, list):
+        raw_features = ["text"]
+    allowed = {"text", "vision", "tools", "image_generation"}
+    features = {str(item).strip() for item in raw_features if str(item).strip() in allowed}
+    return features or {"text"}
+
+
+def _phase_keys_from_test_features(features: set[str]) -> frozenset[str]:
+    phase_keys: set[str] = set()
+    if "text" in features:
+        phase_keys.update({"text", "text_stream"})
+    if "vision" in features:
+        phase_keys.add("vision")
+    if "tools" in features:
+        phase_keys.add("tools")
+    if "image_generation" in features:
+        phase_keys.add("image_generation")
+    return frozenset(phase_keys or {"text", "text_stream"})
 
 
 async def _stream_health_check_events(
@@ -71,6 +98,37 @@ async def _stream_health_check_events(
 @router.get("", response_model=list[ProviderOut])
 def list_providers(db: Session = Depends(get_db)) -> list[ProviderOut]:
     return [ProviderOut(**item) for item in ProviderService.list_provider_dicts(db)]
+
+
+@router.get("/options", response_model=list[ProviderOptionOut])
+def list_provider_options(db: Session = Depends(get_db)) -> list[ProviderOptionOut]:
+    return [ProviderOptionOut(**item) for item in ProviderService.list_provider_option_dicts(db)]
+
+
+@router.get("/playground", response_model=list[ProviderPlaygroundOut])
+def list_provider_playground_items(db: Session = Depends(get_db)) -> list[ProviderPlaygroundOut]:
+    return [ProviderPlaygroundOut(**item) for item in ProviderService.list_provider_playground_dicts(db)]
+
+
+@router.get("/summary", response_model=list[ProviderSummaryOut])
+def list_provider_summaries(db: Session = Depends(get_db)) -> list[ProviderSummaryOut]:
+    return [ProviderSummaryOut(**item) for item in ProviderService.list_provider_summary_dicts(db)]
+
+
+@router.get("/batch-import-template")
+def get_provider_batch_import_template() -> dict:
+    return {"template": ProviderService.BATCH_IMPORT_TEMPLATE}
+
+
+@router.post("/batch-import", response_model=ProviderBatchImportResponse)
+def batch_import_providers(
+    payload: ProviderBatchImportRequest,
+    db: Session = Depends(get_db),
+) -> ProviderBatchImportResponse:
+    try:
+        return ProviderService.batch_import_providers(db, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/models", response_model=ProviderModelMountListResponse)
@@ -203,7 +261,7 @@ def provider_availability(
 
 
 @router.post("/{provider_id}/test")
-async def test_provider(provider_id: int, db: Session = Depends(get_db)) -> dict:
+async def test_provider(provider_id: int, payload: dict | None = None, db: Session = Depends(get_db)) -> dict:
     provider = ProviderService.get_provider(db, provider_id)
     if not provider:
         raise HTTPException(status_code=404, detail="Provider not found")
@@ -211,11 +269,18 @@ async def test_provider(provider_id: int, db: Session = Depends(get_db)) -> dict
         HealthService.claim_manual_check_slot(f"provider:{provider.id}", f"中转站 {provider.name}")
     except ValueError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
-    return await HealthService.check_provider(db, provider)
+    features = _normalize_test_features(payload)
+    return await HealthService.check_provider(
+        db,
+        provider,
+        phase_keys=_phase_keys_from_test_features(features),
+        text_probe_max_tokens=HealthService.INTERACTIVE_TEXT_PROBE_MAX_TOKENS,
+        capability_probe_max_tokens=HealthService.SCHEDULED_CAPABILITY_PROBE_MAX_TOKENS,
+    )
 
 
 @router.post("/{provider_id}/test-stream")
-async def test_provider_stream(provider_id: int, db: Session = Depends(get_db)) -> StreamingResponse:
+async def test_provider_stream(provider_id: int, payload: dict | None = None, db: Session = Depends(get_db)) -> StreamingResponse:
     provider = ProviderService.get_provider(db, provider_id)
     if not provider:
         raise HTTPException(status_code=404, detail="Provider not found")
@@ -223,6 +288,8 @@ async def test_provider_stream(provider_id: int, db: Session = Depends(get_db)) 
         HealthService.claim_manual_check_slot(f"provider:{provider.id}", f"中转站 {provider.name}")
     except ValueError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
+
+    features = _normalize_test_features(payload)
 
     async def worker(progress_reporter: Callable[[dict], Awaitable[None]]) -> dict:
         stream_db = SessionLocal()
@@ -233,6 +300,9 @@ async def test_provider_stream(provider_id: int, db: Session = Depends(get_db)) 
             return await HealthService.check_provider(
                 stream_db,
                 stream_provider,
+                phase_keys=_phase_keys_from_test_features(features),
+                text_probe_max_tokens=HealthService.INTERACTIVE_TEXT_PROBE_MAX_TOKENS,
+                capability_probe_max_tokens=HealthService.SCHEDULED_CAPABILITY_PROBE_MAX_TOKENS,
                 progress_callback=progress_reporter,
             )
         finally:
@@ -259,36 +329,53 @@ async def test_provider_model(
     if provider_model is None:
         raise HTTPException(status_code=404, detail="Provider model not found")
     body = payload or {}
+    features = _normalize_test_features(body)
     return await HealthService.check_provider_model(
         db,
         provider,
         provider_model,
         stream_probe=body.get("stream_probe") is True,
         vision_probe=body.get("vision_probe") is True,
+        phase_keys=_phase_keys_from_test_features(features),
+        text_probe_max_tokens=HealthService.INTERACTIVE_TEXT_PROBE_MAX_TOKENS,
+        capability_probe_max_tokens=HealthService.SCHEDULED_CAPABILITY_PROBE_MAX_TOKENS,
     )
 
 
 @router.post("/test-all")
-async def test_all_providers(db: Session = Depends(get_db)) -> list[dict]:
+async def test_all_providers(payload: dict | None = None, db: Session = Depends(get_db)) -> list[dict]:
     try:
         HealthService.claim_manual_check_slot("all", "全部中转站")
     except ValueError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
-    return await HealthService.check_all(db)
+    features = _normalize_test_features(payload)
+    return await HealthService.check_all(
+        db,
+        selective=False,
+        phase_keys=_phase_keys_from_test_features(features),
+        text_probe_max_tokens=HealthService.INTERACTIVE_TEXT_PROBE_MAX_TOKENS,
+        capability_probe_max_tokens=HealthService.SCHEDULED_CAPABILITY_PROBE_MAX_TOKENS,
+    )
 
 
 @router.post("/test-all-stream")
-async def test_all_providers_stream(db: Session = Depends(get_db)) -> StreamingResponse:
+async def test_all_providers_stream(payload: dict | None = None, db: Session = Depends(get_db)) -> StreamingResponse:
     try:
         HealthService.claim_manual_check_slot("all", "全部中转站")
     except ValueError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
+
+    features = _normalize_test_features(payload)
 
     async def worker(progress_reporter: Callable[[dict], Awaitable[None]]) -> list[dict]:
         stream_db = SessionLocal()
         try:
             return await HealthService.check_all(
                 stream_db,
+                selective=False,
+                phase_keys=_phase_keys_from_test_features(features),
+                text_probe_max_tokens=HealthService.INTERACTIVE_TEXT_PROBE_MAX_TOKENS,
+                capability_probe_max_tokens=HealthService.SCHEDULED_CAPABILITY_PROBE_MAX_TOKENS,
                 progress_callback=progress_reporter,
             )
         finally:
@@ -316,4 +403,6 @@ async def test_provider_connectivity(
         db,
         provider_ids=payload.provider_ids or None,
         include_disabled_models=True,
+        phase_keys=HealthService.INTERACTIVE_TEXT_PROBE_PHASE_KEYS,
+        text_probe_max_tokens=HealthService.INTERACTIVE_TEXT_PROBE_MAX_TOKENS,
     )

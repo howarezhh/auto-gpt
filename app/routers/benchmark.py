@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import subprocess
 import sys
 import threading
@@ -14,23 +13,23 @@ from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 REPORT_ROOT = PROJECT_ROOT / "data" / "benchmark-reports"
 SCRIPT_PATH = PROJECT_ROOT / "scripts" / "real_concurrency_benchmark.py"
 MAX_LOG_LINES = 600
+BENCH_EVENT_PREFIX = "@@BENCH@@"
 
 router = APIRouter(prefix="/api/benchmark", tags=["benchmark"])
 
 
 class RealConcurrencyBenchmarkRequest(BaseModel):
     proxy_base_url: str = Field(default="http://127.0.0.1:8000", min_length=1, max_length=500)
+    raw_api_key: str = Field(..., min_length=1, max_length=4096)
     endpoint: str = Field(default="chat")
-    modes: list[str] = Field(default_factory=lambda: ["json", "stream"])
-    raw_api_key: str = Field(default="", max_length=4096)
-    model_name: str = Field(default="", max_length=200)
+    model_names: list[str] = Field(default_factory=list, min_length=1)
     concurrency: int = Field(default=100, ge=1, le=5000)
     probe_min_concurrency: int = Field(default=0, ge=0, le=5000)
     probe_max_concurrency: int = Field(default=0, ge=0, le=20000)
@@ -39,6 +38,7 @@ class RealConcurrencyBenchmarkRequest(BaseModel):
     sample_requests: int = Field(default=300, ge=1, le=200000)
     requests_per_concurrency: int = Field(default=2, ge=1, le=100)
     warmup_requests: int = Field(default=12, ge=0, le=10000)
+    max_output_tokens: int = Field(default=128, ge=1, le=8192)
     client_timeout_s: float = Field(default=180, ge=1, le=3600)
     request_timeout_s: float = Field(default=180, ge=1, le=3600)
     boundary_max_rounds: int = Field(default=8, ge=0, le=20)
@@ -46,7 +46,21 @@ class RealConcurrencyBenchmarkRequest(BaseModel):
     success_rate_threshold: float = Field(default=0.99, ge=0, le=1)
     timeout_error_threshold: int = Field(default=0, ge=0, le=100000)
     busy_error_threshold: int = Field(default=0, ge=0, le=100000)
+    latency_p95_threshold_ms: float = Field(default=0, ge=0, le=600000)
+    first_event_p95_threshold_ms: float = Field(default=0, ge=0, le=600000)
     prompt: str = Field(default="请用两句话简洁回答：并发压测探针。", min_length=1, max_length=2000)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_model_field(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        if data.get("model_names"):
+            return data
+        legacy_model_name = str(data.get("model_name") or "").strip()
+        if legacy_model_name:
+            data["model_names"] = [legacy_model_name]
+        return data
 
     @field_validator("endpoint")
     @classmethod
@@ -56,23 +70,19 @@ class RealConcurrencyBenchmarkRequest(BaseModel):
             raise ValueError("endpoint 仅支持 chat 或 responses")
         return normalized
 
-    @field_validator("modes")
+    @field_validator("model_names")
     @classmethod
-    def normalize_modes(cls, value: list[str]) -> list[str]:
+    def normalize_model_names(cls, value: list[str]) -> list[str]:
         normalized: list[str] = []
         for item in value:
-            current = (item or "").strip().lower()
-            if current in {"json", "non-stream", "nonstream"}:
-                current = "json"
-            if current not in {"json", "stream"}:
-                continue
-            if current not in normalized:
+            current = str(item or "").strip()
+            if current and current not in normalized:
                 normalized.append(current)
         if not normalized:
-            raise ValueError("至少选择一种测试模式")
+            raise ValueError("至少选择一个模型")
         return normalized
 
-    @field_validator("proxy_base_url", "model_name", "raw_api_key", "prompt")
+    @field_validator("proxy_base_url", "raw_api_key", "prompt")
     @classmethod
     def normalize_text(cls, value: str) -> str:
         return value.strip()
@@ -92,6 +102,7 @@ class BenchmarkJob:
     progress: dict[str, Any] = field(default_factory=dict)
     stage_results: list[dict[str, Any]] = field(default_factory=list)
     summaries: list[str] = field(default_factory=list)
+    model_reports: list[dict[str, Any]] = field(default_factory=list)
     json_report_path: str | None = None
     html_report_path: str | None = None
     error_message: str | None = None
@@ -100,14 +111,6 @@ class BenchmarkJob:
 
 _jobs: dict[str, BenchmarkJob] = {}
 _jobs_lock = threading.Lock()
-
-_PROGRESS_RE = re.compile(
-    r"\[(json|stream) c=(\d+)\]\s+(\d+)/(\d+)\s+\(([\d.]+)%\).*?rps=\s*([\d.]+)"
-)
-_STAGE_RE = re.compile(
-    r"\[(json|stream) c=(\d+)\]\s+(\S+)\s+success=(\d+)/(\d+)\s+"
-    r"success_rate=([\d.]+)%\s+rps=([\d.]+)\s+p95=([\d.]+)ms\s+max=([\d.]+)ms"
-)
 
 
 def _now_text() -> str:
@@ -121,16 +124,18 @@ def _sanitize_config(payload: RealConcurrencyBenchmarkRequest) -> dict[str, Any]
 
 
 def _build_command(payload: RealConcurrencyBenchmarkRequest) -> list[str]:
-    command = [
+    return [
         sys.executable,
         "-u",
         str(SCRIPT_PATH),
         "--proxy-base-url",
         payload.proxy_base_url,
+        "--raw-api-key",
+        payload.raw_api_key,
         "--endpoint",
         payload.endpoint,
-        "--modes",
-        ",".join(payload.modes),
+        "--model-names",
+        ",".join(payload.model_names),
         "--concurrency",
         str(payload.concurrency),
         "--probe-min-concurrency",
@@ -147,6 +152,8 @@ def _build_command(payload: RealConcurrencyBenchmarkRequest) -> list[str]:
         str(payload.requests_per_concurrency),
         "--warmup-requests",
         str(payload.warmup_requests),
+        "--max-output-tokens",
+        str(payload.max_output_tokens),
         "--client-timeout-s",
         str(payload.client_timeout_s),
         "--request-timeout-s",
@@ -161,64 +168,104 @@ def _build_command(payload: RealConcurrencyBenchmarkRequest) -> list[str]:
         str(payload.timeout_error_threshold),
         "--busy-error-threshold",
         str(payload.busy_error_threshold),
+        "--latency-p95-threshold-ms",
+        str(payload.latency_p95_threshold_ms),
+        "--first-event-p95-threshold-ms",
+        str(payload.first_event_p95_threshold_ms),
         "--prompt",
         payload.prompt,
     ]
-    if payload.model_name:
-        command.extend(["--model-name", payload.model_name])
-    return command
+
+
+def _parse_bench_event(job: BenchmarkJob, payload_text: str) -> None:
+    try:
+        payload = json.loads(payload_text)
+    except json.JSONDecodeError:
+        return
+    if not isinstance(payload, dict):
+        return
+
+    event_type = str(payload.get("type") or "").strip()
+    if not event_type:
+        return
+
+    with _jobs_lock:
+        if event_type == "progress":
+            job.progress = {
+                "model_name": payload.get("model_name"),
+                "endpoint": payload.get("endpoint"),
+                "concurrency": payload.get("concurrency"),
+                "done": payload.get("done"),
+                "total": payload.get("total"),
+                "percent": payload.get("percent"),
+                "rps": payload.get("rps"),
+            }
+            return
+
+        if event_type == "stage":
+            stage = {
+                "model_name": payload.get("model_name"),
+                "endpoint": payload.get("endpoint"),
+                "concurrency": payload.get("concurrency"),
+                "stable": bool(payload.get("stable")),
+                "success_requests": payload.get("success_requests"),
+                "total_requests": payload.get("total_requests"),
+                "success_rate_percent": payload.get("success_rate_percent"),
+                "throughput_rps": payload.get("throughput_rps"),
+                "latency_p95_ms": payload.get("latency_p95_ms"),
+                "latency_max_ms": payload.get("latency_max_ms"),
+                "first_event_p95_ms": payload.get("first_event_p95_ms"),
+                "unstable_reasons": payload.get("unstable_reasons") or [],
+            }
+            job.stage_results = [
+                item
+                for item in job.stage_results
+                if not (
+                    item.get("model_name") == stage["model_name"]
+                    and item.get("concurrency") == stage["concurrency"]
+                )
+            ]
+            job.stage_results.append(stage)
+            job.stage_results.sort(
+                key=lambda item: (
+                    str(item.get("model_name") or ""),
+                    int(item.get("concurrency") or 0),
+                )
+            )
+            return
+
+        if event_type == "model_summary":
+            model_name = str(payload.get("model_name") or "").strip() or "-"
+            summary = str(payload.get("summary") or "").strip()
+            if not summary:
+                return
+            prefix = f"{model_name}:"
+            job.summaries = [item for item in job.summaries if not item.startswith(prefix)]
+            job.summaries.append(f"{model_name}: {summary}")
+            job.summaries.sort()
+            return
+
+        if event_type == "report":
+            json_report_path = str(payload.get("json_report_path") or "").strip()
+            html_report_path = str(payload.get("html_report_path") or "").strip()
+            if json_report_path:
+                job.json_report_path = json_report_path
+            if html_report_path:
+                job.html_report_path = html_report_path
 
 
 def _append_log(job: BenchmarkJob, line: str) -> None:
     current = line.strip()
     if not current:
         return
+    if current.startswith(BENCH_EVENT_PREFIX):
+        _parse_bench_event(job, current[len(BENCH_EVENT_PREFIX):])
+        return
     with _jobs_lock:
         job.current_line = current
         job.logs.append(current)
         if len(job.logs) > MAX_LOG_LINES:
             job.logs = job.logs[-MAX_LOG_LINES:]
-        _parse_job_line(job, current)
-
-
-def _parse_job_line(job: BenchmarkJob, line: str) -> None:
-    progress_match = _PROGRESS_RE.search(line)
-    if progress_match:
-        mode, concurrency, done, total, percent, rps = progress_match.groups()
-        job.progress = {
-            "mode": mode,
-            "concurrency": int(concurrency),
-            "done": int(done),
-            "total": int(total),
-            "percent": float(percent),
-            "rps": float(rps),
-        }
-    stage_match = _STAGE_RE.search(line)
-    if stage_match:
-        mode, concurrency, stability, success, total, success_rate, rps, p95, max_latency = stage_match.groups()
-        stage = {
-            "mode": mode,
-            "concurrency": int(concurrency),
-            "stable": stability == "稳定",
-            "success_requests": int(success),
-            "total_requests": int(total),
-            "success_rate": float(success_rate),
-            "throughput_rps": float(rps),
-            "latency_p95_ms": float(p95),
-            "latency_max_ms": float(max_latency),
-        }
-        job.stage_results = [
-            item for item in job.stage_results
-            if not (item["mode"] == stage["mode"] and item["concurrency"] == stage["concurrency"])
-        ]
-        job.stage_results.append(stage)
-        job.stage_results.sort(key=lambda item: (item["mode"], item["concurrency"]))
-    if line.startswith("- json:") or line.startswith("- stream:"):
-        job.summaries.append(line[2:].strip())
-    if line.startswith("json_report="):
-        job.json_report_path = line.split("=", 1)[1].strip()
-    if line.startswith("html_report="):
-        job.html_report_path = line.split("=", 1)[1].strip()
 
 
 def _read_process_output(job_id: str, process: subprocess.Popen[str]) -> None:
@@ -229,7 +276,7 @@ def _read_process_output(job_id: str, process: subprocess.Popen[str]) -> None:
     try:
         assert process.stdout is not None
         for raw_line in process.stdout:
-            for line in re.split(r"[\r\n]+", raw_line):
+            for line in raw_line.splitlines():
                 _append_log(job, line)
         return_code = process.wait()
         with _jobs_lock:
@@ -260,29 +307,68 @@ def _load_json_report_summary(job: BenchmarkJob) -> None:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return
-    stage_results: list[dict[str, Any]] = []
+
+    raw_model_reports = data.get("model_reports")
+    if not isinstance(raw_model_reports, list):
+        return
+
+    model_reports: list[dict[str, Any]] = []
+    flat_stage_results: list[dict[str, Any]] = []
     summaries: list[str] = []
-    for report in data.get("mode_reports", []):
-        summary = report.get("summary")
+
+    for raw_report in raw_model_reports:
+        if not isinstance(raw_report, dict):
+            continue
+        model_name = str(raw_report.get("model_name") or "").strip() or "-"
+        summary = str(raw_report.get("summary") or "").strip()
         if summary:
-            summaries.append(f"{report.get('mode', '-')}: {summary}")
-        for stage in report.get("stage_results", []):
-            stage_results.append({
-                "mode": stage.get("mode"),
-                "concurrency": stage.get("concurrency"),
-                "stable": stage.get("stable"),
-                "success_requests": stage.get("success_requests"),
-                "total_requests": stage.get("total_requests"),
-                "success_rate": round(float(stage.get("success_rate") or 0) * 100, 2),
-                "throughput_rps": stage.get("throughput_rps"),
-                "latency_p95_ms": stage.get("latency_p95_ms"),
-                "latency_max_ms": stage.get("latency_max_ms"),
-                "first_byte_p95_ms": stage.get("first_byte_p95_ms"),
-            })
-    if stage_results:
-        job.stage_results = sorted(stage_results, key=lambda item: (item.get("mode") or "", item.get("concurrency") or 0))
-    if summaries:
-        job.summaries = summaries
+            summaries.append(f"{model_name}: {summary}")
+        stage_results: list[dict[str, Any]] = []
+        for raw_stage in raw_report.get("stage_results", []):
+            if not isinstance(raw_stage, dict):
+                continue
+            success_rate = float(raw_stage.get("success_rate") or 0)
+            stage = {
+                "model_name": model_name,
+                "endpoint": raw_stage.get("endpoint"),
+                "concurrency": raw_stage.get("concurrency"),
+                "stable": bool(raw_stage.get("stable")),
+                "success_requests": raw_stage.get("success_requests"),
+                "total_requests": raw_stage.get("total_requests"),
+                "success_rate_percent": round(success_rate * 100, 2),
+                "throughput_rps": raw_stage.get("throughput_rps"),
+                "latency_p95_ms": raw_stage.get("latency_p95_ms"),
+                "latency_max_ms": raw_stage.get("latency_max_ms"),
+                "first_event_p95_ms": raw_stage.get("first_event_p95_ms"),
+                "unstable_reasons": raw_stage.get("unstable_reasons") or [],
+            }
+            stage_results.append(stage)
+            flat_stage_results.append(stage)
+        model_reports.append(
+            {
+                "model_name": model_name,
+                "endpoint": raw_report.get("endpoint"),
+                "stable_concurrency_upper_limit": raw_report.get("stable_concurrency_upper_limit"),
+                "first_unstable_concurrency": raw_report.get("first_unstable_concurrency"),
+                "recommended_concurrency": raw_report.get("recommended_concurrency"),
+                "best_throughput_rps": raw_report.get("best_throughput_rps"),
+                "recommended_latency_p95_ms": raw_report.get("recommended_latency_p95_ms"),
+                "recommended_first_event_p95_ms": raw_report.get("recommended_first_event_p95_ms"),
+                "summary": summary,
+                "stage_results": stage_results,
+            }
+        )
+
+    with _jobs_lock:
+        job.model_reports = sorted(model_reports, key=lambda item: str(item.get("model_name") or ""))
+        job.stage_results = sorted(
+            flat_stage_results,
+            key=lambda item: (
+                str(item.get("model_name") or ""),
+                int(item.get("concurrency") or 0),
+            ),
+        )
+        job.summaries = sorted(summaries)
 
 
 def _job_to_response(job: BenchmarkJob) -> dict[str, Any]:
@@ -299,6 +385,7 @@ def _job_to_response(job: BenchmarkJob) -> dict[str, Any]:
         "progress": dict(job.progress),
         "stage_results": list(job.stage_results),
         "summaries": list(job.summaries),
+        "model_reports": list(job.model_reports),
         "json_report_available": bool(job.json_report_path),
         "html_report_available": bool(job.html_report_path),
         "error_message": job.error_message,
@@ -331,8 +418,6 @@ def start_real_concurrency_benchmark(payload: RealConcurrencyBenchmarkRequest) -
     job_id = uuid4().hex
     env = os.environ.copy()
     env.setdefault("PYTHONIOENCODING", "utf-8")
-    if payload.raw_api_key:
-        env["REAL_BENCHMARK_RAW_API_KEY"] = payload.raw_api_key
     process = subprocess.Popen(
         _build_command(payload),
         cwd=PROJECT_ROOT,

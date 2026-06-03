@@ -17,8 +17,8 @@ class LogService:
     """负责请求日志落库、派生指标计算和日志序列化。"""
 
     HEALTH_CHECK_LOG_TYPES = ("health_check", "health_check_provider", "health_check_model")
-    ROUTE_TRAFFIC_LOG_TYPES = ("chat", "responses")
-    USER_VISIBLE_LOG_TYPES = ("chat", "responses")
+    ROUTE_TRAFFIC_LOG_TYPES = ("chat", "responses", "moderations", "files")
+    USER_VISIBLE_LOG_TYPES = ("chat", "responses", "moderations", "files")
     REASONING_LEVEL_NONE = "无"
     REASONING_LEVEL_VALUES = {REASONING_LEVEL_NONE, "low", "medium", "high", "xhigh"}
     METRIC_ROW_SAMPLE_LIMIT = 10000

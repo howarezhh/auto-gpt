@@ -10,6 +10,7 @@ from fastapi.templating import Jinja2Templates
 from app.config import get_settings
 from app.database import get_db
 from app.models.model_catalog import ModelCatalog
+from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
 from app.models.request_log import RequestLog
 from app.services.admin_audit_service import AdminAuditService
@@ -55,24 +56,26 @@ def _build_dashboard_stat_cards(stats: dict) -> list[dict]:
     ]
 
 
-def _build_provider_page_content(provider_dicts: list[dict]) -> dict:
-    enabled_provider_count = sum(1 for item in provider_dicts if item.get("enabled"))
-    model_configs = [model for item in provider_dicts for model in item.get("model_configs", [])]
-    enabled_models = [item for item in model_configs if item.get("enabled")]
-    stream_model_count = sum(1 for item in enabled_models if item.get("supports_stream"))
-    vision_model_count = sum(1 for item in enabled_models if item.get("supports_vision"))
-    image_generation_model_count = sum(1 for item in enabled_models if item.get("supports_image_generation"))
+def _build_provider_page_content(providers: list[Provider]) -> dict:
+    enabled_provider_count = sum(1 for item in providers if item.enabled)
+    model_configs = [model for item in providers for model in item.provider_models]
+    enabled_models = [item for item in model_configs if item.enabled]
+    stream_model_count = sum(1 for item in enabled_models if item.supports_stream)
+    vision_model_count = sum(1 for item in enabled_models if item.supports_vision)
+    image_generation_model_count = sum(
+        1 for item in enabled_models if item.supports_responses and item.supports_tools and item.supports_vision
+    )
     priced_model_count = sum(
         1
         for item in enabled_models
-        if (item.get("input_price_per_1k") or 0) > 0 or (item.get("output_price_per_1k") or 0) > 0
+        if (item.input_price_per_1k or 0) > 0 or (item.output_price_per_1k or 0) > 0
     )
-    stability_scores = [item.get("stability_score") for item in provider_dicts if item.get("stability_score") is not None]
+    stability_scores = []
     average_stability = round(sum(stability_scores) / len(stability_scores), 1) if stability_scores else 0
 
     return {
         "summary": {
-            "provider_count": len(provider_dicts),
+            "provider_count": len(providers),
             "enabled_provider_count": enabled_provider_count,
             "model_count": len(enabled_models),
             "stream_model_count": stream_model_count,
@@ -82,7 +85,7 @@ def _build_provider_page_content(provider_dicts: list[dict]) -> dict:
             "avg_stability_score": average_stability,
         },
         "telemetry_cards": [
-            {"id": "provider_count", "label": "中转站总数", "value": len(provider_dicts)},
+            {"id": "provider_count", "label": "中转站总数", "value": len(providers)},
             {"id": "enabled_provider_count", "label": "已启用中转站", "value": enabled_provider_count},
             {"id": "model_count", "label": "挂载模型数", "value": len(enabled_models)},
             {"id": "stream_model_count", "label": "支持 Stream", "value": stream_model_count},
@@ -173,12 +176,13 @@ def providers_page(request: Request, db: Session = Depends(get_db)) -> HTMLRespo
     current_user = require_admin_html(request, db)
     if isinstance(current_user, RedirectResponse):
         return current_user
-    provider_page_content = _build_provider_page_content(ProviderService.list_provider_dicts(db))
+    providers = ProviderService.list_providers(db)
+    provider_page_content = _build_provider_page_content(providers)
     return templates.TemplateResponse(
         "providers.html",
         {
             "request": request,
-            "providers": ProviderService.list_providers(db),
+            "providers": providers,
             "page_name": "providers",
             "portal_type": "admin",
             "current_user": current_user,

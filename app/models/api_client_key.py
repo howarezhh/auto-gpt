@@ -42,6 +42,7 @@ class ApiClientKey(Base):
     default_provider_id: Mapped[int | None] = mapped_column(ForeignKey("providers.id"), nullable=True)
     owner_user_id: Mapped[int | None] = mapped_column(ForeignKey("user_accounts.id"), nullable=True, index=True)
     manual_allow_fallback: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    route_exhausted_retry_infinite_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     allowed_model_names_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     allowed_endpoint_paths_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     allowed_source_ips_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")

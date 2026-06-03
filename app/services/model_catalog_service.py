@@ -33,7 +33,7 @@ from app.utils.json_utils import dumps_json, loads_json
 class ModelCatalogService:
     """负责模型目录管理、provider 绑定和目录同步。"""
 
-    MODEL_HEALTH_MAX_PARALLEL_MODELS = 6
+    MODEL_HEALTH_MAX_PARALLEL_MODELS = 12
 
     @staticmethod
     def _catalog_supports_tools(catalog: ModelCatalog) -> bool:
@@ -64,6 +64,17 @@ class ModelCatalogService:
         """返回模型目录的序列化结果列表。"""
         catalogs, providers = ModelCatalogService._load_catalogs_and_providers(db)
         return [ModelCatalogService._serialize_catalog(catalog, providers) for catalog in catalogs]
+
+    @staticmethod
+    def list_model_option_dicts(db: Session) -> list[dict]:
+        """返回适合下拉框与引用型页面的轻量模型列表。"""
+        cache_key = "model-options:list"
+        cached = CacheService.get(cache_key)
+        if isinstance(cached, list):
+            return cached
+        catalogs, providers = ModelCatalogService._load_catalogs_and_providers(db)
+        items = [ModelCatalogService._serialize_catalog_option(catalog, providers) for catalog in catalogs]
+        return CacheService.set(cache_key, items, ttl_seconds=15)
 
     @staticmethod
     def list_model_page(
@@ -242,13 +253,13 @@ class ModelCatalogService:
         return catalogs
 
     @staticmethod
-    async def test_model_health(db: Session, model_name: str) -> dict[str, Any]:
+    async def test_model_health(db: Session, model_name: str, *, phase_keys: frozenset[str] | None = None) -> dict[str, Any]:
         """并行测试单个目录模型在所有绑定渠道上的可用性。"""
         catalogs, providers = ModelCatalogService._load_catalogs_and_providers(db)
         catalog = next((item for item in catalogs if item.model_name == model_name), None)
         if catalog is None:
             raise ValueError("模型不存在")
-        raw_result = await ModelCatalogService._probe_catalog_health(catalog, providers)
+        raw_result = await ModelCatalogService._probe_catalog_health(catalog, providers, quick_text_only=True, phase_keys=phase_keys)
         return ModelCatalogService._finalize_catalog_health_test(
             db,
             raw_result,
@@ -256,7 +267,7 @@ class ModelCatalogService:
         )
 
     @staticmethod
-    async def test_all_model_health(db: Session) -> list[dict[str, Any]]:
+    async def test_all_model_health(db: Session, *, phase_keys: frozenset[str] | None = None) -> list[dict[str, Any]]:
         """并行测试全部目录模型；模型之间并行，单模型渠道之间也并行。"""
         catalogs, providers = ModelCatalogService._load_catalogs_and_providers(db)
         if not catalogs:
@@ -265,7 +276,7 @@ class ModelCatalogService:
 
         async def run_catalog(catalog: ModelCatalog) -> dict[str, Any]:
             async with model_semaphore:
-                return await ModelCatalogService._probe_catalog_health(catalog, providers)
+                return await ModelCatalogService._probe_catalog_health(catalog, providers, quick_text_only=True, phase_keys=phase_keys)
 
         raw_results = await asyncio.gather(*(run_catalog(catalog) for catalog in catalogs))
         return [
@@ -469,6 +480,7 @@ class ModelCatalogService:
         CacheService.invalidate_prefix("v1-models")
         CacheService.invalidate_prefix("model-enabled-names")
         CacheService.invalidate_prefix("model-catalog-limits")
+        CacheService.invalidate_prefix("model-options")
 
     @staticmethod
     def _load_catalogs_and_providers(db: Session) -> tuple[list[ModelCatalog], list[Provider]]:
@@ -630,6 +642,27 @@ class ModelCatalogService:
         }
 
     @staticmethod
+    def _serialize_catalog_option(catalog: ModelCatalog, providers: list[Provider]) -> dict:
+        serialized = ModelCatalogService._serialize_catalog(catalog, providers)
+        return {
+            "model_name": serialized["model_name"],
+            "display_name": serialized["display_name"],
+            "enabled": serialized["enabled"],
+            "supports_stream": serialized["supports_stream"],
+            "supports_vision": serialized["supports_vision"],
+            "supports_tools": serialized["supports_tools"],
+            "supports_image_generation": serialized["supports_image_generation"],
+            "supports_chat_completions": serialized["supports_chat_completions"],
+            "supports_responses": serialized["supports_responses"],
+            "context_window_tokens": serialized["context_window_tokens"],
+            "max_input_tokens": serialized["max_input_tokens"],
+            "max_output_tokens": serialized["max_output_tokens"],
+            "bound_provider_count": serialized["bound_provider_count"],
+            "available_provider_count": serialized["available_provider_count"],
+            "enabled_provider_count": serialized["enabled_provider_count"],
+        }
+
+    @staticmethod
     def _average_multiplier(multipliers: list[Decimal | float | int]) -> float | None:
         normalized = [to_multiplier_decimal(item) for item in multipliers if item is not None]
         if not normalized:
@@ -762,16 +795,26 @@ class ModelCatalogService:
     def _collect_catalog_test_targets(
         catalog: ModelCatalog,
         providers: list[Provider],
+        *,
+        include_disabled: bool = False,
     ) -> list[tuple[Provider, ProviderModel]]:
         targets: list[tuple[Provider, ProviderModel]] = []
         for provider in providers:
+            if not include_disabled and (not provider.enabled or provider.maintenance_mode_enabled):
+                continue
             provider_model = next((item for item in provider.provider_models if item.model_name == catalog.model_name), None)
-            if provider_model is not None:
+            if provider_model is not None and (include_disabled or provider_model.enabled):
                 targets.append((provider, provider_model))
         return targets
 
     @staticmethod
-    async def _probe_catalog_health(catalog: ModelCatalog, providers: list[Provider]) -> dict[str, Any]:
+    async def _probe_catalog_health(
+        catalog: ModelCatalog,
+        providers: list[Provider],
+        *,
+        quick_text_only: bool = False,
+        phase_keys: frozenset[str] | None = None,
+    ) -> dict[str, Any]:
         from app.services.health_service import HealthService
 
         targets = ModelCatalogService._collect_catalog_test_targets(catalog, providers)
@@ -785,6 +828,17 @@ class ModelCatalogService:
                     await HealthService._run_provider_model_checks(
                         provider,
                         [provider_model],
+                        phase_keys=(
+                            phase_keys
+                            if phase_keys is not None
+                            else (HealthService.INTERACTIVE_TEXT_PROBE_PHASE_KEYS if quick_text_only else None)
+                        ),
+                        text_probe_max_tokens=(
+                            HealthService.INTERACTIVE_TEXT_PROBE_MAX_TOKENS
+                            if quick_text_only
+                            else None
+                        ),
+                        capability_probe_max_tokens=HealthService.SCHEDULED_CAPABILITY_PROBE_MAX_TOKENS,
                     )
                 )[0]
                 return provider, provider_model, result

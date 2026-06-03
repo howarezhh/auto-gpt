@@ -15,8 +15,10 @@ from sqlalchemy import select
 
 from app.database import SessionLocal
 from app.main import app
+from app.models.model_catalog import ModelCatalog
 from app.models.provider import Provider
 from app.services.health_service import HealthService
+from app.services.model_catalog_service import ModelCatalogService
 from app.services.proxy_service import ProxyService
 from app.services.provider_service import ProviderService
 from app.services.router_service import RoutePolicyContext, RouterService
@@ -102,6 +104,14 @@ def _tool_call_response(provider_name: str, model_name: str) -> dict:
 def _assert(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
+
+
+def _enable_all_model_catalogs() -> None:
+    with SessionLocal() as db:
+        for catalog in db.scalars(select(ModelCatalog)):
+            catalog.enabled = True
+        db.commit()
+    ModelCatalogService.invalidate_model_runtime_cache()
 
 
 def _login(client: TestClient, *, identifier: str, password: str) -> None:
@@ -209,6 +219,7 @@ def main() -> None:
             _bootstrap_admin(client)
             glm_provider = _create_provider_with_inferred_model(client)
             no_tools_provider = _create_provider_without_tools(client)
+            _enable_all_model_catalogs()
             api_key = _create_api_key(
                 client,
                 default_provider_id=no_tools_provider["id"],

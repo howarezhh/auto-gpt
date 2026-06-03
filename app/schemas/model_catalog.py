@@ -157,6 +157,24 @@ class ModelCatalogDetailOut(ModelCatalogOut):
     provider_bindings: list[ModelProviderBindingOut] = Field(default_factory=list)
 
 
+class ModelCatalogOptionOut(BaseModel):
+    model_name: str
+    display_name: str | None = None
+    enabled: bool = True
+    supports_stream: bool = True
+    supports_vision: bool = False
+    supports_tools: bool = False
+    supports_image_generation: bool = False
+    supports_chat_completions: bool = True
+    supports_responses: bool = True
+    context_window_tokens: int | None = Field(default=None, ge=1)
+    max_input_tokens: int | None = Field(default=None, ge=1)
+    max_output_tokens: int | None = Field(default=None, ge=1)
+    bound_provider_count: int = 0
+    available_provider_count: int = 0
+    enabled_provider_count: int = 0
+
+
 class UserModelOut(BaseModel):
     model_name: str
     display_name: str | None = None
