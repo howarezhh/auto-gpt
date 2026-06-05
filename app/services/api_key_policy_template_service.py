@@ -40,8 +40,8 @@ class ApiKeyPolicyTemplateService:
             route_mode=payload.route_mode,
             default_provider_id=payload.default_provider_id,
             manual_allow_fallback=payload.manual_allow_fallback,
-            token_limit_total=payload.token_limit_total,
-            cost_limit_total=payload.cost_limit_total,
+            token_limit_total=None,
+            cost_limit_total=None,
             expires_in_days=payload.expires_in_days,
             allowed_provider_ids_json=dumps_json(payload.allowed_provider_ids),
             allowed_model_names_json=dumps_json(payload.allowed_model_names),
@@ -63,7 +63,11 @@ class ApiKeyPolicyTemplateService:
             if field == "allowed_model_names":
                 item.allowed_model_names_json = dumps_json(value or [])
                 continue
+            if field in {"token_limit_total", "cost_limit_total"}:
+                continue
             setattr(item, field, value)
+        item.token_limit_total = None
+        item.cost_limit_total = None
         db.commit()
         db.refresh(item)
         return ApiKeyPolicyTemplateService.serialize(item)
@@ -83,8 +87,6 @@ class ApiKeyPolicyTemplateService:
             route_mode=item.route_mode,
             default_provider_id=item.default_provider_id,
             manual_allow_fallback=item.manual_allow_fallback,
-            token_limit_total=item.token_limit_total,
-            cost_limit_total=float(item.cost_limit_total) if item.cost_limit_total is not None else None,
             expires_in_days=item.expires_in_days,
             allowed_provider_ids=list(loads_json(item.allowed_provider_ids_json, [])),
             allowed_model_names=list(loads_json(item.allowed_model_names_json, [])),
@@ -114,13 +116,12 @@ class ApiKeyPolicyTemplateService:
             remark=remark,
             enabled=enabled,
             expires_at=expires_at,
-            token_limit_total=template.token_limit_total,
-            cost_limit_total=template.cost_limit_total,
             balance_amount=balance_amount,
             route_mode=template.route_mode,
             default_provider_id=template.default_provider_id,
             owner_user_id=owner_user_id,
             manual_allow_fallback=template.manual_allow_fallback,
+            auto_sync_provider_bindings=not template.allowed_provider_ids,
             allowed_provider_ids=template.allowed_provider_ids,
             allowed_model_names=template.allowed_model_names,
         )
@@ -139,11 +140,10 @@ class ApiKeyPolicyTemplateService:
         return ApiKeyUpdate(
             enabled=enabled,
             expires_at=expires_at,
-            token_limit_total=template.token_limit_total,
-            cost_limit_total=template.cost_limit_total,
             route_mode=template.route_mode,
             default_provider_id=template.default_provider_id,
             manual_allow_fallback=template.manual_allow_fallback,
+            auto_sync_provider_bindings=not template.allowed_provider_ids,
             allowed_provider_ids=template.allowed_provider_ids,
             allowed_model_names=template.allowed_model_names,
         )

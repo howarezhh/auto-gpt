@@ -1,6 +1,3 @@
-from datetime import datetime, timedelta
-
-from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from fastapi import APIRouter, Depends, Form, Request
@@ -9,15 +6,9 @@ from fastapi.templating import Jinja2Templates
 
 from app.config import get_settings
 from app.database import get_db
-from app.models.model_catalog import ModelCatalog
-from app.models.provider import Provider
-from app.models.provider_model import ProviderModel
-from app.models.request_log import RequestLog
 from app.services.admin_audit_service import AdminAuditService
 from app.services.alert_service import AlertService
-from app.services.api_key_admin_service import ApiKeyAdminService
-from app.routers.dashboard import _dashboard_usage_overview
-from app.services.log_service import LogService
+from app.routers.dashboard import build_dashboard_payload
 from app.services.provider_service import ProviderService
 from app.services.setting_service import SettingService
 from app.services.user_auth_service import USER_ROLE_ADMIN, UserAuthService
@@ -56,47 +47,6 @@ def _build_dashboard_stat_cards(stats: dict) -> list[dict]:
     ]
 
 
-def _build_provider_page_content(providers: list[Provider]) -> dict:
-    enabled_provider_count = sum(1 for item in providers if item.enabled)
-    model_configs = [model for item in providers for model in item.provider_models]
-    enabled_models = [item for item in model_configs if item.enabled]
-    stream_model_count = sum(1 for item in enabled_models if item.supports_stream)
-    vision_model_count = sum(1 for item in enabled_models if item.supports_vision)
-    image_generation_model_count = sum(
-        1 for item in enabled_models if item.supports_responses and item.supports_tools and item.supports_vision
-    )
-    priced_model_count = sum(
-        1
-        for item in enabled_models
-        if (item.input_price_per_1k or 0) > 0 or (item.output_price_per_1k or 0) > 0
-    )
-    stability_scores = []
-    average_stability = round(sum(stability_scores) / len(stability_scores), 1) if stability_scores else 0
-
-    return {
-        "summary": {
-            "provider_count": len(providers),
-            "enabled_provider_count": enabled_provider_count,
-            "model_count": len(enabled_models),
-            "stream_model_count": stream_model_count,
-            "vision_model_count": vision_model_count,
-            "image_generation_model_count": image_generation_model_count,
-            "priced_model_count": priced_model_count,
-            "avg_stability_score": average_stability,
-        },
-        "telemetry_cards": [
-            {"id": "provider_count", "label": "中转站总数", "value": len(providers)},
-            {"id": "enabled_provider_count", "label": "已启用中转站", "value": enabled_provider_count},
-            {"id": "model_count", "label": "挂载模型数", "value": len(enabled_models)},
-            {"id": "stream_model_count", "label": "支持 Stream", "value": stream_model_count},
-            {"id": "vision_model_count", "label": "支持图像理解", "value": vision_model_count},
-            {"id": "image_generation_model_count", "label": "支持图片生成", "value": image_generation_model_count},
-            {"id": "priced_model_count", "label": "已同步价格", "value": priced_model_count},
-            {"id": "avg_stability_score", "label": "平均稳定性", "value": average_stability},
-        ],
-    }
-
-
 def _resolve_external_base_url(request: Request) -> str:
     configured = get_settings().normalized_external_base_url()
     if configured:
@@ -118,43 +68,8 @@ def dashboard_page(request: Request, db: Session = Depends(get_db)) -> HTMLRespo
     current_user = require_admin_html(request, db)
     if isinstance(current_user, RedirectResponse):
         return current_user
-    providers = ProviderService.list_providers(db)
-    api_key_summary = ApiKeyAdminService.get_summary(db)
-    usage_overview = _dashboard_usage_overview(db)
-    usage_summary = usage_overview["summary"]
-    recent_since = datetime.utcnow() - timedelta(hours=24)
-    recent_requests = db.scalar(select(func.count()).select_from(RequestLog).where(RequestLog.created_at >= recent_since, LogService._route_traffic_expr())) or 0
-    recent_failures = db.scalar(
-        select(func.count()).select_from(RequestLog).where(RequestLog.created_at >= recent_since, LogService._route_traffic_expr(), RequestLog.success.is_(False))
-    ) or 0
-    stats = {
-        "provider_count": len(providers),
-        "healthy_count": len([item for item in providers if item.health_status == "healthy"]),
-        "degraded_count": len([item for item in providers if item.health_status == "degraded"]),
-        "unhealthy_count": len([item for item in providers if item.health_status == "unhealthy"]),
-        "model_count": db.scalar(select(func.count()).select_from(ModelCatalog)) or 0,
-        "healthy_model_count": db.scalar(select(func.count()).select_from(ProviderModel).where(ProviderModel.health_status == "healthy")) or 0,
-        "degraded_model_count": db.scalar(select(func.count()).select_from(ProviderModel).where(ProviderModel.health_status == "degraded")) or 0,
-        "unhealthy_model_count": db.scalar(select(func.count()).select_from(ProviderModel).where(ProviderModel.health_status == "unhealthy")) or 0,
-        "recent_requests": recent_requests,
-        "recent_tokens": db.scalar(select(func.sum(RequestLog.total_tokens)).where(RequestLog.created_at >= recent_since, LogService._route_traffic_expr())) or 0,
-        "total_requests": usage_summary["total_requests"],
-        "total_tokens": usage_summary["total_tokens"],
-        "total_cost": usage_summary["total_cost"],
-        "conversation_count": db.scalar(
-            select(func.count(func.distinct(RequestLog.conversation_key))).where(RequestLog.conversation_key.is_not(None), LogService._route_traffic_expr())
-        ) or 0,
-        "recent_failure_rate": round((recent_failures / recent_requests) * 100, 2) if recent_requests else 0.0,
-        "total_failures": usage_summary["failed_requests"],
-        "usage_overview": usage_overview,
-        "api_key_total": api_key_summary.total_keys,
-        "api_key_enabled": api_key_summary.enabled_keys,
-        "api_key_disabled": api_key_summary.disabled_keys,
-        "api_key_total_requests": api_key_summary.total_requests,
-        "api_key_total_prompt_tokens": api_key_summary.total_prompt_tokens,
-        "api_key_total_completion_tokens": api_key_summary.total_completion_tokens,
-        "api_key_total_tokens": api_key_summary.total_tokens,
-    }
+    providers = ProviderService.list_provider_summary_dicts(db)
+    stats = build_dashboard_payload(db)
     return templates.TemplateResponse(
         "dashboard.html",
         {
@@ -176,13 +91,12 @@ def providers_page(request: Request, db: Session = Depends(get_db)) -> HTMLRespo
     current_user = require_admin_html(request, db)
     if isinstance(current_user, RedirectResponse):
         return current_user
-    providers = ProviderService.list_providers(db)
-    provider_page_content = _build_provider_page_content(providers)
+    provider_page_content = ProviderService.build_provider_page_content(db)
     return templates.TemplateResponse(
         "providers.html",
         {
             "request": request,
-            "providers": providers,
+            "providers": provider_page_content["providers"],
             "page_name": "providers",
             "portal_type": "admin",
             "current_user": current_user,
@@ -321,8 +235,7 @@ def logs_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
     current_user = require_admin_html(request, db)
     if isinstance(current_user, RedirectResponse):
         return current_user
-    logs = db.scalars(select(RequestLog).order_by(RequestLog.created_at.desc()).limit(100)).all()
-    return templates.TemplateResponse("logs.html", {"request": request, "logs": logs, "page_name": "logs", "portal_type": "admin", "current_user": current_user})
+    return templates.TemplateResponse("logs.html", {"request": request, "page_name": "logs", "portal_type": "admin", "current_user": current_user})
 
 
 @router.get("/conversations", response_class=HTMLResponse)
@@ -338,7 +251,6 @@ def alerts_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse
     current_user = require_admin_html(request, db)
     if isinstance(current_user, RedirectResponse):
         return current_user
-    payload = AlertService.build_dashboard_payload(db)
     subscription = AlertService.get_or_create_subscription(db, user=current_user)
     return templates.TemplateResponse(
         "alerts.html",
@@ -349,7 +261,19 @@ def alerts_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse
             "portal_type": "admin",
             "current_user": current_user,
             "subscription": subscription,
-            **payload,
+            "failure_count": 0,
+            "request_count": 0,
+            "failure_rate": 0,
+            "unhealthy_providers": [],
+            "abnormal_api_keys": [],
+            "alert_users": [],
+            "system_metrics": {
+                "status": "加载中",
+                "redis": {"status": "加载中", "active_requests": "-", "active_streams": "-"},
+                "database": {"status": "加载中"},
+                "background": {"pending_finalize_logs": "-"},
+                "traffic": {"status_5xx": 0, "status_429": 0},
+            },
         },
     )
 
@@ -364,16 +288,7 @@ def alerts_feed(request: Request, db: Session = Depends(get_db)):
     return JSONResponse(
         to_jsonable({
             **payload,
-            "subscription": {
-                "enabled": subscription.enabled,
-                "delivery_channel": subscription.delivery_channel,
-                "notify_provider_alerts": subscription.notify_provider_alerts,
-                "notify_api_key_alerts": subscription.notify_api_key_alerts,
-                "notify_account_alerts": subscription.notify_account_alerts,
-                "notify_failure_rate_alerts": subscription.notify_failure_rate_alerts,
-                "browser_notifications_enabled": subscription.browser_notifications_enabled,
-                "poll_interval_seconds": subscription.poll_interval_seconds,
-            },
+            "subscription": AlertService.serialize_subscription(subscription),
         })
     )
 
@@ -404,6 +319,7 @@ def update_alert_subscription(
         browser_notifications_enabled=browser_notifications_enabled == "true",
         poll_interval_seconds=poll_interval_seconds,
     )
+    AlertService.invalidate_dashboard_cache()
     AdminAuditService.create_log(
         db,
         actor_user_id=current_user.id,

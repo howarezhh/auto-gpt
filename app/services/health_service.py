@@ -14,7 +14,7 @@ from app.services.cache_service import CacheService
 from app.services.log_service import LogService
 from app.services.provider_health_state_service import ProviderHealthStateService
 from app.services.provider_service import ProviderService
-from app.services.proxy_service import ProxyService
+from app.services.proxy_service import ProxyService, StreamTimeoutPolicy
 from app.services.setting_service import SettingService
 from app.services.upstream_client import UpstreamClientService
 
@@ -30,6 +30,8 @@ class HealthService:
     MAX_PARALLEL_MODEL_PROBES = 16
     INTERACTIVE_TEXT_PROBE_PHASE_KEYS = frozenset({"text", "text_stream"})
     INTERACTIVE_TEXT_PROBE_MAX_TOKENS = 1
+    INTERACTIVE_STREAM_CONNECT_TIMEOUT_SECONDS = 8
+    INTERACTIVE_STREAM_FIRST_TOKEN_TIMEOUT_SECONDS = 8
     SCHEDULED_ACTIVE_MODEL_WINDOW_MINUTES = 30
     SCHEDULED_TEXT_PROBE_MAX_TOKENS = 4
     SCHEDULED_CAPABILITY_PROBE_MAX_TOKENS = 8
@@ -62,6 +64,7 @@ class HealthService:
         text_probe_max_tokens: int | None = None,
         capability_probe_max_tokens: int | None = None,
         progress_callback: HealthProgressCallback | None = None,
+        interactive_mode: bool = False,
     ) -> dict:
         models_to_check = [item for item in provider.provider_models if include_disabled_models or item.enabled]
         model_results = await HealthService._run_provider_model_checks(
@@ -71,6 +74,7 @@ class HealthService:
             text_probe_max_tokens=text_probe_max_tokens,
             capability_probe_max_tokens=capability_probe_max_tokens,
             progress_callback=progress_callback,
+            interactive_mode=interactive_mode,
         )
         return HealthService._finalize_provider_check(db, provider, models_to_check, model_results)
 
@@ -82,6 +86,7 @@ class HealthService:
         include_disabled_models: bool = True,
         phase_keys: set[str] | frozenset[str] | None = None,
         text_probe_max_tokens: int | None = None,
+        interactive_mode: bool = False,
     ) -> list[dict]:
         providers = ProviderService.list_providers(db)
         if provider_ids:
@@ -110,6 +115,7 @@ class HealthService:
                         phase_groups_by_provider[provider.id][phase_index],
                         phase_index=phase_index + 1,
                         endpoint_results_by_model_id=endpoint_results_by_provider_id[provider.id],
+                        interactive_mode=interactive_mode,
                     )
                     for provider in providers
                     if phase_index < len(phase_groups_by_provider[provider.id])
@@ -148,6 +154,7 @@ class HealthService:
         phase_keys: set[str] | frozenset[str] | None = None,
         text_probe_max_tokens: int | None = None,
         capability_probe_max_tokens: int | None = None,
+        interactive_mode: bool = False,
     ) -> dict:
         model_result = (
             await HealthService._run_provider_model_checks(
@@ -158,6 +165,7 @@ class HealthService:
                 phase_keys=phase_keys,
                 text_probe_max_tokens=text_probe_max_tokens,
                 capability_probe_max_tokens=capability_probe_max_tokens,
+                interactive_mode=interactive_mode,
             )
         )[0]
         HealthService._persist_model_health_result(db, provider, provider_model, model_result)
@@ -414,6 +422,7 @@ class HealthService:
         text_probe_max_tokens: int | None = None,
         capability_probe_max_tokens: int | None = None,
         progress_callback: HealthProgressCallback | None = None,
+        interactive_mode: bool = False,
     ) -> list[dict]:
         providers = [provider for provider in ProviderService.list_providers(db) if provider.enabled]
         route_metrics = LogService.route_metric_summary(
@@ -480,6 +489,7 @@ class HealthService:
                         phase_index=phase_index + 1,
                         endpoint_results_by_model_id=endpoint_results_by_provider_id[provider.id],
                         progress_callback=progress_callback,
+                        interactive_mode=interactive_mode,
                     )
                     for provider in providers
                     if phase_index < len(phase_groups_by_provider[provider.id])
@@ -732,6 +742,7 @@ class HealthService:
         text_probe_max_tokens: int | None = None,
         capability_probe_max_tokens: int | None = None,
         progress_callback: HealthProgressCallback | None = None,
+        interactive_mode: bool = False,
     ) -> list[dict]:
         endpoint_results_by_model_id: dict[int, list[dict[str, Any]]] = {
             provider_model.id: []
@@ -745,6 +756,7 @@ class HealthService:
                 phase_keys=phase_keys,
                 text_probe_max_tokens=text_probe_max_tokens,
                 capability_probe_max_tokens=capability_probe_max_tokens,
+                interactive_mode=interactive_mode,
             ),
             start=1,
         ):
@@ -755,6 +767,7 @@ class HealthService:
                 phase_index=phase_index,
                 endpoint_results_by_model_id=endpoint_results_by_model_id,
                 progress_callback=progress_callback,
+                interactive_mode=interactive_mode,
             )
         return [
             HealthService._build_model_result(
@@ -776,6 +789,7 @@ class HealthService:
         capability_probe_max_tokens: int | None = None,
         selective_capability_probes: bool = False,
         route_metrics: dict[tuple[int | None, str | None], dict] | None = None,
+        interactive_mode: bool = False,
     ) -> list[dict[str, Any]]:
         text_max_tokens = text_probe_max_tokens or HealthService.SCHEDULED_TEXT_PROBE_MAX_TOKENS
         capability_max_tokens = capability_probe_max_tokens or HealthService.SCHEDULED_CAPABILITY_PROBE_MAX_TOKENS
@@ -798,6 +812,7 @@ class HealthService:
                                 stream_probe=stream_probe,
                                 max_tokens=text_max_tokens,
                             ),
+                            interactive_mode=interactive_mode,
                         ),
                     },
                     {
@@ -812,6 +827,7 @@ class HealthService:
                                 vision_probe=vision_probe,
                                 max_output_tokens=text_max_tokens,
                             ),
+                            interactive_mode=interactive_mode,
                         ),
                     },
                 ],
@@ -834,6 +850,7 @@ class HealthService:
                                 stream_probe=True,
                                 max_tokens=text_max_tokens,
                             ),
+                            interactive_mode=interactive_mode,
                         ),
                     },
                     {
@@ -848,6 +865,7 @@ class HealthService:
                                 vision_probe=vision_probe,
                                 max_output_tokens=text_max_tokens,
                             ),
+                            interactive_mode=interactive_mode,
                         ),
                     },
                 ],
@@ -940,6 +958,7 @@ class HealthService:
         phase_index: int,
         endpoint_results_by_model_id: dict[int, list[dict[str, Any]]],
         progress_callback: HealthProgressCallback | None = None,
+        interactive_mode: bool = False,
     ) -> None:
         targets = [provider_model for provider_model in provider_models if phase_spec["targets"](provider_model)]
         if not targets:
@@ -975,6 +994,7 @@ class HealthService:
             provider,
             targets,
             phase_spec["probes"],
+            interactive_mode=interactive_mode,
         )
         results_by_model_id: dict[int, list[dict[str, Any]]] = {provider_model.id: [] for provider_model in targets}
         for provider_model, endpoint_result in phase_results:
@@ -1007,6 +1027,8 @@ class HealthService:
         provider: Provider,
         provider_models: list[ProviderModel],
         probe_specs: list[dict[str, Any]],
+        *,
+        interactive_mode: bool = False,
     ) -> list[tuple[ProviderModel, dict[str, Any]]]:
         phase_targets = [
             (provider_model, probe_spec["probe"])
@@ -1024,7 +1046,10 @@ class HealthService:
             probe_factory: Callable[[ProviderModel], Awaitable[dict[str, Any]]],
         ) -> tuple[ProviderModel, dict[str, Any]]:
             async with semaphore:
-                endpoint_result = await HealthService._probe_with_retry(lambda: probe_factory(provider_model))
+                endpoint_result = await HealthService._probe_with_retry(
+                    lambda: probe_factory(provider_model),
+                    interactive_mode=interactive_mode,
+                )
                 return provider_model, endpoint_result
 
         return list(await asyncio.gather(*(run_single(provider_model, probe_factory) for provider_model, probe_factory in phase_targets)))
@@ -1095,6 +1120,8 @@ class HealthService:
     @staticmethod
     async def _probe_with_retry(
         probe_coro_factory: Callable[[], Awaitable[dict[str, Any]]],
+        *,
+        interactive_mode: bool = False,
     ) -> dict[str, Any]:
         last_result: dict[str, Any] | None = None
         for attempt in range(1, HealthService.PROBE_RETRY_MAX_ATTEMPTS + 1):
@@ -1107,6 +1134,8 @@ class HealthService:
                     current_result["message"] = f"第 {attempt} 次探测成功；{message}"
                 return current_result
             last_result = current_result
+            if interactive_mode and not HealthService._should_retry_probe_result(current_result):
+                return current_result
             if attempt < HealthService.PROBE_RETRY_MAX_ATTEMPTS:
                 await asyncio.sleep(HealthService.PROBE_RETRY_DELAY_SEC)
         if last_result is None:
@@ -1370,6 +1399,7 @@ class HealthService:
         *,
         endpoint_path: str,
         payload: dict[str, Any],
+        interactive_mode: bool = False,
     ) -> dict[str, Any]:
         started = time.perf_counter()
         setting = await ProxyService._get_setting_async()
@@ -1417,6 +1447,11 @@ class HealthService:
                 "status_code": exc.response.status_code,
                 "message": message,
                 "trace": [],
+                "retryable": HealthService._is_probe_failure_retryable(
+                    status_code=exc.response.status_code,
+                    message=message,
+                    interactive_mode=interactive_mode,
+                ),
             }
         except requests.HTTPError as exc:
             latency_ms = int((time.perf_counter() - started) * 1000)
@@ -1434,6 +1469,11 @@ class HealthService:
                 "status_code": response.status_code if response is not None else None,
                 "message": message,
                 "trace": [],
+                "retryable": HealthService._is_probe_failure_retryable(
+                    status_code=response.status_code if response is not None else None,
+                    message=message,
+                    interactive_mode=interactive_mode,
+                ),
             }
         except Exception as exc:
             latency_ms = int((time.perf_counter() - started) * 1000)
@@ -1452,6 +1492,11 @@ class HealthService:
                 "status_code": status_code,
                 "message": message,
                 "trace": [],
+                "retryable": HealthService._is_probe_failure_retryable(
+                    status_code=status_code,
+                    message=message,
+                    interactive_mode=interactive_mode,
+                ),
             }
 
     @staticmethod
@@ -1461,6 +1506,7 @@ class HealthService:
         *,
         endpoint_path: str,
         payload: dict[str, Any],
+        interactive_mode: bool = False,
     ) -> dict[str, Any]:
         started = time.perf_counter()
         setting = await ProxyService._get_setting_async()
@@ -1479,9 +1525,21 @@ class HealthService:
                 endpoint_path,
                 stream_payload,
                 started=started,
-                stream_connect_timeout_seconds=setting.stream_connect_timeout_seconds,
+                stream_connect_timeout_seconds=(
+                    HealthService.INTERACTIVE_STREAM_CONNECT_TIMEOUT_SECONDS
+                    if interactive_mode
+                    else setting.stream_connect_timeout_seconds
+                ),
             )
-            timeout_policy = ProxyService._build_stream_timeout_policy(provider=provider, setting=setting)
+            timeout_policy = (
+                StreamTimeoutPolicy(
+                    first_token_timeout_seconds=HealthService.INTERACTIVE_STREAM_FIRST_TOKEN_TIMEOUT_SECONDS,
+                    idle_timeout_seconds=max(0, int(getattr(setting, "stream_idle_timeout_seconds", 0) or 0)),
+                    max_duration_seconds=max(0, int(getattr(setting, "stream_max_duration_seconds", 0) or 0)),
+                )
+                if interactive_mode
+                else ProxyService._build_stream_timeout_policy(provider=provider, setting=setting)
+            )
             chunk = await ProxyService._read_next_stream_chunk(
                 response.aiter_bytes().__aiter__(),
                 first_chunk_latency_ms=None,
@@ -1518,6 +1576,11 @@ class HealthService:
                 "status_code": 200,
                 "message": "上游流式响应未返回任何数据",
                 "trace": [],
+                "retryable": HealthService._is_probe_failure_retryable(
+                    status_code=200,
+                    message="上游流式响应未返回任何数据",
+                    interactive_mode=interactive_mode,
+                ),
             }
         except httpx.HTTPStatusError as exc:
             exc_type, exc_value, exc_traceback = type(exc), exc, exc.__traceback__
@@ -1535,6 +1598,11 @@ class HealthService:
                 "status_code": exc.response.status_code,
                 "message": message,
                 "trace": [],
+                "retryable": HealthService._is_probe_failure_retryable(
+                    status_code=exc.response.status_code,
+                    message=message,
+                    interactive_mode=interactive_mode,
+                ),
             }
         except Exception as exc:
             exc_type, exc_value, exc_traceback = type(exc), exc, exc.__traceback__
@@ -1554,10 +1622,49 @@ class HealthService:
                 "status_code": status_code,
                 "message": message,
                 "trace": [],
+                "retryable": HealthService._is_probe_failure_retryable(
+                    status_code=status_code,
+                    message=message,
+                    interactive_mode=interactive_mode,
+                ),
             }
         finally:
             if stream_context is not None:
                 await stream_context.__aexit__(exc_type, exc_value, exc_traceback)
+
+    @staticmethod
+    def _should_retry_probe_result(result: dict[str, Any]) -> bool:
+        retryable = result.get("retryable")
+        if isinstance(retryable, bool):
+            return retryable
+        return True
+
+    @staticmethod
+    def _is_probe_failure_retryable(
+        *,
+        status_code: int | None,
+        message: str | None,
+        interactive_mode: bool,
+    ) -> bool:
+        if not interactive_mode:
+            return True
+        if status_code is not None and 400 <= int(status_code) < 500:
+            return False
+        normalized_message = (message or "").strip().lower()
+        if not normalized_message:
+            return True
+        non_retryable_hints = (
+            "not implemented",
+            "bad_response_status_code",
+            "invalid api key",
+            "paid_model_required",
+            "rate_limit_exceeded",
+            "insufficient balance",
+            "model_not_found",
+            "does not support",
+            "unsupported",
+        )
+        return not any(hint in normalized_message for hint in non_retryable_hints)
 
     @staticmethod
     def _endpoint_results_to_trace(endpoint_results: list[dict], *, provider: Provider, provider_model: ProviderModel) -> list[dict]:
@@ -1842,6 +1949,12 @@ class HealthService:
         if health_status == "healthy":
             provider_model.failure_count = 0
             provider_model.success_count += 1
+            provider_model.circuit_state = "closed"
+            provider_model.circuit_opened_at = None
+        elif health_status == "degraded":
+            provider_model.failure_count = 0
+            provider_model.success_count += 1
+            provider_model.health_status = "degraded"
             provider_model.circuit_state = "closed"
             provider_model.circuit_opened_at = None
         else:

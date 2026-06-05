@@ -327,150 +327,110 @@
                 <input class="field-input users-batch-selection-input" id="users-batch-user-ids-preview" value="" placeholder="在上方账号目录勾选后自动填充" disabled>
             </label>
             <div class="users-batch-submit-wrap">
-                <small class="table-muted">只有已打开“本次修改”的额度项才会提交。</small>
+                <small class="table-muted">只会提交已填写且与当前值不同的字段；留空表示不修改。</small>
                 <button class="btn btn-accent interactive-btn" id="users-batch-apply-btn" type="submit">批量应用额度</button>
             </div>
         </div>
-        <div class="users-batch-grid">
-            <label class="batch-quota-field users-batch-card" data-batch-quota-field="frozen_amount">
-                <span class="batch-quota-head">
+        <div class="users-batch-list" role="list" aria-label="批量额度字段列表">
+            <label class="batch-quota-field users-batch-row" data-batch-quota-field="frozen_amount">
+                <span class="users-batch-row-main">
                     <span class="users-batch-title">冻结金额</span>
-                    <span class="users-batch-toggle-wrap">
-                        <span class="users-batch-toggle-text">本次修改</span>
-                        <span class="settings-switch-control">
-                            <input name="apply_fields" type="checkbox" value="frozen_amount" data-batch-quota-toggle="frozen_amount">
-                            <span class="settings-switch-slider"></span>
-                        </span>
-                    </span>
+                    <small class="table-muted" data-batch-quota-current="frozen_amount">当前值：未选择用户</small>
                 </span>
-                <small class="table-muted" data-batch-quota-current="frozen_amount">当前值：未选择用户</small>
-                <input class="field-input" name="frozen_amount" type="number" step="0.000001" data-batch-quota-input="frozen_amount" disabled>
+                <span class="users-batch-row-input">
+                    <span class="users-batch-row-hint">留空则不修改</span>
+                    <input class="field-input" name="frozen_amount" type="number" step="0.000001" min="0" data-batch-quota-input="frozen_amount" data-batch-quota-kind="decimal" placeholder="输入新的冻结金额">
+                </span>
             </label>
-            <label class="batch-quota-field users-batch-card" data-batch-quota-field="request_limit_total">
-                <span class="batch-quota-head">
+            <label class="batch-quota-field users-batch-row" data-batch-quota-field="request_limit_total">
+                <span class="users-batch-row-main">
                     <span class="users-batch-title">总调用次数上限</span>
-                    <span class="users-batch-toggle-wrap">
-                        <span class="users-batch-toggle-text">本次修改</span>
-                        <span class="settings-switch-control">
-                            <input name="apply_fields" type="checkbox" value="request_limit_total" data-batch-quota-toggle="request_limit_total">
-                            <span class="settings-switch-slider"></span>
-                        </span>
-                    </span>
+                    <small class="table-muted" data-batch-quota-current="request_limit_total">当前值：未选择用户</small>
                 </span>
-                <small class="table-muted" data-batch-quota-current="request_limit_total">当前值：未选择用户</small>
-                <input class="field-input" name="request_limit_total" type="number" min="0" data-batch-quota-input="request_limit_total" disabled>
+                <span class="users-batch-row-input">
+                    <span class="users-batch-row-hint">留空则不修改</span>
+                    <input class="field-input" name="request_limit_total" type="number" min="0" data-batch-quota-input="request_limit_total" data-batch-quota-kind="int" placeholder="输入新的总调用次数上限">
+                </span>
             </label>
-            <label class="batch-quota-field users-batch-card" data-batch-quota-field="request_limit_daily">
-                <span class="batch-quota-head">
+            <label class="batch-quota-field users-batch-row" data-batch-quota-field="request_limit_daily">
+                <span class="users-batch-row-main">
                     <span class="users-batch-title">日调用次数上限</span>
-                    <span class="users-batch-toggle-wrap">
-                        <span class="users-batch-toggle-text">本次修改</span>
-                        <span class="settings-switch-control">
-                            <input name="apply_fields" type="checkbox" value="request_limit_daily" data-batch-quota-toggle="request_limit_daily">
-                            <span class="settings-switch-slider"></span>
-                        </span>
-                    </span>
+                    <small class="table-muted" data-batch-quota-current="request_limit_daily">当前值：未选择用户</small>
                 </span>
-                <small class="table-muted" data-batch-quota-current="request_limit_daily">当前值：未选择用户</small>
-                <input class="field-input" name="request_limit_daily" type="number" min="0" data-batch-quota-input="request_limit_daily" disabled>
+                <span class="users-batch-row-input">
+                    <span class="users-batch-row-hint">留空则不修改</span>
+                    <input class="field-input" name="request_limit_daily" type="number" min="0" data-batch-quota-input="request_limit_daily" data-batch-quota-kind="int" placeholder="输入新的日调用次数上限">
+                </span>
             </label>
-            <label class="batch-quota-field users-batch-card" data-batch-quota-field="request_limit_monthly">
-                <span class="batch-quota-head">
+            <label class="batch-quota-field users-batch-row" data-batch-quota-field="request_limit_monthly">
+                <span class="users-batch-row-main">
                     <span class="users-batch-title">月调用次数上限</span>
-                    <span class="users-batch-toggle-wrap">
-                        <span class="users-batch-toggle-text">本次修改</span>
-                        <span class="settings-switch-control">
-                            <input name="apply_fields" type="checkbox" value="request_limit_monthly" data-batch-quota-toggle="request_limit_monthly">
-                            <span class="settings-switch-slider"></span>
-                        </span>
-                    </span>
+                    <small class="table-muted" data-batch-quota-current="request_limit_monthly">当前值：未选择用户</small>
                 </span>
-                <small class="table-muted" data-batch-quota-current="request_limit_monthly">当前值：未选择用户</small>
-                <input class="field-input" name="request_limit_monthly" type="number" min="0" data-batch-quota-input="request_limit_monthly" disabled>
+                <span class="users-batch-row-input">
+                    <span class="users-batch-row-hint">留空则不修改</span>
+                    <input class="field-input" name="request_limit_monthly" type="number" min="0" data-batch-quota-input="request_limit_monthly" data-batch-quota-kind="int" placeholder="输入新的月调用次数上限">
+                </span>
             </label>
-            <label class="batch-quota-field users-batch-card" data-batch-quota-field="token_limit_total">
-                <span class="batch-quota-head">
+            <label class="batch-quota-field users-batch-row" data-batch-quota-field="token_limit_total">
+                <span class="users-batch-row-main">
                     <span class="users-batch-title">总 Token 上限</span>
-                    <span class="users-batch-toggle-wrap">
-                        <span class="users-batch-toggle-text">本次修改</span>
-                        <span class="settings-switch-control">
-                            <input name="apply_fields" type="checkbox" value="token_limit_total" data-batch-quota-toggle="token_limit_total">
-                            <span class="settings-switch-slider"></span>
-                        </span>
-                    </span>
+                    <small class="table-muted" data-batch-quota-current="token_limit_total">当前值：未选择用户</small>
                 </span>
-                <small class="table-muted" data-batch-quota-current="token_limit_total">当前值：未选择用户</small>
-                <input class="field-input" name="token_limit_total" type="number" min="0" data-batch-quota-input="token_limit_total" disabled>
+                <span class="users-batch-row-input">
+                    <span class="users-batch-row-hint">留空则不修改</span>
+                    <input class="field-input" name="token_limit_total" type="number" min="0" data-batch-quota-input="token_limit_total" data-batch-quota-kind="int" placeholder="输入新的总 Token 上限">
+                </span>
             </label>
-            <label class="batch-quota-field users-batch-card" data-batch-quota-field="token_limit_daily">
-                <span class="batch-quota-head">
+            <label class="batch-quota-field users-batch-row" data-batch-quota-field="token_limit_daily">
+                <span class="users-batch-row-main">
                     <span class="users-batch-title">日 Token 上限</span>
-                    <span class="users-batch-toggle-wrap">
-                        <span class="users-batch-toggle-text">本次修改</span>
-                        <span class="settings-switch-control">
-                            <input name="apply_fields" type="checkbox" value="token_limit_daily" data-batch-quota-toggle="token_limit_daily">
-                            <span class="settings-switch-slider"></span>
-                        </span>
-                    </span>
+                    <small class="table-muted" data-batch-quota-current="token_limit_daily">当前值：未选择用户</small>
                 </span>
-                <small class="table-muted" data-batch-quota-current="token_limit_daily">当前值：未选择用户</small>
-                <input class="field-input" name="token_limit_daily" type="number" min="0" data-batch-quota-input="token_limit_daily" disabled>
+                <span class="users-batch-row-input">
+                    <span class="users-batch-row-hint">留空则不修改</span>
+                    <input class="field-input" name="token_limit_daily" type="number" min="0" data-batch-quota-input="token_limit_daily" data-batch-quota-kind="int" placeholder="输入新的日 Token 上限">
+                </span>
             </label>
-            <label class="batch-quota-field users-batch-card" data-batch-quota-field="token_limit_monthly">
-                <span class="batch-quota-head">
+            <label class="batch-quota-field users-batch-row" data-batch-quota-field="token_limit_monthly">
+                <span class="users-batch-row-main">
                     <span class="users-batch-title">月 Token 上限</span>
-                    <span class="users-batch-toggle-wrap">
-                        <span class="users-batch-toggle-text">本次修改</span>
-                        <span class="settings-switch-control">
-                            <input name="apply_fields" type="checkbox" value="token_limit_monthly" data-batch-quota-toggle="token_limit_monthly">
-                            <span class="settings-switch-slider"></span>
-                        </span>
-                    </span>
+                    <small class="table-muted" data-batch-quota-current="token_limit_monthly">当前值：未选择用户</small>
                 </span>
-                <small class="table-muted" data-batch-quota-current="token_limit_monthly">当前值：未选择用户</small>
-                <input class="field-input" name="token_limit_monthly" type="number" min="0" data-batch-quota-input="token_limit_monthly" disabled>
+                <span class="users-batch-row-input">
+                    <span class="users-batch-row-hint">留空则不修改</span>
+                    <input class="field-input" name="token_limit_monthly" type="number" min="0" data-batch-quota-input="token_limit_monthly" data-batch-quota-kind="int" placeholder="输入新的月 Token 上限">
+                </span>
             </label>
-            <label class="batch-quota-field users-batch-card" data-batch-quota-field="cost_limit_total">
-                <span class="batch-quota-head">
+            <label class="batch-quota-field users-batch-row" data-batch-quota-field="cost_limit_total">
+                <span class="users-batch-row-main">
                     <span class="users-batch-title">总金额上限</span>
-                    <span class="users-batch-toggle-wrap">
-                        <span class="users-batch-toggle-text">本次修改</span>
-                        <span class="settings-switch-control">
-                            <input name="apply_fields" type="checkbox" value="cost_limit_total" data-batch-quota-toggle="cost_limit_total">
-                            <span class="settings-switch-slider"></span>
-                        </span>
-                    </span>
+                    <small class="table-muted" data-batch-quota-current="cost_limit_total">当前值：未选择用户</small>
                 </span>
-                <small class="table-muted" data-batch-quota-current="cost_limit_total">当前值：未选择用户</small>
-                <input class="field-input" name="cost_limit_total" type="number" step="0.000001" min="0" data-batch-quota-input="cost_limit_total" disabled>
+                <span class="users-batch-row-input">
+                    <span class="users-batch-row-hint">留空则不修改</span>
+                    <input class="field-input" name="cost_limit_total" type="number" step="0.000001" min="0" data-batch-quota-input="cost_limit_total" data-batch-quota-kind="decimal" placeholder="输入新的总金额上限">
+                </span>
             </label>
-            <label class="batch-quota-field users-batch-card" data-batch-quota-field="cost_limit_daily">
-                <span class="batch-quota-head">
+            <label class="batch-quota-field users-batch-row" data-batch-quota-field="cost_limit_daily">
+                <span class="users-batch-row-main">
                     <span class="users-batch-title">日金额上限</span>
-                    <span class="users-batch-toggle-wrap">
-                        <span class="users-batch-toggle-text">本次修改</span>
-                        <span class="settings-switch-control">
-                            <input name="apply_fields" type="checkbox" value="cost_limit_daily" data-batch-quota-toggle="cost_limit_daily">
-                            <span class="settings-switch-slider"></span>
-                        </span>
-                    </span>
+                    <small class="table-muted" data-batch-quota-current="cost_limit_daily">当前值：未选择用户</small>
                 </span>
-                <small class="table-muted" data-batch-quota-current="cost_limit_daily">当前值：未选择用户</small>
-                <input class="field-input" name="cost_limit_daily" type="number" step="0.000001" min="0" data-batch-quota-input="cost_limit_daily" disabled>
+                <span class="users-batch-row-input">
+                    <span class="users-batch-row-hint">留空则不修改</span>
+                    <input class="field-input" name="cost_limit_daily" type="number" step="0.000001" min="0" data-batch-quota-input="cost_limit_daily" data-batch-quota-kind="decimal" placeholder="输入新的日金额上限">
+                </span>
             </label>
-            <label class="batch-quota-field users-batch-card" data-batch-quota-field="cost_limit_monthly">
-                <span class="batch-quota-head">
+            <label class="batch-quota-field users-batch-row" data-batch-quota-field="cost_limit_monthly">
+                <span class="users-batch-row-main">
                     <span class="users-batch-title">月金额上限</span>
-                    <span class="users-batch-toggle-wrap">
-                        <span class="users-batch-toggle-text">本次修改</span>
-                        <span class="settings-switch-control">
-                            <input name="apply_fields" type="checkbox" value="cost_limit_monthly" data-batch-quota-toggle="cost_limit_monthly">
-                            <span class="settings-switch-slider"></span>
-                        </span>
-                    </span>
+                    <small class="table-muted" data-batch-quota-current="cost_limit_monthly">当前值：未选择用户</small>
                 </span>
-                <small class="table-muted" data-batch-quota-current="cost_limit_monthly">当前值：未选择用户</small>
-                <input class="field-input" name="cost_limit_monthly" type="number" step="0.000001" min="0" data-batch-quota-input="cost_limit_monthly" disabled>
+                <span class="users-batch-row-input">
+                    <span class="users-batch-row-hint">留空则不修改</span>
+                    <input class="field-input" name="cost_limit_monthly" type="number" step="0.000001" min="0" data-batch-quota-input="cost_limit_monthly" data-batch-quota-kind="decimal" placeholder="输入新的月金额上限">
+                </span>
             </label>
         </div>
     </form>

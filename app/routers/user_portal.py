@@ -34,6 +34,7 @@ from app.services.model_catalog_service import ModelCatalogService
 from app.services.openai_error_service import OpenAIErrorService
 from app.services.provider_service import ProviderService
 from app.services.proxy_service import ProxyService
+from app.services.request_log_queue_service import RequestLogQueueService
 from app.services.user_auth_service import USER_ROLE_ADMIN, UserAuthService
 from app.services.user_portal_service import UserPortalService
 from app.utils.json_utils import safeJsonParse
@@ -116,24 +117,11 @@ def _build_user_api_key_payload(
     default_provider_id: str | None,
     manual_allow_fallback: bool,
     route_exhausted_retry_infinite_enabled: bool,
-    allowed_provider_ids: list[int],
 ) -> dict:
     parsed_default_provider_id = _parse_optional_int_form(default_provider_id, field_label="默认中转站")
-    normalized_allowed_provider_ids: list[int] = []
-    seen_provider_ids: set[int] = set()
-    for provider_id in allowed_provider_ids:
-        if provider_id in seen_provider_ids:
-            continue
-        seen_provider_ids.add(provider_id)
-        normalized_allowed_provider_ids.append(provider_id)
-    invalid_provider_ids = [provider_id for provider_id in normalized_allowed_provider_ids if provider_id not in selectable_provider_ids]
-    if invalid_provider_ids:
-        raise ValueError("仅允许选择管理员已启用的中转站")
     if parsed_default_provider_id is not None:
         if parsed_default_provider_id not in selectable_provider_ids:
             raise ValueError("默认中转站未启用，当前不可选择")
-        if parsed_default_provider_id not in seen_provider_ids:
-            normalized_allowed_provider_ids.append(parsed_default_provider_id)
     return {
         "name": name,
         "raw_api_key": raw_api_key,
@@ -144,7 +132,8 @@ def _build_user_api_key_payload(
         "owner_user_id": current_user_id,
         "manual_allow_fallback": manual_allow_fallback,
         "route_exhausted_retry_infinite_enabled": route_exhausted_retry_infinite_enabled,
-        "allowed_provider_ids": normalized_allowed_provider_ids,
+        "auto_sync_provider_bindings": True,
+        "allowed_provider_ids": [],
     }
 
 
@@ -642,7 +631,6 @@ def create_user_api_key(
     default_provider_id: str | None = Form(default=None),
     manual_allow_fallback: str | None = Form(default=None),
     route_exhausted_retry_infinite_enabled: str | None = Form(default=None),
-    allowed_provider_ids: list[int] = Form(default=[]),
     db: Session = Depends(get_db),
 ):
     current_user = require_user_html(request, db)
@@ -662,7 +650,6 @@ def create_user_api_key(
                 default_provider_id=default_provider_id,
                 manual_allow_fallback=manual_allow_fallback == "on",
                 route_exhausted_retry_infinite_enabled=route_exhausted_retry_infinite_enabled == "on",
-                allowed_provider_ids=allowed_provider_ids,
             )
         )
         ApiKeyAdminService.create_api_key(db, payload)
@@ -683,7 +670,6 @@ def update_user_api_key(
     default_provider_id: str | None = Form(default=None),
     manual_allow_fallback: str | None = Form(default=None),
     route_exhausted_retry_infinite_enabled: str | None = Form(default=None),
-    allowed_provider_ids: list[int] = Form(default=[]),
     db: Session = Depends(get_db),
 ):
     current_user = require_user_html(request, db)
@@ -706,7 +692,6 @@ def update_user_api_key(
                 default_provider_id=default_provider_id,
                 manual_allow_fallback=manual_allow_fallback == "on",
                 route_exhausted_retry_infinite_enabled=route_exhausted_retry_infinite_enabled == "on",
-                allowed_provider_ids=allowed_provider_ids,
             )
         )
         ApiKeyAdminService.update_api_key(db, api_key, payload)
@@ -798,13 +783,6 @@ def user_logs_page(
     current_user = require_user_html(request, db)
     if isinstance(current_user, RedirectResponse):
         return current_user
-    _, recent_logs, _, _ = UserPortalService.list_logs(
-        db,
-        user=current_user,
-        page=1,
-        page_size=20,
-        exclude_health_checks=True,
-    )
     return templates.TemplateResponse(
         "user_logs.html",
         {
@@ -813,7 +791,6 @@ def user_logs_page(
             "page_name": "user-logs",
             "portal_type": "user",
             "current_user": current_user,
-            "recent_logs": recent_logs,
         },
     )
 
@@ -837,7 +814,7 @@ def user_log_filter_options(
 
 
 @router.get("/api/user/logs", response_model=LogListResponse)
-def user_logs_api(
+async def user_logs_api(
     request: Request,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=200),
@@ -854,11 +831,19 @@ def user_logs_api(
     environment_name: str | None = None,
     success: bool | None = None,
     exclude_health_checks: bool = Query(default=True),
+    wait_for_latest: bool = Query(default=False),
+    wait_timeout_ms: int = Query(default=2000, ge=0, le=10000),
     db: Session = Depends(get_db),
 ) -> LogListResponse:
     current_user = require_user_html(request, db)
     if isinstance(current_user, RedirectResponse):
         raise HTTPException(status_code=401, detail="unauthorized")
+    queue_status: dict | None = None
+    if wait_for_latest:
+        queue_status = await RequestLogQueueService.wait_until_idle(
+            timeout_seconds=wait_timeout_ms / 1000,
+            poll_interval_seconds=0.05,
+        )
     total, items, summary, _ = UserPortalService.list_logs(
         db,
         user=current_user,
@@ -882,6 +867,10 @@ def user_logs_api(
         total=total,
         items=items,
         summary=LogSummaryOut.model_validate(summary),
+        queue_idle=None if queue_status is None else bool(queue_status.get("idle")),
+        queue_timed_out=None if queue_status is None else bool(queue_status.get("timed_out")),
+        queued_request_logs=None if queue_status is None else int(queue_status.get("queued") or 0),
+        processing_request_logs=None if queue_status is None else int(queue_status.get("processing") or 0),
     )
 
 
@@ -1262,6 +1251,10 @@ async def run_user_self_test(
         )
     except ApiClientAuthError as exc:
         trace_id = getattr(request.state, "trace_id", None)
+        classified = OpenAIErrorService.classify_error(
+            status_code=exc.status_code,
+            detail={"message": exc.message, "code": exc.code},
+        )
         return JSONResponse(
             {
                 "success": False,
@@ -1272,8 +1265,11 @@ async def run_user_self_test(
                     message=exc.message,
                     code=exc.code,
                     trace_id=trace_id,
-                    error_type="authentication_error" if exc.status_code in {401, 403} else "rate_limit_error",
-                    retryable=exc.status_code == 429,
+                    error_type=str(classified["error_type"]),
+                    retryable=bool(classified["retryable"]),
+                    recoverable=bool(classified["recoverable"]),
+                    category=str(classified["category"]),
+                    status_code=exc.status_code,
                 )["error"],
             },
             status_code=exc.status_code,
@@ -1282,7 +1278,8 @@ async def run_user_self_test(
         trace_id = getattr(request.state, "trace_id", None)
         detail_payload = exc.detail if isinstance(exc.detail, dict) else None
         message = OpenAIErrorService.extract_message(exc.detail, fallback="Request failed")
-        error_type, error_code, retryable = OpenAIErrorService.classify_status_code(exc.status_code)
+        classified = OpenAIErrorService.classify_error(status_code=exc.status_code, detail=detail_payload)
+        error_code = str(classified["code"])
         if isinstance(detail_payload, dict) and isinstance(detail_payload.get("code"), str):
             error_code = detail_payload["code"]
         return JSONResponse(
@@ -1294,8 +1291,11 @@ async def run_user_self_test(
                     message=message,
                     code=error_code,
                     trace_id=trace_id,
-                    error_type=error_type,
-                    retryable=retryable,
+                    error_type=str(classified["error_type"]),
+                    retryable=bool(classified["retryable"]),
+                    recoverable=bool(classified["recoverable"]),
+                    category=str(classified["category"]),
+                    status_code=exc.status_code,
                     detail=detail_payload,
                 )["error"],
             },

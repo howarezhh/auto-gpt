@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import threading
 from typing import Any
 
@@ -287,7 +288,7 @@ class RequestLogQueueService:
                 continue
             LogService.enqueue_finalize_for_log(
                 log=log,
-                model_name=kwargs.get("requested_model") or kwargs.get("model_name"),
+                model_name=kwargs.get("model_name") or kwargs.get("requested_model"),
                 request_path=kwargs.get("request_path"),
                 token_request_payload=kwargs.get("token_request_payload"),
                 token_response_payload=kwargs.get("token_response_payload"),
@@ -302,4 +303,21 @@ class RequestLogQueueService:
             client.llen(cls.QUEUE_KEY),
             client.llen(cls.PROCESSING_KEY),
         )
-        return {"queued": int(queued or 0), "processing": int(processing or 0)}
+        ingress = cls._ingress_queue.qsize() if cls._ingress_queue is not None else 0
+        return {"queued": int(queued or 0), "processing": int(processing or 0), "ingress": int(ingress or 0)}
+
+    @classmethod
+    async def wait_until_idle(cls, *, timeout_seconds: float = 2.0, poll_interval_seconds: float = 0.05) -> dict[str, Any]:
+        """等待请求日志队列进入空闲态，供日志页手动刷新时尽量看到最新结果。"""
+        if timeout_seconds <= 0:
+            lengths = await cls.queue_lengths()
+            return {"idle": (lengths["ingress"] + lengths["queued"] + lengths["processing"]) == 0, "timed_out": False, **lengths}
+        deadline = time.monotonic() + timeout_seconds
+        last_lengths = {"queued": 0, "processing": 0}
+        while True:
+            last_lengths = await cls.queue_lengths()
+            if (last_lengths["ingress"] + last_lengths["queued"] + last_lengths["processing"]) == 0:
+                return {"idle": True, "timed_out": False, **last_lengths}
+            if time.monotonic() >= deadline:
+                return {"idle": False, "timed_out": True, **last_lengths}
+            await asyncio.sleep(max(0.01, poll_interval_seconds))

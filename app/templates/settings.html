@@ -4,7 +4,7 @@
     <div>
         <div class="eyebrow">路由设置</div>
         <h2>路由设置</h2>
-        <p>统一配置默认路由模式、重试策略、熔断阈值，以及自动健康检查与恢复探测参数。</p>
+        <p>统一配置健康优先主策略、重试策略、熔断阈值，以及自动健康检查与恢复探测参数。</p>
     </div>
 </section>
 
@@ -17,12 +17,9 @@
     </div>
     <form class="form-grid" id="settings-form">
         <label>
-            <span>路由模式</span>
+            <span>路由主策略</span>
             <select class="field-input" id="setting-route-mode">
-                <option value="manual">手动优先 | 固定默认中转优先</option>
-                <option value="failover">故障切换 | 默认中转失败自动切换</option>
-                <option value="weighted">权重分流 | 按权重首选自动分流</option>
-                <option value="sticky">会话粘滞 | 同会话优先命中同一中转</option>
+                <option value="failover">健康优先 | 同层复用近期会话，随后按负载、权重与得分分发</option>
             </select>
         </label>
         <label>
@@ -187,35 +184,35 @@
         </label>
         <label>
             <span>全局最大活跃请求</span>
-            <input class="field-input" id="setting-global-max-active-requests" type="number" min="0">
+            <input class="field-input" id="setting-global-max-active-requests" type="number" min="0" value="20">
         </label>
         <label>
             <span>全局最大流式请求</span>
-            <input class="field-input" id="setting-global-max-active-streams" type="number" min="0">
+            <input class="field-input" id="setting-global-max-active-streams" type="number" min="0" value="10">
         </label>
         <label>
             <span>单密钥最大活跃请求</span>
-            <input class="field-input" id="setting-api-key-max-active-requests" type="number" min="0">
+            <input class="field-input" id="setting-api-key-max-active-requests" type="number" min="0" value="20">
         </label>
         <label>
             <span>单密钥最大流式请求</span>
-            <input class="field-input" id="setting-api-key-max-active-streams" type="number" min="0">
+            <input class="field-input" id="setting-api-key-max-active-streams" type="number" min="0" value="10">
         </label>
         <label>
             <span>单账户最大活跃请求</span>
-            <input class="field-input" id="setting-account-max-active-requests" type="number" min="0">
+            <input class="field-input" id="setting-account-max-active-requests" type="number" min="0" value="20">
         </label>
         <label>
             <span>单账户最大流式请求</span>
-            <input class="field-input" id="setting-account-max-active-streams" type="number" min="0">
+            <input class="field-input" id="setting-account-max-active-streams" type="number" min="0" value="10">
         </label>
         <label>
             <span>单中转最大活跃请求</span>
-            <input class="field-input" id="setting-provider-max-active-requests" type="number" min="0">
+            <input class="field-input" id="setting-provider-max-active-requests" type="number" min="0" value="20">
         </label>
         <label>
             <span>单中转最大流式请求</span>
-            <input class="field-input" id="setting-provider-max-active-streams" type="number" min="0">
+            <input class="field-input" id="setting-provider-max-active-streams" type="number" min="0" value="10">
         </label>
         <label>
             <span>并发租约 TTL（s）</span>
@@ -224,7 +221,7 @@
         <div class="form-span-2 settings-switch-grid">
             <label class="settings-switch-card">
                 <span class="settings-switch-copy">
-                    <strong>手动优先模式允许失败后回退</strong>
+                    <strong>默认中转不可用时允许回退</strong>
                 </span>
                 <span class="settings-switch-control">
                     <input id="setting-manual-allow-fallback" type="checkbox">

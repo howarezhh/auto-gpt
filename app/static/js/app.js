@@ -7,12 +7,14 @@
     };
     const PUBLIC_ROUTE_PREFIXES = ["/login", "/register", "/setup-admin"];
     const ADMIN_ROUTE_PREFIXES = ["/providers", "/models", "/settings", "/playground", "/benchmark", "/operations", "/docs", "/api-keys", "/logs", "/alerts", "/conversations", "/users", "/audit-logs"];
+    const FIXED_ROUTE_MODE = "failover";
+    const FIXED_MODEL_MAPPING_STRATEGY = "auto";
 
     const ROUTE_MODE_LABELS = {
-        manual: "手动优先",
-        failover: "故障切换",
-        weighted: "权重分流",
-        sticky: "会话粘滞",
+        manual: "健康优先",
+        failover: "健康优先",
+        weighted: "健康优先",
+        sticky: "健康优先",
     };
 
     const LOG_TYPE_LABELS = {
@@ -55,7 +57,17 @@
         invalid_api_key: "无效密钥",
         key_disabled: "密钥已禁用",
         key_expired: "密钥已过期",
-        insufficient_quota: "额度不足",
+        insufficient_quota: "配额不足",
+        api_key_token_quota_exhausted: "密钥余额不足",
+        api_key_cost_quota_exhausted: "密钥余额不足",
+        daily_token_quota_exhausted: "密钥余额不足",
+        daily_cost_quota_exhausted: "密钥余额不足",
+        account_token_quota_exhausted: "账户余额不足",
+        account_daily_token_quota_exhausted: "账户余额不足",
+        account_monthly_token_quota_exhausted: "账户余额不足",
+        account_cost_quota_exhausted: "账户余额不足",
+        account_daily_cost_quota_exhausted: "账户余额不足",
+        account_monthly_cost_quota_exhausted: "账户余额不足",
         insufficient_balance: "余额不足",
         no_authorized_provider: "未授权渠道",
     };
@@ -64,8 +76,8 @@
         active: "正常可用",
         disabled: "已禁用",
         expired: "已过期",
-        quota_exhausted: "额度耗尽",
-        cost_quota_exhausted: "金额额度耗尽",
+        quota_exhausted: "余额耗尽",
+        cost_quota_exhausted: "余额耗尽",
         balance_exhausted: "余额耗尽",
         unbound: "未绑定渠道",
     };
@@ -623,6 +635,16 @@
         enhanceInteractiveButtons(contentNode);
     }
 
+    function refreshHealthCheckResultModal(title, html) {
+        const modalState = ensureHealthCheckResultModalController();
+        if (!modalState) return;
+        const { controller, titleNode, contentNode } = modalState;
+        if (!controller.isOpen()) return;
+        titleNode.textContent = title;
+        contentNode.innerHTML = html;
+        enhanceInteractiveButtons(contentNode);
+    }
+
     function closeHealthCheckResultModal(options = {}) {
         healthCheckResultModalController?.close(options);
     }
@@ -815,10 +837,22 @@
         }, duration));
     }
 
+    function isHealthCheckUsable(result) {
+        const healthStatus = String(result?.health_status || "").trim();
+        if (healthStatus === "healthy" || healthStatus === "degraded") return true;
+        if (typeof result?.provider_success === "boolean") return result.provider_success;
+        return result?.success === true;
+    }
+
+    function formatHealthCheckOutcomeLabel(result) {
+        if (result?.success) return "成功";
+        return isHealthCheckUsable(result) ? "部分可用" : "失败";
+    }
+
     function formatTestResultLabel(result, fallbackName) {
         const statusCode = result?.status_code ?? "-";
         const latencyMs = result?.latency_ms ?? "-";
-        const statusText = result?.success ? "成功" : "失败";
+        const statusText = formatHealthCheckOutcomeLabel(result);
         const healthText = result?.health_status ? `，健康 ${formatHealthStatusLabel(result.health_status)}` : "";
         const providerText = typeof result?.provider_success === "boolean"
             ? `，连通${result.provider_success ? "成功" : "失败"}`
@@ -882,7 +916,7 @@
         const summaryRows = [
             ["测试对象", titleName],
             ["测试范围", scope === "model" ? "单模型测试" : "中转站测试"],
-            ["结果", result?.success ? "成功" : "失败"],
+            ["结果", formatHealthCheckOutcomeLabel(result)],
             [healthLabel, healthValue],
             ["状态码", result?.status_code ?? "-"],
             ["耗时", `${result?.latency_ms ?? "-"} ms`],
@@ -1297,41 +1331,6 @@
         return parts.join(" / ");
     }
 
-    function summarizeProviders(providers = []) {
-        const providerCount = providers.length;
-        const enabledProviderCount = providers.filter((provider) => provider.enabled).length;
-        const modelConfigs = providers.flatMap((provider) => provider.model_configs || []);
-        const modelCount = modelConfigs.length;
-        const healthyProviderCount = providers.filter((provider) => provider.health_status === "healthy").length;
-        const degradedProviderCount = providers.filter((provider) => provider.health_status === "degraded").length;
-        const unhealthyProviderCount = providers.filter((provider) => provider.health_status === "unhealthy").length;
-        const streamModelCount = modelConfigs.filter((model) => model.supports_stream).length;
-        const visionModelCount = modelConfigs.filter((model) => model.supports_vision).length;
-        const imageGenerationModelCount = modelConfigs.filter((model) => supportsImageGeneration(model)).length;
-        const pricedModelCount = modelConfigs.filter((model) => model.input_price_per_1k != null || model.output_price_per_1k != null).length;
-        const healthyModelCount = modelConfigs.filter((model) => model.health_status === "healthy").length;
-        const unhealthyModelCount = modelConfigs.filter((model) => model.health_status === "unhealthy").length;
-        const stabilityModels = modelConfigs.filter((model) => Number.isFinite(Number(model.stability_score)));
-        const avgStabilityScore = stabilityModels.length
-            ? Number((stabilityModels.reduce((sum, model) => sum + Number(model.stability_score || 0), 0) / stabilityModels.length).toFixed(2))
-            : 0;
-        return {
-            providerCount,
-            enabledProviderCount,
-            modelCount,
-            healthyProviderCount,
-            degradedProviderCount,
-            unhealthyProviderCount,
-            streamModelCount,
-            visionModelCount,
-            imageGenerationModelCount,
-            pricedModelCount,
-            healthyModelCount,
-            unhealthyModelCount,
-            avgStabilityScore,
-        };
-    }
-
     function getDefaultProviderLabel(providers = [], providerId) {
         if (!providerId) return "未设置默认中转站";
         const provider = providers.find((item) => item.id === Number(providerId));
@@ -1344,7 +1343,7 @@
     }
 
     function formatRouteModeLabel(value) {
-        return formatMappedLabel(ROUTE_MODE_LABELS, value);
+        return value ? formatMappedLabel(ROUTE_MODE_LABELS, value, "健康优先") : "健康优先";
     }
 
     function formatLogTypeLabel(value) {
@@ -1457,21 +1456,24 @@
         const inputPrice = toFiniteNumber(log?.channel_price_input_per_1k);
         const outputPrice = toFiniteNumber(log?.channel_price_output_per_1k);
         const cachePrice = toFiniteNumber(log?.channel_price_cache_per_1k) ?? inputPrice;
+        const cacheWritePrice = toFiniteNumber(log?.channel_price_cache_write_per_1k) ?? inputPrice;
         const promptTokens = Math.max(0, toFiniteNumber(log?.prompt_tokens) ?? 0);
         const completionTokens = Math.max(0, toFiniteNumber(log?.completion_tokens) ?? 0);
         const totalTokens = Math.max(0, toFiniteNumber(log?.total_tokens) ?? (promptTokens + completionTokens));
         const cacheReadTokens = Math.max(0, toFiniteNumber(log?.cache_read_tokens) ?? 0);
         const cacheWriteTokens = Math.max(0, toFiniteNumber(log?.cache_write_tokens) ?? 0);
-        const regularPromptTokens = Math.max(0, promptTokens - cacheReadTokens);
+        const regularPromptTokens = Math.max(0, promptTokens - cacheReadTokens - cacheWriteTokens);
         const inputCost = inputPrice == null ? null : roundCurrency((regularPromptTokens / 1000) * inputPrice, 9);
         const cacheReadCost = cachePrice == null ? null : roundCurrency((cacheReadTokens / 1000) * cachePrice, 9);
+        const cacheWriteCost = cacheWritePrice == null ? null : roundCurrency((cacheWriteTokens / 1000) * cacheWritePrice, 9);
         const outputCost = outputPrice == null ? null : roundCurrency((completionTokens / 1000) * outputPrice, 9);
-        const promptCost = roundCurrency(log?.prompt_cost) ?? sumCosts(inputCost, cacheReadCost);
+        const promptCost = roundCurrency(log?.prompt_cost) ?? sumCosts(inputCost, cacheReadCost, cacheWriteCost);
         const completionCost = roundCurrency(log?.completion_cost) ?? outputCost;
         const totalCost = roundCurrency(log?.total_cost) ?? sumCosts(promptCost, completionCost);
         const baseInputPrice = inputPrice == null ? null : roundCurrency(inputPrice / multiplier, 12);
         const baseOutputPrice = outputPrice == null ? null : roundCurrency(outputPrice / multiplier, 12);
         const baseCachePrice = cachePrice == null ? null : roundCurrency(cachePrice / multiplier, 12);
+        const baseCacheWritePrice = cacheWritePrice == null ? null : roundCurrency(cacheWritePrice / multiplier, 12);
         return {
             multiplier,
             totalTokens,
@@ -1483,11 +1485,14 @@
             inputPrice,
             outputPrice,
             cachePrice,
+            cacheWritePrice,
             baseInputPrice,
             baseOutputPrice,
             baseCachePrice,
+            baseCacheWritePrice,
             inputCost,
             cacheReadCost,
+            cacheWriteCost,
             outputCost,
             promptCost,
             completionCost,
@@ -1501,15 +1506,18 @@
             `输入 ${formatUsdPer1M(billing.baseInputPrice)}`,
             `输出 ${formatUsdPer1M(billing.baseOutputPrice)}`,
             `缓存 ${formatUsdPer1M(billing.baseCachePrice)}`,
+            `缓存写 ${formatUsdPer1M(billing.baseCacheWritePrice)}`,
         ];
         const channelPriceLines = [
             `输入 ${formatUsdPer1M(billing.inputPrice)}`,
             `输出 ${formatUsdPer1M(billing.outputPrice)}`,
             `缓存 ${formatUsdPer1M(billing.cachePrice)}`,
+            `缓存写 ${formatUsdPer1M(billing.cacheWritePrice)}`,
         ];
         const calculationLines = [
             `输入成本 ${formatTokenDisplay(billing.regularPromptTokens)} × ${formatUsdPer1M(billing.inputPrice)} = ${formatUsdValue(billing.inputCost)}`,
             `缓存读成本 ${formatTokenDisplay(billing.cacheReadTokens)} × ${formatUsdPer1M(billing.cachePrice)} = ${formatUsdValue(billing.cacheReadCost)}`,
+            `缓存写成本 ${formatTokenDisplay(billing.cacheWriteTokens)} × ${formatUsdPer1M(billing.cacheWritePrice)} = ${formatUsdValue(billing.cacheWriteCost)}`,
             `输出成本 ${formatTokenDisplay(billing.completionTokens)} × ${formatUsdPer1M(billing.outputPrice)} = ${formatUsdValue(billing.outputCost)}`,
             `总成本 = ${formatUsdValue(billing.totalCost)}，倍率 ${formatMultiplier(billing.multiplier)}`,
         ];
@@ -1577,6 +1585,23 @@
                         <span class="log-billing-multiplier">${escapeHtml(formatMultiplier(billing.multiplier))}</span>
                     </div>
                 </div>
+            </div>
+        `;
+    }
+
+    function normalizeLogModelValue(value) {
+        if (typeof value !== "string") return "";
+        return value.trim();
+    }
+
+    function renderLogModelCell(log = {}) {
+        const requestedModel = normalizeLogModelValue(log.requested_model);
+        const actualModel = normalizeLogModelValue(log.model_name);
+        if (!requestedModel && !actualModel) return '<span class="table-muted">-</span>';
+        return `
+            <div class="log-model-cell">
+                <div class="table-muted">原始：${escapeHtml(requestedModel || "-")}</div>
+                <strong>实际：${escapeHtml(actualModel || "-")}</strong>
             </div>
         `;
     }
@@ -3794,6 +3819,7 @@
         const providerMaxActiveRequestsInput = document.getElementById("provider-max-active-requests");
         const providerMaxActiveStreamsInput = document.getElementById("provider-max-active-streams");
         const providerMaxQpsInput = document.getElementById("provider-max-qps");
+        const providerMaxRpmInput = document.getElementById("provider-max-rpm");
         const providerMaxErrorRateInput = document.getElementById("provider-max-error-rate");
         const providerFirstTokenTimeoutSecInput = document.getElementById("provider-first-token-timeout-sec");
         const providerMaintenanceWindowInput = document.getElementById("provider-maintenance-window");
@@ -3817,8 +3843,8 @@
         const discoverFeedback = document.getElementById("provider-discover-feedback");
         const DEFAULT_PROVIDER_MODEL_CONFIG = {
             supports_stream: true,
-            supports_vision: false,
-            supports_tools: false,
+            supports_vision: true,
+            supports_tools: true,
             enabled: true,
             price_multiplier: 1,
         };
@@ -4314,6 +4340,7 @@
                 max_active_requests: providerMaxActiveRequestsInput.value === "" ? null : Number(providerMaxActiveRequestsInput.value),
                 max_active_streams: providerMaxActiveStreamsInput.value === "" ? null : Number(providerMaxActiveStreamsInput.value),
                 max_qps: providerMaxQpsInput.value === "" ? null : Number(providerMaxQpsInput.value),
+                max_rpm: providerMaxRpmInput.value === "" ? null : Number(providerMaxRpmInput.value),
                 max_error_rate: providerMaxErrorRateInput.value === "" ? null : Number(providerMaxErrorRateInput.value),
                 first_token_timeout_sec: providerFirstTokenTimeoutSecInput.value === "" ? null : Number(providerFirstTokenTimeoutSecInput.value),
                 maintenance_window: providerMaintenanceWindowInput.value.trim() || null,
@@ -4422,8 +4449,9 @@
         });
 
         async function loadProviders() {
-            providers = await api.get("/api/providers");
-            renderProviderTelemetry(providers);
+            const overview = await api.get("/api/providers/overview");
+            providers = Array.isArray(overview.providers) ? overview.providers : [];
+            renderProviderTelemetry(overview.summary || {});
             renderProviders(searchInput.value);
             renderProviderModelFilterOptions();
             populateAvailabilityProviderOptions();
@@ -4432,28 +4460,30 @@
             syncOpenModelsDetailModal();
         }
 
-        function renderProviderTelemetry(currentProviders) {
-            const summary = summarizeProviders(currentProviders);
-            document.querySelector('[data-provider-stat="provider_count"]').textContent = summary.providerCount;
-            document.querySelector('[data-provider-stat="enabled_provider_count"]').textContent = summary.enabledProviderCount;
-            document.querySelector('[data-provider-stat="model_count"]').textContent = summary.modelCount;
-            document.querySelector('[data-provider-stat="stream_model_count"]').textContent = summary.streamModelCount;
-            document.querySelector('[data-provider-stat="vision_model_count"]').textContent = summary.visionModelCount;
-            document.querySelector('[data-provider-stat="image_generation_model_count"]').textContent = summary.imageGenerationModelCount;
-            document.querySelector('[data-provider-stat="priced_model_count"]').textContent = summary.pricedModelCount;
-            document.querySelector('[data-provider-stat="avg_stability_score"]').textContent = formatScore(summary.avgStabilityScore);
+        function renderProviderTelemetry(summary) {
+            const providerCount = Number(summary.provider_count || 0);
+            const enabledProviderCount = Number(summary.enabled_provider_count || 0);
+            document.querySelector('[data-provider-stat="provider_count"]').textContent = providerCount;
+            document.querySelector('[data-provider-stat="enabled_provider_count"]').textContent = enabledProviderCount;
+            document.querySelector('[data-provider-stat="model_count"]').textContent = Number(summary.model_count || 0);
+            document.querySelector('[data-provider-stat="stream_model_count"]').textContent = Number(summary.stream_model_count || 0);
+            document.querySelector('[data-provider-stat="vision_model_count"]').textContent = Number(summary.vision_model_count || 0);
+            document.querySelector('[data-provider-stat="image_generation_model_count"]').textContent = Number(summary.image_generation_model_count || 0);
+            document.querySelector('[data-provider-stat="priced_model_count"]').textContent = Number(summary.priced_model_count || 0);
+            document.querySelector('[data-provider-stat="avg_stability_score"]').textContent = formatScore(summary.avg_stability_score);
 
-            const healthyRatio = summary.providerCount ? Math.round((summary.healthyProviderCount / summary.providerCount) * 100) : 0;
+            const healthyProviderCount = providers.filter((provider) => provider.health_status === "healthy").length;
+            const healthyRatio = providerCount ? Math.round((healthyProviderCount / providerCount) * 100) : 0;
             const providersSummaryCard = document.getElementById("providers-summary-card");
             if (providersSummaryCard) {
                 providersSummaryCard.innerHTML = `
                     <div class="cockpit-aside-label">渠道脉冲</div>
-                    <div class="cockpit-aside-value">${summary.enabledProviderCount}</div>
+                    <div class="cockpit-aside-value">${enabledProviderCount}</div>
                     <div class="cockpit-aside-copy">当前已启用中转站</div>
                     <div class="cockpit-health-bar"><span style="width:${healthyRatio}%"></span></div>
                     <div class="cockpit-aside-meta">
-                        <span>挂载 ${summary.modelCount}</span>
-                        <span>生图 ${summary.imageGenerationModelCount}</span>
+                        <span>挂载 ${Number(summary.model_count || 0)}</span>
+                        <span>生图 ${Number(summary.image_generation_model_count || 0)}</span>
                     </div>
                 `;
             }
@@ -4497,11 +4527,13 @@
             const activeRequests = provider.active_requests ?? 0;
             const activeStreams = provider.active_streams ?? 0;
             const currentQps = provider.current_qps ?? 0;
+            const currentRpm = provider.current_rpm ?? 0;
             const errorLimit = provider.max_error_rate == null ? "不限" : `${provider.max_error_rate}%`;
             return `
                 <strong>请求 ${formatNumber(activeRequests)} / ${formatCapacityLimit(provider.max_active_requests)}</strong>
                 <div class="table-muted">流式 ${formatNumber(activeStreams)} / ${formatCapacityLimit(provider.max_active_streams)}</div>
                 <div class="table-muted">QPS ${formatNumber(currentQps)} / ${formatCapacityLimit(provider.max_qps)}</div>
+                <div class="table-muted">RPM ${formatNumber(currentRpm)} / ${formatCapacityLimit(provider.max_rpm)}</div>
                 <div class="table-muted">失败率上限 ${escapeHtml(errorLimit)} · 首 Token ${provider.first_token_timeout_sec ?? "-"}s</div>
             `;
         }
@@ -5048,6 +5080,7 @@
             setButtonLoading(trigger, true);
             try {
                 const result = await api.post(`/api/providers/${providerId}/models/${modelId}/test`, { features });
+                const resultUsable = isHealthCheckUsable(result);
                 applyProviderModelHealthSnapshot(providerId, modelId, {
                     success: result.success === true,
                     health_status: result.health_status,
@@ -5056,13 +5089,13 @@
                     message: result.message,
                 });
                 setButtonLoading(trigger, false);
-                setButtonTransientFeedback(trigger, result.success ? "success" : "error", {
-                    successText: "成功",
+                setButtonTransientFeedback(trigger, resultUsable ? "success" : "error", {
+                    successText: result.success ? "成功" : "可用",
                     errorText: "失败",
                 });
                 showToast(
                     formatTestResultLabel(result, `模型 ${modelConfig.model_name}`),
-                    result.success ? "success" : "error",
+                    resultUsable ? "success" : "error",
                 );
                 if (options.closeModelsDetail) {
                     closeModelsDetailModal({ force: true, reason: "test-model" });
@@ -5114,14 +5147,15 @@
                         showModal: true,
                         data: { features },
                     });
+                    const resultUsable = isHealthCheckUsable(result);
                     setButtonLoading(button, false);
-                    setButtonTransientFeedback(button, result.success ? "success" : "error", {
-                        successText: "成功",
+                    setButtonTransientFeedback(button, resultUsable ? "success" : "error", {
+                        successText: result.success ? "成功" : "可用",
                         errorText: "失败",
                     });
                     showToast(
                         formatTestResultLabel(result, provider.name),
-                        result.success ? "success" : "error",
+                        resultUsable ? "success" : "error",
                     );
                     await wait(650);
                     await loadProviders();
@@ -5253,9 +5287,10 @@
             providerWeightInput.value = provider?.weight ?? 100;
             providerTimeoutMsInput.value = provider?.timeout_ms ?? 30000;
             providerMaxRetriesInput.value = provider?.max_retries ?? 1;
-            providerMaxActiveRequestsInput.value = provider?.max_active_requests ?? 1000;
-            providerMaxActiveStreamsInput.value = provider?.max_active_streams ?? 1000;
-            providerMaxQpsInput.value = provider?.max_qps ?? "";
+            providerMaxActiveRequestsInput.value = provider?.max_active_requests ?? 20;
+            providerMaxActiveStreamsInput.value = provider?.max_active_streams ?? 10;
+            providerMaxQpsInput.value = provider?.max_qps ?? 20;
+            providerMaxRpmInput.value = provider?.max_rpm ?? 20;
             providerMaxErrorRateInput.value = provider?.max_error_rate ?? 80;
             providerFirstTokenTimeoutSecInput.value = provider?.first_token_timeout_sec ?? 60;
             providerMaintenanceWindowInput.value = provider?.maintenance_window ?? "";
@@ -5558,11 +5593,7 @@
         }
 
         function formatModelMappingStrategy(value) {
-            return {
-                auto: "自动择优",
-                priority: "优先级",
-                weighted: "权重分流",
-            }[value] || value || "-";
+            return value ? "健康优先" : "-";
         }
 
         function renderMultiplierCell(item) {
@@ -5596,8 +5627,14 @@
             const endpointLabels = [];
             if (item.supports_chat_completions) endpointLabels.push("Chat");
             if (item.supports_responses) endpointLabels.push("Responses");
+            const abilityLabels = [
+                item.supports_stream ? "流式" : "非流式",
+                "仅文本",
+                item.supports_tools ? "工具调用" : "无工具",
+            ];
+            if (item.supports_vision) abilityLabels.push("图像理解");
             return `
-                <div>${formatModelCapabilitySummary(item)}</div>
+                <div>${escapeHtml(abilityLabels.join(" / "))}</div>
                 <div class="table-muted">${escapeHtml(endpointLabels.join("、") || "未配置原生端点")}</div>
             `;
         }
@@ -5709,6 +5746,105 @@
             `;
         }
 
+        function createModelBatchTestState(modelOptions = []) {
+            return {
+                items: modelOptions.map((item, index) => ({
+                    index,
+                    modelName: item.model_name,
+                    displayName: item.display_name || item.model_name || `模型 ${index + 1}`,
+                    status: "running",
+                    healthyChannelCount: null,
+                    totalChannelCount: null,
+                    latencyMs: null,
+                    message: "",
+                })),
+            };
+        }
+
+        function recalculateModelBatchTestState(batchState) {
+            const items = Array.isArray(batchState?.items) ? batchState.items : [];
+            const total = items.length;
+            const completed = items.filter((item) => item.status === "healthy" || item.status === "unhealthy" || item.status === "failed").length;
+            const running = items.filter((item) => item.status === "running").length;
+            const healthy = items.filter((item) => item.status === "healthy").length;
+            const unhealthy = items.filter((item) => item.status === "unhealthy" || item.status === "failed").length;
+            return { total, completed, running, healthy, unhealthy };
+        }
+
+        function renderModelBatchStatusBadge(status) {
+            if (status === "healthy") return '<span class="status-badge status-healthy">健康</span>';
+            if (status === "unhealthy" || status === "failed") return '<span class="status-badge status-unhealthy">异常</span>';
+            return '<span class="status-badge status-running">进行中</span>';
+        }
+
+        function compactModelBatchTestMessage(message) {
+            const text = String(message || "").trim();
+            if (!text) return "";
+            return text.length <= 72 ? text : `${text.slice(0, 72)}...`;
+        }
+
+        function applyModelBatchTestSuccess(batchState, result) {
+            const item = batchState.items.find((entry) => entry.modelName === result?.model_name);
+            if (!item) return;
+            item.status = result?.health_status === "healthy" ? "healthy" : "unhealthy";
+            item.healthyChannelCount = Number(result?.healthy_channel_count ?? 0);
+            item.totalChannelCount = Number(result?.total_channel_count ?? 0);
+            item.latencyMs = result?.latency_ms ?? null;
+            item.message = compactModelBatchTestMessage(result?.message);
+        }
+
+        function applyModelBatchTestError(batchState, modelName, error) {
+            const item = batchState.items.find((entry) => entry.modelName === modelName);
+            if (!item) return;
+            item.status = "failed";
+            item.healthyChannelCount = 0;
+            item.totalChannelCount = item.totalChannelCount ?? 0;
+            item.latencyMs = null;
+            item.message = compactModelBatchTestMessage(error?.message || "测试失败");
+        }
+
+        function renderModelBatchTestProgress(batchState) {
+            const summary = recalculateModelBatchTestState(batchState);
+            const summaryHtml = [
+                ["总数", formatNumber(summary.total)],
+                ["完成", `${formatNumber(summary.completed)}/${formatNumber(summary.total)}`],
+                ["健康", formatNumber(summary.healthy)],
+                ["异常", formatNumber(summary.unhealthy)],
+            ].map(([label, value]) => `
+                <div class="provider-test-summary-item">
+                    <span>${escapeHtml(String(label))}</span>
+                    <strong>${escapeHtml(String(value))}</strong>
+                </div>
+            `).join("");
+            const modelHtml = batchState.items.map((item) => {
+                const meta = item.status === "running"
+                    ? "测试中"
+                    : `通过 ${item.healthyChannelCount ?? 0}/${item.totalChannelCount ?? 0} · 耗时 ${item.latencyMs ?? "-"} ms`;
+                return `
+                    <article class="provider-test-model-item model-batch-progress-item" data-status="${escapeHtml(item.status)}">
+                        <div class="provider-test-model-top">
+                            <strong>${escapeHtml(item.displayName)}</strong>
+                            <div>${renderModelBatchStatusBadge(item.status)}</div>
+                        </div>
+                        <div class="table-muted">${escapeHtml(meta)}</div>
+                        ${item.message ? `<div class="provider-test-model-message">${escapeHtml(item.message)}</div>` : ""}
+                    </article>
+                `;
+            }).join("");
+            return `
+                <div class="provider-test-result-shell">
+                    <section class="provider-test-result-card">
+                        <div class="panel-kicker">结果</div>
+                        <div class="provider-test-summary-grid">${summaryHtml}</div>
+                    </section>
+                    <section class="provider-test-result-card">
+                        <div class="panel-kicker">${summary.completed >= summary.total ? "模型" : `模型 · ${formatNumber(summary.running)} 进行中`}</div>
+                        <div class="provider-test-model-list model-batch-progress-list">${modelHtml}</div>
+                    </section>
+                </div>
+            `;
+        }
+
         function formatPricingSummary(item) {
             const mode = item?.pricing_mode || "fixed";
             const pricingJson = item?.pricing_json || {};
@@ -5810,7 +5946,7 @@
             mappingForm.reset();
             mappingSourceInput.disabled = false;
             mappingEnabledInput.checked = true;
-            mappingStrategySelect.value = "auto";
+            mappingStrategySelect.value = FIXED_MODEL_MAPPING_STRATEGY;
             mappingTargetList.innerHTML = "";
             addMappingTargetRow();
         }
@@ -5819,7 +5955,7 @@
             state.editingMappingSource = mapping.source_model_name;
             mappingSourceInput.value = mapping.source_model_name || "";
             mappingSourceInput.disabled = true;
-            mappingStrategySelect.value = mapping.strategy || "auto";
+            mappingStrategySelect.value = FIXED_MODEL_MAPPING_STRATEGY;
             mappingEnabledInput.checked = mapping.enabled !== false;
             mappingRemarkInput.value = mapping.remark || "";
             mappingTargetList.innerHTML = "";
@@ -5977,8 +6113,8 @@
             displayNameInput.value = detail?.display_name || "";
             enabledInput.checked = detail?.enabled ?? true;
             supportsStreamInput.checked = detail?.supports_stream ?? true;
-            supportsVisionInput.checked = detail?.supports_vision ?? false;
-            supportsToolsInput.checked = detail?.supports_tools ?? false;
+            supportsVisionInput.checked = detail?.supports_vision ?? true;
+            supportsToolsInput.checked = detail?.supports_tools ?? true;
             supportsChatCompletionsInput.checked = detail?.supports_chat_completions ?? true;
             supportsResponsesInput.checked = detail?.supports_responses ?? true;
             contextWindowInput.value = detail?.context_window_tokens == null ? "" : detail.context_window_tokens;
@@ -6021,6 +6157,122 @@
                     weight: Number(row.querySelector('input[data-binding-field="weight"]').value || 100),
                 };
             });
+        }
+
+        function parseOptionalIntegerField(input, label) {
+            const rawValue = String(input?.value || "").trim();
+            if (!rawValue) return null;
+            const value = Number(rawValue);
+            if (!Number.isInteger(value) || value < 1) {
+                throw new Error(`${label}必须填写大于 0 的整数`);
+            }
+            return value;
+        }
+
+        function parseOptionalPriceField(input, label) {
+            const rawValue = String(input?.value || "").trim();
+            if (!rawValue) return null;
+            const value = Number(rawValue);
+            if (!Number.isFinite(value) || value < 0) {
+                throw new Error(`${label}必须填写大于或等于 0 的数字`);
+            }
+            return toPricePer1K(value);
+        }
+
+        function collectValidatedBindings({ isEditing = false } = {}) {
+            return Array.from(bindingBody.querySelectorAll("tr")).map((row) => {
+                const providerId = Number(row.dataset.providerId);
+                const providerName = row.querySelector("strong")?.textContent?.trim() || `中转站 ${providerId}`;
+                const initialBound = row.dataset.initialBound === "true";
+                const boundTouched = row.dataset.boundTouched === "true";
+                const requestedBound = row.querySelector('input[data-binding-field="bound"]').checked;
+                const effectiveBound = isEditing && !initialBound && requestedBound && !boundTouched ? false : requestedBound;
+                const enabled = row.querySelector('input[data-binding-field="enabled"]').checked;
+                const priceMultiplierRaw = String(row.querySelector('input[data-binding-field="price_multiplier"]').value || "").trim();
+                const priorityRaw = String(row.querySelector('input[data-binding-field="priority"]').value || "").trim();
+                const weightRaw = String(row.querySelector('input[data-binding-field="weight"]').value || "").trim();
+                const priceMultiplier = priceMultiplierRaw ? Number(priceMultiplierRaw) : 1;
+                const priority = priorityRaw ? Number(priorityRaw) : 100;
+                const weight = weightRaw ? Number(weightRaw) : 100;
+
+                if (!Number.isInteger(providerId) || providerId < 1) {
+                    throw new Error("模型绑定中存在无效的中转站，请刷新页面后重试");
+                }
+                if (effectiveBound) {
+                    if (!Number.isFinite(priceMultiplier) || priceMultiplier <= 0) {
+                        throw new Error(`${providerName} 的倍率必须大于 0`);
+                    }
+                    if (!Number.isFinite(priority)) {
+                        throw new Error(`${providerName} 的优先级必须是有效数字`);
+                    }
+                    if (!Number.isFinite(weight)) {
+                        throw new Error(`${providerName} 的权重必须是有效数字`);
+                    }
+                }
+
+                return {
+                    provider_id: providerId,
+                    bound: effectiveBound,
+                    enabled,
+                    price_multiplier: priceMultiplier,
+                    priority,
+                    weight,
+                };
+            });
+        }
+
+        function normalizeModelSaveError(error) {
+            const fallback = String(error?.message || "").trim() || "模型保存失败";
+            if (fallback.includes("模型已存在")) {
+                return "模型名已存在，请更换后再保存";
+            }
+            if (fallback.includes("中转站不存在")) {
+                return "所选中转站不存在，请刷新页面后重试";
+            }
+            if (!(fallback.startsWith("[") || fallback.startsWith("{"))) {
+                return fallback;
+            }
+            try {
+                const parsed = JSON.parse(fallback);
+                const details = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.detail) ? parsed.detail : [];
+                if (!details.length) return fallback;
+                const first = details[0] || {};
+                const location = Array.isArray(first.loc) ? first.loc.join(".") : "";
+                const message = String(first.msg || "").trim();
+                if (location.includes("model_name")) return "请填写模型名";
+                if (location.includes("display_name")) return "展示名格式不正确，请检查后重试";
+                if (location.includes("context_window_tokens")) return "最大上下文窗口 token 必须大于 0";
+                if (location.includes("max_input_tokens")) return "最大输入 token 必须大于 0";
+                if (location.includes("max_output_tokens")) return "最大输出 token 必须大于 0";
+                if (location.includes("input_price_per_1k")) return "输入单价格式不正确，请填写大于或等于 0 的数字";
+                if (location.includes("output_price_per_1k")) return "输出单价格式不正确，请填写大于或等于 0 的数字";
+                if (location.includes("cache_price_per_1k")) return "缓存单价格式不正确，请填写大于或等于 0 的数字";
+                if (location.includes("provider_bindings")) {
+                    if (location.includes("price_multiplier")) return "中转站倍率必须大于 0";
+                    if (location.includes("priority")) return "中转站优先级格式不正确";
+                    if (location.includes("weight")) return "中转站权重格式不正确";
+                    if (location.includes("provider_id")) return "中转站绑定数据无效，请刷新页面后重试";
+                }
+                if (message) return `模型保存失败：${message}`;
+            } catch {
+                return fallback;
+            }
+            return fallback;
+        }
+
+        function hasModelInCurrentPage(modelName) {
+            return state.models.some((item) => item.model_name === modelName);
+        }
+
+        async function focusModelInList(modelName, { reloadProviders = false } = {}) {
+            const normalizedModelName = String(modelName || "").trim();
+            if (!normalizedModelName) return false;
+            searchInput.value = normalizedModelName;
+            enabledSelect.value = "";
+            providerSelect.value = "";
+            state.page = 1;
+            await loadData({ silent: true, reloadProviders });
+            return hasModelInCurrentPage(normalizedModelName);
         }
 
         async function loadData({ silent = false, reloadProviders = false } = {}) {
@@ -6081,20 +6333,40 @@
         async function testAllModelHealth() {
             const features = await openTestFeaturePicker({ title: "选择模型批量测试功能" });
             if (!features) return;
+            const modelOptions = (Array.isArray(state.allModels) ? state.allModels : [])
+                .filter((item) => typeof item?.model_name === "string" && item.model_name.trim())
+                .map((item) => ({
+                    model_name: item.model_name,
+                    display_name: item.display_name || item.model_name,
+                }));
+            if (!modelOptions.length) {
+                showToast("暂无可测试模型", "error");
+                return;
+            }
+            const batchState = createModelBatchTestState(modelOptions);
             try {
                 setButtonLoading(testAllBtn, true);
-                const results = await api.post("/api/models/test-all", { features });
-                const healthyCount = results.filter((item) => item.health_status === "healthy").length;
-                setButtonTransientFeedback(testAllBtn, healthyCount === results.length ? "success" : "error", {
+                openHealthCheckResultModal(
+                    "模型批量测试",
+                    renderModelBatchTestProgress(batchState),
+                    testAllBtn,
+                );
+                await Promise.allSettled(modelOptions.map(async (item) => {
+                    try {
+                        const result = await api.post(`/api/models/${encodeURIComponent(item.model_name)}/test`, { features });
+                        applyModelBatchTestSuccess(batchState, result);
+                    } catch (error) {
+                        applyModelBatchTestError(batchState, item.model_name, error);
+                    }
+                    refreshHealthCheckResultModal("模型批量测试", renderModelBatchTestProgress(batchState));
+                }));
+                const summary = recalculateModelBatchTestState(batchState);
+                setButtonTransientFeedback(testAllBtn, summary.unhealthy === 0 ? "success" : "error", {
                     successText: "完成",
                     errorText: "有异常",
                 });
-                openHealthCheckResultModal(
-                    "模型批量测试",
-                    renderAllModelHealthTestResult(results),
-                    testAllBtn,
-                );
-                showToast(`模型检测：${healthyCount}/${results.length} 健康`);
+                refreshHealthCheckResultModal("模型批量测试", renderModelBatchTestProgress(batchState));
+                showToast(`模型检测：${summary.healthy}/${summary.total} 健康`);
                 await loadData({ silent: true, reloadProviders: true });
             } catch (error) {
                 setButtonTransientFeedback(testAllBtn, "error", { errorText: "失败" });
@@ -6116,11 +6388,16 @@
                     return;
                 }
                 try {
+                    setButtonLoading(button, true);
                     await api.delete(`/api/models/${encodeURIComponent(button.dataset.modelName)}`);
+                    setButtonTransientFeedback(button, "success", { successText: "已删除" });
                     showToast("模型已删除");
-                    await loadData({ silent: true });
+                    await loadData({ silent: true, reloadProviders: true });
                 } catch (error) {
+                    setButtonTransientFeedback(button, "error", { errorText: "删除失败" });
                     showToast(error.message, "error");
+                } finally {
+                    setButtonLoading(button, false);
                 }
                 return;
             }
@@ -6177,9 +6454,11 @@
                     model_names: modelNames,
                     context_window_tokens: Math.floor(contextWindowTokens),
                 });
+                setButtonTransientFeedback(batchContextApplyBtn, "success", { successText: "已应用" });
                 showToast("上下文窗口已批量应用");
                 await loadData({ silent: true });
             } catch (error) {
+                setButtonTransientFeedback(batchContextApplyBtn, "error", { errorText: "应用失败" });
                 showToast(error.message, "error");
             } finally {
                 setButtonLoading(batchContextApplyBtn, false);
@@ -6202,46 +6481,63 @@
 
         form.addEventListener("submit", async (event) => {
             event.preventDefault();
-            const payload = {
-                display_name: displayNameInput.value.trim() || null,
-                enabled: enabledInput.checked,
-                supports_stream: supportsStreamInput.checked,
-                supports_vision: supportsVisionInput.checked,
-                supports_tools: supportsToolsInput.checked,
-                supports_chat_completions: supportsChatCompletionsInput.checked,
-                supports_responses: supportsResponsesInput.checked,
-                context_window_tokens: contextWindowInput.value === "" ? null : Number(contextWindowInput.value),
-                max_input_tokens: maxInputTokensInput.value === "" ? null : Number(maxInputTokensInput.value),
-                max_output_tokens: maxOutputTokensInput.value === "" ? null : Number(maxOutputTokensInput.value),
-                input_price_per_1k: inputPriceInput.value === "" ? null : toPricePer1K(Number(inputPriceInput.value)),
-                output_price_per_1k: outputPriceInput.value === "" ? null : toPricePer1K(Number(outputPriceInput.value)),
-                cache_price_per_1k: cachePriceInput.value === ""
-                    ? (inputPriceInput.value === "" ? null : toPricePer1K(Number(inputPriceInput.value)))
-                    : toPricePer1K(Number(cachePriceInput.value)),
-                speed_label: speedLabelInput.value.trim() || null,
-                remark: remarkInput.value.trim() || null,
-                provider_bindings: collectBindings({ isEditing: Boolean(state.editingModelName) }),
-            };
-            if (!state.editingModelName) {
-                payload.model_name = nameInput.value.trim();
-                if (!payload.model_name) {
+            const isEditing = Boolean(state.editingModelName);
+            try {
+                const modelName = nameInput.value.trim();
+                if (!isEditing && !modelName) {
                     showToast("请填写模型名", "error");
                     return;
                 }
-            }
-            try {
-                setButtonLoading(submitBtn, true);
-                if (state.editingModelName) {
-                    await api.put(`/api/models/${encodeURIComponent(state.editingModelName)}`, payload);
-                    showToast("模型配置已更新");
-                } else {
-                    await api.post("/api/models", payload);
-                    showToast("模型已创建");
+                const inputPricePer1K = parseOptionalPriceField(inputPriceInput, "输入单价");
+                const payload = {
+                    display_name: displayNameInput.value.trim() || null,
+                    enabled: enabledInput.checked,
+                    supports_stream: supportsStreamInput.checked,
+                    supports_vision: supportsVisionInput.checked,
+                    supports_tools: supportsToolsInput.checked,
+                    supports_chat_completions: supportsChatCompletionsInput.checked,
+                    supports_responses: supportsResponsesInput.checked,
+                    context_window_tokens: parseOptionalIntegerField(contextWindowInput, "最大上下文窗口 token"),
+                    max_input_tokens: parseOptionalIntegerField(maxInputTokensInput, "最大输入 token"),
+                    max_output_tokens: parseOptionalIntegerField(maxOutputTokensInput, "最大输出 token"),
+                    input_price_per_1k: inputPricePer1K,
+                    output_price_per_1k: parseOptionalPriceField(outputPriceInput, "输出单价"),
+                    cache_price_per_1k: cachePriceInput.value.trim() === ""
+                        ? inputPricePer1K
+                        : parseOptionalPriceField(cachePriceInput, "缓存单价"),
+                    speed_label: speedLabelInput.value.trim() || null,
+                    remark: remarkInput.value.trim() || null,
+                    provider_bindings: collectValidatedBindings({ isEditing }),
+                };
+                if (!isEditing) {
+                    payload.model_name = modelName;
                 }
+                let savedModel = null;
+                let toastMessage = "模型配置已更新";
+                setButtonLoading(submitBtn, true);
+                if (isEditing) {
+                    savedModel = await api.put(`/api/models/${encodeURIComponent(state.editingModelName)}`, payload);
+                    setButtonLoading(submitBtn, false);
+                    setButtonTransientFeedback(submitBtn, "success", { successText: "已保存" });
+                } else {
+                    savedModel = await api.post("/api/models", payload);
+                    setButtonLoading(submitBtn, false);
+                    setButtonTransientFeedback(submitBtn, "success", { successText: "已创建" });
+                    toastMessage = "模型已创建";
+                }
+                await wait(180);
                 closeModal();
                 await loadData({ silent: true, reloadProviders: true });
+                if (!isEditing && savedModel?.model_name && !hasModelInCurrentPage(savedModel.model_name)) {
+                    const located = await focusModelInList(savedModel.model_name, { reloadProviders: true });
+                    toastMessage = located
+                        ? "模型已创建，已自动定位到新模型"
+                        : "模型已创建，但当前列表未显示，请检查筛选条件";
+                }
+                showToast(toastMessage);
             } catch (error) {
-                showToast(error.message, "error");
+                setButtonTransientFeedback(submitBtn, "error", { errorText: "保存失败" });
+                showToast(normalizeModelSaveError(error), "error");
             } finally {
                 setButtonLoading(submitBtn, false);
             }
@@ -6273,7 +6569,7 @@
             }
             const payload = {
                 enabled: mappingEnabledInput.checked,
-                strategy: mappingStrategySelect.value,
+                strategy: FIXED_MODEL_MAPPING_STRATEGY,
                 targets,
                 remark: mappingRemarkInput.value.trim() || null,
             };
@@ -6284,14 +6580,19 @@
                 setButtonLoading(mappingSubmitBtn, true);
                 if (state.editingMappingSource) {
                     await api.put(`/api/model-mappings/${encodeURIComponent(state.editingMappingSource)}`, payload);
+                    setButtonLoading(mappingSubmitBtn, false);
+                    setButtonTransientFeedback(mappingSubmitBtn, "success", { successText: "已保存" });
                     showToast("模型映射已更新");
                 } else {
                     await api.post("/api/model-mappings", payload);
+                    setButtonLoading(mappingSubmitBtn, false);
+                    setButtonTransientFeedback(mappingSubmitBtn, "success", { successText: "已创建" });
                     showToast("模型映射已创建");
                 }
                 resetMappingForm();
                 await loadData({ silent: true });
             } catch (error) {
+                setButtonTransientFeedback(mappingSubmitBtn, "error", { errorText: "保存失败" });
                 showToast(error.message, "error");
             } finally {
                 setButtonLoading(mappingSubmitBtn, false);
@@ -6311,12 +6612,17 @@
             if (button.dataset.mappingAction === "delete") {
                 if (!window.confirm(`确认删除模型映射 ${sourceModel} 吗？`)) return;
                 try {
+                    setButtonLoading(button, true);
                     await api.delete(`/api/model-mappings/${encodeURIComponent(sourceModel)}`);
+                    setButtonTransientFeedback(button, "success", { successText: "已删除" });
                     showToast("模型映射已删除");
                     if (state.editingMappingSource === sourceModel) resetMappingForm();
                     await loadData({ silent: true });
                 } catch (error) {
+                    setButtonTransientFeedback(button, "error", { errorText: "删除失败" });
                     showToast(error.message, "error");
+                } finally {
+                    setButtonLoading(button, false);
                 }
                 return;
             }
@@ -6348,7 +6654,9 @@
             try {
                 setButtonLoading(refreshBtn, true);
                 await loadData({ reloadProviders: true });
+                setButtonTransientFeedback(refreshBtn, "success", { successText: "已刷新" });
             } catch (error) {
+                setButtonTransientFeedback(refreshBtn, "error", { errorText: "刷新失败" });
                 showToast(error.message, "error");
             } finally {
                 setButtonLoading(refreshBtn, false);
@@ -6427,7 +6735,7 @@
             <option value="${provider.id}">${escapeHtml(provider.name)}</option>
         `).join("");
 
-        routeModeSelect.value = settings.route_mode;
+        routeModeSelect.value = FIXED_ROUTE_MODE;
         document.getElementById("setting-default-provider-id").value = settings.default_provider_id ?? "";
         document.getElementById("setting-global-timeout-ms").value = settings.global_timeout_ms;
         document.getElementById("setting-global-max-retries").value = settings.global_max_retries;
@@ -6468,7 +6776,7 @@
         form.addEventListener("submit", async (event) => {
             event.preventDefault();
             const payload = {
-                route_mode: routeModeSelect.value,
+                route_mode: FIXED_ROUTE_MODE,
                 default_provider_id: providerSelect.value ? Number(providerSelect.value) : null,
                 manual_allow_fallback: manualAllowFallbackInput.checked,
                 global_timeout_ms: Number(document.getElementById("setting-global-timeout-ms").value),
@@ -7562,6 +7870,10 @@
             params.set("exclude_health_checks", excludeHealthChecks ? "true" : "false");
             params.set("_ts", Date.now().toString());
             try {
+                if (manual && feedbackSource === "refresh") {
+                    params.set("wait_for_latest", "true");
+                    params.set("wait_timeout_ms", "2000");
+                }
                 const data = await api.get(`/api/user/logs?${params.toString()}`);
                 renderLogPagination(data.total ?? data.items.length);
                 renderLogSummary(data.summary || {});
@@ -7580,7 +7892,7 @@
                             <div class="table-muted">${escapeHtml(log.api_client_key_prefix || "-")}</div>
                         </td>
                         <td>${escapeHtml(buildSessionValue(log))}</td>
-                        <td>${escapeHtml(log.requested_model || log.model_name || "-")}</td>
+                        <td>${renderLogModelCell(log)}</td>
                         <td>${escapeHtml(log.provider_name || "-")}</td>
                         <td>${renderLogResultCell(log)}</td>
                         <td>${renderLogBillingCell(log)}</td>
@@ -7605,7 +7917,10 @@
                     refreshFeedbackStatus = "success";
                 }
                 if (manual) {
-                    showToast(`日志已刷新，第 ${state.page} 页 / ${Math.max(1, Math.ceil((state.total || 0) / state.pageSize))} 页`);
+                    const queueSuffix = data.queue_timed_out
+                        ? `，但日志队列仍有 ${formatNumber((data.queued_request_logs || 0) + (data.processing_request_logs || 0))} 条待落库`
+                        : "";
+                    showToast(`日志已刷新，第 ${state.page} 页 / ${Math.max(1, Math.ceil((state.total || 0) / state.pageSize))} 页${queueSuffix}`);
                 }
             } catch (error) {
                 updateLogRefreshResultLabel(lastRefreshLabel, "error", new Date());
@@ -7650,6 +7965,7 @@
                 session_id: log.session_id,
                 requested_model: log.requested_model,
                 model_name: log.model_name,
+                display_model: log.display_model,
                 provider_name: log.provider_name,
                 user_account_id: log.user_account_id,
                 user_account_name: log.user_account_name,
@@ -8010,8 +8326,8 @@
                     { label: "摘要", value: "当前密钥没有可命中的中转站，或默认路由和授权集合无法组成候选线路。" },
                 ],
                 fixes: [
-                    { label: "修复建议", value: "回到 API Key 管理页，检查授权中转站、默认中转站和路由模式是否配置正确。" },
-                    { label: "补充检查", value: "若是手动模式，确认是否需要开启回退，避免单线路失败后没有候选线路。" },
+                    { label: "修复建议", value: "回到 API Key 管理页，检查授权中转站、默认中转站和路由主策略是否配置正确。" },
+                    { label: "补充检查", value: "若指定了默认中转站，确认是否需要开启回退，避免单线路失败后没有候选线路。" },
                 ],
                 next: [
                     { label: "下一步", value: "修正密钥授权后，重新查看候选线路预览并再跑一次真实测试。" },
@@ -8026,7 +8342,7 @@
                     { label: "摘要", value: "当前账号或密钥已触发余额、费用或配额限制，代理链路被提前拦截。" },
                 ],
                 fixes: [
-                    { label: "修复建议", value: "先去账单页核对共享余额和累计消费，再确认是否触发日/月或总额度限制。" },
+                    { label: "修复建议", value: "先去账单页核对共享余额和累计消费，再确认是否触发日/月或总 Token/金额配额限制。" },
                     { label: "补充检查", value: "若是账户级限额导致，需联系管理员调整配额或充值。" },
                 ],
                 next: [
@@ -8548,7 +8864,6 @@
         const form = document.getElementById("users-batch-quota-form");
         const submitBtn = document.getElementById("users-batch-apply-btn");
         const quotaFieldNodes = Array.from(document.querySelectorAll("[data-batch-quota-field]"));
-        const quotaToggleNodes = Array.from(document.querySelectorAll("[data-batch-quota-toggle]"));
         const quotaInputNodes = Array.from(document.querySelectorAll("[data-batch-quota-input]"));
         const quotaCurrentNodes = Array.from(document.querySelectorAll("[data-batch-quota-current]"));
         if (!checkAll || !hiddenInput || !previewInput || !form) {
@@ -8556,18 +8871,70 @@
         }
         const quotaInputsByField = new Map(quotaInputNodes.map((node) => [node.dataset.batchQuotaInput, node]));
         const quotaCurrentByField = new Map(quotaCurrentNodes.map((node) => [node.dataset.batchQuotaCurrent, node]));
-        const quotaTogglesByField = new Map(quotaToggleNodes.map((node) => [node.dataset.batchQuotaToggle, node]));
+        const quotaPreviewState = new Map();
+
+        const normalizeQuotaValue = (input, rawValue) => {
+            const text = String(rawValue ?? "").trim();
+            if (!text) {
+                return { hasValue: false, normalized: "" };
+            }
+            const kind = input?.dataset.batchQuotaKind || "int";
+            if (kind === "decimal") {
+                const value = Number(text);
+                if (!Number.isFinite(value) || value < 0) {
+                    throw new Error("请输入大于或等于 0 的数字");
+                }
+                return { hasValue: true, normalized: value.toFixed(6) };
+            }
+            const value = Number(text);
+            if (!Number.isInteger(value) || value < 0) {
+                throw new Error("请输入大于或等于 0 的整数");
+            }
+            return { hasValue: true, normalized: String(value) };
+        };
+
+        const getQuotaFieldChangeState = (fieldName, { allowInvalid = false } = {}) => {
+            const input = quotaInputsByField.get(fieldName);
+            if (!input) {
+                return { changed: false, hasValue: false, valid: true, message: "" };
+            }
+            const currentState = quotaPreviewState.get(fieldName) || {};
+            let candidate;
+            try {
+                candidate = normalizeQuotaValue(input, input.value);
+            } catch (error) {
+                if (allowInvalid) {
+                    return {
+                        changed: String(input.value || "").trim() !== "",
+                        hasValue: String(input.value || "").trim() !== "",
+                        valid: false,
+                        message: error.message || "输入值无效",
+                    };
+                }
+                throw error;
+            }
+            if (!candidate.hasValue) {
+                return { changed: false, hasValue: false, valid: true, message: "" };
+            }
+            if (currentState.isMixed) {
+                return { changed: true, hasValue: true, valid: true, message: "" };
+            }
+            const original = normalizeQuotaValue(input, currentState.rawValue);
+            return {
+                changed: !original.hasValue || candidate.normalized !== original.normalized,
+                hasValue: true,
+                valid: true,
+                message: "",
+            };
+        };
 
         const syncQuotaFieldState = () => {
             quotaFieldNodes.forEach((fieldNode) => {
                 const fieldName = fieldNode.dataset.batchQuotaField;
-                const toggle = quotaTogglesByField.get(fieldName);
                 const input = quotaInputsByField.get(fieldName);
-                const enabled = Boolean(toggle?.checked);
-                fieldNode.classList.toggle("is-enabled", enabled);
-                if (input) {
-                    input.disabled = !enabled;
-                }
+                const state = getQuotaFieldChangeState(fieldName, { allowInvalid: true });
+                fieldNode.classList.toggle("is-enabled", state.changed);
+                input?.classList.toggle("is-invalid", state.hasValue && !state.valid);
             });
         };
 
@@ -8575,9 +8942,11 @@
             quotaCurrentByField.forEach((node) => {
                 node.textContent = "当前值：未选择用户";
             });
+            quotaPreviewState.clear();
             quotaInputsByField.forEach((node) => {
-                node.placeholder = "";
+                node.placeholder = "留空则不修改";
             });
+            syncQuotaFieldState();
         };
 
         const refreshQuotaPreview = async () => {
@@ -8593,15 +8962,22 @@
                 const query = selectedIds.map((id) => `user_ids=${encodeURIComponent(id)}`).join("&");
                 const data = await api.get(`/api/users/quota-preview?${query}`);
                 Object.entries(data?.fields || {}).forEach(([fieldName, item]) => {
+                    quotaPreviewState.set(fieldName, {
+                        rawValue: item.raw_value == null ? "" : String(item.raw_value),
+                        isMixed: item.is_mixed === true,
+                    });
                     const currentNode = quotaCurrentByField.get(fieldName);
                     const input = quotaInputsByField.get(fieldName);
                     if (currentNode) {
                         currentNode.textContent = `当前值：${item.display_value || "未知"}`;
                     }
-                    if (input && !input.value) {
-                        input.placeholder = item.raw_value == null ? "" : String(item.raw_value);
+                    if (input && !input.value.trim()) {
+                        input.placeholder = item.is_mixed
+                            ? "输入统一新值"
+                            : "留空则不修改";
                     }
                 });
+                syncQuotaFieldState();
             } catch (error) {
                 console.error("批量额度原值预览失败", error);
                 showToast(error.message || "批量额度原值预览失败", "error");
@@ -8628,7 +9004,8 @@
             });
             updateSelectionAndPreview();
         });
-        quotaToggleNodes.forEach((node) => {
+        quotaInputNodes.forEach((node) => {
+            node.addEventListener("input", syncQuotaFieldState);
             node.addEventListener("change", syncQuotaFieldState);
         });
         document.querySelectorAll("[data-user-batch-id]").forEach((node) => {
@@ -8642,16 +9019,41 @@
                 console.error("批量应用额度失败：未选择用户");
                 return;
             }
-            if (!quotaToggleNodes.some((node) => node.checked)) {
+            let invalidFieldMessage = "";
+            const changedFields = quotaFieldNodes
+                .map((fieldNode) => fieldNode.dataset.batchQuotaField)
+                .filter((fieldName) => {
+                    if (!fieldName) return false;
+                    const state = getQuotaFieldChangeState(fieldName, { allowInvalid: true });
+                    if (state.hasValue && !state.valid && !invalidFieldMessage) {
+                        invalidFieldMessage = state.message || "存在无效输入";
+                    }
+                    return state.changed;
+                });
+            if (invalidFieldMessage) {
                 event.preventDefault();
-                showToast("请至少勾选一个要修改的额度项", "error");
-                console.error("批量应用额度失败：未勾选额度项");
+                showToast(invalidFieldMessage, "error");
+                console.error(`批量应用额度失败：${invalidFieldMessage}`);
+                return;
+            }
+            if (!changedFields.length) {
+                event.preventDefault();
+                showToast("请至少填写一个需要修改且与当前值不同的额度项", "error");
+                console.error("批量应用额度失败：没有可提交的变更字段");
                 return;
             }
             event.preventDefault();
+            const formData = new FormData();
+            formData.append("user_ids_text", hiddenInput.value);
+            changedFields.forEach((fieldName) => {
+                const input = quotaInputsByField.get(fieldName);
+                if (!input) return;
+                formData.append("apply_fields", fieldName);
+                formData.append(fieldName, String(input.value || "").trim());
+            });
             const request = new Request(form.action, {
                 method: "POST",
-                body: new FormData(form),
+                body: formData,
                 credentials: "same-origin",
                 headers: {
                     Accept: "application/json",
@@ -8664,6 +9066,10 @@
                 const message = data?.message || "已批量应用用户额度";
                 console.info(message, data);
                 showToast(message);
+                quotaInputNodes.forEach((node) => {
+                    node.value = "";
+                });
+                syncQuotaFieldState();
                 await refreshQuotaPreview();
             } catch (error) {
                 const message = error?.message || "批量应用额度失败";
@@ -8673,7 +9079,7 @@
                 if (submitBtn) setButtonLoading(submitBtn, false);
             }
         });
-        syncQuotaFieldState();
+        resetQuotaPreview();
         updateSelection();
         await refreshQuotaPreview();
     }
@@ -8704,7 +9110,7 @@
         const costLimit = apiKey.cost_limit_total == null ? null : Number(apiKey.cost_limit_total || 0);
         return {
             summary: `累计消费 ${formatMoney(usedCost)}`,
-            detail: `余额 ${balance == null ? "不限" : formatMoney(balance)} · 金额额度 ${costLimit == null ? "不限" : formatMoney(costLimit)}`,
+            detail: `账户余额 ${balance == null ? "不限" : formatMoney(balance)} · 密钥金额配额 ${costLimit == null ? "不限" : formatMoney(costLimit)}`,
         };
     }
 
@@ -8749,6 +9155,7 @@
         const batchExpireBtn = document.getElementById("api-key-batch-expire-btn");
         const batchTemplateBtn = document.getElementById("api-key-batch-template-btn");
         const batchProvidersBtn = document.getElementById("api-key-batch-providers-btn");
+        const authorizeAllBtn = document.getElementById("api-key-authorize-all-btn");
         const checkAllVisibleInput = document.getElementById("api-key-check-all-visible");
         const addBtn = document.getElementById("add-api-key-btn");
         const modal = document.getElementById("api-key-modal");
@@ -8934,6 +9341,7 @@
                 const quota = buildApiKeyQuotaSummary(item);
                 const cost = buildApiKeyCostSummary(item);
                 const defaultProvider = state.providers.find((provider) => provider.id === item.default_provider_id);
+                const providerSummary = formatAuthorizedProviderSummary(item);
                 return `
                     <tr>
                         <td>
@@ -8963,8 +9371,8 @@
                             <div class="table-muted">默认中转 ${escapeHtml(defaultProvider?.name || (item.default_provider_id ? String(item.default_provider_id) : "-"))} · 失败后回退 ${formatSwitchText(item.manual_allow_fallback)}</div>
                         </td>
                         <td>
-                            <strong>${formatNumber(item.allowed_provider_ids.length)} 个</strong>
-                            <div class="table-muted">${escapeHtml(item.allowed_providers.map((provider) => provider.name).join(", ") || "未绑定")}</div>
+                            <strong>${escapeHtml(providerSummary.countText)}</strong>
+                            <div class="table-muted">${escapeHtml(providerSummary.nameText)}</div>
                             <div class="table-muted">模型 ${escapeHtml((item.allowed_model_names || []).length ? `${formatNumber(item.allowed_model_names.length)} 个白名单` : "全部可路由")}</div>
                             <div class="table-muted">重试 ${escapeHtml(item.route_exhausted_retry_infinite_enabled ? "无限" : "正常")}</div>
                         </td>
@@ -9040,6 +9448,67 @@
             return Array.from(providerSelector.querySelectorAll("[data-api-key-provider-id]:checked"))
                 .map((input) => Number(input.dataset.apiKeyProviderId))
                 .filter((value) => Number.isFinite(value));
+        }
+
+        function getAllProviderIds() {
+            return state.providers
+                .map((provider) => Number(provider.id))
+                .filter((value) => Number.isFinite(value));
+        }
+
+        function uniqueProviderIds(providerIds = []) {
+            return Array.from(new Set(
+                (providerIds || [])
+                    .map((item) => Number(item))
+                    .filter((value) => Number.isFinite(value))
+            ));
+        }
+
+        function areAllProvidersSelected(providerIds = []) {
+            const allProviderIds = getAllProviderIds();
+            if (!allProviderIds.length) return false;
+            const selectedIds = new Set(uniqueProviderIds(providerIds));
+            return allProviderIds.every((providerId) => selectedIds.has(providerId));
+        }
+
+        function getProviderSelectionForApiKey(apiKey = null) {
+            if (!apiKey || apiKey.auto_sync_provider_bindings) {
+                return getAllProviderIds();
+            }
+            return uniqueProviderIds(apiKey.allowed_provider_ids || []);
+        }
+
+        function getProviderSelectionForTemplate(template = null) {
+            if (!template) {
+                return getAllProviderIds();
+            }
+            const selectedProviderIds = uniqueProviderIds(template.allowed_provider_ids || []);
+            return selectedProviderIds.length ? selectedProviderIds : getAllProviderIds();
+        }
+
+        function buildProviderAuthorizationPayload(providerIds = []) {
+            const normalizedProviderIds = uniqueProviderIds(providerIds);
+            const autoSyncProviderBindings = areAllProvidersSelected(normalizedProviderIds);
+            return {
+                auto_sync_provider_bindings: autoSyncProviderBindings,
+                allowed_provider_ids: autoSyncProviderBindings ? [] : normalizedProviderIds,
+            };
+        }
+
+        function formatAuthorizedProviderSummary(item) {
+            if (item?.auto_sync_provider_bindings) {
+                return {
+                    countText: `${formatNumber(state.providers.length || item.allowed_provider_ids.length || 0)} 个`,
+                    nameText: "全部渠道（自动同步）",
+                };
+            }
+            const providerNames = (item?.allowed_providers || [])
+                .map((provider) => provider.name)
+                .filter(Boolean);
+            return {
+                countText: `${formatNumber((item?.allowed_provider_ids || []).length)} 个`,
+                nameText: providerNames.join(", ") || "未绑定",
+            };
         }
 
         function renderApiKeyModelSelector(container, models = [], selectedNames = []) {
@@ -9122,14 +9591,14 @@
         function applyTemplateToForm(templateId) {
             const template = state.templates.find((item) => String(item.id) === String(templateId));
             if (!template) return;
-            routeModeInput.value = template.route_mode || "failover";
+            routeModeInput.value = FIXED_ROUTE_MODE;
             manualFallbackInput.checked = template.manual_allow_fallback ?? true;
             enabledInput.checked = template.enabled ?? true;
             tokenLimitInput.value = template.token_limit_total ?? "";
             costLimitInput.value = template.cost_limit_total ?? "";
             expiresAtInput.value = template.expires_in_days ? toDatetimeLocalInputValue(new Date(Date.now() + (Number(template.expires_in_days) * 86400000)).toISOString()) : "";
             populateDefaultProviderOptions(template.default_provider_id || null);
-            renderApiKeyProviderSelector(providerSelector, state.providers, template.allowed_provider_ids || []);
+            renderApiKeyProviderSelector(providerSelector, state.providers, getProviderSelectionForTemplate(template));
             renderApiKeyModelSelector(modelSelector, state.models, template.allowed_model_names || []);
             refreshRoutePreview();
         }
@@ -9138,6 +9607,13 @@
             if (!templateTableBody) return;
             templateTableBody.innerHTML = state.templates.map((item) => {
                 const defaultProvider = state.providers.find((provider) => provider.id === item.default_provider_id);
+                const templateProviderIds = getProviderSelectionForTemplate(item);
+                const isAllProvidersTemplate = !uniqueProviderIds(item.allowed_provider_ids || []).length;
+                const templateProviderNames = isAllProvidersTemplate
+                    ? "全部渠道"
+                    : templateProviderIds
+                        .map((providerId) => state.providers.find((provider) => provider.id === providerId)?.name || String(providerId))
+                        .join(", ");
                 return `
                     <tr>
                         <td>
@@ -9149,8 +9625,8 @@
                             <div class="table-muted">默认中转 ${escapeHtml(defaultProvider?.name || (item.default_provider_id ? String(item.default_provider_id) : "-"))} · 回退 ${formatSwitchText(item.manual_allow_fallback)}</div>
                         </td>
                         <td>
-                            <strong>${formatNumber((item.allowed_provider_ids || []).length)} 个</strong>
-                            <div class="table-muted">${escapeHtml((item.allowed_provider_ids || []).map((providerId) => state.providers.find((provider) => provider.id === providerId)?.name || String(providerId)).join(", ") || "未绑定")}</div>
+                            <strong>${isAllProvidersTemplate ? "全部渠道" : `${formatNumber(templateProviderIds.length)} 个`}</strong>
+                            <div class="table-muted">${escapeHtml(templateProviderNames)}</div>
                         </td>
                         <td>
                             <strong>${(item.allowed_model_names || []).length ? `${formatNumber(item.allowed_model_names.length)} 个` : "不限制"}</strong>
@@ -9181,7 +9657,7 @@
             templateModalTitle.textContent = template ? `编辑策略模板 #${template.id}` : "新增策略模板";
             templateEditIdInput.value = template?.id ?? "";
             templateNameInput.value = template?.name ?? "";
-            templateRouteModeInput.value = template?.route_mode ?? "failover";
+            templateRouteModeInput.value = FIXED_ROUTE_MODE;
             templateTokenLimitInput.value = template?.token_limit_total ?? "";
             templateCostLimitInput.value = template?.cost_limit_total ?? "";
             templateExpiresInDaysInput.value = template?.expires_in_days ?? "";
@@ -9189,7 +9665,7 @@
             templateManualFallbackInput.checked = template?.manual_allow_fallback ?? true;
             templateRemarkInput.value = template?.remark ?? "";
             populateTemplateDefaultProviderOptions(template?.default_provider_id || null);
-            renderApiKeyProviderSelector(templateProviderSelector, state.providers, template?.allowed_provider_ids || []);
+            renderApiKeyProviderSelector(templateProviderSelector, state.providers, getProviderSelectionForTemplate(template));
             renderApiKeyModelSelector(templateModelSelector, state.models, template?.allowed_model_names || []);
             templateModal.classList.remove("hidden");
         }
@@ -9199,7 +9675,7 @@
             templateModal.classList.add("hidden");
             templateForm.reset();
             templateEditIdInput.value = "";
-            renderApiKeyProviderSelector(templateProviderSelector, state.providers, []);
+            renderApiKeyProviderSelector(templateProviderSelector, state.providers, getAllProviderIds());
             renderApiKeyModelSelector(templateModelSelector, state.models, []);
             populateTemplateDefaultProviderOptions();
         }
@@ -9283,7 +9759,7 @@
             generationModeInput.value = isEditing ? "custom" : "auto";
             rawApiKeyInput.value = isEditing ? (apiKey?.raw_api_key || "") : "";
             remarkInput.value = apiKey?.remark || "";
-            routeModeInput.value = apiKey?.route_mode || "failover";
+            routeModeInput.value = FIXED_ROUTE_MODE;
             enabledInput.checked = apiKey?.enabled ?? true;
             manualFallbackInput.checked = apiKey?.manual_allow_fallback ?? true;
             routeInfiniteRetryInput.checked = apiKey?.route_exhausted_retry_infinite_enabled ?? false;
@@ -9293,13 +9769,13 @@
             costLimitInput.value = apiKey?.cost_limit_total ?? "";
             balanceAmountInput.value = isEditing ? "" : (apiKey?.balance_amount ?? "");
             requestLimitDailyInput.value = apiKey?.request_limit_daily ?? "";
-            qpsLimitInput.value = apiKey?.qps_limit ?? "";
-            rpmLimitInput.value = apiKey?.rpm_limit ?? "";
+            qpsLimitInput.value = apiKey?.qps_limit ?? 20;
+            rpmLimitInput.value = apiKey?.rpm_limit ?? 20;
             tpmLimitInput.value = apiKey?.tpm_limit ?? "";
             balanceAmountInput.disabled = isEditing;
             balanceAmountInput.placeholder = isEditing ? "已创建密钥请到详情页做余额调整" : "留空表示不限制";
             populateDefaultProviderOptions(apiKey?.default_provider_id || null);
-            renderApiKeyProviderSelector(providerSelector, state.providers, apiKey?.allowed_provider_ids || []);
+            renderApiKeyProviderSelector(providerSelector, state.providers, getProviderSelectionForApiKey(apiKey));
             renderApiKeyModelSelector(modelSelector, state.models, apiKey?.allowed_model_names || []);
             refreshRawApiKeyInputState();
             rawPanel.classList.add("hidden");
@@ -9318,7 +9794,7 @@
             rawApiKeyInput.value = "";
             balanceAmountInput.disabled = false;
             balanceAmountInput.placeholder = "留空表示不限制";
-            renderApiKeyProviderSelector(providerSelector, state.providers, []);
+            renderApiKeyProviderSelector(providerSelector, state.providers, getAllProviderIds());
             renderApiKeyModelSelector(modelSelector, state.models, []);
             populateDefaultProviderOptions();
             populateOwnerUserOptions();
@@ -9335,8 +9811,8 @@
 
         function openBatchProviderModal() {
             populateBatchProviderOptions();
-            renderApiKeyProviderSelector(batchProviderSelector, state.providers, []);
-            batchProviderRouteMode.value = "failover";
+            renderApiKeyProviderSelector(batchProviderSelector, state.providers, getAllProviderIds());
+            batchProviderRouteMode.value = FIXED_ROUTE_MODE;
             batchProviderFallback.checked = true;
             batchProviderInfiniteRetry.checked = false;
             batchProviderModal.classList.remove("hidden");
@@ -9492,6 +9968,7 @@
                 showToast("默认中转站必须包含在授权中转站里", "error");
                 return;
             }
+            const providerAuthorizationPayload = buildProviderAuthorizationPayload(allowedProviderIds);
             const payload = {
                 name: nameInput.value.trim(),
                 remark: remarkInput.value.trim() || null,
@@ -9503,12 +9980,13 @@
                 qps_limit: qpsLimitInput.value === "" ? null : Number(qpsLimitInput.value),
                 rpm_limit: rpmLimitInput.value === "" ? null : Number(rpmLimitInput.value),
                 tpm_limit: tpmLimitInput.value === "" ? null : Number(tpmLimitInput.value),
-                route_mode: routeModeInput.value,
+                route_mode: FIXED_ROUTE_MODE,
                 default_provider_id: defaultProviderId,
                 owner_user_id: ownerUserSelect.value === "" ? null : Number(ownerUserSelect.value),
                 manual_allow_fallback: manualFallbackInput.checked,
                 route_exhausted_retry_infinite_enabled: routeInfiniteRetryInput.checked,
-                allowed_provider_ids: allowedProviderIds,
+                auto_sync_provider_bindings: providerAuthorizationPayload.auto_sync_provider_bindings,
+                allowed_provider_ids: providerAuthorizationPayload.allowed_provider_ids,
                 allowed_model_names: getSelectedModelNames(),
             };
             const rawApiKey = rawApiKeyInput.value.trim();
@@ -9717,6 +10195,21 @@
             }
             openBatchProviderModal();
         });
+        authorizeAllBtn?.addEventListener("click", async () => {
+            if (!window.confirm("确认将全部 API Key 恢复为全渠道授权吗？")) {
+                return;
+            }
+            try {
+                setButtonLoading(authorizeAllBtn, true);
+                const result = await api.post("/api/api-keys/batch/providers/authorize-all");
+                showToast(`已恢复 ${formatNumber(result.affected_count || 0)} 个 API Key 的全渠道授权`);
+                await loadData({ silent: true, reloadReference: true });
+            } catch (error) {
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(authorizeAllBtn, false);
+            }
+        });
         checkAllVisibleInput.addEventListener("change", () => {
             const visibleIds = getVisibleApiKeyIds();
             if (checkAllVisibleInput.checked) {
@@ -9750,15 +10243,17 @@
                 showToast("默认中转站必须包含在授权中转站里", "error");
                 return;
             }
+            const providerAuthorizationPayload = buildProviderAuthorizationPayload(allowedProviderIds);
             try {
                 setButtonLoading(batchProviderSubmitBtn, true);
                 const result = await api.post("/api/api-keys/batch/providers", {
                     api_key_ids: Array.from(state.selectedIds),
-                    route_mode: batchProviderRouteMode.value,
+                    route_mode: FIXED_ROUTE_MODE,
                     default_provider_id: defaultProviderId,
                     manual_allow_fallback: batchProviderFallback.checked,
                     route_exhausted_retry_infinite_enabled: batchProviderInfiniteRetry.checked,
-                    allowed_provider_ids: allowedProviderIds,
+                    auto_sync_provider_bindings: providerAuthorizationPayload.auto_sync_provider_bindings,
+                    allowed_provider_ids: providerAuthorizationPayload.allowed_provider_ids,
                 });
                 showToast(`已批量更新渠道授权 ${formatNumber(result.affected_count || 0)} 个`);
                 closeBatchProviderModal();
@@ -9778,17 +10273,18 @@
                 showToast("默认中转站必须包含在授权中转站里", "error");
                 return;
             }
+            const providerAuthorizationPayload = buildProviderAuthorizationPayload(allowedProviderIds);
             const payload = {
                 name: templateNameInput.value.trim(),
                 remark: templateRemarkInput.value.trim() || null,
                 enabled: templateEnabledInput.checked,
-                route_mode: templateRouteModeInput.value,
+                route_mode: FIXED_ROUTE_MODE,
                 default_provider_id: defaultProviderId,
                 manual_allow_fallback: templateManualFallbackInput.checked,
                 token_limit_total: templateTokenLimitInput.value === "" ? null : Number(templateTokenLimitInput.value),
                 cost_limit_total: templateCostLimitInput.value === "" ? null : Number(templateCostLimitInput.value),
                 expires_in_days: templateExpiresInDaysInput.value === "" ? null : Number(templateExpiresInDaysInput.value),
-                allowed_provider_ids: allowedProviderIds,
+                allowed_provider_ids: providerAuthorizationPayload.allowed_provider_ids,
                 allowed_model_names: getTemplateSelectedModelNames(),
             };
             try {
@@ -9933,11 +10429,11 @@
 
         function renderBilling(billing) {
             document.getElementById("api-key-detail-billing-summary").innerHTML = `
-                <div><span>当前余额</span><strong>${billing.balance_amount == null ? "不限" : formatMoney(billing.balance_amount)}</strong></div>
+                <div><span>账户余额</span><strong>${billing.balance_amount == null ? "不限" : formatMoney(billing.balance_amount)}</strong></div>
                 <div><span>累计消费</span><strong>${formatMoney(billing.total_cost_used)}</strong></div>
                 <div><span>累计充值</span><strong>${formatMoney(billing.total_recharge_amount)}</strong></div>
-                <div><span>金额额度</span><strong>${billing.cost_limit_total == null ? "不限" : formatMoney(billing.cost_limit_total)}</strong></div>
-                <div><span>剩余额度</span><strong>${billing.remaining_cost_quota == null ? "不限" : formatMoney(billing.remaining_cost_quota)}</strong></div>
+                <div><span>密钥金额配额</span><strong>${billing.cost_limit_total == null ? "不限" : formatMoney(billing.cost_limit_total)}</strong></div>
+                <div><span>剩余金额配额</span><strong>${billing.remaining_cost_quota == null ? "不限" : formatMoney(billing.remaining_cost_quota)}</strong></div>
                 <div><span>24h 消费</span><strong>${formatMoney(billing.recent_billed_cost)}</strong></div>
                 <div><span>账单笔数</span><strong>${formatNumber(billing.total_billing_records)}</strong></div>
             `;
@@ -9964,9 +10460,9 @@
             document.getElementById("api-key-detail-subtitle").textContent = `${renderApiKeyStatusText(detail.status)} · ${detail.key_masked} · 最近使用 ${formatDate(detail.last_used_at)}`;
             const quota = buildApiKeyQuotaSummary(detail);
             document.getElementById("api-key-detail-signal").innerHTML = `
-                <div class="cockpit-aside-label">额度脉冲</div>
+                <div class="cockpit-aside-label">Token 与余额</div>
                 <div class="cockpit-aside-value">${detail.balance_amount == null ? (detail.remaining_tokens == null ? "∞" : formatNumber(detail.remaining_tokens)) : formatMoney(detail.balance_amount)}</div>
-                <div class="cockpit-aside-copy">余额、额度与最近调用强度</div>
+                <div class="cockpit-aside-copy">账户余额、Token 配额与最近调用强度</div>
                 <div class="cockpit-health-bar"><span style="width:${quota.percent}%"></span></div>
                 <div class="cockpit-aside-meta">
                     <span>状态 ${escapeHtml(renderApiKeyStatusText(detail.status))}</span>
@@ -9987,7 +10483,7 @@
                 <div><span>状态</span><strong>${escapeHtml(renderApiKeyStatusText(detail.status))}</strong></div>
                 <div><span>前缀</span><strong>${escapeHtml(detail.key_masked)}</strong></div>
                 <div><span>密钥明文</span><strong>${detail.raw_api_key ? `${escapeHtml(detail.raw_api_key)} <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="${escapeHtml(detail.raw_api_key)}">复制</button>` : "历史密钥未存明文，可在编辑时替换为新密钥"}</strong></div>
-                <div><span>默认中转</span><strong>${escapeHtml(detail.default_provider_id ? String(detail.default_provider_id) : "-")}</strong></div>
+                <div><span>默认中转</span><strong>${escapeHtml(detail.default_provider_name || (detail.default_provider_id ? String(detail.default_provider_id) : "-"))}</strong></div>
                 <div><span>过期时间</span><strong>${formatDate(detail.expires_at)}</strong></div>
                 <div><span>每日请求上限</span><strong>${formatLimitSetting(detail.request_limit_daily)}</strong></div>
                 <div><span>QPS / RPM / TPM</span><strong>${formatLimitSetting(detail.qps_limit)} / ${formatLimitSetting(detail.rpm_limit)} / ${formatLimitSetting(detail.tpm_limit)}</strong></div>
@@ -9996,12 +10492,12 @@
             `;
             document.getElementById("api-key-detail-quota-bar").style.width = `${quota.percent}%`;
             document.getElementById("api-key-detail-quota-meta").innerHTML = `
-                <div><span>总额度</span><strong>${detail.token_limit_total == null ? "无限额" : formatNumber(detail.token_limit_total)}</strong></div>
+                <div><span>Token 总配额</span><strong>${detail.token_limit_total == null ? "无限额" : formatNumber(detail.token_limit_total)}</strong></div>
                 <div><span>已使用</span><strong>${formatNumber(detail.total_tokens_used)}</strong></div>
-                <div><span>剩余额度</span><strong>${detail.remaining_tokens == null ? "无限额" : formatNumber(detail.remaining_tokens)}</strong></div>
+                <div><span>Token 剩余配额</span><strong>${detail.remaining_tokens == null ? "无限额" : formatNumber(detail.remaining_tokens)}</strong></div>
                 <div><span>24h Token</span><strong>${formatNumber(detail.recent_usage.recent_total_tokens)} Token</strong></div>
-                <div><span>金额额度</span><strong>${detail.cost_limit_total == null ? "不限" : formatMoney(detail.cost_limit_total)}</strong></div>
-                <div><span>当前余额</span><strong>${detail.balance_amount == null ? "不限" : formatMoney(detail.balance_amount)}</strong></div>
+                <div><span>密钥金额配额</span><strong>${detail.cost_limit_total == null ? "不限" : formatMoney(detail.cost_limit_total)}</strong></div>
+                <div><span>账户余额</span><strong>${detail.balance_amount == null ? "不限" : formatMoney(detail.balance_amount)}</strong></div>
                 <div><span>每日请求</span><strong>${formatLimitSetting(detail.request_limit_daily)}</strong></div>
                 <div><span>QPS / RPM / TPM</span><strong>${formatLimitSetting(detail.qps_limit)} / ${formatLimitSetting(detail.rpm_limit)} / ${formatLimitSetting(detail.tpm_limit)}</strong></div>
                 <div><span>24h 消费</span><strong>${formatMoney(stats.recent_total_cost)}</strong></div>
@@ -10053,7 +10549,7 @@
                 <tr>
                     <td>${formatDate(log.created_at)}</td>
                     <td>${escapeHtml(formatLogTypeLabel(log.log_type))}</td>
-                    <td>${escapeHtml(log.requested_model || log.model_name || "-")}</td>
+                    <td>${renderLogModelCell(log)}</td>
                     <td>${escapeHtml(log.provider_name || "-")}</td>
                     <td>${escapeHtml(log.api_client_auth_result ? formatApiClientAuthResultLabel(log.api_client_auth_result) : (log.success ? formatApiClientAuthResultLabel("authenticated") : "-"))}</td>
                     <td>${formatNumber(log.total_tokens ?? 0)}<div class="table-muted">${escapeHtml(log.total_cost == null ? "-" : formatMoney(log.total_cost))}</div></td>
@@ -10445,7 +10941,11 @@
             params.set("exclude_health_checks", excludeHealthChecks ? "true" : "false");
             params.set("_ts", Date.now().toString());
             try {
-                const data = await api.get(`/api/logs?${params.toString()}`);
+            if (manual && feedbackSource === "refresh") {
+                params.set("wait_for_latest", "true");
+                params.set("wait_timeout_ms", "2000");
+            }
+            const data = await api.get(`/api/logs?${params.toString()}`);
                 renderLogPagination(data.total ?? data.items.length);
                 renderLogSummary(data.summary || {});
                 tableBody.innerHTML = data.items.map((log) => `
@@ -10464,7 +10964,7 @@
                             <div class="table-muted">${escapeHtml(log.api_client_key_prefix || "-")}</div>
                         </td>
                         <td>${escapeHtml(buildSessionValue(log))}</td>
-                        <td>${escapeHtml(log.requested_model || log.model_name || "-")}</td>
+                        <td>${renderLogModelCell(log)}</td>
                         <td>${escapeHtml(log.provider_name || "-")}</td>
                         <td>${renderLogResultCell(log)}</td>
                         <td>${renderLogBillingCell(log)}</td>
@@ -10489,7 +10989,10 @@
                     refreshFeedbackStatus = "success";
                 }
                 if (manual) {
-                    showToast(`日志已刷新，第 ${state.page} 页 / ${Math.max(1, Math.ceil((state.total || 0) / state.pageSize))} 页`);
+                    const queueSuffix = data.queue_timed_out
+                        ? `，但日志队列仍有 ${formatNumber((data.queued_request_logs || 0) + (data.processing_request_logs || 0))} 条待落库`
+                        : "";
+                    showToast(`日志已刷新，第 ${state.page} 页 / ${Math.max(1, Math.ceil((state.total || 0) / state.pageSize))} 页${queueSuffix}`);
                 }
             } catch (error) {
                 updateLogRefreshResultLabel(lastRefreshLabel, "error", new Date());
@@ -10534,6 +11037,7 @@
                 session_id: log.session_id,
                 requested_model: log.requested_model,
                 model_name: log.model_name,
+                display_model: log.display_model,
                 provider_name: log.provider_name,
                 user_account_id: log.user_account_id,
                 user_account_name: log.user_account_name,
@@ -11338,6 +11842,7 @@
                 const requestPercent = capacityPercent(item.active_requests, item.max_active_requests);
                 const streamPercent = capacityPercent(item.active_streams, item.max_active_streams);
                 const qpsPercent = capacityPercent(item.current_qps, item.max_qps);
+                const rpmPercent = capacityPercent(item.current_rpm, item.max_rpm);
                 const failureRate = Number(item.failure_rate || 0);
                 const tone = failureRate >= 20 ? "danger" : failureRate >= 5 ? "warn" : "ok";
                 return `
@@ -11346,7 +11851,10 @@
                         <td>${providerAvailabilityBadge(item.health_status || "unknown")}</td>
                         <td>${renderMiniBar(capacityLabel(item.active_requests, item.max_active_requests), "", requestPercent, requestPercent >= 90 ? "danger" : requestPercent >= 75 ? "warn" : "ok")}</td>
                         <td>${renderMiniBar(capacityLabel(item.active_streams, item.max_active_streams), "", streamPercent, streamPercent >= 90 ? "danger" : streamPercent >= 75 ? "warn" : "ok")}</td>
-                        <td>${renderMiniBar(capacityLabel(Number(item.current_qps || 0).toFixed(2), item.max_qps), "", qpsPercent, qpsPercent >= 90 ? "danger" : qpsPercent >= 75 ? "warn" : "ok")}</td>
+                        <td>
+                            ${renderMiniBar(`QPS ${capacityLabel(Number(item.current_qps || 0).toFixed(2), item.max_qps)}`, "", qpsPercent, qpsPercent >= 90 ? "danger" : qpsPercent >= 75 ? "warn" : "ok")}
+                            ${renderMiniBar(`RPM ${capacityLabel(Number(item.current_rpm || 0).toFixed(0), item.max_rpm)}`, "", rpmPercent, rpmPercent >= 90 ? "danger" : rpmPercent >= 75 ? "warn" : "ok")}
+                        </td>
                         <td>${formatNumber(item.total_requests || 0)}</td>
                         <td><span class="operations-rate" data-tone="${tone}">${formatPercent(failureRate)}</span></td>
                         <td>${formatLatencyMs(item.avg_first_token_latency_ms)}</td>

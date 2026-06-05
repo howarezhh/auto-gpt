@@ -35,6 +35,7 @@ from app.routers.user_accounts import router as user_accounts_router
 from app.routers.user_portal import router as user_portal_router
 from app.scheduler import scheduler
 from app.services.api_key_auth_cache import ApiKeyAuthCache
+from app.services.api_key_admin_service import ApiKeyAdminService
 from app.services.api_key_service import ApiClientAuthError
 from app.services.log_service import LogService
 from app.services.model_catalog_service import ModelCatalogService
@@ -75,7 +76,7 @@ def init_database(*, allow_production_ddl: bool = False) -> None:
     try:
         _migrate_provider_capacity_columns(db)
         _migrate_app_setting_concurrency_columns(db)
-        _migrate_api_client_key_columns(db)
+        api_key_columns_changed = _migrate_api_client_key_columns(db)
         _migrate_cache_price_columns(db)
         _migrate_model_mapping_table(db)
         if _is_sqlite_session(db):
@@ -88,6 +89,10 @@ def init_database(*, allow_production_ddl: bool = False) -> None:
             db.add(setting)
             db.commit()
             db.refresh(setting)
+        if api_key_columns_changed:
+            ApiKeyAdminService.backfill_all_api_keys_to_all_providers(db)
+        else:
+            ApiKeyAdminService.sync_auto_provider_bindings(db)
         ProviderService.sync_legacy_provider_models(db)
         ModelCatalogService.sync_model_catalogs(db)
     finally:
@@ -111,9 +116,10 @@ def _migrate_provider_capacity_columns(db) -> None:
     """为 providers 表补充容量控制相关字段。"""
     existing_columns = _get_table_columns(db, "providers")
     additions = {
-        "max_active_requests": "ALTER TABLE providers ADD COLUMN max_active_requests INTEGER DEFAULT 1000",
-        "max_active_streams": "ALTER TABLE providers ADD COLUMN max_active_streams INTEGER DEFAULT 1000",
-        "max_qps": "ALTER TABLE providers ADD COLUMN max_qps INTEGER",
+        "max_active_requests": "ALTER TABLE providers ADD COLUMN max_active_requests INTEGER DEFAULT 20",
+        "max_active_streams": "ALTER TABLE providers ADD COLUMN max_active_streams INTEGER DEFAULT 10",
+        "max_qps": "ALTER TABLE providers ADD COLUMN max_qps INTEGER DEFAULT 20",
+        "max_rpm": "ALTER TABLE providers ADD COLUMN max_rpm INTEGER DEFAULT 20",
         "max_error_rate": "ALTER TABLE providers ADD COLUMN max_error_rate FLOAT DEFAULT 80",
         "first_token_timeout_sec": "ALTER TABLE providers ADD COLUMN first_token_timeout_sec INTEGER DEFAULT 60",
     }
@@ -199,6 +205,7 @@ def _migrate_cache_price_columns(db) -> None:
         },
         "request_logs": {
             "channel_price_cache_per_1k": f"ALTER TABLE request_logs ADD COLUMN channel_price_cache_per_1k {price_type}",
+            "channel_price_cache_write_per_1k": f"ALTER TABLE request_logs ADD COLUMN channel_price_cache_write_per_1k {price_type}",
             "model_reasoning_effort": "ALTER TABLE request_logs ADD COLUMN model_reasoning_effort TEXT",
             "pricing_tier_key": "ALTER TABLE request_logs ADD COLUMN pricing_tier_key TEXT",
             "pricing_tier_name": "ALTER TABLE request_logs ADD COLUMN pricing_tier_name TEXT",
@@ -239,15 +246,17 @@ def _migrate_cache_price_columns(db) -> None:
         db.commit()
 
 
-def _migrate_api_client_key_columns(db) -> None:
+def _migrate_api_client_key_columns(db) -> bool:
     """为 api_client_keys 表补充 API Key 管理运行字段。"""
     existing_columns = _get_table_columns(db, "api_client_keys")
     if not existing_columns:
-        return
+        return False
     dialect_name = db.get_bind().dialect.name
     false_default = "FALSE" if dialect_name == "postgresql" else "0"
+    true_default = "TRUE" if dialect_name == "postgresql" else "1"
     additions = {
         "route_exhausted_retry_infinite_enabled": f"ALTER TABLE api_client_keys ADD COLUMN route_exhausted_retry_infinite_enabled BOOLEAN NOT NULL DEFAULT {false_default}",
+        "auto_sync_provider_bindings": f"ALTER TABLE api_client_keys ADD COLUMN auto_sync_provider_bindings BOOLEAN NOT NULL DEFAULT {true_default}",
     }
     changed = False
     for column, ddl in additions.items():
@@ -257,6 +266,7 @@ def _migrate_api_client_key_columns(db) -> None:
         changed = True
     if changed:
         db.commit()
+    return changed
 
 
 def _migrate_model_mapping_table(db) -> None:
@@ -315,6 +325,7 @@ def _migrate_request_log_columns(db) -> None:
         "channel_price_input_per_1k": f"ALTER TABLE request_logs ADD COLUMN channel_price_input_per_1k {price_type}",
         "channel_price_output_per_1k": f"ALTER TABLE request_logs ADD COLUMN channel_price_output_per_1k {price_type}",
         "channel_price_cache_per_1k": f"ALTER TABLE request_logs ADD COLUMN channel_price_cache_per_1k {price_type}",
+        "channel_price_cache_write_per_1k": f"ALTER TABLE request_logs ADD COLUMN channel_price_cache_write_per_1k {price_type}",
         "api_client_balance_after": f"ALTER TABLE request_logs ADD COLUMN api_client_balance_after {money_type}",
         "prompt_tokens": "ALTER TABLE request_logs ADD COLUMN prompt_tokens INTEGER",
         "completion_tokens": "ALTER TABLE request_logs ADD COLUMN completion_tokens INTEGER",
@@ -412,8 +423,8 @@ def _migrate_request_log_columns(db) -> None:
         "request_limit_daily": "ALTER TABLE api_client_keys ADD COLUMN request_limit_daily INTEGER",
         "token_limit_daily": "ALTER TABLE api_client_keys ADD COLUMN token_limit_daily INTEGER",
         "cost_limit_daily": f"ALTER TABLE api_client_keys ADD COLUMN cost_limit_daily {money_type}",
-        "qps_limit": "ALTER TABLE api_client_keys ADD COLUMN qps_limit INTEGER",
-        "rpm_limit": "ALTER TABLE api_client_keys ADD COLUMN rpm_limit INTEGER",
+        "qps_limit": "ALTER TABLE api_client_keys ADD COLUMN qps_limit INTEGER DEFAULT 20",
+        "rpm_limit": "ALTER TABLE api_client_keys ADD COLUMN rpm_limit INTEGER DEFAULT 20",
         "tpm_limit": "ALTER TABLE api_client_keys ADD COLUMN tpm_limit INTEGER",
         "cost_limit_total": f"ALTER TABLE api_client_keys ADD COLUMN cost_limit_total {money_type}",
         "total_cost_used": f"ALTER TABLE api_client_keys ADD COLUMN total_cost_used {money_type} NOT NULL DEFAULT 0",
@@ -725,6 +736,9 @@ def _reject_oversized_v1_request_by_content_length(request: Request) -> JSONResp
             trace_id=trace_id,
             error_type="invalid_request_error",
             retryable=False,
+            recoverable=False,
+            category="invalid_request",
+            status_code=413,
             detail={
                 "request_body_bytes": request_bytes,
                 "max_v1_request_body_bytes": limit,
@@ -769,14 +783,21 @@ def _apply_v1_cors_headers(request: Request, response) -> None:
 async def api_client_auth_error_handler(request: Request, exc: ApiClientAuthError):
     await _log_api_client_auth_failure(request, exc)
     trace_id = getattr(request.state, "trace_id", None)
+    classified = OpenAIErrorService.classify_error(
+        status_code=exc.status_code,
+        detail={"message": exc.message, "code": exc.code},
+    )
     return JSONResponse(
         status_code=exc.status_code,
         content=OpenAIErrorService.build_error_payload(
             message=exc.message,
             code=exc.code,
             trace_id=trace_id,
-            error_type="authentication_error" if exc.status_code in {401, 403} else "rate_limit_error",
-            retryable=exc.status_code == 429,
+            error_type=classified["error_type"],
+            retryable=bool(classified["retryable"]),
+            recoverable=bool(classified["recoverable"]),
+            category=str(classified["category"]),
+            status_code=exc.status_code,
         ),
         headers={"X-Trace-Id": trace_id or "", "X-Request-Id": trace_id or ""},
     )
@@ -805,6 +826,9 @@ async def request_validation_exception_handler(request: Request, exc: RequestVal
             trace_id=trace_id,
             error_type="invalid_request_error",
             retryable=False,
+            recoverable=False,
+            category="invalid_request",
+            status_code=422,
             detail=detail,
         ),
         headers={"X-Trace-Id": trace_id or "", "X-Request-Id": trace_id or ""},
@@ -816,10 +840,10 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     if not _is_external_v1_path(request.url.path):
         return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
     trace_id = getattr(request.state, "trace_id", None)
-    error_type, default_code, retryable = OpenAIErrorService.classify_status_code(exc.status_code)
     message = OpenAIErrorService.extract_message(exc.detail, fallback="Request failed")
     detail_payload = exc.detail if isinstance(exc.detail, dict) else None
-    error_code = default_code
+    classified = OpenAIErrorService.classify_error(status_code=exc.status_code, detail=detail_payload)
+    error_code = str(classified["code"])
     if isinstance(detail_payload, dict):
         if isinstance(detail_payload.get("code"), str):
             error_code = detail_payload["code"]
@@ -830,7 +854,7 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         status_code=exc.status_code,
         message=message,
         error_code=error_code,
-        retryable=retryable,
+        retryable=bool(classified["retryable"]),
         detail=detail_payload,
         request_body_json=getattr(request.state, "v1_request_body_structure_json", None),
     )
@@ -838,8 +862,11 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         message=message,
         code=error_code,
         trace_id=trace_id,
-        error_type=error_type,
-        retryable=retryable,
+        error_type=str(classified["error_type"]),
+        retryable=bool(classified["retryable"]),
+        recoverable=bool(classified["recoverable"]),
+        category=str(classified["category"]),
+        status_code=exc.status_code,
         detail=detail_payload if isinstance(detail_payload, dict) else None,
     )
     if detail_payload is not None:
@@ -866,12 +893,13 @@ def _build_unhandled_v1_error_response(request: Request, exc: Exception) -> JSON
         "exception_type": exc.__class__.__name__,
         "message": message,
     }
+    classified = OpenAIErrorService.classify_error(status_code=500, detail=detail)
     _log_v1_request_rejected_before_route(
         request=request,
         status_code=500,
         message=message,
         error_code="internal_server_error",
-        retryable=True,
+        retryable=bool(classified["retryable"]),
         detail=detail,
         request_body_json=getattr(request.state, "v1_request_body_structure_json", None),
     )
@@ -881,8 +909,11 @@ def _build_unhandled_v1_error_response(request: Request, exc: Exception) -> JSON
             message=message,
             code="internal_server_error",
             trace_id=trace_id,
-            error_type="server_error",
-            retryable=True,
+            error_type=str(classified["error_type"]),
+            retryable=bool(classified["retryable"]),
+            recoverable=bool(classified["recoverable"]),
+            category=str(classified["category"]),
+            status_code=500,
             detail=detail,
         ),
         headers={"X-Trace-Id": trace_id or "", "X-Request-Id": trace_id or ""},

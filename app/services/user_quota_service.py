@@ -43,39 +43,7 @@ class UserQuotaViolation:
 class UserQuotaService:
     @staticmethod
     def get_realtime_usage_snapshot(db: Session, *, user: UserAccount) -> UserQuotaUsageSnapshot:
-        owned_keys = list(
-            db.scalars(
-                select(ApiClientKey)
-                .where(ApiClientKey.owner_user_id == user.id)
-                .order_by(ApiClientKey.id.asc())
-            )
-        )
-        key_ids = [item.id for item in owned_keys if item.id is not None]
-        balance_amount = BillingService.to_decimal(user.balance_amount)
-        frozen_amount = BillingService.to_decimal(user.frozen_amount)
-        total_recharge_amount = BillingService.to_decimal(user.total_recharge_amount)
-        total_cost_used = sum(
-            (BillingService.to_decimal(item.total_cost_used) for item in owned_keys),
-            start=Decimal("0"),
-        )
-        total_tokens = sum((int(item.total_tokens_used or 0) for item in owned_keys), start=0)
-        return UserQuotaUsageSnapshot(
-            key_ids=key_ids,
-            has_balance_limit=True,
-            balance_amount=balance_amount,
-            frozen_amount=frozen_amount,
-            available_balance=balance_amount - frozen_amount,
-            total_recharge_amount=total_recharge_amount,
-            total_cost_used=total_cost_used,
-            day_cost_used=Decimal("0"),
-            month_cost_used=Decimal("0"),
-            total_requests=0,
-            day_requests=0,
-            month_requests=0,
-            total_tokens=total_tokens,
-            day_tokens=0,
-            month_tokens=0,
-        )
+        return UserQuotaService.get_usage_snapshot(db, user=user)
 
     @staticmethod
     def get_usage_snapshot(db: Session, *, user: UserAccount) -> UserQuotaUsageSnapshot:
@@ -92,10 +60,6 @@ class UserQuotaService:
         frozen_amount = BillingService.to_decimal(user.frozen_amount)
         available_balance = balance_amount - frozen_amount
         total_recharge_amount = BillingService.to_decimal(user.total_recharge_amount)
-        total_cost_used = sum(
-            (BillingService.to_decimal(item.total_cost_used) for item in owned_keys),
-            start=Decimal("0"),
-        )
 
         if not key_ids:
             return UserQuotaUsageSnapshot(
@@ -105,7 +69,7 @@ class UserQuotaService:
                 frozen_amount=frozen_amount,
                 available_balance=available_balance,
                 total_recharge_amount=total_recharge_amount,
-                total_cost_used=total_cost_used,
+                total_cost_used=Decimal("0"),
                 day_cost_used=Decimal("0"),
                 month_cost_used=Decimal("0"),
                 total_requests=0,
@@ -168,33 +132,6 @@ class UserQuotaService:
                 code="insufficient_balance",
                 message="Owner account available balance exhausted",
             )
-
-        request_limits = (
-            ("account_request_quota_exhausted", "Owner account total request quota exhausted", snapshot.total_requests, user.request_limit_total),
-            ("account_daily_request_quota_exhausted", "Owner account daily request quota exhausted", snapshot.day_requests, user.request_limit_daily),
-            ("account_monthly_request_quota_exhausted", "Owner account monthly request quota exhausted", snapshot.month_requests, user.request_limit_monthly),
-        )
-        for code, message, current, limit in request_limits:
-            if limit is not None and current >= limit:
-                return UserQuotaViolation(code=code, message=message)
-
-        token_limits = (
-            ("account_token_quota_exhausted", "Owner account total token quota exhausted", snapshot.total_tokens, user.token_limit_total),
-            ("account_daily_token_quota_exhausted", "Owner account daily token quota exhausted", snapshot.day_tokens, user.token_limit_daily),
-            ("account_monthly_token_quota_exhausted", "Owner account monthly token quota exhausted", snapshot.month_tokens, user.token_limit_monthly),
-        )
-        for code, message, current, limit in token_limits:
-            if limit is not None and current >= limit:
-                return UserQuotaViolation(code=code, message=message)
-
-        cost_limits = (
-            ("account_cost_quota_exhausted", "Owner account total cost quota exhausted", snapshot.total_cost_used, user.cost_limit_total),
-            ("account_daily_cost_quota_exhausted", "Owner account daily cost quota exhausted", snapshot.day_cost_used, user.cost_limit_daily),
-            ("account_monthly_cost_quota_exhausted", "Owner account monthly cost quota exhausted", snapshot.month_cost_used, user.cost_limit_monthly),
-        )
-        for code, message, current, limit in cost_limits:
-            if limit is not None and current >= BillingService.to_decimal(limit):
-                return UserQuotaViolation(code=code, message=message)
         return None
 
     @staticmethod
@@ -215,44 +152,17 @@ class UserQuotaService:
             "total_tokens": snapshot.total_tokens,
             "day_tokens": snapshot.day_tokens,
             "month_tokens": snapshot.month_tokens,
-            "request_limit_total": user.request_limit_total,
-            "request_limit_daily": user.request_limit_daily,
-            "request_limit_monthly": user.request_limit_monthly,
-            "token_limit_total": user.token_limit_total,
-            "token_limit_daily": user.token_limit_daily,
-            "token_limit_monthly": user.token_limit_monthly,
-            "cost_limit_total": BillingService.to_float(user.cost_limit_total),
-            "cost_limit_daily": BillingService.to_float(user.cost_limit_daily),
-            "cost_limit_monthly": BillingService.to_float(user.cost_limit_monthly),
             "has_balance_limit": snapshot.has_balance_limit,
         }
 
     @staticmethod
-    def update_limits(
+    def update_balance_policy(
         db: Session,
         *,
         user: UserAccount,
         frozen_amount: Decimal,
-        request_limit_total: int | None,
-        request_limit_daily: int | None,
-        request_limit_monthly: int | None,
-        token_limit_total: int | None,
-        token_limit_daily: int | None,
-        token_limit_monthly: int | None,
-        cost_limit_total: Decimal | None,
-        cost_limit_daily: Decimal | None,
-        cost_limit_monthly: Decimal | None,
     ) -> UserAccount:
         user.frozen_amount = BillingService.to_decimal(frozen_amount)
-        user.request_limit_total = request_limit_total
-        user.request_limit_daily = request_limit_daily
-        user.request_limit_monthly = request_limit_monthly
-        user.token_limit_total = token_limit_total
-        user.token_limit_daily = token_limit_daily
-        user.token_limit_monthly = token_limit_monthly
-        user.cost_limit_total = BillingService.to_decimal(cost_limit_total) if cost_limit_total is not None else None
-        user.cost_limit_daily = BillingService.to_decimal(cost_limit_daily) if cost_limit_daily is not None else None
-        user.cost_limit_monthly = BillingService.to_decimal(cost_limit_monthly) if cost_limit_monthly is not None else None
         db.commit()
         db.refresh(user)
         ApiKeyAuthCache.invalidate_user(user.id)

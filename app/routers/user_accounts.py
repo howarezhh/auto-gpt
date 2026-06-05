@@ -6,7 +6,7 @@ from decimal import Decimal, InvalidOperation
 from math import ceil
 from urllib.parse import parse_qsl, urlencode
 
-from fastapi import APIRouter, Depends, Form, Query, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
@@ -33,15 +33,6 @@ templates = Jinja2Templates(directory="app/templates")
 
 QUOTA_FIELD_DEFINITIONS = (
     ("frozen_amount", "冻结金额", "decimal", "0.000000"),
-    ("request_limit_total", "总调用次数上限", "int", "不限"),
-    ("request_limit_daily", "日调用次数上限", "int", "不限"),
-    ("request_limit_monthly", "月调用次数上限", "int", "不限"),
-    ("token_limit_total", "总 Token 上限", "int", "不限"),
-    ("token_limit_daily", "日 Token 上限", "int", "不限"),
-    ("token_limit_monthly", "月 Token 上限", "int", "不限"),
-    ("cost_limit_total", "总金额上限", "decimal", "不限"),
-    ("cost_limit_daily", "日金额上限", "decimal", "不限"),
-    ("cost_limit_monthly", "月金额上限", "decimal", "不限"),
 )
 
 
@@ -431,15 +422,6 @@ def update_user_quota_policy(
     user_id: int,
     request: Request,
     frozen_amount: str = Form(default="0"),
-    request_limit_total: str = Form(default=""),
-    request_limit_daily: str = Form(default=""),
-    request_limit_monthly: str = Form(default=""),
-    token_limit_total: str = Form(default=""),
-    token_limit_daily: str = Form(default=""),
-    token_limit_monthly: str = Form(default=""),
-    cost_limit_total: str = Form(default=""),
-    cost_limit_daily: str = Form(default=""),
-    cost_limit_monthly: str = Form(default=""),
     db: Session = Depends(get_db),
 ):
     current_user = require_admin_html(request, db)
@@ -449,19 +431,10 @@ def update_user_quota_policy(
     if user is None:
         return _redirect_users(error="not_found")
     try:
-        UserQuotaService.update_limits(
+        UserQuotaService.update_balance_policy(
             db,
             user=user,
             frozen_amount=_parse_optional_decimal(frozen_amount, field_label="冻结金额") or Decimal("0"),
-            request_limit_total=_parse_optional_int(request_limit_total, field_label="总调用次数上限"),
-            request_limit_daily=_parse_optional_int(request_limit_daily, field_label="日调用次数上限"),
-            request_limit_monthly=_parse_optional_int(request_limit_monthly, field_label="月调用次数上限"),
-            token_limit_total=_parse_optional_int(token_limit_total, field_label="总 Token 上限"),
-            token_limit_daily=_parse_optional_int(token_limit_daily, field_label="日 Token 上限"),
-            token_limit_monthly=_parse_optional_int(token_limit_monthly, field_label="月 Token 上限"),
-            cost_limit_total=_parse_optional_decimal(cost_limit_total, field_label="总金额上限"),
-            cost_limit_daily=_parse_optional_decimal(cost_limit_daily, field_label="日金额上限"),
-            cost_limit_monthly=_parse_optional_decimal(cost_limit_monthly, field_label="月金额上限"),
         )
     except ValueError as exc:
         return _redirect_user_detail(user_id, error=str(exc))
@@ -474,18 +447,9 @@ def update_user_quota_policy(
         entity_id=user.id,
         entity_name=user.username,
         target_user_id=user.id,
-        summary=f"更新用户 {user.username} 账户额度",
+        summary=f"更新用户 {user.username} 冻结金额",
         detail={
             "frozen_amount": str(user.frozen_amount),
-            "request_limit_total": user.request_limit_total,
-            "request_limit_daily": user.request_limit_daily,
-            "request_limit_monthly": user.request_limit_monthly,
-            "token_limit_total": user.token_limit_total,
-            "token_limit_daily": user.token_limit_daily,
-            "token_limit_monthly": user.token_limit_monthly,
-            "cost_limit_total": str(user.cost_limit_total) if user.cost_limit_total is not None else None,
-            "cost_limit_daily": str(user.cost_limit_daily) if user.cost_limit_daily is not None else None,
-            "cost_limit_monthly": str(user.cost_limit_monthly) if user.cost_limit_monthly is not None else None,
         },
     )
     return _redirect_user_detail(user_id, success="quota_updated")
@@ -538,15 +502,6 @@ def batch_update_user_quota_policy(
     user_ids_text: str = Form(default=""),
     apply_fields: list[str] = Form(default=[]),
     frozen_amount: str = Form(default=""),
-    request_limit_total: str = Form(default=""),
-    request_limit_daily: str = Form(default=""),
-    request_limit_monthly: str = Form(default=""),
-    token_limit_total: str = Form(default=""),
-    token_limit_daily: str = Form(default=""),
-    token_limit_monthly: str = Form(default=""),
-    cost_limit_total: str = Form(default=""),
-    cost_limit_daily: str = Form(default=""),
-    cost_limit_monthly: str = Form(default=""),
     db: Session = Depends(get_db),
 ):
     current_user = require_admin_html(request, db)
@@ -554,21 +509,18 @@ def batch_update_user_quota_policy(
         return current_user
     try:
         target_user_ids = _parse_form_user_ids(user_ids, user_ids_text)
-        normalized_apply_fields = {item for item in apply_fields if item}
-        if not normalized_apply_fields:
-            raise ValueError("请至少勾选一个要应用的额度项")
         field_text_map = {
             "frozen_amount": frozen_amount,
-            "request_limit_total": request_limit_total,
-            "request_limit_daily": request_limit_daily,
-            "request_limit_monthly": request_limit_monthly,
-            "token_limit_total": token_limit_total,
-            "token_limit_daily": token_limit_daily,
-            "token_limit_monthly": token_limit_monthly,
-            "cost_limit_total": cost_limit_total,
-            "cost_limit_daily": cost_limit_daily,
-            "cost_limit_monthly": cost_limit_monthly,
         }
+        normalized_apply_fields = {item for item in apply_fields if item}
+        if not normalized_apply_fields:
+            normalized_apply_fields = {
+                field_name
+                for field_name, raw_text in field_text_map.items()
+                if str(raw_text or "").strip()
+            }
+        if not normalized_apply_fields:
+            raise ValueError("请填写要修改的冻结金额")
         parsed_updates: dict[str, int | Decimal | None] = {}
         for field_name, field_label, field_type, _ in QUOTA_FIELD_DEFINITIONS:
             if field_name not in normalized_apply_fields:
@@ -593,7 +545,7 @@ def batch_update_user_quota_policy(
         _apply_quota_updates_to_user(user, parsed_updates)
         affected_user_ids.append(user.id)
     if not affected_user_ids:
-        message = "未找到可应用额度的有效用户"
+        message = "未找到可应用冻结金额的有效用户"
         if _wants_json(request):
             return JSONResponse(status_code=404, content={"success": False, "message": message})
         return _redirect_users(request.url.query, error=message)
@@ -608,7 +560,7 @@ def batch_update_user_quota_policy(
         entity_type="user",
         entity_id=None,
         entity_name="batch",
-        summary=f"批量更新用户账户额度 {len(affected_user_ids)} 个",
+        summary=f"批量更新用户冻结金额 {len(affected_user_ids)} 个",
         detail={
             "user_ids": affected_user_ids,
             "apply_fields": sorted(normalized_apply_fields),
@@ -618,7 +570,7 @@ def batch_update_user_quota_policy(
             },
         },
     )
-    success_message = f"已为 {len(affected_user_ids)} 个用户应用额度"
+    success_message = f"已为 {len(affected_user_ids)} 个用户应用冻结金额"
     if _wants_json(request):
         return JSONResponse(
             content={

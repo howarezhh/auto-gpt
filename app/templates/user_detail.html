@@ -187,8 +187,8 @@
                             {% if item.status == 'active' %}正常可用
                             {% elif item.status == 'disabled' %}已禁用
                             {% elif item.status == 'expired' %}已过期
-                            {% elif item.status == 'quota_exhausted' %}额度耗尽
-                            {% elif item.status == 'cost_quota_exhausted' %}金额额度耗尽
+                            {% elif item.status == 'quota_exhausted' %}余额耗尽
+                            {% elif item.status == 'cost_quota_exhausted' %}余额耗尽
                             {% elif item.status == 'balance_exhausted' %}余额耗尽
                             {% elif item.status == 'unbound' %}未绑定渠道
                             {% else %}{{ item.status }}
@@ -221,7 +221,7 @@
                     <tr>
                         <th>时间</th>
                         <th>类型</th>
-                        <th>模型</th>
+                        <th>模型映射</th>
                         <th>会话号</th>
                         <th>状态</th>
                         <th>Tokens</th>
@@ -242,7 +242,12 @@
                                 {% else %}{{ item.log_type }}
                                 {% endif %}
                             </td>
-                            <td>{{ item.requested_model or item.model_name or '-' }}</td>
+                            <td>
+                                <div class="log-model-cell">
+                                    <div class="table-muted">原始：{{ item.requested_model or '-' }}</div>
+                                    <strong>实际：{{ item.model_name or '-' }}</strong>
+                                </div>
+                            </td>
                             <td>{{ item.conversation_key or '-' }}</td>
                             <td>{{ '成功' if item.success else '失败' }}</td>
                             <td>{{ item.total_tokens or 0 }}</td>

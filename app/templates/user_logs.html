@@ -146,7 +146,7 @@
                     <th>类型</th>
                     <th>密钥</th>
                     <th>Session</th>
-                    <th>模型</th>
+                    <th>模型映射</th>
                     <th>渠道</th>
                     <th>结果</th>
                     <th>Token / 成本</th>
@@ -154,22 +154,7 @@
                     <th>详情</th>
                 </tr>
             </thead>
-            <tbody id="logs-table-body">
-                {% for log in recent_logs %}
-                <tr>
-                    <td>{{ log.created_at }}</td>
-                    <td>{{ log.log_type }}</td>
-                    <td>{{ log.api_client_key_name or log.api_client_key_prefix or '-' }}</td>
-                    <td>{{ log.session_id or log.conversation_key or log.request_id or '-' }}</td>
-                    <td>{{ log.requested_model or log.model_name or '-' }}</td>
-                    <td>{{ log.provider_name or '-' }}</td>
-                    <td>{{ '成功' if log.success else '失败' }}</td>
-                    <td>{{ log.total_tokens or 0 }} / {{ '%.6f'|format(log.total_cost or 0) }}</td>
-                    <td>{{ log.duration_ms or log.latency_ms or '-' }} ms</td>
-                    <td>详情</td>
-                </tr>
-                {% endfor %}
-            </tbody>
+            <tbody id="logs-table-body"></tbody>
         </table>
     </div>
     <div class="table-toolbar logs-pagination-bar">

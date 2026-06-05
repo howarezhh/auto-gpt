@@ -28,7 +28,7 @@ PRICE_FIELDS = {
     "output_price_per_1k",
     "cache_price_per_1k",
 }
-UPDATED_AT = "2026-06-01T21:30:00+08:00"
+UPDATED_AT = "2026-06-05T12:30:00+08:00"
 CHINA_PRICE_NOTE = (
     "官方原价单位为人民币，当前展示口径统一折算为美元；"
     "按 2026-06-01 USD/CNY=6.7948 折算。"
@@ -281,18 +281,19 @@ MODEL_SPECS = [
     {
         "model_name": "gpt-5.3-codex-spark",
         "display_name": "GPT-5.3 Codex Spark",
-        "supports_vision": True,
-        "supports_tools": True,
-        "supports_chat_completions": True,
-        "supports_responses": True,
-        "context_window_tokens": 400_000,
+        "supports_vision": False,
+        "supports_tools": False,
+        "supports_chat_completions": False,
+        "supports_responses": False,
+        "context_window_tokens": 128_000,
+        "max_input_tokens": 128_000,
         "max_output_tokens": 128_000,
         "pricing": build_unpriced_payload(
-            source_label="OpenAI 官方价格页",
+            source_label="OpenAI 官方发布页",
             source_url="https://openai.com/index/introducing-gpt-5-3-codex-spark/",
-            note="截至 2026-06-01，OpenAI 官方仅公开 GPT-5.3-Codex-Spark 的研究预览介绍，未公开独立 API 价格与完整规格；上下文窗口与能力字段按最接近的官方 GPT-5.3-Codex 规格对齐。",
+            note="OpenAI 官方发布页公开 GPT-5.3-Codex-Spark 为 128k 上下文且 text-only；截至 2026-06-05，官方未公开独立 API 价格。",
         ),
-        "remark": "当前未查到该模型完整公开 API 规格；上下文窗口与能力字段按最接近的官方 GPT-5.3-Codex 规格对齐。",
+        "remark": "OpenAI 官方发布页公开 128k 上下文且 text-only；官方未公开独立 API 价格，保持未定价。",
     },
     {
         "model_name": "gpt-5.4",

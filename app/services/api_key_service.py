@@ -9,7 +9,7 @@ from decimal import Decimal
 
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import Depends, Header, Request, status
-from sqlalchemy import func, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 from starlette.concurrency import run_in_threadpool
 
@@ -21,6 +21,7 @@ from app.models.user_account import UserAccount
 from app.scheduler import scheduler
 from app.services.api_key_auth_cache import ApiKeyAuthCache
 from app.services.billing_service import BillingService
+from app.services.log_service import LogService
 from app.services.rate_limit_service import RateLimitExceededError, RateLimitService
 from app.services.router_service import RoutePolicyContext
 from app.services.user_quota_service import UserQuotaService
@@ -202,8 +203,6 @@ class ApiKeyService:
         owner_user = api_client_key.owner_user
         owner_user_name = owner_user.username if owner_user else None
         remaining_tokens = None
-        if api_client_key.token_limit_total is not None:
-            remaining_tokens = max(0, api_client_key.token_limit_total - api_client_key.total_tokens_used)
         remaining_balance = None
         if owner_user is not None:
             remaining_balance = float(BillingService.to_decimal(owner_user.balance_amount) - BillingService.to_decimal(owner_user.frozen_amount))
@@ -299,37 +298,6 @@ class ApiKeyService:
                 remaining_balance=remaining_balance,
                 policy_snapshot_json=policy_snapshot_json,
             )
-        if (
-            api_client_key.token_limit_total is not None
-            and api_client_key.total_tokens_used >= api_client_key.token_limit_total
-        ):
-            raise ApiClientAuthError(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                code="insufficient_quota",
-                message="Api key token quota exhausted",
-                api_client_key_id=api_client_key.id,
-                api_client_key_name=api_client_key.name,
-                api_client_key_prefix=api_client_key.key_prefix,
-                user_account_id=api_client_key.owner_user_id,
-                user_account_name=owner_user_name,
-                remaining_tokens=remaining_tokens,
-                remaining_balance=remaining_balance,
-                policy_snapshot_json=policy_snapshot_json,
-            )
-        if api_client_key.cost_limit_total is not None and Decimal(str(api_client_key.total_cost_used or 0)) >= Decimal(str(api_client_key.cost_limit_total)):
-            raise ApiClientAuthError(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                code="insufficient_quota",
-                message="Api key billing quota exhausted",
-                api_client_key_id=api_client_key.id,
-                api_client_key_name=api_client_key.name,
-                api_client_key_prefix=api_client_key.key_prefix,
-                user_account_id=api_client_key.owner_user_id,
-                user_account_name=owner_user_name,
-                remaining_tokens=remaining_tokens,
-                remaining_balance=remaining_balance,
-                policy_snapshot_json=policy_snapshot_json,
-            )
         if owner_user is None and api_client_key.balance_amount is not None and Decimal(str(api_client_key.balance_amount)) <= Decimal("0"):
             raise ApiClientAuthError(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -403,8 +371,6 @@ class ApiKeyService:
                 api_client_key_prefix=ApiKeyService.extract_key_prefix(raw_key),
             )
         remaining_tokens = None
-        if api_client_key.token_limit_total is not None:
-            remaining_tokens = max(0, api_client_key.token_limit_total - api_client_key.total_tokens_used)
         remaining_requests_daily = None
         remaining_cost_daily = None
         allowed_provider_ids = [binding.provider_id for binding in api_client_key.provider_bindings]
@@ -420,11 +386,6 @@ class ApiKeyService:
             remaining_balance = float(user_quota_snapshot.available_balance)
         elif api_client_key.balance_amount is not None:
             remaining_balance = float(api_client_key.balance_amount)
-        key_daily_usage = {"request_count": 0, "total_tokens": 0, "total_cost": 0.0}
-        if api_client_key.request_limit_daily is not None:
-            remaining_requests_daily = api_client_key.request_limit_daily
-        if api_client_key.cost_limit_daily is not None:
-            remaining_cost_daily = float(BillingService.to_decimal(api_client_key.cost_limit_daily))
         policy_snapshot = {
             "route_mode": api_client_key.route_mode,
             "default_provider_id": default_provider_id,
@@ -495,37 +456,6 @@ class ApiKeyService:
                 status_code=status.HTTP_403_FORBIDDEN,
                 code="source_ip_not_allowed",
                 message="Api key is not allowed to call from this source ip",
-                api_client_key_id=api_client_key.id,
-                api_client_key_name=api_client_key.name,
-                api_client_key_prefix=api_client_key.key_prefix,
-                user_account_id=owner_user_id,
-                user_account_name=owner_user_name,
-                remaining_tokens=remaining_tokens,
-                remaining_balance=remaining_balance,
-                policy_snapshot_json=policy_snapshot_json,
-            )
-        if (
-            api_client_key.token_limit_total is not None
-            and api_client_key.total_tokens_used >= api_client_key.token_limit_total
-        ):
-            raise ApiClientAuthError(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                code="insufficient_quota",
-                message="Api key token quota exhausted",
-                api_client_key_id=api_client_key.id,
-                api_client_key_name=api_client_key.name,
-                api_client_key_prefix=api_client_key.key_prefix,
-                user_account_id=owner_user_id,
-                user_account_name=owner_user_name,
-                remaining_tokens=remaining_tokens,
-                remaining_balance=remaining_balance,
-                policy_snapshot_json=policy_snapshot_json,
-            )
-        if api_client_key.cost_limit_total is not None and Decimal(str(api_client_key.total_cost_used or 0)) >= Decimal(str(api_client_key.cost_limit_total)):
-            raise ApiClientAuthError(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                code="insufficient_quota",
-                message="Api key billing quota exhausted",
                 api_client_key_id=api_client_key.id,
                 api_client_key_name=api_client_key.name,
                 api_client_key_prefix=api_client_key.key_prefix,
@@ -692,151 +622,23 @@ class ApiKeyService:
     @staticmethod
     async def validate_redis_rate_limits(auth_context: ApiClientAuthContext, *, request_path: str | None = None) -> None:
         api_client_key = auth_context.api_client_key
-        owner_user = api_client_key.owner_user
         is_billable_model_request = bool(request_path and request_path != "/v1/models")
         has_api_key_limits = any(
             value is not None
             for value in (
                 api_client_key.qps_limit,
                 api_client_key.rpm_limit,
-                api_client_key.request_limit_daily if is_billable_model_request else None,
-                api_client_key.token_limit_total if is_billable_model_request else None,
-                api_client_key.token_limit_daily if is_billable_model_request else None,
-                api_client_key.cost_limit_total if is_billable_model_request else None,
-                api_client_key.cost_limit_daily if is_billable_model_request else None,
                 api_client_key.tpm_limit if is_billable_model_request else None,
             )
         )
-        has_account_limits = any(
-            value is not None
-            for value in (
-                owner_user.request_limit_total if is_billable_model_request and owner_user is not None else None,
-                owner_user.request_limit_daily if is_billable_model_request and owner_user is not None else None,
-                owner_user.request_limit_monthly if is_billable_model_request and owner_user is not None else None,
-                owner_user.token_limit_total if is_billable_model_request and owner_user is not None else None,
-                owner_user.token_limit_daily if is_billable_model_request and owner_user is not None else None,
-                owner_user.token_limit_monthly if is_billable_model_request and owner_user is not None else None,
-                owner_user.cost_limit_total if is_billable_model_request and owner_user is not None else None,
-                owner_user.cost_limit_daily if is_billable_model_request and owner_user is not None else None,
-                owner_user.cost_limit_monthly if is_billable_model_request and owner_user is not None else None,
-            )
-        )
-        if not has_api_key_limits and not has_account_limits:
+        if not has_api_key_limits:
             return
         try:
-            has_api_key_realtime_quota = any(
-                value is not None
-                for value in (
-                    api_client_key.token_limit_total,
-                    api_client_key.cost_limit_total,
-                )
-            )
-            has_account_realtime_quota = any(
-                value is not None
-                for value in (
-                    owner_user.token_limit_total if owner_user is not None else None,
-                    owner_user.cost_limit_total if owner_user is not None else None,
-                )
-            )
-            owner_snapshot = None
-            if has_account_realtime_quota:
-                policy_snapshot = loads_json(auth_context.policy_snapshot_json, {})
-                owner_snapshot = policy_snapshot.get("owner_user") if isinstance(policy_snapshot, dict) else None
-            if has_api_key_realtime_quota or has_account_realtime_quota:
-                await RateLimitService.seed_realtime_quota_counters(
-                    api_key_id=api_client_key.id,
-                    api_key_total_tokens_used=api_client_key.total_tokens_used if has_api_key_realtime_quota else None,
-                    api_key_total_cost_used=(
-                        BillingService.to_decimal(api_client_key.total_cost_used)
-                        if has_api_key_realtime_quota and api_client_key.total_cost_used is not None
-                        else None
-                    ),
-                    account_id=api_client_key.owner_user_id if has_account_realtime_quota else None,
-                    account_total_tokens_used=(
-                        int(owner_snapshot.get("total_tokens"))
-                        if has_account_realtime_quota
-                        and isinstance(owner_snapshot, dict)
-                        and owner_snapshot.get("total_tokens") is not None
-                        else None
-                    ),
-                    account_total_cost_used=(
-                        BillingService.to_decimal(owner_snapshot.get("total_cost_used"))
-                        if has_account_realtime_quota
-                        and isinstance(owner_snapshot, dict)
-                        and owner_snapshot.get("total_cost_used") is not None
-                        else None
-                    ),
-                )
             await RateLimitService.check_api_key_limits(
                 api_key_id=api_client_key.id,
                 qps_limit=api_client_key.qps_limit,
                 rpm_limit=api_client_key.rpm_limit,
-                daily_request_limit=api_client_key.request_limit_daily if is_billable_model_request else None,
-                total_token_limit=api_client_key.token_limit_total if is_billable_model_request else None,
-                daily_token_limit=api_client_key.token_limit_daily if is_billable_model_request else None,
-                total_cost_limit=(
-                    BillingService.to_decimal(api_client_key.cost_limit_total)
-                    if is_billable_model_request and api_client_key.cost_limit_total is not None
-                    else None
-                ),
-                daily_cost_limit=(
-                    BillingService.to_decimal(api_client_key.cost_limit_daily)
-                    if is_billable_model_request and api_client_key.cost_limit_daily is not None
-                    else None
-                ),
                 tpm_limit=api_client_key.tpm_limit if is_billable_model_request else None,
-                account_id=api_client_key.owner_user_id if is_billable_model_request else None,
-                account_request_limit_total=(
-                    owner_user.request_limit_total
-                    if is_billable_model_request and owner_user is not None
-                    else None
-                ),
-                account_request_limit_daily=(
-                    owner_user.request_limit_daily
-                    if is_billable_model_request and owner_user is not None
-                    else None
-                ),
-                account_request_limit_monthly=(
-                    owner_user.request_limit_monthly
-                    if is_billable_model_request and owner_user is not None
-                    else None
-                ),
-                account_token_limit_total=(
-                    owner_user.token_limit_total
-                    if is_billable_model_request and owner_user is not None
-                    else None
-                ),
-                account_token_limit_daily=(
-                    owner_user.token_limit_daily
-                    if is_billable_model_request and owner_user is not None
-                    else None
-                ),
-                account_token_limit_monthly=(
-                    owner_user.token_limit_monthly
-                    if is_billable_model_request and owner_user is not None
-                    else None
-                ),
-                account_cost_limit_total=(
-                    BillingService.to_decimal(owner_user.cost_limit_total)
-                    if is_billable_model_request
-                    and owner_user is not None
-                    and owner_user.cost_limit_total is not None
-                    else None
-                ),
-                account_cost_limit_daily=(
-                    BillingService.to_decimal(owner_user.cost_limit_daily)
-                    if is_billable_model_request
-                    and owner_user is not None
-                    and owner_user.cost_limit_daily is not None
-                    else None
-                ),
-                account_cost_limit_monthly=(
-                    BillingService.to_decimal(owner_user.cost_limit_monthly)
-                    if is_billable_model_request
-                    and owner_user is not None
-                    and owner_user.cost_limit_monthly is not None
-                    else None
-                ),
             )
         except RateLimitExceededError as exc:
             raise ApiClientAuthError(
@@ -954,21 +756,168 @@ class ApiKeyService:
         target = db.get(ApiClientKey, target_id)
         if target is None:
             return None
+        now = datetime.utcnow()
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        route_filters = (
+            RequestLog.api_client_key_id == target_id,
+            LogService._route_traffic_expr(),
+            or_(RequestLog.request_path.is_(None), RequestLog.request_path != "/v1/models"),
+        )
         totals = db.execute(
             select(
-                func.coalesce(func.sum(RequestLog.prompt_tokens), 0).label("prompt_tokens_used"),
-                func.coalesce(func.sum(RequestLog.completion_tokens), 0).label("completion_tokens_used"),
-                func.coalesce(func.sum(RequestLog.total_tokens), 0).label("total_tokens_used"),
+                func.count(RequestLog.id).label("total_requests"),
+                func.coalesce(
+                    func.sum(case((RequestLog.created_at >= day_start, 1), else_=0)),
+                    0,
+                ).label("day_requests"),
+                func.coalesce(
+                    func.sum(case((RequestLog.success.is_(True), func.coalesce(RequestLog.prompt_tokens, 0)), else_=0)),
+                    0,
+                ).label("prompt_tokens_used"),
+                func.coalesce(
+                    func.sum(case((RequestLog.success.is_(True), func.coalesce(RequestLog.completion_tokens, 0)), else_=0)),
+                    0,
+                ).label("completion_tokens_used"),
+                func.coalesce(
+                    func.sum(case((RequestLog.success.is_(True), func.coalesce(RequestLog.total_tokens, 0)), else_=0)),
+                    0,
+                ).label("total_tokens_used"),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (
+                                (RequestLog.success.is_(True)) & (RequestLog.created_at >= day_start),
+                                func.coalesce(RequestLog.total_tokens, 0),
+                            ),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ).label("day_tokens_used"),
+                func.coalesce(
+                    func.sum(case((RequestLog.success.is_(True), func.coalesce(RequestLog.total_cost, 0)), else_=0)),
+                    0,
+                ).label("total_cost_used"),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (
+                                (RequestLog.success.is_(True)) & (RequestLog.created_at >= day_start),
+                                func.coalesce(RequestLog.total_cost, 0),
+                            ),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ).label("day_cost_used"),
             )
-            .where(RequestLog.api_client_key_id == target_id)
-            .where(RequestLog.success.is_(True))
-            .where(RequestLog.request_path != "/v1/models")
+            .where(*route_filters)
         ).one()
         target.prompt_tokens_used = int(totals.prompt_tokens_used or 0)
         target.completion_tokens_used = int(totals.completion_tokens_used or 0)
         target.total_tokens_used = int(totals.total_tokens_used or 0)
+        target.total_cost_used = BillingService.to_decimal(totals.total_cost_used)
+        account_totals = None
+        if target.owner_user_id is not None:
+            owned_key_ids = list(
+                db.scalars(
+                    select(ApiClientKey.id).where(ApiClientKey.owner_user_id == target.owner_user_id)
+                )
+            )
+            account_scope = [RequestLog.user_account_id == target.owner_user_id]
+            if owned_key_ids:
+                account_scope.append(RequestLog.api_client_key_id.in_(owned_key_ids))
+            account_totals = db.execute(
+                select(
+                    func.count(RequestLog.id).label("total_requests"),
+                    func.coalesce(func.sum(case((RequestLog.created_at >= day_start, 1), else_=0)), 0).label("day_requests"),
+                    func.coalesce(func.sum(case((RequestLog.created_at >= month_start, 1), else_=0)), 0).label("month_requests"),
+                    func.coalesce(
+                        func.sum(case((RequestLog.success.is_(True), func.coalesce(RequestLog.total_tokens, 0)), else_=0)),
+                        0,
+                    ).label("total_tokens"),
+                    func.coalesce(
+                        func.sum(
+                            case(
+                                (
+                                    (RequestLog.success.is_(True)) & (RequestLog.created_at >= day_start),
+                                    func.coalesce(RequestLog.total_tokens, 0),
+                                ),
+                                else_=0,
+                            )
+                        ),
+                        0,
+                    ).label("day_tokens"),
+                    func.coalesce(
+                        func.sum(
+                            case(
+                                (
+                                    (RequestLog.success.is_(True)) & (RequestLog.created_at >= month_start),
+                                    func.coalesce(RequestLog.total_tokens, 0),
+                                ),
+                                else_=0,
+                            )
+                        ),
+                        0,
+                    ).label("month_tokens"),
+                    func.coalesce(
+                        func.sum(case((RequestLog.success.is_(True), func.coalesce(RequestLog.total_cost, 0)), else_=0)),
+                        0,
+                    ).label("total_cost"),
+                    func.coalesce(
+                        func.sum(
+                            case(
+                                (
+                                    (RequestLog.success.is_(True)) & (RequestLog.created_at >= day_start),
+                                    func.coalesce(RequestLog.total_cost, 0),
+                                ),
+                                else_=0,
+                            )
+                        ),
+                        0,
+                    ).label("day_cost"),
+                    func.coalesce(
+                        func.sum(
+                            case(
+                                (
+                                    (RequestLog.success.is_(True)) & (RequestLog.created_at >= month_start),
+                                    func.coalesce(RequestLog.total_cost, 0),
+                                ),
+                                else_=0,
+                            )
+                        ),
+                        0,
+                    ).label("month_cost"),
+                ).where(
+                    LogService._route_traffic_expr(),
+                    or_(RequestLog.request_path.is_(None), RequestLog.request_path != "/v1/models"),
+                    or_(*account_scope),
+                )
+            ).one()
         if auto_commit:
             db.commit()
+            db.refresh(target)
+            RateLimitService.reset_realtime_quota_counters(
+                api_key_id=target.id,
+                api_key_total_tokens_used=target.total_tokens_used,
+                api_key_day_tokens_used=int(totals.day_tokens_used or 0),
+                api_key_total_cost_used=target.total_cost_used,
+                api_key_day_cost_used=BillingService.to_decimal(totals.day_cost_used),
+                api_key_day_requests=int(totals.day_requests or 0),
+                account_id=target.owner_user_id,
+                account_total_tokens_used=int(account_totals.total_tokens or 0) if account_totals is not None else None,
+                account_day_tokens_used=int(account_totals.day_tokens or 0) if account_totals is not None else None,
+                account_month_tokens_used=int(account_totals.month_tokens or 0) if account_totals is not None else None,
+                account_total_cost_used=BillingService.to_decimal(account_totals.total_cost) if account_totals is not None else None,
+                account_day_cost_used=BillingService.to_decimal(account_totals.day_cost) if account_totals is not None else None,
+                account_month_cost_used=BillingService.to_decimal(account_totals.month_cost) if account_totals is not None else None,
+                account_total_requests=int(account_totals.total_requests or 0) if account_totals is not None else None,
+                account_day_requests=int(account_totals.day_requests or 0) if account_totals is not None else None,
+                account_month_requests=int(account_totals.month_requests or 0) if account_totals is not None else None,
+            )
+            ApiKeyAuthCache.invalidate_api_key(target.id, target.key_hash)
+            ApiKeyAuthCache.invalidate_user(target.owner_user_id)
         return target
 
 

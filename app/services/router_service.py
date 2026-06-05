@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from threading import Lock
 from typing import Any
 
-from sqlalchemy import update
+from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
@@ -14,6 +14,7 @@ from app.config import get_settings
 from app.database import SessionLocal
 from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
+from app.models.request_log import RequestLog
 from app.services.cache_service import CacheService
 from app.services.log_service import LogService
 from app.services.model_catalog_service import ModelCatalogService
@@ -34,6 +35,18 @@ class RouteCandidate:
     recent_avg_latency_ms: float | None = None
     dynamic_weight: float = 1.0
     route_score: float = 0.0
+    health_tier: int = 1
+    sticky_affinity: float = 0.0
+    load_factor: float = 0.0
+
+
+@dataclass(slots=True)
+class RecentSessionRoute:
+    """记录同一会话最近一次成功使用的模型与中转站。"""
+
+    provider_id: int | None
+    provider_model_id: int | None
+    model_name: str | None
 
 
 @dataclass(slots=True)
@@ -219,9 +232,6 @@ class RouterService:
                     # 打开熔断后仅允许极少量探测流量进入 half-open 探针流程。
                     if not RouterService._claim_half_open_probe(db, provider_model, now):
                         continue
-                if provider_model.health_status == "unhealthy" and provider_model.circuit_state not in {"half_open"}:
-                    continue
-
                 metric = metrics.get((provider.id, provider_model.model_name), {})
                 recent_failure_rate = float(metric.get("failure_rate", 0.0))
                 recent_success_rate = float(metric.get("success_rate", 1.0))
@@ -229,6 +239,12 @@ class RouterService:
                 model_health_state = ProviderHealthStateService.get_model_state(provider.id, provider_model.id)
                 provider_health_state = ProviderHealthStateService.get_provider_state(provider.id)
                 dynamic_weight = RouterService._dynamic_weight(provider_model.weight, recent_failure_rate)
+                health_tier = RouterService._health_tier(
+                    provider=provider,
+                    provider_model=provider_model,
+                    model_health_state=model_health_state,
+                    provider_health_state=provider_health_state,
+                )
                 route_score = RouterService._route_score(
                     provider=provider,
                     provider_model=provider_model,
@@ -249,9 +265,18 @@ class RouterService:
                         recent_avg_latency_ms=recent_avg_latency_ms,
                         dynamic_weight=dynamic_weight,
                         route_score=route_score,
+                        health_tier=health_tier,
                     )
                 )
-        return CacheService.set(cache_key, candidates, ttl_seconds=1)
+        return CacheService.set(cache_key, candidates, ttl_seconds=RouterService._route_candidate_cache_ttl_seconds())
+
+    @staticmethod
+    def _route_candidate_cache_ttl_seconds() -> int:
+        try:
+            setting = SettingService.get_cached()
+            return max(1, min(int(getattr(setting, "route_candidate_cache_ttl_sec", 10) or 10), 60))
+        except Exception:
+            return 10
 
     @staticmethod
     def order_candidates(
@@ -320,8 +345,8 @@ class RouterService:
         if effective_forced_provider_id is not None:
             candidates = [item for item in candidates if item.provider.id == effective_forced_provider_id]
         candidates = await RouterService._async_filter_capacity_candidates(candidates, is_stream=require_stream)
-        return RouterService._order_filtered_candidates(
-            None,
+        return await run_in_threadpool(
+            RouterService._order_filtered_candidates_with_scoped_session,
             candidates,
             sticky_key=sticky_key,
             route_context=route_context,
@@ -550,14 +575,12 @@ class RouterService:
                 ):
                     RouterService._record_diagnostic_reason(diagnostics, "model_circuit_open", provider=provider, provider_model=provider_model)
                     continue
-                if provider_model.health_status == "unhealthy" and provider_model.circuit_state not in {"half_open"}:
-                    RouterService._record_diagnostic_reason(diagnostics, "model_unhealthy", provider=provider, provider_model=provider_model)
-                    continue
                 pre_capacity_candidates.append(
                     RouteCandidate(
                         provider=provider,
                         provider_model=provider_model,
                         recent_failure_rate=float(metrics.get((provider.id, provider_model.model_name), {}).get("failure_rate", 0.0)),
+                        health_tier=RouterService._health_tier(provider=provider, provider_model=provider_model),
                     )
                 )
         diagnostics["pre_capacity_candidate_count"] = len(pre_capacity_candidates)
@@ -620,61 +643,107 @@ class RouterService:
             others = [item for item in candidates if item.provider.id not in preferred_set]
             candidates = preferred + others
 
-        route_mode = route_context.route_mode if route_context else setting.route_mode
-        manual_allow_fallback = route_context.manual_allow_fallback if route_context else setting.manual_allow_fallback
-        default_provider_id = route_context.default_provider_id if route_context else setting.default_provider_id
-
-        sorted_candidates = sorted(
+        recent_route = RouterService.load_recent_session_route(db, sticky_key)
+        sorted_candidates = RouterService._primary_route_order(
             candidates,
-            key=lambda item: (
-                -item.route_score,
-                item.provider_model.priority,
-                item.provider.priority,
-                item.provider.id,
-                item.provider_model.id,
-            ),
+            sticky_key=sticky_key,
+            recent_route=recent_route,
         )
+        return RouterService._trim_candidates(sorted_candidates, route_context=route_context)
+
+    @staticmethod
+    def load_recent_session_route(db: Session | None, sticky_key: str | None) -> RecentSessionRoute | None:
+        """只读取同一会话最近一次成功路由结果，新会话或无会话标识不做粘性查询。"""
+        if not isinstance(sticky_key, str) or not sticky_key.strip():
+            return None
+        key = sticky_key.strip()
+        close_db = False
+        if db is None:
+            db = SessionLocal()
+            close_db = True
+        try:
+            row = db.execute(
+                select(
+                    RequestLog.provider_id,
+                    RequestLog.resolved_provider_model_id,
+                    RequestLog.model_name,
+                    RequestLog.requested_model,
+                )
+                .where(
+                    RequestLog.success.is_(True),
+                    RequestLog.provider_id.is_not(None),
+                    or_(RequestLog.session_id == key, RequestLog.conversation_key == key),
+                )
+                .order_by(RequestLog.created_at.desc(), RequestLog.id.desc())
+                .limit(1)
+            ).first()
+            if row is None:
+                return None
+            provider_id, provider_model_id, model_name, requested_model = row
+            return RecentSessionRoute(
+                provider_id=provider_id,
+                provider_model_id=provider_model_id,
+                model_name=model_name or requested_model,
+            )
+        finally:
+            if close_db:
+                db.close()
+
+    @staticmethod
+    def _primary_route_order(
+        candidates: list[RouteCandidate],
+        *,
+        sticky_key: str | None,
+        recent_route: RecentSessionRoute | None,
+    ) -> list[RouteCandidate]:
+        """统一主路由策略：硬筛选后优先复用同会话最近成功目标，再做健康优先分发。"""
         ordered: list[RouteCandidate] = []
         seen: set[tuple[int, int]] = set()
-
-        def append_candidate(candidate: RouteCandidate | None) -> None:
-            if candidate is None:
-                return
-            key = (candidate.provider.id, candidate.provider_model.id)
-            if key in seen:
-                return
-            ordered.append(candidate)
+        recent_candidate = RouterService._recent_route_candidate(candidates, recent_route)
+        if recent_candidate is not None:
+            key = (recent_candidate.provider.id, recent_candidate.provider_model.id)
+            ordered.append(recent_candidate)
             seen.add(key)
+        for health_tier in sorted({candidate.health_tier for candidate in candidates}):
+            tier_candidates = [
+                candidate
+                for candidate in candidates
+                if candidate.health_tier == health_tier
+                and (candidate.provider.id, candidate.provider_model.id) not in seen
+            ]
+            balanced = RouterService._balanced_shuffle(tier_candidates, sticky_key=sticky_key)
+            for candidate in balanced:
+                key = (candidate.provider.id, candidate.provider_model.id)
+                if key in seen:
+                    continue
+                ordered.append(candidate)
+                seen.add(key)
+        return ordered
 
-        default_candidate = next(
-            (item for item in sorted_candidates if item.provider.id == default_provider_id),
-            None,
-        )
-
-        if route_mode == "manual":
-            append_candidate(default_candidate)
-            if manual_allow_fallback:
-                for candidate in sorted_candidates:
-                    append_candidate(candidate)
-            return RouterService._trim_candidates(ordered, route_context=route_context)
-
-        if route_mode == "failover":
-            append_candidate(default_candidate)
-            for candidate in sorted_candidates:
-                append_candidate(candidate)
-            return RouterService._trim_candidates(ordered, route_context=route_context)
-
-        if route_mode == "weighted":
-            for candidate in RouterService._weighted_shuffle(sorted_candidates):
-                append_candidate(candidate)
-            return RouterService._trim_candidates(ordered, route_context=route_context)
-
-        if route_mode == "sticky":
-            for candidate in RouterService._sticky_order(sorted_candidates, sticky_key):
-                append_candidate(candidate)
-            return RouterService._trim_candidates(ordered, route_context=route_context)
-
-        return RouterService._trim_candidates(sorted_candidates, route_context=route_context)
+    @staticmethod
+    def _recent_route_candidate(
+        candidates: list[RouteCandidate],
+        recent_route: RecentSessionRoute | None,
+    ) -> RouteCandidate | None:
+        if recent_route is None:
+            return None
+        if recent_route.provider_model_id is not None:
+            exact = next(
+                (item for item in candidates if item.provider_model.id == recent_route.provider_model_id),
+                None,
+            )
+            if exact is not None:
+                exact.sticky_affinity = max(exact.sticky_affinity, 1_000_000.0)
+                return exact
+        if recent_route.provider_id is not None:
+            same_provider = next(
+                (item for item in candidates if item.provider.id == recent_route.provider_id),
+                None,
+            )
+            if same_provider is not None:
+                same_provider.sticky_affinity = max(same_provider.sticky_affinity, 500_000.0)
+                return same_provider
+        return None
 
     @staticmethod
     def _trim_candidates(candidates: list[RouteCandidate], *, route_context: RoutePolicyContext | None) -> list[RouteCandidate]:
@@ -686,8 +755,6 @@ class RouterService:
     def _filter_capacity_candidates(candidates: list[RouteCandidate], *, is_stream: bool) -> list[RouteCandidate]:
         if not candidates:
             return []
-        if not get_settings().route_capacity_prefilter_enabled:
-            return RouterService._filter_failure_rate_candidates(candidates)
         snapshots = ProviderCapacityService.snapshots({item.provider.id for item in candidates})
         filtered: list[RouteCandidate] = []
         for candidate in candidates:
@@ -696,6 +763,7 @@ class RouterService:
                 continue
             if not ProviderCapacityService._has_capacity(candidate.provider, snapshot=snapshot, is_stream=is_stream):
                 continue
+            candidate.load_factor = RouterService._capacity_load_factor(candidate.provider, snapshot, is_stream=is_stream)
             if (
                 candidate.provider.max_error_rate is not None
                 and candidate.provider.max_error_rate > 0
@@ -709,8 +777,6 @@ class RouterService:
     async def _async_filter_capacity_candidates(candidates: list[RouteCandidate], *, is_stream: bool) -> list[RouteCandidate]:
         if not candidates:
             return []
-        if not get_settings().route_capacity_prefilter_enabled:
-            return RouterService._filter_failure_rate_candidates(candidates)
         snapshots = await ProviderCapacityService.async_snapshots({item.provider.id for item in candidates})
         filtered: list[RouteCandidate] = []
         for candidate in candidates:
@@ -719,6 +785,7 @@ class RouterService:
                 continue
             if not ProviderCapacityService._has_capacity(candidate.provider, snapshot=snapshot, is_stream=is_stream):
                 continue
+            candidate.load_factor = RouterService._capacity_load_factor(candidate.provider, snapshot, is_stream=is_stream)
             if (
                 candidate.provider.max_error_rate is not None
                 and candidate.provider.max_error_rate > 0
@@ -739,6 +806,48 @@ class RouterService:
                 and candidate.recent_failure_rate * 100 >= candidate.provider.max_error_rate
             )
         ]
+
+    @staticmethod
+    def _health_tier(
+        *,
+        provider: Provider,
+        provider_model: ProviderModel,
+        model_health_state: dict[str, Any] | None = None,
+        provider_health_state: dict[str, Any] | None = None,
+    ) -> int:
+        model_health_state = model_health_state or {}
+        provider_health_state = provider_health_state or {}
+        circuit_state = str(model_health_state.get("circuit_state") or provider_model.circuit_state or "closed")
+        if circuit_state == "open":
+            return 3
+        if circuit_state == "half_open":
+            return 1
+        model_status = str(model_health_state.get("health_status") or provider_model.health_status or "unknown")
+        provider_status = str(provider_health_state.get("health_status") or provider.health_status or "unknown")
+        statuses = {model_status, provider_status}
+        if "unhealthy" in statuses:
+            return 2
+        if "healthy" in statuses or "degraded" in statuses:
+            return 0
+        return 1
+
+    @staticmethod
+    def _sort_by_health_and_sticky(candidates: list[RouteCandidate], *, sticky_key: str | None) -> list[RouteCandidate]:
+        for candidate in candidates:
+            candidate.sticky_affinity = RouterService._sticky_affinity_score(candidate, sticky_key) if sticky_key else 0.0
+        return sorted(
+            candidates,
+            key=lambda item: (
+                item.health_tier,
+                -item.sticky_affinity,
+                item.load_factor,
+                -item.route_score,
+                item.provider_model.priority,
+                item.provider.priority,
+                item.provider.id,
+                item.provider_model.id,
+            ),
+        )
 
     @staticmethod
     def _record_diagnostic_reason(
@@ -926,9 +1035,33 @@ class RouterService:
             ratios.append(capacity_snapshot.active_streams / provider.max_active_streams)
         if provider.max_qps and provider.max_qps > 0:
             ratios.append(capacity_snapshot.current_qps / provider.max_qps)
+        if provider.max_rpm and provider.max_rpm > 0:
+            ratios.append(capacity_snapshot.current_rpm / provider.max_rpm)
         if not ratios:
             return 0.0
         return min(40.0, max(ratios) * 40.0)
+
+    @staticmethod
+    def _capacity_load_factor(
+        provider: Provider,
+        capacity_snapshot: ProviderCapacitySnapshot | None,
+        *,
+        is_stream: bool,
+    ) -> float:
+        if capacity_snapshot is None:
+            return 0.0
+        ratios: list[float] = []
+        if provider.max_active_requests and provider.max_active_requests > 0:
+            ratios.append(capacity_snapshot.active_requests / provider.max_active_requests)
+        if is_stream and provider.max_active_streams and provider.max_active_streams > 0:
+            ratios.append(capacity_snapshot.active_streams / provider.max_active_streams)
+        if provider.max_qps and provider.max_qps > 0:
+            ratios.append(capacity_snapshot.current_qps / provider.max_qps)
+        if provider.max_rpm and provider.max_rpm > 0:
+            ratios.append(capacity_snapshot.current_rpm / provider.max_rpm)
+        if not ratios:
+            return 0.0
+        return max(0.0, min(1.0, max(ratios)))
 
     @staticmethod
     def _effective_model_cost(provider_model: ProviderModel) -> float | None:
@@ -997,15 +1130,65 @@ class RouterService:
         return ordered
 
     @staticmethod
+    def _route_selection_weight(candidate: RouteCandidate) -> float:
+        load_multiplier = max(0.05, 1.0 - max(0.0, min(1.0, float(candidate.load_factor or 0.0))))
+        score_multiplier = max(1.0, float(candidate.route_score or 0.0))
+        return max(0.0, float(candidate.dynamic_weight or 0.0)) * score_multiplier * load_multiplier
+
+    @staticmethod
+    def _balanced_shuffle(candidates: list[RouteCandidate], *, sticky_key: str | None) -> list[RouteCandidate]:
+        remaining = sorted(
+            list(candidates),
+            key=lambda item: (
+                item.load_factor,
+                -item.route_score,
+                item.provider_model.priority,
+                item.provider.priority,
+                item.provider.id,
+                item.provider_model.id,
+            ),
+        )
+        ordered: list[RouteCandidate] = []
+        while remaining:
+            weights = [RouterService._route_selection_weight(item) for item in remaining]
+            if not any(value > 0 for value in weights):
+                ordered.extend(remaining)
+                break
+            rng = random if sticky_key is None else random.Random(
+                f"{sticky_key}:{len(ordered)}:{','.join(str(item.provider_model.id) for item in remaining)}"
+            )
+            chosen = rng.choices(remaining, weights=weights, k=1)[0]
+            ordered.append(chosen)
+            remaining.remove(chosen)
+        return ordered
+
+    @staticmethod
+    def _weighted_shuffle_by_health(candidates: list[RouteCandidate], *, sticky_key: str | None) -> list[RouteCandidate]:
+        ordered: list[RouteCandidate] = []
+        for health_tier in sorted({candidate.health_tier for candidate in candidates}):
+            tier_candidates = [candidate for candidate in candidates if candidate.health_tier == health_tier]
+            if sticky_key:
+                # Stable session affinity is applied inside each health bucket, but never
+                # allows an unhealthy bucket to leapfrog a healthy one.
+                tier_candidates = RouterService._sticky_order(tier_candidates, sticky_key)
+                if tier_candidates:
+                    ordered.append(tier_candidates[0])
+                    tier_candidates = tier_candidates[1:]
+            ordered.extend(RouterService._weighted_shuffle(tier_candidates))
+        return ordered
+
+    @staticmethod
     def _sticky_order(candidates: list[RouteCandidate], sticky_key: str | None) -> list[RouteCandidate]:
         if not candidates:
             return []
         if not sticky_key:
-            return candidates
+            return RouterService._sort_by_health_and_sticky(candidates, sticky_key=None)
         return sorted(
             candidates,
             key=lambda item: (
+                item.health_tier,
                 -RouterService._sticky_affinity_score(item, sticky_key),
+                item.load_factor,
                 -item.route_score,
                 item.provider_model.priority,
                 item.provider.priority,

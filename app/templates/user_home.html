@@ -120,8 +120,8 @@
                         {% if item.status == 'active' %}正常可用
                         {% elif item.status == 'disabled' %}已禁用
                         {% elif item.status == 'expired' %}已过期
-                        {% elif item.status == 'quota_exhausted' %}额度耗尽
-                        {% elif item.status == 'cost_quota_exhausted' %}金额额度耗尽
+                        {% elif item.status == 'quota_exhausted' %}余额耗尽
+                        {% elif item.status == 'cost_quota_exhausted' %}余额耗尽
                         {% elif item.status == 'balance_exhausted' %}余额耗尽
                         {% elif item.status == 'unbound' %}未绑定渠道
                         {% else %}{{ item.status }}

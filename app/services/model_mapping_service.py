@@ -24,6 +24,7 @@ class ModelMappingResolution:
     selected_model_name: str
     strategy: str
     mapping_id: int | None
+    candidate_model_names: tuple[str, ...]
     trace: dict[str, Any]
 
 
@@ -116,6 +117,7 @@ class ModelMappingService:
         require_image_generation: bool,
         require_chat_completions: bool,
         require_responses: bool,
+        excluded_target_model_names: tuple[str, ...] | None = None,
     ) -> ModelMappingResolution | None:
         if not source_model_name:
             return None
@@ -132,6 +134,7 @@ class ModelMappingService:
             require_image_generation=require_image_generation,
             require_chat_completions=require_chat_completions,
             require_responses=require_responses,
+            excluded_target_model_names=excluded_target_model_names,
         )
 
     @staticmethod
@@ -148,6 +151,7 @@ class ModelMappingService:
         require_image_generation: bool,
         require_chat_completions: bool,
         require_responses: bool,
+        excluded_target_model_names: tuple[str, ...] | None = None,
     ) -> ModelMappingResolution | None:
         from app.database import SessionLocal
 
@@ -159,10 +163,26 @@ class ModelMappingService:
             targets = [item for item in ModelMappingService._parse_targets(mapping.targets_json) if item.get("enabled", True)]
             if not targets:
                 return None
+            excluded_target_set = {
+                item.strip()
+                for item in (excluded_target_model_names or ())
+                if isinstance(item, str) and item.strip()
+            }
+            recent_route = RouterService.load_recent_session_route(db, sticky_key)
             evaluated: list[dict[str, Any]] = []
             for index, target in enumerate(targets):
                 target_model_name = str(target.get("model_name") or "").strip()
                 if not target_model_name:
+                    continue
+                if target_model_name in excluded_target_set:
+                    evaluated.append(
+                        ModelMappingService._target_trace(
+                            target,
+                            index,
+                            available=False,
+                            reason="excluded_by_failover",
+                        )
+                    )
                     continue
                 if api_client_auth is not None and not ApiKeyService.is_model_allowed(api_client_auth.api_client_key, target_model_name):
                     evaluated.append(ModelMappingService._target_trace(target, index, available=False, reason="api_key_model_not_allowed"))
@@ -185,7 +205,28 @@ class ModelMappingService:
                     evaluated.append(ModelMappingService._target_trace(target, index, available=False, reason=str(exc)))
                     continue
                 if not candidates:
-                    evaluated.append(ModelMappingService._target_trace(target, index, available=False, reason="no_route_candidate"))
+                    route_diagnostics = RouterService.diagnose_candidate_unavailability(
+                        db,
+                        model_name=target_model_name,
+                        forced_provider_id=forced_provider_id,
+                        route_context=route_context,
+                        require_vision=require_vision,
+                        require_stream=require_stream,
+                        require_tools=require_tools,
+                        require_image_generation=require_image_generation,
+                        require_chat_completions=require_chat_completions,
+                        require_responses=require_responses,
+                        is_stream=require_stream,
+                    )
+                    evaluated.append(
+                        ModelMappingService._target_trace(
+                            target,
+                            index,
+                            available=False,
+                            reason="no_route_candidate",
+                            route_diagnostics=route_diagnostics,
+                        )
+                    )
                     continue
                 best_candidate = candidates[0]
                 target_trace = ModelMappingService._target_trace(
@@ -203,6 +244,7 @@ class ModelMappingService:
                     selected_model_name=source_model_name,
                     strategy=mapping.strategy,
                     mapping_id=mapping.id,
+                    candidate_model_names=(),
                     trace={
                         "result": "model_mapping_no_available_target",
                         "source_model_name": source_model_name,
@@ -210,66 +252,119 @@ class ModelMappingService:
                         "targets": evaluated,
                     },
                 )
-            selected = ModelMappingService._select_target(
+            ordered_targets = ModelMappingService._order_targets(
                 available,
                 strategy=mapping.strategy,
                 sticky_key=sticky_key or source_model_name,
+                recent_model_name=recent_route.model_name if recent_route is not None else None,
+            )
+            selected = ordered_targets[0]
+            candidate_model_names = tuple(
+                str(item.get("model_name") or "").strip()
+                for item in ordered_targets
+                if str(item.get("model_name") or "").strip()
             )
             return ModelMappingResolution(
                 source_model_name=source_model_name,
                 selected_model_name=str(selected["model_name"]),
                 strategy=mapping.strategy,
                 mapping_id=mapping.id,
+                candidate_model_names=candidate_model_names,
                 trace={
                     "result": "model_mapping_selected",
                     "mapping_id": mapping.id,
                     "source_model_name": source_model_name,
                     "selected_model_name": selected["model_name"],
                     "strategy": mapping.strategy,
+                    "capability_checks_skipped": False,
+                    "capability_requirements": {
+                        "require_vision": require_vision,
+                        "require_stream": require_stream,
+                        "require_tools": require_tools,
+                        "require_image_generation": require_image_generation,
+                        "require_chat_completions": require_chat_completions,
+                        "require_responses": require_responses,
+                    },
+                    "candidate_model_names": list(candidate_model_names),
                     "targets": evaluated,
                     "selection_reason": selected.get("selection_reason"),
+                    "recent_session_model_name": recent_route.model_name if recent_route is not None else None,
                 },
             )
         finally:
             db.close()
 
     @staticmethod
-    def _select_target(targets: list[dict[str, Any]], *, strategy: str, sticky_key: str | None) -> dict[str, Any]:
-        normalized_strategy = strategy if strategy in ModelMappingService.STRATEGIES else "auto"
-        if normalized_strategy == "weighted":
-            weighted = []
-            for item in targets:
-                weight = max(0.0, float(item.get("weight") or 0))
-                score = max(1.0, float(item.get("score") or 1.0))
-                weighted.append(max(0.0, weight * score))
-            if any(value > 0 for value in weighted):
-                rng = random.Random(ModelMappingService._stable_seed(sticky_key, targets))
-                selected = rng.choices(targets, weights=weighted, k=1)[0]
-                selected["selection_reason"] = "按权重与路由分加权选择"
-                return selected
-        if normalized_strategy == "priority":
-            selected = sorted(
-                targets,
-                key=lambda item: (
-                    int(item.get("priority") or 100),
-                    int(item.get("order") or 0),
-                    -float(item.get("route_score") or 0),
-                    str(item.get("model_name") or ""),
-                ),
-            )[0]
-            selected["selection_reason"] = "按配置优先级选择首个可用目标"
-            return selected
-        selected = sorted(
-            targets,
+    def _order_targets(
+        targets: list[dict[str, Any]],
+        *,
+        strategy: str,
+        sticky_key: str | None,
+        recent_model_name: str | None = None,
+    ) -> list[dict[str, Any]]:
+        for item in targets:
+            item["sticky_affinity"] = ModelMappingService._target_sticky_affinity(item, sticky_key)
+        ordered: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        normalized_recent = recent_model_name.strip() if isinstance(recent_model_name, str) and recent_model_name.strip() else None
+        if normalized_recent:
+            recent_target = next(
+                (item for item in targets if str(item.get("model_name") or "").strip() == normalized_recent),
+                None,
+            )
+            if recent_target is not None:
+                recent_target["selection_reason"] = "同一会话上次成功目标模型仍可用，优先复用"
+                ordered.append(recent_target)
+                seen.add(str(recent_target.get("model_name") or ""))
+        for health_tier in sorted({ModelMappingService._target_health_tier(item) for item in targets}):
+            tier_targets = [
+                item
+                for item in targets
+                if ModelMappingService._target_health_tier(item) == health_tier
+                and str(item.get("model_name") or "") not in seen
+            ]
+            for item in ModelMappingService._balanced_target_shuffle(tier_targets, sticky_key=sticky_key):
+                model_name = str(item.get("model_name") or "")
+                if model_name in seen:
+                    continue
+                ordered.append(item)
+                seen.add(model_name)
+        if ordered and not ordered[0].get("selection_reason"):
+            ordered[0]["selection_reason"] = "按健康层级、渠道负载、路由得分和目标权重综合分发"
+        return ordered
+
+    @staticmethod
+    def _target_selection_weight(target: dict[str, Any]) -> float:
+        weight = max(0.0, float(target.get("weight") or 0.0))
+        score = max(1.0, float(target.get("score") or 0.0))
+        load_factor = max(0.0, min(1.0, float(target.get("provider_load_factor") or 0.0)))
+        return weight * score * max(0.05, 1.0 - load_factor)
+
+    @staticmethod
+    def _balanced_target_shuffle(targets: list[dict[str, Any]], *, sticky_key: str | None) -> list[dict[str, Any]]:
+        remaining = sorted(
+            list(targets),
             key=lambda item: (
-                -float(item.get("score") or 0),
+                float(item.get("provider_load_factor") or 0.0),
+                -float(item.get("score") or 0.0),
                 int(item.get("priority") or 100),
                 int(item.get("order") or 0),
                 str(item.get("model_name") or ""),
             ),
-        )[0]
-        selected["selection_reason"] = "按健康、成功率、延迟、成本与配置权重综合择优"
-        return selected
+        )
+        ordered: list[dict[str, Any]] = []
+        while remaining:
+            weights = [ModelMappingService._target_selection_weight(item) for item in remaining]
+            if not any(value > 0 for value in weights):
+                ordered.extend(remaining)
+                break
+            rng = random if sticky_key is None else random.Random(
+                f"{sticky_key}:{len(ordered)}:{','.join(str(item.get('model_name') or '') for item in remaining)}"
+            )
+            chosen = rng.choices(remaining, weights=weights, k=1)[0]
+            ordered.append(chosen)
+            remaining.remove(chosen)
+        return ordered
 
     @staticmethod
     def _target_trace(
@@ -280,6 +375,7 @@ class ModelMappingService:
         reason: str | None = None,
         candidate: RouteCandidate | None = None,
         candidate_count: int = 0,
+        route_diagnostics: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         model_name = str(target.get("model_name") or "").strip()
         priority = int(target.get("priority") or 100)
@@ -287,6 +383,7 @@ class ModelMappingService:
         route_score = float(candidate.route_score) if candidate is not None else 0.0
         success_rate = float(candidate.recent_success_rate) if candidate is not None else 0.0
         latency_ms = candidate.recent_avg_latency_ms if candidate is not None else None
+        health_tier = int(candidate.health_tier) if candidate is not None else 1
         cost = ModelMappingService._candidate_cost(candidate) if candidate is not None else None
         score = ModelMappingService._target_score(
             priority=priority,
@@ -306,9 +403,12 @@ class ModelMappingService:
             "route_score": route_score,
             "score": score,
             "candidate_count": candidate_count,
+            "health_tier": health_tier,
         }
         if reason:
             payload["reason"] = reason
+        if route_diagnostics:
+            payload["route_diagnostics"] = route_diagnostics
         if candidate is not None:
             payload.update({
                 "provider_id": candidate.provider.id,
@@ -317,7 +417,9 @@ class ModelMappingService:
                 "recent_success_rate": success_rate,
                 "recent_avg_latency_ms": latency_ms,
                 "recent_failure_rate": candidate.recent_failure_rate,
+                "sticky_affinity": candidate.sticky_affinity,
                 "effective_cost": cost,
+                "provider_load_factor": candidate.load_factor,
             })
         return payload
 
@@ -356,6 +458,22 @@ class ModelMappingService:
         basis = sticky_key or "|".join(str(item.get("model_name") or "") for item in targets)
         digest = hashlib.sha256(basis.encode("utf-8")).hexdigest()
         return int(digest[:16], 16)
+
+    @staticmethod
+    def _target_sticky_affinity(target: dict[str, Any], sticky_key: str | None) -> float:
+        if not sticky_key:
+            return 0.0
+        model_name = str(target.get("model_name") or "")
+        provider_id = str(target.get("provider_id") or "")
+        digest = hashlib.sha256(f"{sticky_key}:{model_name}:{provider_id}".encode("utf-8")).hexdigest()
+        return int(digest[:12], 16) / float(0xFFFFFFFFFFFF)
+
+    @staticmethod
+    def _target_health_tier(target: dict[str, Any]) -> int:
+        try:
+            return max(0, int(target.get("health_tier", 1)))
+        except (TypeError, ValueError):
+            return 1
 
     @staticmethod
     def _parse_targets(raw_value: str | None) -> list[dict[str, Any]]:

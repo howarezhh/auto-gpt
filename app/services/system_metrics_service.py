@@ -23,6 +23,7 @@ from app.models.provider import Provider
 from app.models.request_log import RequestLog
 from app.scheduler import scheduler
 from app.services.log_service import LogService
+from app.services.cache_service import CacheService
 from app.services.request_log_queue_service import RequestLogQueueService
 from app.services.provider_capacity_service import ProviderCapacityService, ProviderCapacityUnavailableError
 from app.services.runtime_state_service import RuntimeStateService
@@ -87,6 +88,7 @@ class SystemMetricsService:
             "database": {**database, "pool": pool},
             "redis": redis_snapshot,
             "runtime": runtime,
+            "cache": CacheService.stats_snapshot(),
             "host": host,
             "traffic": traffic,
             "timeseries": timeseries,
@@ -534,9 +536,11 @@ class SystemMetricsService:
                     "active_requests": snapshot.active_requests if snapshot else 0,
                     "active_streams": snapshot.active_streams if snapshot else 0,
                     "current_qps": snapshot.current_qps if snapshot else 0,
+                    "current_rpm": snapshot.current_rpm if snapshot else 0,
                     "max_active_requests": provider.max_active_requests,
                     "max_active_streams": provider.max_active_streams,
                     "max_qps": provider.max_qps,
+                    "max_rpm": provider.max_rpm,
                 }
             )
         return items

@@ -383,6 +383,25 @@ def batch_update_api_key_providers(
     return result
 
 
+@router.post("/batch/providers/authorize-all", response_model=ApiKeyBatchActionResultOut)
+def batch_authorize_all_api_key_providers(
+    db: Session = Depends(get_db),
+    current_user=Depends(require_admin_api_user),
+) -> ApiKeyBatchActionResultOut:
+    result = ApiKeyAdminService.batch_authorize_all_providers(db)
+    AdminAuditService.create_log(
+        db,
+        actor_user_id=current_user.id,
+        actor_username=current_user.username,
+        action="batch_authorize_all_providers",
+        entity_type="api_key",
+        entity_id=None,
+        entity_name="all_api_keys",
+        summary=f"将全部 API Key 恢复为全渠道授权 {result.affected_count} 个",
+    )
+    return result
+
+
 @router.post("/batch/template", response_model=ApiKeyBatchActionResultOut)
 def batch_apply_api_key_template(
     payload: ApiKeyBatchTemplateApplyIn,

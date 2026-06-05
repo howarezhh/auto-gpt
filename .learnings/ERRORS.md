@@ -538,3 +538,90 @@ httpx.ResponseNotRead: Attempted to access streaming response content, without h
 - Context: Tried to run inline Python with `python - <<'PY'` inside PowerShell.
 - Error: `ParserError: Missing file specification after redirection operator.`
 - Fix: Use a PowerShell here-string piped into Python, e.g. `@' ... '@ | & $py -`.
+
+---
+
+## [ERR-20260605-001] nested_pwsh_rg_regex_pipe_quoting
+
+**Logged**: 2026-06-05T00:00:00+08:00
+**Priority**: low
+**Status**: pending
+**Area**: infra
+
+### Summary
+Nested `pwsh -Command` with a double-quoted `rg` regex containing `|` can be split by PowerShell before reaching `rg`.
+
+### Error
+```text
+mapping: The term 'mapping' is not recognized as a name of a cmdlet, function, script file, or executable program.
+/v1/responses: The term '/v1/responses' is not recognized as a name of a cmdlet, function, script file, or executable program.
+```
+
+### Context
+- Command attempted: `pwsh -NoLogo -Command "rg -n \"model_mapping|mapping|...\" app"`.
+- Environment: Codex shell command runs under PowerShell and invokes PowerShell 7 per project rule.
+
+### Suggested Fix
+Use single quotes for the regex inside the nested PowerShell command, or wrap the inner script in a single-quoted script block: `pwsh -Command '& { rg -n ''pattern1|pattern2'' app }'`.
+
+### Metadata
+- Reproducible: yes
+- Related Files: none
+- See Also: ERR-20260603-001 nested_pwsh_rg_pipe_pattern
+
+---
+
+## [ERR-20260605-002] powershell_rg_glob_path_argument
+
+**Logged**: 2026-06-05T00:00:00+08:00
+**Priority**: low
+**Status**: pending
+**Area**: infra
+
+### Summary
+On Windows, passing `stage*.py` as an `rg` path argument can be treated as an invalid literal path instead of a glob.
+
+### Error
+```text
+rg: stage*.py: 文件名、目录名或卷标语法不正确。 (os error 123)
+```
+
+### Context
+- Command attempted: `rg -n 'pattern' stage*.py test_data app/tests tests`.
+- Environment: PowerShell 7 wrapper on Windows.
+
+### Suggested Fix
+Use ripgrep's glob option instead of a wildcard path argument, for example `rg -n --glob 'stage*.py' 'pattern' .`.
+
+### Metadata
+- Reproducible: yes
+- Related Files: none
+- See Also: ERR-20260605-001 nested_pwsh_rg_regex_pipe_quoting
+
+---
+
+## [ERR-20260605-003] cache_service_no_clear_method
+
+**Logged**: 2026-06-05T00:00:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: verification
+
+### Summary
+`CacheService` does not expose a `clear()` helper, so temporary verification scripts must not call it.
+
+### Error
+```text
+AttributeError: type object 'CacheService' has no attribute 'clear'
+```
+
+### Context
+- Command attempted: an inline Python regression check for model mapping capability filtering.
+- Environment: project `.venv` Python on Windows.
+
+### Suggested Fix
+Use `CacheService.invalidate_prefix(...)` for the relevant cache prefixes, or run the verification in a fresh Python process with isolated test data.
+
+### Metadata
+- Reproducible: yes
+- Related Files: app/services/cache_service.py

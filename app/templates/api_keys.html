@@ -4,7 +4,6 @@
     <div class="cockpit-hero-copy">
         <div class="eyebrow">API 接入</div>
         <h2>API 密钥管理</h2>
-        <p>集中维护外部调用密钥、授权中转范围、额度约束与调用状态，直接完成日常授权和风控操作。</p>
         <div class="hero-actions">
             <button class="btn btn-accent interactive-btn" id="add-api-key-btn" type="button">新增 API 密钥</button>
             <a class="btn btn-ghost interactive-btn" href="/logs" data-shell-link>查看全局日志</a>
@@ -25,8 +24,7 @@
 
 <nav class="page-anchor-bar">
     <a class="page-anchor-link" href="#api-keys-overview">概览指标</a>
-    <a class="page-anchor-link" href="#api-keys-registry">筛选列表</a>
-    <a class="page-anchor-link" href="#api-keys-batch">批量操作</a>
+    <a class="page-anchor-link" href="#api-keys-registry">密钥列表</a>
 </nav>
 
 <section class="panel-card section-shell anchor-section-offset" id="api-keys-overview">
@@ -45,7 +43,7 @@
         <article class="metric-card"><span>启用中</span><strong data-api-key-summary="enabled_keys">0</strong></article>
         <article class="metric-card"><span>禁用中</span><strong data-api-key-summary="disabled_keys">0</strong></article>
         <article class="metric-card"><span>已过期</span><strong data-api-key-summary="expired_keys">0</strong></article>
-        <article class="metric-card metric-card-alert"><span>额度耗尽</span><strong data-api-key-summary="quota_exhausted_keys">0</strong></article>
+        <article class="metric-card metric-card-alert"><span>余额耗尽</span><strong data-api-key-summary="balance_exhausted_keys">0</strong></article>
         <article class="metric-card"><span>总请求量</span><strong data-api-key-summary="total_requests">0</strong></article>
         <article class="metric-card"><span>总 Token</span><strong data-api-key-summary="total_tokens">0</strong></article>
         <article class="metric-card"><span>累计消费</span><strong data-api-key-summary="total_cost_used">0</strong></article>
@@ -75,23 +73,25 @@
 </section>
 
 <section class="panel-card section-shell anchor-section-offset" id="api-keys-registry">
-    <div class="section-subhead">
+    <div class="section-subhead compact-section-subhead">
         <div>
-            <div class="panel-kicker">筛选列表</div>
-            <h3>服务端筛选与密钥列表</h3>
+            <div class="panel-kicker">密钥列表</div>
+            <h3>筛选、批量与列表</h3>
         </div>
-        <button class="btn btn-ghost interactive-btn" id="api-key-refresh-btn" type="button">刷新</button>
+        <div class="data-workspace-actions">
+            <div class="table-muted" id="api-key-page-meta">正在加载...</div>
+            <button class="btn btn-ghost interactive-btn" id="api-key-refresh-btn" type="button">刷新</button>
+        </div>
     </div>
-    <div class="table-toolbar-block">
-        <div class="table-toolbar filter-toolbar">
+    <div class="data-workspace-card">
+        <div class="table-toolbar-block workspace-toolbar-block">
+            <div class="table-toolbar filter-toolbar compact-filter-toolbar">
             <input class="field-input search-input" id="api-key-search" type="search" placeholder="搜索名称、备注、前缀、归属用户">
             <select class="field-input" id="api-key-status-filter">
                 <option value="">全部状态</option>
                 <option value="active">正常可用</option>
                 <option value="disabled">已禁用</option>
                 <option value="expired">已过期</option>
-                <option value="quota_exhausted">额度耗尽</option>
-                <option value="cost_quota_exhausted">金额额度耗尽</option>
                 <option value="balance_exhausted">余额耗尽</option>
                 <option value="unbound">未绑定渠道</option>
             </select>
@@ -109,55 +109,53 @@
                 <option value="100">100 条 / 页</option>
             </select>
         </div>
-    </div>
-    <div class="table-shell">
-        <table class="data-table">
-            <thead>
-                <tr>
-                    <th><input id="api-key-check-all-visible" type="checkbox" aria-label="选择本页"></th>
-                    <th>名称</th>
-                    <th>归属用户</th>
-                    <th>密钥</th>
-                    <th>状态</th>
-                    <th>路由策略</th>
-                    <th>授权渠道</th>
-                    <th>额度</th>
-                    <th>账单 / 余额</th>
-                    <th>最近使用</th>
-                    <th>操作</th>
-                </tr>
-            </thead>
-            <tbody id="api-key-table-body">
-                <tr><td colspan="11"><div class="empty-state">正在加载 API 密钥...</div></td></tr>
-            </tbody>
-        </table>
-    </div>
-</section>
-
-<section class="panel-card section-shell anchor-section-offset" id="api-keys-batch">
-    <div class="section-subhead">
-        <div>
-            <div class="panel-kicker">批量操作</div>
-            <h3>选择、翻页与统一治理</h3>
         </div>
-        <div class="table-muted" id="api-key-page-meta">正在加载...</div>
-    </div>
-    <div class="action-palette">
-        <button class="btn btn-ghost interactive-btn" id="api-key-select-page" type="button">选择本页</button>
-        <button class="btn btn-ghost interactive-btn" id="api-key-clear-selection-btn" type="button">清空选择</button>
-        <button class="btn btn-ghost interactive-btn" id="api-key-batch-enable-btn" type="button">批量启用</button>
-        <button class="btn btn-ghost interactive-btn" id="api-key-batch-disable-btn" type="button">批量禁用</button>
-        <button class="btn btn-ghost interactive-btn" id="api-key-batch-delete-btn" type="button">批量删除</button>
-        <button class="btn btn-ghost interactive-btn" id="api-key-batch-rotate-btn" type="button">批量轮换</button>
-        <button class="btn btn-ghost interactive-btn" id="api-key-batch-expire-btn" type="button">批量过期</button>
-        <button class="btn btn-ghost interactive-btn" id="api-key-batch-template-btn" type="button">批量套用模板</button>
-        <button class="btn btn-ghost interactive-btn" id="api-key-batch-providers-btn" type="button">批量改渠道授权</button>
-        <button class="btn btn-ghost interactive-btn" id="api-key-prev-page-btn" type="button">上一页</button>
-        <button class="btn btn-ghost interactive-btn" id="api-key-next-page-btn" type="button">下一页</button>
-    </div>
-    <div class="settings-note">
-        <strong>批量规则</strong>
-        <span>批量操作仅作用于已勾选的 API 密钥，可跨页累积选择。除启停、删除、轮换外，还可以统一套用策略模板、立即过期或覆盖渠道授权策略。</span>
+        <div class="data-workspace-toolbar">
+            <div class="action-palette compact-action-palette">
+                <button class="btn btn-ghost interactive-btn" id="api-key-select-page" type="button">选择本页</button>
+                <button class="btn btn-ghost interactive-btn" id="api-key-clear-selection-btn" type="button">清空选择</button>
+                <button class="btn btn-ghost interactive-btn" id="api-key-batch-enable-btn" type="button">批量启用</button>
+                <button class="btn btn-ghost interactive-btn" id="api-key-batch-disable-btn" type="button">批量禁用</button>
+                <button class="btn btn-ghost interactive-btn" id="api-key-batch-delete-btn" type="button">批量删除</button>
+                <button class="btn btn-ghost interactive-btn" id="api-key-batch-rotate-btn" type="button">批量轮换</button>
+                <button class="btn btn-ghost interactive-btn" id="api-key-batch-expire-btn" type="button">批量过期</button>
+                <button class="btn btn-ghost interactive-btn" id="api-key-batch-template-btn" type="button">套用模板</button>
+                <button class="btn btn-ghost interactive-btn" id="api-key-batch-providers-btn" type="button">改渠道授权</button>
+            </div>
+            <div class="table-toolbar logs-pagination-bar workspace-pagination-bar">
+                <label class="logs-page-size">
+                    <span>本页全选</span>
+                    <input id="api-key-check-all-visible" type="checkbox" aria-label="选择本页">
+                </label>
+                <div class="logs-page-actions">
+                    <button class="btn btn-ghost interactive-btn" id="api-key-authorize-all-btn" type="button">全部恢复全渠道授权</button>
+                    <button class="btn btn-ghost interactive-btn" id="api-key-prev-page-btn" type="button">上一页</button>
+                    <button class="btn btn-ghost interactive-btn" id="api-key-next-page-btn" type="button">下一页</button>
+                </div>
+            </div>
+        </div>
+        <div class="table-shell">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>选择</th>
+                        <th>名称</th>
+                        <th>归属用户</th>
+                        <th>密钥</th>
+                        <th>状态</th>
+                        <th>路由策略</th>
+                        <th>授权渠道</th>
+                        <th>额度</th>
+                        <th>账单 / 余额</th>
+                        <th>最近使用</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody id="api-key-table-body">
+                    <tr><td colspan="11"><div class="empty-state">正在加载 API 密钥...</div></td></tr>
+                </tbody>
+            </table>
+        </div>
     </div>
 </section>
 
@@ -267,12 +265,9 @@
                 <input class="field-input" id="api-key-remark" maxlength="200" placeholder="例如：CRM 生产环境">
             </label>
             <label>
-                <span>路由模式</span>
+                <span>路由主策略</span>
                 <select class="field-input" id="api-key-route-mode">
-                    <option value="manual">手动优先</option>
-                    <option value="failover">故障切换</option>
-                    <option value="weighted">权重分流</option>
-                    <option value="sticky">会话粘滞</option>
+                    <option value="failover">健康优先</option>
                 </select>
             </label>
             <label>
@@ -296,7 +291,7 @@
                 <input class="field-input" id="api-key-token-limit-total" type="number" min="0" placeholder="留空表示不限制">
             </label>
             <label>
-                <span>金额额度</span>
+                <span>密钥金额配额</span>
                 <input class="field-input" id="api-key-cost-limit-total" type="number" min="0" step="0.000001" placeholder="留空表示不限制">
             </label>
             <label>
@@ -315,11 +310,11 @@
                     </label>
                     <label>
                         <span>每秒最多请求</span>
-                        <input class="field-input" id="api-key-qps-limit" type="number" min="0" placeholder="0 或留空表示不限制">
+                        <input class="field-input" id="api-key-qps-limit" type="number" min="0" placeholder="0 或留空表示不限制" value="20">
                     </label>
                     <label>
                         <span>每分钟最多请求</span>
-                        <input class="field-input" id="api-key-rpm-limit" type="number" min="0" placeholder="0 或留空表示不限制">
+                        <input class="field-input" id="api-key-rpm-limit" type="number" min="0" placeholder="0 或留空表示不限制" value="20">
                     </label>
                     <label>
                         <span>每分钟最多 Token</span>
@@ -338,7 +333,7 @@
                 </label>
                 <label class="toggle-row">
                     <input id="api-key-manual-allow-fallback" type="checkbox" checked>
-                    <span>手动优先模式允许失败后回退</span>
+                    <span>默认中转不可用时允许回退</span>
                 </label>
                 <label class="toggle-row">
                     <input id="api-key-route-exhausted-retry-infinite-enabled" type="checkbox">
@@ -349,7 +344,7 @@
                 <span>授权中转站</span>
                 <div class="settings-note">
                     <strong>授权规则</strong>
-                    <span>只允许命中这里勾选的中转站；即使模型可用，只要渠道未授权，也会被路由链路拦截。</span>
+                    <span>默认全选。保持全选时，该 API Key 会自动跟随后续渠道增删；只有取消部分勾选时，才会切换成单密钥自定义授权。</span>
                 </div>
                 <div class="api-key-provider-selector" id="api-key-provider-selector">
                     <div class="playground-provider-list-empty">正在加载中转站...</div>
@@ -391,12 +386,9 @@
         </div>
         <form id="api-key-batch-provider-form" class="form-grid">
             <label>
-                <span>路由模式</span>
+                <span>路由主策略</span>
                 <select class="field-input" id="api-key-batch-provider-route-mode">
-                    <option value="manual">手动优先</option>
-                    <option value="failover">故障切换</option>
-                    <option value="weighted">权重分流</option>
-                    <option value="sticky">会话粘滞</option>
+                    <option value="failover">健康优先</option>
                 </select>
             </label>
             <label>
@@ -407,7 +399,7 @@
             </label>
             <label class="toggle-row">
                 <input id="api-key-batch-provider-fallback" type="checkbox" checked>
-                <span>手动优先模式允许失败后回退</span>
+                <span>默认中转不可用时允许回退</span>
             </label>
             <label class="toggle-row">
                 <input id="api-key-batch-provider-infinite-retry" type="checkbox">
@@ -415,6 +407,10 @@
             </label>
             <div class="form-span-2">
                 <span>授权中转站</span>
+                <div class="settings-note">
+                    <strong>批量规则</strong>
+                    <span>默认全选。若保持全选，所选 API Key 会统一恢复为自动同步全部渠道授权。</span>
+                </div>
                 <div class="api-key-provider-selector" id="api-key-batch-provider-selector"></div>
             </div>
             <div class="form-actions form-span-2">
@@ -438,12 +434,9 @@
                 <input class="field-input" id="api-key-template-name" maxlength="100" required>
             </label>
             <label>
-                <span>路由模式</span>
+                <span>路由主策略</span>
                 <select class="field-input" id="api-key-template-route-mode">
-                    <option value="manual">手动优先</option>
-                    <option value="failover">故障切换</option>
-                    <option value="weighted">权重分流</option>
-                    <option value="sticky">会话粘滞</option>
+                    <option value="failover">健康优先</option>
                 </select>
             </label>
             <label>
@@ -457,7 +450,7 @@
                 <input class="field-input" id="api-key-template-token-limit-total" type="number" min="0">
             </label>
             <label>
-                <span>金额额度</span>
+                <span>密钥金额配额</span>
                 <input class="field-input" id="api-key-template-cost-limit-total" type="number" min="0" step="0.000001">
             </label>
             <label>
@@ -470,7 +463,7 @@
             </label>
             <label class="toggle-row">
                 <input id="api-key-template-manual-allow-fallback" type="checkbox" checked>
-                <span>手动优先模式允许失败后回退</span>
+                <span>默认中转不可用时允许回退</span>
             </label>
             <label class="form-span-2">
                 <span>备注</span>

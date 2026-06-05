@@ -10,8 +10,8 @@ class ProviderModelConfigBase(BaseModel):
     priority: int = 100
     weight: int = 100
     supports_stream: bool = True
-    supports_vision: bool = False
-    supports_tools: bool = False
+    supports_vision: bool = True
+    supports_tools: bool = True
     supports_chat_completions: bool = True
     supports_responses: bool = True
     context_window_tokens: int | None = Field(default=None, ge=1)
@@ -144,9 +144,10 @@ class ProviderBase(BaseModel):
     weight: int = 100
     timeout_ms: int = 30000
     max_retries: int = 1
-    max_active_requests: int | None = Field(default=1000, ge=0)
-    max_active_streams: int | None = Field(default=1000, ge=0)
-    max_qps: int | None = Field(default=None, ge=0)
+    max_active_requests: int | None = Field(default=20, ge=0)
+    max_active_streams: int | None = Field(default=10, ge=0)
+    max_qps: int | None = Field(default=20, ge=0)
+    max_rpm: int | None = Field(default=20, ge=0)
     max_error_rate: float | None = Field(default=80.0, ge=0, le=100)
     first_token_timeout_sec: int | None = Field(default=60, ge=1)
     maintenance_window: str | None = None
@@ -196,6 +197,7 @@ class ProviderUpdate(BaseModel):
     max_active_requests: int | None = Field(default=None, ge=0)
     max_active_streams: int | None = Field(default=None, ge=0)
     max_qps: int | None = Field(default=None, ge=0)
+    max_rpm: int | None = Field(default=None, ge=0)
     max_error_rate: float | None = Field(default=None, ge=0, le=100)
     first_token_timeout_sec: int | None = Field(default=None, ge=1)
     maintenance_window: str | None = None
@@ -247,11 +249,13 @@ class ProviderOut(BaseModel):
     max_active_requests: int | None
     max_active_streams: int | None
     max_qps: int | None
+    max_rpm: int | None
     max_error_rate: float | None
     first_token_timeout_sec: int | None
     active_requests: int = 0
     active_streams: int = 0
     current_qps: int = 0
+    current_rpm: int = 0
     maintenance_window: str | None
     maintenance_mode_enabled: bool
     auto_circuit_break_enabled: bool
@@ -281,6 +285,18 @@ class ProviderOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ProviderTelemetryCardOut(BaseModel):
+    id: str
+    label: str
+    value: int | float
+
+
+class ProviderPageContentOut(BaseModel):
+    providers: list[ProviderOut]
+    summary: dict[str, int | float]
+    telemetry_cards: list[ProviderTelemetryCardOut]
+
+
 class ProviderOptionOut(BaseModel):
     id: int
     name: str
@@ -296,8 +312,8 @@ class ProviderPlaygroundModelOut(BaseModel):
     model_name: str
     enabled: bool
     supports_stream: bool = True
-    supports_vision: bool = False
-    supports_tools: bool = False
+    supports_vision: bool = True
+    supports_tools: bool = True
     supports_image_generation: bool = False
     supports_chat_completions: bool = True
     supports_responses: bool = True
@@ -379,8 +395,8 @@ class ProviderDiscoverModelsIn(BaseModel):
 class ProviderDiscoveredModelOut(BaseModel):
     model_name: str
     supports_stream: bool = True
-    supports_vision: bool = False
-    supports_tools: bool = False
+    supports_vision: bool = True
+    supports_tools: bool = True
     supports_image_generation: bool = False
     supports_chat_completions: bool = True
     supports_responses: bool = True

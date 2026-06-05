@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% set route_mode_labels = {"manual": "手动优先", "failover": "故障切换", "weighted": "权重分流", "sticky": "会话粘滞"} %}
+{% set route_mode_labels = {"manual": "健康优先", "failover": "健康优先", "weighted": "健康优先", "sticky": "健康优先"} %}
 {% set health_labels = {"healthy": "健康", "degraded": "降级", "unhealthy": "异常", "unknown": "未知"} %}
 {% set circuit_labels = {"closed": "闭合", "open": "已熔断", "half_open": "半开探测", "unknown": "未知"} %}
 {% block content %}
@@ -267,7 +267,7 @@
                     <span class="status-badge status-{{ provider.health_status }}">{{ health_labels.get(provider.health_status, provider.health_status) }}</span>
                 </div>
                 <div class="provider-meta">优先级 {{ provider.priority }} / 权重 {{ provider.weight }}</div>
-                <div class="provider-models">{{ provider.models_json }}</div>
+                <div class="provider-models">{{ provider.models|join(', ') or '-' }}</div>
                 <div class="provider-foot">
                     <span>延迟 {{ provider.last_latency_ms or '-' }} ms</span>
                     <span>{{ circuit_labels.get(provider.circuit_state, provider.circuit_state) }}</span>
@@ -287,7 +287,7 @@
             </div>
             <div class="detail-list" id="dashboard-route-meta">
                 <div><span>模式</span><strong>{{ route_mode_labels.get(settings.route_mode, settings.route_mode) }}</strong></div>
-                <div><span>默认中转</span><strong>{{ settings.default_provider_id or '-' }}</strong></div>
+                <div><span>默认中转</span><strong>{{ stats.default_provider or '-' }}</strong></div>
                 <div><span>自动巡检</span><strong>{{ '开启' if settings.auto_health_check else '关闭' }}</strong></div>
                 <div><span>检查间隔</span><strong>{{ settings.health_check_interval_sec }} 秒</strong></div>
                 <div><span>模型健康</span><strong>健康 {{ stats.healthy_model_count or 0 }} / 降级 {{ stats.degraded_model_count or 0 }} / 异常 {{ stats.unhealthy_model_count or 0 }}</strong></div>

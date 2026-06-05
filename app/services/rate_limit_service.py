@@ -62,6 +62,64 @@ class RateLimitService:
             raise
 
     @staticmethod
+    def reset_realtime_quota_counters(
+        *,
+        api_key_id: int,
+        api_key_total_tokens_used: int | None = None,
+        api_key_day_tokens_used: int | None = None,
+        api_key_total_cost_used: Decimal | float | int | str | None = None,
+        api_key_day_cost_used: Decimal | float | int | str | None = None,
+        api_key_day_requests: int | None = None,
+        account_id: int | None = None,
+        account_total_tokens_used: int | None = None,
+        account_day_tokens_used: int | None = None,
+        account_month_tokens_used: int | None = None,
+        account_total_cost_used: Decimal | float | int | str | None = None,
+        account_day_cost_used: Decimal | float | int | str | None = None,
+        account_month_cost_used: Decimal | float | int | str | None = None,
+        account_total_requests: int | None = None,
+        account_day_requests: int | None = None,
+        account_month_requests: int | None = None,
+    ) -> None:
+        try:
+            client = RedisService.get_sync_client()
+            day_key = datetime.utcnow().strftime("%Y%m%d")
+            month_key = datetime.utcnow().strftime("%Y%m")
+            pipe = client.pipeline(transaction=True)
+            if api_key_total_tokens_used is not None:
+                pipe.set(f"quota:api_key:{api_key_id}:tokens:total", max(0, int(api_key_total_tokens_used)))
+            if api_key_day_tokens_used is not None:
+                pipe.set(f"quota:api_key:{api_key_id}:tokens:{day_key}", max(0, int(api_key_day_tokens_used)), ex=60 * 60 * 26)
+            if api_key_total_cost_used is not None:
+                pipe.set(f"quota:api_key:{api_key_id}:cost:total", max(0, money_to_scaled_int(api_key_total_cost_used)))
+            if api_key_day_cost_used is not None:
+                pipe.set(f"quota:api_key:{api_key_id}:cost:{day_key}", max(0, money_to_scaled_int(api_key_day_cost_used)), ex=60 * 60 * 26)
+            if api_key_day_requests is not None:
+                pipe.set(f"quota:api_key:{api_key_id}:requests:{day_key}", max(0, int(api_key_day_requests)), ex=60 * 60 * 26)
+            if account_id is not None:
+                if account_total_tokens_used is not None:
+                    pipe.set(f"quota:account:{account_id}:tokens:total", max(0, int(account_total_tokens_used)))
+                if account_day_tokens_used is not None:
+                    pipe.set(f"quota:account:{account_id}:tokens:{day_key}", max(0, int(account_day_tokens_used)), ex=60 * 60 * 26)
+                if account_month_tokens_used is not None:
+                    pipe.set(f"quota:account:{account_id}:tokens:{month_key}", max(0, int(account_month_tokens_used)), ex=60 * 60 * 24 * 33)
+                if account_total_cost_used is not None:
+                    pipe.set(f"quota:account:{account_id}:cost:total", max(0, money_to_scaled_int(account_total_cost_used)))
+                if account_day_cost_used is not None:
+                    pipe.set(f"quota:account:{account_id}:cost:{day_key}", max(0, money_to_scaled_int(account_day_cost_used)), ex=60 * 60 * 26)
+                if account_month_cost_used is not None:
+                    pipe.set(f"quota:account:{account_id}:cost:{month_key}", max(0, money_to_scaled_int(account_month_cost_used)), ex=60 * 60 * 24 * 33)
+                if account_total_requests is not None:
+                    pipe.set(f"quota:account:{account_id}:requests:total", max(0, int(account_total_requests)))
+                if account_day_requests is not None:
+                    pipe.set(f"quota:account:{account_id}:requests:{day_key}", max(0, int(account_day_requests)), ex=60 * 60 * 26)
+                if account_month_requests is not None:
+                    pipe.set(f"quota:account:{account_id}:requests:{month_key}", max(0, int(account_month_requests)), ex=60 * 60 * 24 * 33)
+            pipe.execute()
+        except Exception:
+            return
+
+    @staticmethod
     async def check_api_key_limits(
         *,
         api_key_id: int,
@@ -120,7 +178,7 @@ class RateLimitService:
                 await RateLimitService._get_and_check(
                     key=f"quota:api_key:{api_key_id}:tokens:total",
                     limit=total_token_limit,
-                    code="insufficient_quota",
+                    code="api_key_token_quota_exhausted",
                     message="Api key token quota exhausted",
                 )
             if daily_token_limit and daily_token_limit > 0:
@@ -134,7 +192,7 @@ class RateLimitService:
                 await RateLimitService._get_and_check_cost(
                     key=f"quota:api_key:{api_key_id}:cost:total",
                     limit=total_cost_limit,
-                    code="insufficient_quota",
+                    code="api_key_cost_quota_exhausted",
                     message="Api key billing quota exhausted",
                 )
             if daily_cost_limit and daily_cost_limit > 0:

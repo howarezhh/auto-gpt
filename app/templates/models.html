@@ -129,9 +129,7 @@
                 <label>
                     <span>选择策略</span>
                     <select class="field-input" id="model-mapping-strategy">
-                        <option value="auto">自动择优</option>
-                        <option value="priority">优先级</option>
-                        <option value="weighted">权重分流</option>
+                        <option value="auto">健康优先</option>
                     </select>
                 </label>
                 <label class="settings-switch-card model-mapping-enabled-card" for="model-mapping-enabled">
@@ -243,11 +241,11 @@
                     </label>
                     <label class="settings-switch-card" for="model-supports-vision">
                         <span class="settings-switch-copy">
-                            <strong>支持图像</strong>
+                            <strong>支持图像理解</strong>
                             <small>用于图片输入请求的模型候选过滤。</small>
                         </span>
                         <span class="settings-switch-control">
-                            <input id="model-supports-vision" type="checkbox">
+                            <input id="model-supports-vision" type="checkbox" checked>
                             <span class="settings-switch-slider" aria-hidden="true"></span>
                         </span>
                     </label>
@@ -257,7 +255,7 @@
                             <small>用于写代码代理、函数调用等请求的原生能力过滤。</small>
                         </span>
                         <span class="settings-switch-control">
-                            <input id="model-supports-tools" type="checkbox">
+                            <input id="model-supports-tools" type="checkbox" checked>
                             <span class="settings-switch-slider" aria-hidden="true"></span>
                         </span>
                     </label>

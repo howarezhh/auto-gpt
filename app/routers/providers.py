@@ -18,6 +18,7 @@ from app.schemas.provider import (
     ProviderDiscoverModelsResponse,
     ProviderModelMountListResponse,
     ProviderModelConfigOut,
+    ProviderPageContentOut,
     ProviderModelConfigUpdate,
     ProviderOptionOut,
     ProviderOut,
@@ -98,6 +99,11 @@ async def _stream_health_check_events(
 @router.get("", response_model=list[ProviderOut])
 def list_providers(db: Session = Depends(get_db)) -> list[ProviderOut]:
     return [ProviderOut(**item) for item in ProviderService.list_provider_dicts(db)]
+
+
+@router.get("/overview", response_model=ProviderPageContentOut)
+def provider_page_overview(db: Session = Depends(get_db)) -> ProviderPageContentOut:
+    return ProviderPageContentOut(**ProviderService.build_provider_page_content(db))
 
 
 @router.get("/options", response_model=list[ProviderOptionOut])
@@ -276,6 +282,7 @@ async def test_provider(provider_id: int, payload: dict | None = None, db: Sessi
         phase_keys=_phase_keys_from_test_features(features),
         text_probe_max_tokens=HealthService.INTERACTIVE_TEXT_PROBE_MAX_TOKENS,
         capability_probe_max_tokens=HealthService.SCHEDULED_CAPABILITY_PROBE_MAX_TOKENS,
+        interactive_mode=True,
     )
 
 
@@ -304,6 +311,7 @@ async def test_provider_stream(provider_id: int, payload: dict | None = None, db
                 text_probe_max_tokens=HealthService.INTERACTIVE_TEXT_PROBE_MAX_TOKENS,
                 capability_probe_max_tokens=HealthService.SCHEDULED_CAPABILITY_PROBE_MAX_TOKENS,
                 progress_callback=progress_reporter,
+                interactive_mode=True,
             )
         finally:
             stream_db.close()
@@ -339,6 +347,7 @@ async def test_provider_model(
         phase_keys=_phase_keys_from_test_features(features),
         text_probe_max_tokens=HealthService.INTERACTIVE_TEXT_PROBE_MAX_TOKENS,
         capability_probe_max_tokens=HealthService.SCHEDULED_CAPABILITY_PROBE_MAX_TOKENS,
+        interactive_mode=True,
     )
 
 
@@ -355,6 +364,7 @@ async def test_all_providers(payload: dict | None = None, db: Session = Depends(
         phase_keys=_phase_keys_from_test_features(features),
         text_probe_max_tokens=HealthService.INTERACTIVE_TEXT_PROBE_MAX_TOKENS,
         capability_probe_max_tokens=HealthService.SCHEDULED_CAPABILITY_PROBE_MAX_TOKENS,
+        interactive_mode=True,
     )
 
 
@@ -377,6 +387,7 @@ async def test_all_providers_stream(payload: dict | None = None, db: Session = D
                 text_probe_max_tokens=HealthService.INTERACTIVE_TEXT_PROBE_MAX_TOKENS,
                 capability_probe_max_tokens=HealthService.SCHEDULED_CAPABILITY_PROBE_MAX_TOKENS,
                 progress_callback=progress_reporter,
+                interactive_mode=True,
             )
         finally:
             stream_db.close()
@@ -405,4 +416,5 @@ async def test_provider_connectivity(
         include_disabled_models=True,
         phase_keys=HealthService.INTERACTIVE_TEXT_PROBE_PHASE_KEYS,
         text_probe_max_tokens=HealthService.INTERACTIVE_TEXT_PROBE_MAX_TOKENS,
+        interactive_mode=True,
     )

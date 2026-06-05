@@ -5,7 +5,7 @@ from collections import defaultdict
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.api_client_key import ApiClientKey
@@ -74,7 +74,7 @@ class ModelCatalogService:
             return cached
         catalogs, providers = ModelCatalogService._load_catalogs_and_providers(db)
         items = [ModelCatalogService._serialize_catalog_option(catalog, providers) for catalog in catalogs]
-        return CacheService.set(cache_key, items, ttl_seconds=15)
+        return CacheService.set(cache_key, items, ttl_seconds=ModelCatalogService._model_list_cache_ttl_seconds())
 
     @staticmethod
     def list_model_page(
@@ -292,16 +292,24 @@ class ModelCatalogService:
     def delete_model(db: Session, catalog: ModelCatalog) -> None:
         """删除模型目录项，并清理 provider 绑定和授权范围。"""
         model_name = catalog.model_name
-        providers = ProviderService.list_providers(db)
+        provider_ids = list(
+            db.scalars(select(ProviderModel.provider_id).where(ProviderModel.model_name == model_name).distinct())
+        )
+        db.execute(delete(ProviderModel).where(ProviderModel.model_name == model_name))
+        providers = list(
+            db.scalars(
+                select(Provider)
+                .options(selectinload(Provider.provider_models))
+                .where(Provider.id.in_(provider_ids))
+            )
+        )
         for provider in providers:
-            for provider_model in list(provider.provider_models):
-                if provider_model.model_name == model_name:
-                    provider.provider_models.remove(provider_model)
             ProviderService.refresh_provider_state(provider)
         ModelCatalogService._remove_model_from_authorization_scopes(db, model_name)
         db.delete(catalog)
         db.commit()
         ModelCatalogService.invalidate_model_runtime_cache()
+        ProviderService.invalidate_provider_runtime_cache()
 
     @staticmethod
     def sync_model_catalogs(db: Session) -> None:
@@ -471,8 +479,18 @@ class ModelCatalogService:
         if isinstance(cached, list):
             return {str(item) for item in cached if isinstance(item, str)}
         names = set(db.scalars(select(ModelCatalog.model_name).where(ModelCatalog.enabled.is_(True))))
-        CacheService.set(cache_key, sorted(names), ttl_seconds=15)
+        CacheService.set(cache_key, sorted(names), ttl_seconds=ModelCatalogService._model_list_cache_ttl_seconds())
         return names
+
+    @staticmethod
+    def _model_list_cache_ttl_seconds() -> int:
+        try:
+            from app.services.setting_service import SettingService
+
+            setting = SettingService.get_cached()
+            return max(5, min(int(getattr(setting, "model_list_cache_ttl_sec", 15) or 15), 300))
+        except Exception:
+            return 15
 
     @staticmethod
     def invalidate_model_runtime_cache() -> None:
@@ -839,6 +857,7 @@ class ModelCatalogService:
                             else None
                         ),
                         capability_probe_max_tokens=HealthService.SCHEDULED_CAPABILITY_PROBE_MAX_TOKENS,
+                        interactive_mode=True,
                     )
                 )[0]
                 return provider, provider_model, result

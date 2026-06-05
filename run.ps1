@@ -478,45 +478,90 @@ function Resolve-AvailablePort {
     throw "未找到可用端口。尝试范围: $PreferredPort-$MaxPort"
 }
 
-Set-Location $ProjectRoot
-Set-LocalDevRuntimeFallbacks -ProjectRootPath $ProjectRoot
+function Get-ProjectStartupMutexName {
+    param(
+        [string]$ProjectRootPath
+    )
 
-if (-not (Test-Path $VenvDir)) {
-    Write-Host "未检测到项目虚拟环境，正在创建: $VenvDir"
-    $BootstrapPythonExe = Resolve-BootstrapPythonExe
-    & $BootstrapPythonExe -m venv $VenvDir
+    $normalizedPath = (Resolve-Path -LiteralPath $ProjectRootPath).Path.ToLowerInvariant()
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($normalizedPath)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hash = $sha256.ComputeHash($bytes)
+    }
+    finally {
+        $sha256.Dispose()
+    }
+
+    $suffix = -join ($hash[0..7] | ForEach-Object { $_.ToString("x2") })
+    return "Local\aotu-gpt-run-$suffix"
 }
 
-if (-not (Test-Path $PythonExe)) {
-    throw "项目虚拟环境解释器不存在: $PythonExe"
+$ProjectStartupMutex = $null
+$HasProjectStartupMutex = $false
+
+try {
+    $mutexName = Get-ProjectStartupMutexName -ProjectRootPath $ProjectRoot
+    $ProjectStartupMutex = New-Object System.Threading.Mutex($false, $mutexName)
+    if (-not $ProjectStartupMutex.WaitOne(0)) {
+        throw "检测到另一个本项目 run.ps1 正在启动或运行。请先关闭旧启动窗口，或等待旧进程退出后再重新执行。"
+    }
+    $HasProjectStartupMutex = $true
+
+    Set-Location $ProjectRoot
+    Set-LocalDevRuntimeFallbacks -ProjectRootPath $ProjectRoot
+
+    if (-not (Test-Path $VenvDir)) {
+        Write-Host "未检测到项目虚拟环境，正在创建: $VenvDir"
+        $BootstrapPythonExe = Resolve-BootstrapPythonExe
+        & $BootstrapPythonExe -m venv $VenvDir
+    }
+
+    if (-not (Test-Path $PythonExe)) {
+        throw "项目虚拟环境解释器不存在: $PythonExe"
+    }
+
+    if (-not (Test-ProjectVenvPython -ProjectPythonExe $PythonExe -ProjectVenvDir $VenvDir)) {
+        throw "启动脚本拒绝继续：当前 Python 解释器未正确指向项目虚拟环境。期望: $PythonExe"
+    }
+
+    Stop-ProjectProcesses -ProjectRootPath $ProjectRoot -ProjectPythonExe $PythonExe -ProjectPort $Port
+    $Port = Resolve-AvailablePort -PreferredPort $Port -ForceKillPreferredPort $AllowForceKillPortProcess
+
+    if (Test-Path $ActivateScript) {
+        . $ActivateScript
+    } else {
+        throw "项目虚拟环境激活脚本不存在: $ActivateScript"
+    }
+
+    Write-Host "当前启动环境: 项目虚拟环境"
+    Write-Host "虚拟环境目录: $VenvDir"
+    Write-Host "虚拟环境激活脚本: $ActivateScript"
+    Write-Host "Python 解释器: $PythonExe"
+    Write-Host "启动模式: $(if ($EnableReload) { 'reload' } else { 'stable(no-reload)' })"
+
+    & $PythonExe -m pip install --upgrade pip -i $PipIndexUrl
+    & $PythonExe -m pip install -r requirements.txt -i $PipIndexUrl
+
+    $Port = Resolve-AvailablePort -PreferredPort $Port -ForceKillPreferredPort $AllowForceKillPortProcess
+    Write-Host "服务地址: http://$HostAddress`:$Port"
+
+    $UvicornArgs = @("-m", "uvicorn", "app.main:app", "--host", $HostAddress, "--port", $Port)
+    if ($EnableReload) {
+        $UvicornArgs += "--reload"
+    }
+
+    & $PythonExe @UvicornArgs
 }
-
-if (-not (Test-ProjectVenvPython -ProjectPythonExe $PythonExe -ProjectVenvDir $VenvDir)) {
-    throw "启动脚本拒绝继续：当前 Python 解释器未正确指向项目虚拟环境。期望: $PythonExe"
+finally {
+    if ($HasProjectStartupMutex -and $null -ne $ProjectStartupMutex) {
+        try {
+            $ProjectStartupMutex.ReleaseMutex()
+        }
+        catch {
+        }
+    }
+    if ($null -ne $ProjectStartupMutex) {
+        $ProjectStartupMutex.Dispose()
+    }
 }
-
-Stop-ProjectProcesses -ProjectRootPath $ProjectRoot -ProjectPythonExe $PythonExe -ProjectPort $Port
-$Port = Resolve-AvailablePort -PreferredPort $Port -ForceKillPreferredPort $AllowForceKillPortProcess
-
-if (Test-Path $ActivateScript) {
-    . $ActivateScript
-} else {
-    throw "项目虚拟环境激活脚本不存在: $ActivateScript"
-}
-
-Write-Host "当前启动环境: 项目虚拟环境"
-Write-Host "虚拟环境目录: $VenvDir"
-Write-Host "虚拟环境激活脚本: $ActivateScript"
-Write-Host "Python 解释器: $PythonExe"
-Write-Host "服务地址: http://$HostAddress`:$Port"
-Write-Host "启动模式: $(if ($EnableReload) { 'reload' } else { 'stable(no-reload)' })"
-
-& $PythonExe -m pip install --upgrade pip -i $PipIndexUrl
-& $PythonExe -m pip install -r requirements.txt -i $PipIndexUrl
-
-$UvicornArgs = @("-m", "uvicorn", "app.main:app", "--host", $HostAddress, "--port", $Port)
-if ($EnableReload) {
-    $UvicornArgs += "--reload"
-}
-
-& $PythonExe @UvicornArgs

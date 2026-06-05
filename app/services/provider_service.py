@@ -1,4 +1,5 @@
 import json
+import math
 import re
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -46,8 +47,39 @@ class ProviderService:
     QUALITY_WINDOW_MINUTES = 24 * 60
     QUALITY_CACHE_TTL_SECONDS = 15
     AVAILABILITY_CACHE_TTL_SECONDS = 30
-    VISION_MODEL_HINTS = ("gpt-4o", "gpt-4.1", "gpt-5")
-    TOOL_CAPABLE_MODEL_HINTS = ("gpt-4o", "gpt-4.1", "gpt-5", "o3", "o4", "claude", "qwen", "deepseek", "glm")
+    VISION_MODEL_HINTS = (
+        "gpt-4o",
+        "gpt-4.1",
+        "gpt-5",
+        "vision",
+        "qwen-vl",
+        "qwen2.5-vl",
+        "qvq",
+        "glm-4v",
+        "glm-4.1v",
+        "mimo-vl",
+        "doubao-vision",
+    )
+    VISION_MODEL_REGEXES = (
+        re.compile(r"(?:^|[-_/])vision(?:$|[-_/])"),
+        re.compile(r"(?:^|[-_/])vl(?:$|[-_/])"),
+        re.compile(r"glm-\d+(?:\.\d+)?v(?:$|[-_/])"),
+    )
+    TOOL_CAPABLE_MODEL_HINTS = (
+        "gpt-4o",
+        "gpt-4.1",
+        "gpt-5",
+        "o3",
+        "o4",
+        "claude",
+        "qwen",
+        "deepseek",
+        "glm",
+        "moonshot",
+        "kimi",
+        "doubao",
+        "mimo",
+    )
     IMAGE_GENERATION_MODEL_HINTS = ("gpt-4o", "gpt-4.1", "gpt-5")
     TRACE_TERMINAL_SUCCESS_RESULTS = {"success"}
     TRACE_TERMINAL_FAILURE_RESULTS = {
@@ -73,12 +105,14 @@ API Key: sk-xxxx
 权重: 100
 超时毫秒: 30000
 最大重试次数: 1
-最大活跃请求: 1000
-最大流式请求: 1000
-最大 QPS:
+最大活跃请求: 20
+最大流式请求: 10
+最大 QPS: 20
+每分钟最多请求: 20
 最大错误率: 80
 首 Token 超时秒: 60
 模型: gpt-5.4, gpt-5.5, gpt-4.1-mini
+模型能力: 流式 / 仅文本 / 工具调用 / 图像理解
 启用: 是
 备注: 可选备注
 
@@ -87,23 +121,70 @@ API Key: sk-xxxx
 名称: 第二个中文渠道名
 Base URL: https://another.example.com/v1
 API Key: sk-yyyy
-模型: gpt-5.5, gpt-5.4-mini
+模型:
+模型能力:
 """
+
+    @staticmethod
+    def _model_name_supports_vision(normalized: str) -> bool:
+        if not normalized:
+            return False
+        if normalized.startswith("kimi-k2"):
+            return True
+        if normalized.startswith("moonshot-v1") and "vision" in normalized:
+            return True
+        if normalized in {"mimo-v2.5", "mimo-v2-omni"}:
+            return True
+        if normalized.startswith("mimo-v2.5-omni"):
+            return True
+        if any(prefix in normalized for prefix in ProviderService.VISION_MODEL_HINTS):
+            return True
+        return any(pattern.search(normalized) for pattern in ProviderService.VISION_MODEL_REGEXES)
+
+    @staticmethod
+    def _model_name_supports_tools(normalized: str) -> bool:
+        if not normalized:
+            return False
+        if normalized.startswith("kimi-k2"):
+            return True
+        if normalized.startswith("moonshot-v1"):
+            return True
+        if normalized.startswith("mimo-v2"):
+            return True
+        if normalized.startswith("doubao"):
+            return True
+        return any(prefix in normalized for prefix in ProviderService.TOOL_CAPABLE_MODEL_HINTS)
+
+    @staticmethod
+    def _model_name_supports_responses(normalized: str) -> bool:
+        if not normalized:
+            return True
+        chat_only_prefixes = (
+            "deepseek",
+            "glm",
+            "kimi",
+            "moonshot-v1",
+            "mimo",
+        )
+        if normalized.startswith(chat_only_prefixes):
+            return False
+        return True
 
     @staticmethod
     def _infer_model_capabilities(model_name: str) -> dict[str, bool]:
         """根据模型名启发式推断视觉、工具和图像生成能力。"""
         normalized = (model_name or "").strip().lower()
-        supports_vision = any(prefix in normalized for prefix in ProviderService.VISION_MODEL_HINTS)
-        supports_tools = any(prefix in normalized for prefix in ProviderService.TOOL_CAPABLE_MODEL_HINTS)
+        supports_vision = ProviderService._model_name_supports_vision(normalized)
+        supports_tools = ProviderService._model_name_supports_tools(normalized)
         supports_image_generation = any(prefix in normalized for prefix in ProviderService.IMAGE_GENERATION_MODEL_HINTS)
+        supports_responses = ProviderService._model_name_supports_responses(normalized)
         return {
             "supports_stream": True,
             "supports_vision": supports_vision,
             "supports_tools": supports_tools,
             "supports_image_generation": supports_image_generation,
             "supports_chat_completions": True,
-            "supports_responses": True,
+            "supports_responses": supports_responses,
         }
 
     @staticmethod
@@ -171,8 +252,16 @@ API Key: sk-yyyy
         if isinstance(cached, list):
             return cached
         providers = ProviderService.list_providers(db)
-        CacheService.set(cache_key, providers, ttl_seconds=2)
+        CacheService.set(cache_key, providers, ttl_seconds=ProviderService._runtime_provider_cache_ttl_seconds())
         return providers
+
+    @staticmethod
+    def _runtime_provider_cache_ttl_seconds() -> int:
+        try:
+            setting = SettingService.get_cached()
+            return max(2, min(int(getattr(setting, "route_candidate_cache_ttl_sec", 10) or 10), 60))
+        except Exception:
+            return 10
 
     @staticmethod
     def list_provider_dicts(db: Session) -> list[dict]:
@@ -180,6 +269,75 @@ API Key: sk-yyyy
         providers = ProviderService.list_providers(db)
         metrics = ProviderService._build_quality_metrics(db, providers)
         return [ProviderService.provider_to_dict(provider, metrics=metrics) for provider in providers]
+
+    @staticmethod
+    def build_provider_page_content(db: Session) -> dict:
+        """返回中转站页面首屏与异步刷新共用的数据口径。"""
+        providers = ProviderService.list_provider_dicts(db)
+        return ProviderService.build_provider_page_content_from_dicts(providers)
+
+    @staticmethod
+    def build_provider_page_content_from_dicts(providers: list[dict]) -> dict:
+        enabled_provider_count = sum(1 for item in providers if item.get("enabled"))
+        model_configs = [model for item in providers for model in item.get("model_configs", [])]
+        model_summary_map: dict[str, dict] = {}
+        for model_config in model_configs:
+            model_name = str(model_config.get("model_name") or "").strip()
+            if not model_name:
+                continue
+            current = model_summary_map.setdefault(
+                model_name,
+                {
+                    "model_name": model_name,
+                    "supports_stream": False,
+                    "supports_vision": False,
+                    "supports_image_generation": False,
+                    "priced": False,
+                    "stability_scores": [],
+                },
+            )
+            current["supports_stream"] = current["supports_stream"] or bool(model_config.get("supports_stream"))
+            current["supports_vision"] = current["supports_vision"] or bool(model_config.get("supports_vision"))
+            current["supports_image_generation"] = current["supports_image_generation"] or bool(model_config.get("supports_image_generation"))
+            current["priced"] = current["priced"] or (
+                model_config.get("input_price_per_1k") is not None
+                or model_config.get("output_price_per_1k") is not None
+            )
+            try:
+                stability_score = float(model_config.get("stability_score"))
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(stability_score):
+                current["stability_scores"].append(stability_score)
+
+        model_summaries = list(model_summary_map.values())
+        model_stability_scores = [
+            sum(item["stability_scores"]) / len(item["stability_scores"])
+            for item in model_summaries
+            if item["stability_scores"]
+        ]
+        average_stability = round(sum(model_stability_scores) / len(model_stability_scores), 2) if model_stability_scores else 0
+        summary = {
+            "provider_count": len(providers),
+            "enabled_provider_count": enabled_provider_count,
+            "model_count": len(model_summaries),
+            "stream_model_count": sum(1 for item in model_summaries if item["supports_stream"]),
+            "vision_model_count": sum(1 for item in model_summaries if item["supports_vision"]),
+            "image_generation_model_count": sum(1 for item in model_summaries if item["supports_image_generation"]),
+            "priced_model_count": sum(1 for item in model_summaries if item["priced"]),
+            "avg_stability_score": average_stability,
+        }
+        telemetry_cards = [
+            {"id": "provider_count", "label": "中转站总数", "value": summary["provider_count"]},
+            {"id": "enabled_provider_count", "label": "已启用中转站", "value": summary["enabled_provider_count"]},
+            {"id": "model_count", "label": "挂载模型数", "value": summary["model_count"]},
+            {"id": "stream_model_count", "label": "支持 Stream", "value": summary["stream_model_count"]},
+            {"id": "vision_model_count", "label": "支持图像理解", "value": summary["vision_model_count"]},
+            {"id": "image_generation_model_count", "label": "支持图片生成", "value": summary["image_generation_model_count"]},
+            {"id": "priced_model_count", "label": "已同步价格", "value": summary["priced_model_count"]},
+            {"id": "avg_stability_score", "label": "平均稳定性", "value": average_stability},
+        ]
+        return {"providers": providers, "summary": summary, "telemetry_cards": telemetry_cards}
 
     @staticmethod
     def list_provider_option_dicts(db: Session) -> list[dict]:
@@ -274,6 +432,7 @@ API Key: sk-yyyy
     @staticmethod
     def create_provider(db: Session, payload: ProviderCreate) -> Provider:
         """创建 provider，并同步初始化模型挂载和模型目录。"""
+        from app.services.api_key_admin_service import ApiKeyAdminService
         from app.services.model_catalog_service import ModelCatalogService
 
         provider = Provider(
@@ -291,6 +450,7 @@ API Key: sk-yyyy
             max_active_requests=payload.max_active_requests,
             max_active_streams=payload.max_active_streams,
             max_qps=payload.max_qps,
+            max_rpm=payload.max_rpm,
             max_error_rate=payload.max_error_rate,
             first_token_timeout_sec=payload.first_token_timeout_sec,
             maintenance_window=payload.maintenance_window,
@@ -309,6 +469,7 @@ API Key: sk-yyyy
         db.flush()
         ModelCatalogService.sync_model_catalogs(db)
         db.commit()
+        ApiKeyAdminService.sync_auto_provider_bindings(db)
         ProviderService.invalidate_provider_runtime_cache()
         db.refresh(provider)
         return provider
@@ -506,6 +667,11 @@ API Key: sk-yyyy
             "qps": "max_qps",
             "maxqps": "max_qps",
             "max_qps": "max_qps",
+            "每分钟最多请求": "max_rpm",
+            "最大rpm": "max_rpm",
+            "rpm": "max_rpm",
+            "maxrpm": "max_rpm",
+            "max_rpm": "max_rpm",
             "最大错误率": "max_error_rate",
             "最大错误率%": "max_error_rate",
             "maxerrorrate": "max_error_rate",
@@ -518,6 +684,13 @@ API Key: sk-yyyy
             "模型列表": "models",
             "models": "models",
             "model": "models",
+            "模型能力": "model_capabilities",
+            "模型能力列表": "model_capabilities",
+            "能力": "model_capabilities",
+            "能力列表": "model_capabilities",
+            "modelcapabilities": "model_capabilities",
+            "model_capabilities": "model_capabilities",
+            "capabilities": "model_capabilities",
             "启用": "enabled",
             "enabled": "enabled",
             "备注": "remark",
@@ -542,11 +715,13 @@ API Key: sk-yyyy
         if not api_key:
             errors.append("缺少 API Key")
         model_names = ProviderService._parse_batch_model_names(normalized.get("models"))
-        if not model_names:
-            errors.append("至少需要填写一个模型")
         if errors:
             return None
-        model_configs = [ProviderService._build_model_config_input_from_name(model_name).model_dump() for model_name in model_names]
+        model_capabilities = ProviderService._parse_batch_model_capabilities(normalized.get("model_capabilities"))
+        model_configs = [
+            ProviderService._build_batch_model_config(model_name, model_capabilities).model_dump()
+            for model_name in model_names
+        ]
         provider_payload = {
             "name": name,
             "base_url": base_url.rstrip("/"),
@@ -559,9 +734,10 @@ API Key: sk-yyyy
             "weight": ProviderService._parse_batch_int(normalized.get("weight"), default=100, minimum=0),
             "timeout_ms": ProviderService._parse_batch_int(normalized.get("timeout_ms"), default=30000, minimum=1000),
             "max_retries": ProviderService._parse_batch_int(normalized.get("max_retries"), default=1, minimum=0),
-            "max_active_requests": ProviderService._parse_batch_nullable_int(normalized.get("max_active_requests"), default=1000),
-            "max_active_streams": ProviderService._parse_batch_nullable_int(normalized.get("max_active_streams"), default=1000),
-            "max_qps": ProviderService._parse_batch_nullable_int(normalized.get("max_qps"), default=None),
+            "max_active_requests": ProviderService._parse_batch_nullable_int(normalized.get("max_active_requests"), default=20),
+            "max_active_streams": ProviderService._parse_batch_nullable_int(normalized.get("max_active_streams"), default=10),
+            "max_qps": ProviderService._parse_batch_nullable_int(normalized.get("max_qps"), default=20),
+            "max_rpm": ProviderService._parse_batch_nullable_int(normalized.get("max_rpm"), default=20),
             "max_error_rate": ProviderService._parse_batch_float(normalized.get("max_error_rate"), default=80.0),
             "first_token_timeout_sec": ProviderService._parse_batch_nullable_int(normalized.get("first_token_timeout_sec"), default=60),
             "models": model_names,
@@ -596,6 +772,55 @@ API Key: sk-yyyy
             seen.add(model_name)
             names.append(model_name)
         return names
+
+    @staticmethod
+    def _default_batch_model_capabilities() -> dict[str, bool]:
+        return {
+            "supports_stream": True,
+            "supports_vision": True,
+            "supports_tools": True,
+            "supports_chat_completions": True,
+            "supports_responses": True,
+        }
+
+    @staticmethod
+    def _parse_batch_model_capabilities(value) -> dict[str, bool]:
+        defaults = ProviderService._default_batch_model_capabilities()
+        text = str(value or "").strip().lower()
+        if not text:
+            return defaults
+        tokens = {item for item in re.split(r"[,，、/\s;；]+", text) if item}
+        disabled_tokens = {"否", "false", "0", "no", "off", "关闭", "停用", "none", "无"}
+        if tokens & disabled_tokens:
+            return {
+                **defaults,
+                "supports_stream": False,
+                "supports_vision": False,
+                "supports_tools": False,
+            }
+        stream_tokens = {"流式", "stream", "streaming", "sse"}
+        vision_tokens = {"图像理解", "图片理解", "视觉", "vision", "image", "vl", "多模态"}
+        tools_tokens = {"工具调用", "工具", "tools", "tool", "function", "functioncalling", "函数调用"}
+        recognized = tokens & (stream_tokens | vision_tokens | tools_tokens | {"仅文本", "文本", "text"})
+        if not recognized:
+            return defaults
+        return {
+            **defaults,
+            "supports_stream": bool(tokens & stream_tokens),
+            "supports_vision": bool(tokens & vision_tokens),
+            "supports_tools": bool(tokens & tools_tokens),
+        }
+
+    @staticmethod
+    def _build_batch_model_config(model_name: str, capabilities: dict[str, bool]) -> ProviderModelConfigInput:
+        return ProviderModelConfigInput(
+            model_name=model_name,
+            supports_stream=capabilities["supports_stream"],
+            supports_vision=capabilities["supports_vision"],
+            supports_tools=capabilities["supports_tools"],
+            supports_chat_completions=capabilities["supports_chat_completions"],
+            supports_responses=capabilities["supports_responses"],
+        )
 
     @staticmethod
     def _parse_batch_bool(value, *, default: bool) -> bool:
@@ -641,6 +866,7 @@ API Key: sk-yyyy
     @staticmethod
     def update_provider(db: Session, provider: Provider, payload: ProviderUpdate) -> Provider:
         """更新 provider 基础信息及模型挂载。"""
+        from app.services.api_key_admin_service import ApiKeyAdminService
         from app.services.model_catalog_service import ModelCatalogService
 
         data = payload.model_dump(exclude_unset=True)
@@ -665,12 +891,14 @@ API Key: sk-yyyy
         ProviderService.refresh_provider_state(provider)
         ModelCatalogService.sync_model_catalogs(db)
         db.commit()
+        ApiKeyAdminService.sync_auto_provider_bindings(db)
         ProviderService.invalidate_provider_runtime_cache()
         db.refresh(provider)
         return provider
 
     @staticmethod
     def delete_provider(db: Session, provider: Provider) -> None:
+        from app.services.api_key_admin_service import ApiKeyAdminService
         from app.services.model_catalog_service import ModelCatalogService
         from app.services.api_key_auth_cache import ApiKeyAuthCache
 
@@ -705,6 +933,7 @@ API Key: sk-yyyy
         for api_key_id, key_hash, owner_user_id in set(affected_key_refs):
             ApiKeyAuthCache.invalidate_api_key(api_key_id, key_hash)
             ApiKeyAuthCache.invalidate_user(owner_user_id)
+        ApiKeyAdminService.sync_auto_provider_bindings(db)
         ProviderService.invalidate_provider_runtime_cache()
         ModelCatalogService.sync_model_catalogs(db)
 
@@ -782,11 +1011,13 @@ API Key: sk-yyyy
             "max_active_requests": provider.max_active_requests,
             "max_active_streams": provider.max_active_streams,
             "max_qps": provider.max_qps,
+            "max_rpm": provider.max_rpm,
             "max_error_rate": provider.max_error_rate,
             "first_token_timeout_sec": provider.first_token_timeout_sec,
             "active_requests": capacity_snapshot.active_requests,
             "active_streams": capacity_snapshot.active_streams,
             "current_qps": capacity_snapshot.current_qps,
+            "current_rpm": capacity_snapshot.current_rpm,
             "maintenance_window": provider.maintenance_window,
             "maintenance_mode_enabled": provider.maintenance_mode_enabled,
             "auto_circuit_break_enabled": provider.auto_circuit_break_enabled,

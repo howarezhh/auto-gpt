@@ -582,11 +582,13 @@ async def _release_after_stream(
 def _format_sse_error_event(exc: Exception, *, trace_id: str | None) -> bytes:
     status_code = getattr(exc, "status_code", 500)
     detail = getattr(exc, "detail", None)
-    error_type, default_code, retryable = OpenAIErrorService.classify_status_code(
-        status_code if isinstance(status_code, int) else 500
+    effective_status_code = status_code if isinstance(status_code, int) else 500
+    classified = OpenAIErrorService.classify_error(
+        status_code=effective_status_code,
+        detail=detail if isinstance(detail, dict) else None,
     )
     message = OpenAIErrorService.extract_message(detail, fallback=str(exc) or exc.__class__.__name__)
-    code = default_code
+    code = str(classified["code"])
     if isinstance(detail, dict):
         if isinstance(detail.get("code"), str):
             code = detail["code"]
@@ -596,8 +598,11 @@ def _format_sse_error_event(exc: Exception, *, trace_id: str | None) -> bytes:
         message=message,
         code=code,
         trace_id=trace_id,
-        error_type=error_type,
-        retryable=retryable,
+        error_type=str(classified["error_type"]),
+        retryable=bool(classified["retryable"]),
+        recoverable=bool(classified["recoverable"]),
+        category=str(classified["category"]),
+        status_code=effective_status_code,
         detail=detail if isinstance(detail, dict) else {"exception_type": exc.__class__.__name__},
     )
     return f"event: error\ndata: {dumps_json(payload)}\n\n".encode("utf-8")
@@ -1496,6 +1501,9 @@ async def retrieve_model(
             trace_id=getattr(request.state, "trace_id", None),
             error_type="invalid_request_error",
             retryable=False,
+            recoverable=False,
+            category="model_unavailable",
+            status_code=status.HTTP_404_NOT_FOUND,
             detail=detail,
         )
         return JSONResponse(status_code=status.HTTP_404_NOT_FOUND, content=payload, headers=_build_v1_cors_headers(request))
@@ -1588,6 +1596,9 @@ async def unsupported_v1_endpoint(
         trace_id=trace_id,
         error_type="invalid_request_error",
         retryable=False,
+        recoverable=False,
+        category="invalid_request",
+        status_code=status.HTTP_404_NOT_FOUND,
         detail=detail,
     )
     return JSONResponse(

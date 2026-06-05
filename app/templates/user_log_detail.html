@@ -1,5 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
+{% set requested_model = log.requested_model or '-' %}
+{% set actual_model = log.model_name or '-' %}
 <section class="hero-panel hero-panel-compact cockpit-hero">
     <div class="cockpit-hero-copy">
         <div class="eyebrow">日志详情</div>
@@ -15,7 +17,7 @@
     <div class="cockpit-hero-aside">
         <div class="cockpit-aside-label">请求结果</div>
         <div class="cockpit-aside-value">{{ '成功' if log.success else '失败' }}</div>
-        <div class="cockpit-aside-copy">{{ log.status_code or '-' }} · {{ log.requested_model or log.model_name or '-' }}</div>
+        <div class="cockpit-aside-copy">{{ log.status_code or '-' }} · 原始 {{ requested_model }} · 实际 {{ actual_model }}</div>
         <div class="cockpit-health-bar"><span class="{% if log.success %}cockpit-health-fill-full{% else %}cockpit-health-fill-empty{% endif %}"></span></div>
         <div class="cockpit-aside-meta">
             <span>TTFB {{ log.ttfb_ms if log.ttfb_ms is not none else '-' }}</span>
@@ -30,6 +32,8 @@
     <article class="metric-card"><span>总 Tokens</span><strong>{{ log.total_tokens if log.total_tokens is not none else '-' }}</strong></article>
     <article class="metric-card"><span>总费用</span><strong>{{ '%.6f'|format(log.total_cost or 0) }}</strong></article>
     <article class="metric-card"><span>计费倍率</span><strong>{{ '%.2f'|format(log.billing_multiplier or 1) }}x</strong></article>
+    <article class="metric-card"><span>原始模型</span><strong>{{ requested_model }}</strong></article>
+    <article class="metric-card"><span>实际模型</span><strong>{{ actual_model }}</strong></article>
     <article class="metric-card"><span>缓存读</span><strong>{{ log.cache_read_tokens if log.cache_read_tokens is not none else '-' }}</strong></article>
     <article class="metric-card"><span>缓存写</span><strong>{{ log.cache_write_tokens if log.cache_write_tokens is not none else '-' }}</strong></article>
 </section>

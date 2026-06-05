@@ -240,15 +240,19 @@
             </label>
             <label for="provider-max-active-requests">
                 <span>最大活跃请求</span>
-                <input class="field-input" id="provider-max-active-requests" type="number" inputmode="numeric" min="0" placeholder="0 或留空表示不限" value="300">
+                <input class="field-input" id="provider-max-active-requests" type="number" inputmode="numeric" min="0" placeholder="0 或留空表示不限" value="20">
             </label>
             <label for="provider-max-active-streams">
                 <span>最大流式请求</span>
-                <input class="field-input" id="provider-max-active-streams" type="number" inputmode="numeric" min="0" placeholder="0 或留空表示不限" value="150">
+                <input class="field-input" id="provider-max-active-streams" type="number" inputmode="numeric" min="0" placeholder="0 或留空表示不限" value="10">
             </label>
             <label for="provider-max-qps">
                 <span>最大 QPS</span>
-                <input class="field-input" id="provider-max-qps" type="number" inputmode="numeric" min="0" placeholder="0 或留空表示不限">
+                <input class="field-input" id="provider-max-qps" type="number" inputmode="numeric" min="0" placeholder="0 或留空表示不限" value="20">
+            </label>
+            <label for="provider-max-rpm">
+                <span>每分钟最多请求</span>
+                <input class="field-input" id="provider-max-rpm" type="number" inputmode="numeric" min="0" placeholder="0 或留空表示不限" value="20">
             </label>
             <label for="provider-max-error-rate">
                 <span>最大错误率 %</span>
@@ -278,7 +282,7 @@
                         </div>
                         <button class="btn btn-ghost btn-sm interactive-btn" id="provider-import-catalog-models-btn" type="button">添加选中</button>
                     </div>
-                    <div class="table-shell provider-catalog-model-table-shell">
+                    <div class="table-shell provider-catalog-model-table-shell provider-model-result-shell">
                         <table class="data-table provider-data-table">
                             <thead>
                                 <tr>
@@ -295,7 +299,7 @@
                         </table>
                     </div>
                 </div>
-                <div class="table-shell provider-discovered-model-shell">
+                <div class="table-shell provider-discovered-model-shell provider-model-result-shell">
                     <table class="data-table provider-data-table">
                         <thead>
                             <tr>

@@ -16,11 +16,12 @@ from app.services.redis_service import RedisService
 
 @dataclass(slots=True)
 class ProviderCapacitySnapshot:
-    """表示某个 provider 当前的并发与 QPS 快照。"""
+    """表示某个 provider 当前的并发、QPS 与 RPM 快照。"""
 
     active_requests: int = 0
     active_streams: int = 0
     current_qps: int = 0
+    current_rpm: int = 0
 
 
 class ProviderCapacityExceededError(Exception):
@@ -49,23 +50,29 @@ local lease_key = KEYS[1]
 local active_key = KEYS[2]
 local stream_key = KEYS[3]
 local qps_key = KEYS[4]
+local rpm_key = KEYS[5]
 local ttl = tonumber(ARGV[1])
 local is_stream = tonumber(ARGV[2])
 local active_limit = tonumber(ARGV[3])
 local stream_limit = tonumber(ARGV[4])
 local qps_limit = tonumber(ARGV[5])
+local rpm_limit = tonumber(ARGV[6])
 local active_current = tonumber(redis.call('GET', active_key) or '0')
 local stream_current = tonumber(redis.call('GET', stream_key) or '0')
 local qps_current = tonumber(redis.call('GET', qps_key) or '0')
+local rpm_current = tonumber(redis.call('GET', rpm_key) or '0')
 
 if active_limit ~= nil and active_limit > 0 and active_current >= active_limit then
-  return {'provider_active_request_limit_exceeded', active_current, stream_current, qps_current}
+  return {'provider_active_request_limit_exceeded', active_current, stream_current, qps_current, rpm_current}
 end
 if is_stream == 1 and stream_limit ~= nil and stream_limit > 0 and stream_current >= stream_limit then
-  return {'provider_active_stream_limit_exceeded', active_current, stream_current, qps_current}
+  return {'provider_active_stream_limit_exceeded', active_current, stream_current, qps_current, rpm_current}
 end
 if qps_limit ~= nil and qps_limit > 0 and qps_current >= qps_limit then
-  return {'provider_qps_limit_exceeded', active_current, stream_current, qps_current}
+  return {'provider_qps_limit_exceeded', active_current, stream_current, qps_current, rpm_current}
+end
+if rpm_limit ~= nil and rpm_limit > 0 and rpm_current >= rpm_limit then
+  return {'provider_rpm_limit_exceeded', active_current, stream_current, qps_current, rpm_current}
 end
 
 active_current = redis.call('INCR', active_key)
@@ -78,8 +85,10 @@ if is_stream == 1 then
 end
 qps_current = redis.call('INCR', qps_key)
 redis.call('EXPIRE', qps_key, 3)
+rpm_current = redis.call('INCR', rpm_key)
+redis.call('EXPIRE', rpm_key, 120)
 redis.call('SET', lease_key, cjson.encode(lease_items), 'EX', ttl)
-return {'ok', active_current, stream_current, qps_current}
+return {'ok', active_current, stream_current, qps_current, rpm_current}
 """
 
     _RELEASE_LUA = """
@@ -181,6 +190,8 @@ return 1
             raise ProviderCapacityExceededError("Provider active stream limit exceeded", code="provider_active_stream_limit_exceeded")
         if cls._limit_reached(snapshot.current_qps, provider.max_qps):
             raise ProviderCapacityExceededError("Provider QPS limit exceeded", code="provider_qps_limit_exceeded")
+        if cls._limit_reached(snapshot.current_rpm, provider.max_rpm):
+            raise ProviderCapacityExceededError("Provider RPM limit exceeded", code="provider_rpm_limit_exceeded")
 
     @classmethod
     def _has_capacity(cls, provider: Provider, *, snapshot: ProviderCapacitySnapshot, is_stream: bool) -> bool:
@@ -212,16 +223,19 @@ return 1
         client = cls._redis()
         try:
             current_second = int(time.time())
+            current_minute = current_second // 60
             keys = [
                 f"concurrency:provider:{provider_id}:active",
                 f"concurrency:provider:{provider_id}:streams",
                 f"rate:provider:qps:{provider_id}:{current_second}",
+                f"rate:provider:rpm:{provider_id}:{current_minute}",
             ]
             values = client.mget(keys)
             return ProviderCapacitySnapshot(
                 active_requests=int(values[0] or 0),
                 active_streams=int(values[1] or 0),
                 current_qps=int(values[2] or 0),
+                current_rpm=int(values[3] or 0),
             )
         except Exception:
             raise ProviderCapacityUnavailableError()
@@ -232,6 +246,7 @@ return 1
         client = cls._redis()
         try:
             current_second = int(time.time())
+            current_minute = current_second // 60
             keys: list[str] = []
             ordered_ids = sorted(provider_ids)
             for provider_id in ordered_ids:
@@ -240,16 +255,18 @@ return 1
                         f"concurrency:provider:{provider_id}:active",
                         f"concurrency:provider:{provider_id}:streams",
                         f"rate:provider:qps:{provider_id}:{current_second}",
+                        f"rate:provider:rpm:{provider_id}:{current_minute}",
                     ]
                 )
             values = client.mget(keys) if keys else []
             snapshots: dict[int, ProviderCapacitySnapshot] = {}
             for index, provider_id in enumerate(ordered_ids):
-                offset = index * 3
+                offset = index * 4
                 snapshots[provider_id] = ProviderCapacitySnapshot(
                     active_requests=int(values[offset] or 0),
                     active_streams=int(values[offset + 1] or 0),
                     current_qps=int(values[offset + 2] or 0),
+                    current_rpm=int(values[offset + 3] or 0),
                 )
             return snapshots
         except Exception:
@@ -268,6 +285,7 @@ return 1
         """异步批量读取 provider 计数值。"""
         client = await cls._async_redis()
         current_second = int(time.time())
+        current_minute = current_second // 60
         keys: list[str] = []
         ordered_ids = sorted(provider_ids)
         for provider_id in ordered_ids:
@@ -276,6 +294,7 @@ return 1
                     f"concurrency:provider:{provider_id}:active",
                     f"concurrency:provider:{provider_id}:streams",
                     f"rate:provider:qps:{provider_id}:{current_second}",
+                    f"rate:provider:rpm:{provider_id}:{current_minute}",
                 ]
             )
         try:
@@ -284,11 +303,12 @@ return 1
             raise ProviderCapacityUnavailableError(str(exc)) from exc
         snapshots: dict[int, ProviderCapacitySnapshot] = {}
         for index, provider_id in enumerate(ordered_ids):
-            offset = index * 3
+            offset = index * 4
             snapshots[provider_id] = ProviderCapacitySnapshot(
                 active_requests=int(values[offset] or 0),
                 active_streams=int(values[offset + 1] or 0),
                 current_qps=int(values[offset + 2] or 0),
+                current_rpm=int(values[offset + 3] or 0),
             )
         return snapshots
 
@@ -298,20 +318,23 @@ return 1
             raise ProviderCapacityUnavailableError("provider capacity lease id is empty")
         client = await cls._async_redis()
         current_second = int(time.time())
+        current_minute = current_second // 60
         lease_key = f"provider_capacity:lease:{lease_id}"
         try:
             result = await client.eval(
                 cls._ACQUIRE_LUA,
-                4,
+                5,
                 lease_key,
                 f"concurrency:provider:{provider.id}:active",
                 f"concurrency:provider:{provider.id}:streams",
                 f"rate:provider:qps:{provider.id}:{current_second}",
+                f"rate:provider:rpm:{provider.id}:{current_minute}",
                 max(60, get_settings().concurrency_lease_ttl_seconds),
                 1 if is_stream else 0,
                 cls._limit_arg(provider.max_active_requests),
                 cls._limit_arg(provider.max_active_streams),
                 cls._limit_arg(provider.max_qps),
+                cls._limit_arg(provider.max_rpm),
             )
         except Exception as exc:
             raise ProviderCapacityUnavailableError(str(exc)) from exc
@@ -321,12 +344,14 @@ return 1
                 "provider_active_request_limit_exceeded": "Provider active request limit exceeded",
                 "provider_active_stream_limit_exceeded": "Provider active stream limit exceeded",
                 "provider_qps_limit_exceeded": "Provider QPS limit exceeded",
+                "provider_rpm_limit_exceeded": "Provider RPM limit exceeded",
             }
             raise ProviderCapacityExceededError(messages.get(str(code), "Provider capacity limit exceeded"), code=str(code))
         return ProviderCapacitySnapshot(
             active_requests=int(result[1] or 0),
             active_streams=int(result[2] or 0),
             current_qps=int(result[3] or 0),
+            current_rpm=int(result[4] or 0),
         )
 
     @classmethod

@@ -12,8 +12,6 @@ class ApiKeyPolicyTemplateBase(BaseModel):
     route_mode: RouteMode = "failover"
     default_provider_id: int | None = None
     manual_allow_fallback: bool = True
-    token_limit_total: int | None = Field(default=None, ge=0)
-    cost_limit_total: float | None = Field(default=None, ge=0)
     expires_in_days: int | None = Field(default=None, ge=0)
     allowed_provider_ids: list[int] = Field(default_factory=list)
     allowed_model_names: list[str] = Field(default_factory=list)
@@ -68,8 +66,6 @@ class ApiKeyPolicyTemplateUpdate(BaseModel):
     route_mode: RouteMode | None = None
     default_provider_id: int | None = None
     manual_allow_fallback: bool | None = None
-    token_limit_total: int | None = Field(default=None, ge=0)
-    cost_limit_total: float | None = Field(default=None, ge=0)
     expires_in_days: int | None = Field(default=None, ge=0)
     allowed_provider_ids: list[int] | None = None
     allowed_model_names: list[str] | None = None

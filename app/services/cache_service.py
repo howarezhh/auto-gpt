@@ -24,17 +24,31 @@ class CacheService:
     _lock = Lock()
     _store: dict[str, CacheEntry] = {}
     _redis_prefix = "shared-cache:"
+    _stats: dict[str, int] = {
+        "memory_hits": 0,
+        "redis_hits": 0,
+        "misses": 0,
+        "sets": 0,
+        "invalidations": 0,
+    }
 
     @classmethod
     def get(cls, key: str) -> Any | None:
         """优先读取短 TTL 本地缓存，再回退到 Redis，降低热路径网络往返。"""
         memory_value = cls._memory_get(key)
         if memory_value is not None:
+            cls._record_stat("memory_hits")
             return memory_value
         redis_value = cls._redis_get(key)
         if redis_value is not None:
-            cls._memory_set(key, redis_value, ttl_seconds=cls._local_ttl_seconds(default_ttl=1))
+            cls._record_stat("redis_hits")
+            cls._memory_set(
+                key,
+                redis_value,
+                ttl_seconds=cls._local_ttl_seconds(default_ttl=getattr(get_settings(), "cache_l1_ttl_cap_seconds", 5.0)),
+            )
             return redis_value
+        cls._record_stat("misses")
         return None
 
     @classmethod
@@ -54,6 +68,7 @@ class CacheService:
         """写入缓存；可 JSON 序列化值进入 Redis，所有值都进入短 TTL L1。"""
         if ttl_seconds <= 0:
             return value
+        cls._record_stat("sets")
         cls._memory_set(key, value, ttl_seconds=cls._local_ttl_seconds(default_ttl=ttl_seconds))
         if cls._is_redis_safe_value(value) and cls._redis_set(key, value, ttl_seconds=ttl_seconds):
             return value
@@ -64,7 +79,9 @@ class CacheService:
         if ttl_seconds <= 0:
             return
         with cls._lock:
+            cls._prune_expired_locked(now=time.time())
             cls._store[key] = CacheEntry(expires_at=time.time() + ttl_seconds, value=value)
+            cls._enforce_max_entries_locked()
 
     @staticmethod
     def _local_ttl_seconds(*, default_ttl: int | float) -> float:
@@ -76,6 +93,7 @@ class CacheService:
     @classmethod
     def invalidate_prefix(cls, prefix: str) -> None:
         """按前缀失效内存与 Redis 中的缓存项。"""
+        cls._record_stat("invalidations")
         with cls._lock:
             keys = [key for key in cls._store.keys() if key.startswith(prefix)]
             for key in keys:
@@ -86,6 +104,49 @@ class CacheService:
     def _memory_delete(cls, key: str) -> None:
         """删除进程内存中的单条缓存。"""
         with cls._lock:
+            cls._store.pop(key, None)
+
+    @classmethod
+    def stats_snapshot(cls) -> dict[str, Any]:
+        with cls._lock:
+            stats = dict(cls._stats)
+            memory_entries = len(cls._store)
+        total_reads = stats["memory_hits"] + stats["redis_hits"] + stats["misses"]
+        hit_count = stats["memory_hits"] + stats["redis_hits"]
+        return {
+            **stats,
+            "memory_entries": memory_entries,
+            "total_reads": total_reads,
+            "hit_count": hit_count,
+            "hit_ratio": round(hit_count / total_reads, 6) if total_reads else None,
+            "memory_hit_ratio": round(stats["memory_hits"] / total_reads, 6) if total_reads else None,
+        }
+
+    @classmethod
+    def reset_stats(cls) -> None:
+        with cls._lock:
+            for key in cls._stats:
+                cls._stats[key] = 0
+
+    @classmethod
+    def _record_stat(cls, key: str) -> None:
+        with cls._lock:
+            cls._stats[key] = int(cls._stats.get(key, 0)) + 1
+
+    @classmethod
+    def _prune_expired_locked(cls, *, now: float) -> None:
+        expired_keys = [key for key, entry in cls._store.items() if entry.expires_at <= now]
+        for key in expired_keys:
+            cls._store.pop(key, None)
+
+    @classmethod
+    def _enforce_max_entries_locked(cls) -> None:
+        max_entries = int(getattr(get_settings(), "cache_l1_max_entries", 10000) or 0)
+        if max_entries <= 0 or len(cls._store) <= max_entries:
+            return
+        overflow = len(cls._store) - max_entries
+        oldest_keys = sorted(cls._store, key=lambda item: cls._store[item].expires_at)[:overflow]
+        for key in oldest_keys:
             cls._store.pop(key, None)
 
     @classmethod

@@ -24,20 +24,16 @@ class ApiKeyBase(BaseModel):
     environment_name: str | None = Field(default=None, max_length=100)
     enabled: bool = True
     expires_at: datetime | None = None
-    token_limit_total: int | None = Field(default=None, ge=0)
-    request_limit_daily: int | None = Field(default=None, ge=0)
-    token_limit_daily: int | None = Field(default=None, ge=0)
-    cost_limit_daily: float | None = Field(default=None, ge=0)
-    qps_limit: int | None = Field(default=None, ge=0)
-    rpm_limit: int | None = Field(default=None, ge=0)
+    qps_limit: int | None = Field(default=20, ge=0)
+    rpm_limit: int | None = Field(default=20, ge=0)
     tpm_limit: int | None = Field(default=None, ge=0)
-    cost_limit_total: float | None = Field(default=None, ge=0)
     balance_amount: float | None = Field(default=None, ge=0)
     route_mode: RouteMode = "failover"
     default_provider_id: int | None = None
     owner_user_id: int | None = None
     manual_allow_fallback: bool = True
     route_exhausted_retry_infinite_enabled: bool = False
+    auto_sync_provider_bindings: bool = True
     allowed_provider_ids: list[int] = Field(default_factory=list)
     allowed_model_names: list[str] = Field(default_factory=list)
     allowed_endpoint_paths: list[str] = Field(default_factory=list)
@@ -131,20 +127,16 @@ class ApiKeyUpdate(BaseModel):
     environment_name: str | None = Field(default=None, max_length=100)
     enabled: bool | None = None
     expires_at: datetime | None = None
-    token_limit_total: int | None = Field(default=None, ge=0)
-    request_limit_daily: int | None = Field(default=None, ge=0)
-    token_limit_daily: int | None = Field(default=None, ge=0)
-    cost_limit_daily: float | None = Field(default=None, ge=0)
     qps_limit: int | None = Field(default=None, ge=0)
     rpm_limit: int | None = Field(default=None, ge=0)
     tpm_limit: int | None = Field(default=None, ge=0)
-    cost_limit_total: float | None = Field(default=None, ge=0)
     balance_amount: float | None = Field(default=None, ge=0)
     route_mode: RouteMode | None = None
     default_provider_id: int | None = None
     owner_user_id: int | None = None
     manual_allow_fallback: bool | None = None
     route_exhausted_retry_infinite_enabled: bool | None = None
+    auto_sync_provider_bindings: bool | None = None
     allowed_provider_ids: list[int] | None = None
     allowed_model_names: list[str] | None = None
     allowed_endpoint_paths: list[str] | None = None
@@ -224,28 +216,23 @@ class ApiKeyOut(BaseModel):
     raw_api_key: str | None
     has_stored_raw_key: bool
     expires_at: datetime | None
-    token_limit_total: int | None
-    request_limit_daily: int | None
-    token_limit_daily: int | None
-    cost_limit_daily: float | None
     qps_limit: int | None
     rpm_limit: int | None
     tpm_limit: int | None
     prompt_tokens_used: int
     completion_tokens_used: int
     total_tokens_used: int
-    remaining_tokens: int | None
-    cost_limit_total: float | None
     total_cost_used: float
     balance_amount: float | None
     total_recharge_amount: float
-    remaining_cost_quota: float | None
     route_mode: RouteMode
     default_provider_id: int | None
+    default_provider_name: str | None = None
     owner_user_id: int | None
     owner_user_name: str | None
     manual_allow_fallback: bool
     route_exhausted_retry_infinite_enabled: bool
+    auto_sync_provider_bindings: bool
     allowed_provider_ids: list[int]
     allowed_model_names: list[str]
     allowed_endpoint_paths: list[str]
@@ -301,6 +288,7 @@ class ApiKeySummaryOut(BaseModel):
     disabled_keys: int
     expired_keys: int
     quota_exhausted_keys: int
+    balance_exhausted_keys: int = 0
     unbound_keys: int
     total_requests: int
     total_prompt_tokens: int
@@ -358,6 +346,7 @@ class ApiKeyBatchProviderUpdateIn(ApiKeyBatchActionIn):
     default_provider_id: int | None = None
     manual_allow_fallback: bool = True
     route_exhausted_retry_infinite_enabled: bool = False
+    auto_sync_provider_bindings: bool = False
     allowed_provider_ids: list[int] = Field(default_factory=list)
 
     @field_validator("allowed_provider_ids")
@@ -427,8 +416,6 @@ class ApiKeyBillingSummaryOut(BaseModel):
     balance_amount: float | None
     total_cost_used: float
     total_recharge_amount: float
-    cost_limit_total: float | None
-    remaining_cost_quota: float | None
     recent_billed_cost: float = 0
     total_billing_records: int = 0
     items: list[ApiKeyBillingRecordOut] = Field(default_factory=list)

@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import logging
 import threading
 import time
@@ -123,6 +124,7 @@ class RouteExhaustedRetrySignal(Exception):
         self.route_retry_trace = route_retry_trace
         self.route_retry_attempt_count = route_retry_attempt_count
 
+
 class ProxyService:
     """处理鉴权、路由、转发、限流和响应适配的核心代理服务。"""
 
@@ -136,6 +138,8 @@ class ProxyService:
         "model",
         "instructions",
         "input",
+        "tools",
+        "tool_choice",
         "temperature",
         "top_p",
         "presence_penalty",
@@ -150,6 +154,8 @@ class ProxyService:
     CHAT_RESPONSES_ADAPTER_SAFE_FIELDS = {
         "model",
         "messages",
+        "tools",
+        "tool_choice",
         "temperature",
         "top_p",
         "presence_penalty",
@@ -454,7 +460,7 @@ class ProxyService:
             model_reasoning_effort=model_reasoning_effort,
             request_body_json=request_body_json,
             message=detail.get("message"),
-            error_type=ProxyService._error_type_from_status(status_code),
+            error_type=ProxyService._error_type_from_status(status_code, detail),
             error_code=detail.get("code"),
             retryable=False,
             **ProxyService._build_api_client_log_kwargs(api_client_auth, auth_result="authenticated"),
@@ -480,6 +486,25 @@ class ProxyService:
         if any(key in payload for key in ("tools", "tool_choice", "functions", "function_call", "parallel_tool_calls")):
             return True
         return ProxyService._value_has_tool_context(payload.get("messages")) or ProxyService._value_has_tool_context(payload.get("input"))
+
+    @staticmethod
+    def _payload_has_stateful_responses_context(payload: Any) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        previous_response_id = payload.get("previous_response_id")
+        if isinstance(previous_response_id, str) and previous_response_id.strip():
+            return True
+        return ProxyService._value_has_key(payload, "encrypted_content")
+
+    @staticmethod
+    def _value_has_key(value: Any, key_name: str) -> bool:
+        if isinstance(value, list):
+            return any(ProxyService._value_has_key(item, key_name) for item in value)
+        if isinstance(value, dict):
+            if key_name in value:
+                return True
+            return any(ProxyService._value_has_key(item, key_name) for item in value.values())
+        return False
 
     @staticmethod
     def _payload_uses_image_generation(payload: dict[str, Any]) -> bool:
@@ -986,8 +1011,13 @@ class ProxyService:
         route_retry_round: int = 0,
         route_retry_trace: list[dict] | None = None,
         route_retry_attempt_count: int = 0,
+        mapping_failover_excluded_target_model_names: tuple[str, ...] = (),
+        request_id_override: str | None = None,
+        conversation_key_override: str | None = None,
+        session_id_override: str | None = None,
     ) -> tuple[dict[str, Any], Provider, list[dict], int]:
         payload = ProxyService._normalize_reasoning_request_payload(endpoint_path=endpoint_path, payload=payload)
+        request_payload_for_log = payload
         model_name = payload.get("model")
         requested_model_name = model_name
         has_image_input = ProxyService._payload_has_image(payload)
@@ -997,9 +1027,11 @@ class ProxyService:
         effective_public_endpoint_path = public_endpoint_path or endpoint_path
         effective_log_request_path = request_path_for_log or f"/v1{effective_public_endpoint_path}"
         setting = await ProxyService._get_setting_async(db)
-        request_id = uuid4().hex
+        request_id = request_id_override or uuid4().hex
+        session_sticky_key = session_id_override or ProxyService._extract_session_sticky_key(payload)
         reasoning_level = LogService.extract_reasoning_level(payload)
         model_reasoning_effort = LogService.extract_model_reasoning_effort(payload)
+        require_chat_completions, require_responses = ProxyService._route_endpoint_requirements(endpoint_path, payload)
         if api_client_auth is not None and not ApiKeyService.is_model_allowed(api_client_auth.api_client_key, requested_model_name):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -1009,14 +1041,15 @@ class ProxyService:
             source_model_name=requested_model_name if isinstance(requested_model_name, str) else None,
             route_context=route_context,
             api_client_auth=api_client_auth,
-            sticky_key=ProxyService._extract_sticky_key(payload),
+            sticky_key=session_sticky_key,
             forced_provider_id=forced_provider_id,
             require_vision=has_image_input,
             require_stream=False,
             require_tools=require_tools,
             require_image_generation=require_image_generation,
-            require_chat_completions=endpoint_path == "/chat/completions",
-            require_responses=endpoint_path == "/responses",
+            require_chat_completions=require_chat_completions,
+            require_responses=require_responses,
+            excluded_target_model_names=mapping_failover_excluded_target_model_names,
         )
         model_mapping_unavailable = ProxyService._model_mapping_unavailable(mapping_resolution)
         if mapping_resolution is not None and not model_mapping_unavailable and mapping_resolution.selected_model_name != requested_model_name:
@@ -1048,7 +1081,7 @@ class ProxyService:
                 requested_model=requested_model_name,
                 request_path_for_log=effective_log_request_path,
                 request_body_json=ProxyService._serialize_payload_for_logging(
-                    payload,
+                    request_payload_for_log,
                     setting=setting,
                     preserve_request_content_when_disabled=True,
                     structure_only=True,
@@ -1087,10 +1120,10 @@ class ProxyService:
                     structure_only=True,
                 ),
             )
-        conversation_key = ProxyService._extract_conversation_key(payload, request_id)
-        session_id = LogService.extract_session_id(payload, conversation_key=conversation_key, fallback=request_id)
+        conversation_key = conversation_key_override or ProxyService._extract_conversation_key(payload, request_id)
+        session_id = session_id_override or LogService.extract_session_id(payload, conversation_key=conversation_key, fallback=request_id)
         request_body_json = ProxyService._serialize_payload_for_logging(
-            payload,
+            request_payload_for_log,
             setting=setting,
             preserve_request_content_when_disabled=True,
             structure_only=True,
@@ -1103,6 +1136,14 @@ class ProxyService:
 
         trace: list[dict] = list(route_retry_trace or [])
         ProxyService._append_model_mapping_trace(trace, mapping_resolution)
+        ProxyService._append_stateful_responses_route_trace(
+            trace,
+            endpoint_path=endpoint_path,
+            payload=payload,
+            requested_model_name=requested_model_name,
+            selected_model_name=model_name,
+            mapping_resolution=mapping_resolution,
+        )
         last_upstream_error: dict[str, Any] | None = None
         attempt_count = max(0, int(route_retry_attempt_count or 0))
         route_retry_started_at = route_retry_started_at or time.perf_counter()
@@ -1114,15 +1155,15 @@ class ProxyService:
                 else await RouterService.async_order_candidates(
                     db,
                     model_name=model_name,
-                    sticky_key=ProxyService._extract_sticky_key(payload),
+                    sticky_key=session_sticky_key,
                     forced_provider_id=forced_provider_id,
                     route_context=route_context,
                     require_vision=has_image_input,
                     require_stream=False,
                     require_tools=require_tools,
                     require_image_generation=require_image_generation,
-                    require_chat_completions=endpoint_path == "/chat/completions",
-                    require_responses=endpoint_path == "/responses",
+                    require_chat_completions=require_chat_completions,
+                    require_responses=require_responses,
                 )
             )
         except ProviderCapacityUnavailableError as exc:
@@ -1142,14 +1183,13 @@ class ProxyService:
                     require_stream=False,
                     require_tools=require_tools,
                     require_image_generation=require_image_generation,
-                    require_chat_completions=endpoint_path == "/chat/completions",
-                    require_responses=endpoint_path == "/responses",
+                    require_chat_completions=require_chat_completions,
+                    require_responses=require_responses,
                     is_stream=False,
                 )
             )
             if model_mapping_unavailable:
-                route_message = "No available mapped target model"
-                error_code = "model_mapping_target_not_available"
+                route_message, error_code = ProxyService._build_model_mapping_unavailable_error(route_diagnostics)
             elif require_image_generation:
                 route_message = "No native image-generation-capable provider for requested model"
                 error_code = "model_image_generation_not_available"
@@ -1159,6 +1199,36 @@ class ProxyService:
             else:
                 route_message = "No available provider for requested model"
                 error_code = "model_not_available"
+            mapped_retry = await ProxyService._retry_with_next_mapped_model_json(
+                db=db,
+                endpoint_path=endpoint_path,
+                payload=payload,
+                log_type=log_type,
+                forced_provider_id=forced_provider_id,
+                route_context=route_context,
+                api_client_auth=api_client_auth,
+                trace_id=trace_id,
+                source_ip=source_ip,
+                request_path_for_log=effective_log_request_path,
+                public_endpoint_path=public_endpoint_path,
+                response_transform=response_transform,
+                suppress_success_log=suppress_success_log,
+                route_retry_started_at=route_retry_started_at,
+                route_retry_round=route_retry_round,
+                route_retry_trace=trace,
+                route_retry_attempt_count=attempt_count,
+                mapping_resolution=mapping_resolution,
+                requested_model_name=requested_model_name if isinstance(requested_model_name, str) else None,
+                current_model_name=model_name if isinstance(model_name, str) else None,
+                excluded_target_model_names=mapping_failover_excluded_target_model_names,
+                request_id=request_id,
+                conversation_key=conversation_key,
+                session_id=session_id,
+                reason="no_route_candidate_for_mapped_target",
+                route_diagnostics=route_diagnostics,
+            )
+            if mapped_retry is not None:
+                return mapped_retry
             retryable_route_exhausted = ProxyService._should_retry_route_diagnostics(route_diagnostics)
             sleep_seconds = (
                 ProxyService._route_exhausted_retry_sleep_seconds(
@@ -1199,6 +1269,7 @@ class ProxyService:
                         setting,
                         started_at=route_retry_started_at,
                         attempt_count=attempt_count,
+                        trace=trace,
                         trace_id=trace_id,
                         last_upstream_error=None,
                     ),
@@ -1404,7 +1475,10 @@ class ProxyService:
                             detail=ProxyService._normalize_error_detail(error_body),
                         ),
                     )
-                    if not ProxyService._should_retry_same_provider_status(exc.response.status_code):
+                    if not ProxyService._should_retry_same_provider_status(
+                        exc.response.status_code,
+                        detail=last_upstream_error["detail"],
+                    ):
                         break
                 except RequestsUpstreamHTTPError as exc:
                     latency_ms = int((time.perf_counter() - started) * 1000)
@@ -1434,7 +1508,10 @@ class ProxyService:
                             detail=exc.detail,
                         ),
                     )
-                    if not ProxyService._should_retry_same_provider_status(exc.status_code):
+                    if not ProxyService._should_retry_same_provider_status(
+                        exc.status_code,
+                        detail=last_upstream_error["detail"],
+                    ):
                         break
                 except NonStreamResponseTooLarge as exc:
                     latency_ms = int((time.perf_counter() - started) * 1000)
@@ -1477,6 +1554,38 @@ class ProxyService:
                         db=db,
                     )
 
+        if ProxyService._should_retry_mapped_model(last_upstream_error):
+            mapped_retry = await ProxyService._retry_with_next_mapped_model_json(
+                db=db,
+                endpoint_path=endpoint_path,
+                payload=payload,
+                log_type=log_type,
+                forced_provider_id=forced_provider_id,
+                route_context=route_context,
+                api_client_auth=api_client_auth,
+                trace_id=trace_id,
+                source_ip=source_ip,
+                request_path_for_log=effective_log_request_path,
+                public_endpoint_path=public_endpoint_path,
+                response_transform=response_transform,
+                suppress_success_log=suppress_success_log,
+                route_retry_started_at=route_retry_started_at,
+                route_retry_round=route_retry_round,
+                route_retry_trace=trace,
+                route_retry_attempt_count=attempt_count,
+                mapping_resolution=mapping_resolution,
+                requested_model_name=requested_model_name if isinstance(requested_model_name, str) else None,
+                current_model_name=model_name if isinstance(model_name, str) else None,
+                excluded_target_model_names=mapping_failover_excluded_target_model_names,
+                request_id=request_id,
+                conversation_key=conversation_key,
+                session_id=session_id,
+                reason="mapped_target_upstream_failed",
+                upstream_error=last_upstream_error,
+            )
+            if mapped_retry is not None:
+                return mapped_retry
+
         if ProxyService._should_retry_route_upstream_error(last_upstream_error):
             sleep_seconds = ProxyService._route_exhausted_retry_sleep_seconds(
                 setting,
@@ -1507,6 +1616,7 @@ class ProxyService:
                     setting,
                     started_at=route_retry_started_at,
                     attempt_count=attempt_count,
+                    trace=trace,
                     trace_id=trace_id,
                     last_upstream_error=last_upstream_error,
                 )
@@ -1576,8 +1686,13 @@ class ProxyService:
         route_retry_round: int = 0,
         route_retry_trace: list[dict] | None = None,
         route_retry_attempt_count: int = 0,
+        mapping_failover_excluded_target_model_names: tuple[str, ...] = (),
+        request_id_override: str | None = None,
+        conversation_key_override: str | None = None,
+        session_id_override: str | None = None,
     ) -> tuple[AsyncIterator[bytes], Provider, list[dict], int]:
         payload = ProxyService._normalize_reasoning_request_payload(endpoint_path=endpoint_path, payload=payload)
+        request_payload_for_log = payload
         model_name = payload.get("model")
         requested_model_name = model_name
         has_image_input = ProxyService._payload_has_image(payload)
@@ -1587,9 +1702,11 @@ class ProxyService:
         effective_public_endpoint_path = public_endpoint_path or endpoint_path
         effective_log_request_path = request_path_for_log or f"/v1{effective_public_endpoint_path}"
         setting = await ProxyService._get_setting_async(db)
-        request_id = uuid4().hex
+        request_id = request_id_override or uuid4().hex
+        session_sticky_key = session_id_override or ProxyService._extract_session_sticky_key(payload)
         reasoning_level = LogService.extract_reasoning_level(payload)
         model_reasoning_effort = LogService.extract_model_reasoning_effort(payload)
+        require_chat_completions, require_responses = ProxyService._route_endpoint_requirements(endpoint_path, payload)
         if api_client_auth is not None and not ApiKeyService.is_model_allowed(api_client_auth.api_client_key, requested_model_name):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -1599,14 +1716,15 @@ class ProxyService:
             source_model_name=requested_model_name if isinstance(requested_model_name, str) else None,
             route_context=route_context,
             api_client_auth=api_client_auth,
-            sticky_key=ProxyService._extract_sticky_key(payload),
+            sticky_key=session_sticky_key,
             forced_provider_id=forced_provider_id,
             require_vision=has_image_input,
             require_stream=True,
             require_tools=require_tools,
             require_image_generation=require_image_generation,
-            require_chat_completions=endpoint_path == "/chat/completions",
-            require_responses=endpoint_path == "/responses",
+            require_chat_completions=require_chat_completions,
+            require_responses=require_responses,
+            excluded_target_model_names=mapping_failover_excluded_target_model_names,
         )
         model_mapping_unavailable = ProxyService._model_mapping_unavailable(mapping_resolution)
         if mapping_resolution is not None and not model_mapping_unavailable and mapping_resolution.selected_model_name != requested_model_name:
@@ -1664,17 +1782,31 @@ class ProxyService:
                 source_ip=source_ip,
                 requested_model=requested_model_name,
                 request_path_for_log=effective_log_request_path,
+                request_body_json=ProxyService._serialize_payload_for_logging(
+                    request_payload_for_log,
+                    setting=setting,
+                    preserve_request_content_when_disabled=True,
+                    structure_only=True,
+                ),
             )
-        conversation_key = ProxyService._extract_conversation_key(payload, request_id)
-        session_id = LogService.extract_session_id(payload, conversation_key=conversation_key, fallback=request_id)
+        conversation_key = conversation_key_override or ProxyService._extract_conversation_key(payload, request_id)
+        session_id = session_id_override or LogService.extract_session_id(payload, conversation_key=conversation_key, fallback=request_id)
         request_body_json = ProxyService._serialize_payload_for_logging(
-            payload,
+            request_payload_for_log,
             setting=setting,
             preserve_request_content_when_disabled=True,
             structure_only=True,
         )
         trace: list[dict] = list(route_retry_trace or [])
         ProxyService._append_model_mapping_trace(trace, mapping_resolution)
+        ProxyService._append_stateful_responses_route_trace(
+            trace,
+            endpoint_path=endpoint_path,
+            payload=payload,
+            requested_model_name=requested_model_name,
+            selected_model_name=model_name,
+            mapping_resolution=mapping_resolution,
+        )
         last_upstream_error: dict[str, Any] | None = None
         attempt_count = max(0, int(route_retry_attempt_count or 0))
         route_retry_started_at = route_retry_started_at or time.perf_counter()
@@ -1685,15 +1817,15 @@ class ProxyService:
                 else await RouterService.async_order_candidates(
                     db,
                     model_name=model_name,
-                    sticky_key=ProxyService._extract_sticky_key(payload),
+                    sticky_key=session_sticky_key,
                     forced_provider_id=forced_provider_id,
                     route_context=route_context,
                     require_vision=has_image_input,
                     require_stream=True,
                     require_tools=require_tools,
                     require_image_generation=require_image_generation,
-                    require_chat_completions=endpoint_path == "/chat/completions",
-                    require_responses=endpoint_path == "/responses",
+                    require_chat_completions=require_chat_completions,
+                    require_responses=require_responses,
                 )
             )
         except ProviderCapacityUnavailableError as exc:
@@ -1713,14 +1845,13 @@ class ProxyService:
                     require_stream=True,
                     require_tools=require_tools,
                     require_image_generation=require_image_generation,
-                    require_chat_completions=endpoint_path == "/chat/completions",
-                    require_responses=endpoint_path == "/responses",
+                    require_chat_completions=require_chat_completions,
+                    require_responses=require_responses,
                     is_stream=True,
                 )
             )
             if model_mapping_unavailable:
-                route_message = "No available mapped target model"
-                error_code = "model_mapping_target_not_available"
+                route_message, error_code = ProxyService._build_model_mapping_unavailable_error(route_diagnostics)
             elif require_image_generation:
                 route_message = "No native image-generation-capable provider for requested model"
                 error_code = "model_image_generation_not_available"
@@ -1730,6 +1861,34 @@ class ProxyService:
             else:
                 route_message = "No available provider for requested model"
                 error_code = "model_not_available"
+            mapped_retry = await ProxyService._retry_with_next_mapped_model_stream(
+                db=db,
+                endpoint_path=endpoint_path,
+                payload=payload,
+                log_type=log_type,
+                forced_provider_id=forced_provider_id,
+                route_context=route_context,
+                api_client_auth=api_client_auth,
+                trace_id=trace_id,
+                source_ip=source_ip,
+                request_path_for_log=effective_log_request_path,
+                public_endpoint_path=public_endpoint_path,
+                route_retry_started_at=route_retry_started_at,
+                route_retry_round=route_retry_round,
+                route_retry_trace=trace,
+                route_retry_attempt_count=attempt_count,
+                mapping_resolution=mapping_resolution,
+                requested_model_name=requested_model_name if isinstance(requested_model_name, str) else None,
+                current_model_name=model_name if isinstance(model_name, str) else None,
+                excluded_target_model_names=mapping_failover_excluded_target_model_names,
+                request_id=request_id,
+                conversation_key=conversation_key,
+                session_id=session_id,
+                reason="no_route_candidate_for_mapped_target",
+                route_diagnostics=route_diagnostics,
+            )
+            if mapped_retry is not None:
+                return mapped_retry
             retryable_route_exhausted = ProxyService._should_retry_route_diagnostics(route_diagnostics)
             sleep_seconds = (
                 ProxyService._route_exhausted_retry_sleep_seconds(
@@ -1770,6 +1929,7 @@ class ProxyService:
                         setting,
                         started_at=route_retry_started_at,
                         attempt_count=attempt_count,
+                        trace=trace,
                         trace_id=trace_id,
                         last_upstream_error=None,
                     ),
@@ -2191,7 +2351,10 @@ class ProxyService:
                             detail=ProxyService._normalize_error_detail(error_body),
                         ),
                     )
-                    if not ProxyService._should_retry_same_provider_status(exc.response.status_code):
+                    if not ProxyService._should_retry_same_provider_status(
+                        exc.response.status_code,
+                        detail=last_upstream_error["detail"],
+                    ):
                         break
                 except Exception as exc:
                     if stream_context is not None:
@@ -2220,6 +2383,36 @@ class ProxyService:
                         ProxyService._error_message_for_log(error_detail),
                         db=db,
                     )
+
+        if ProxyService._should_retry_mapped_model(last_upstream_error):
+            mapped_retry = await ProxyService._retry_with_next_mapped_model_stream(
+                db=db,
+                endpoint_path=endpoint_path,
+                payload=payload,
+                log_type=log_type,
+                forced_provider_id=forced_provider_id,
+                route_context=route_context,
+                api_client_auth=api_client_auth,
+                trace_id=trace_id,
+                source_ip=source_ip,
+                request_path_for_log=effective_log_request_path,
+                public_endpoint_path=public_endpoint_path,
+                route_retry_started_at=route_retry_started_at,
+                route_retry_round=route_retry_round,
+                route_retry_trace=trace,
+                route_retry_attempt_count=attempt_count,
+                mapping_resolution=mapping_resolution,
+                requested_model_name=requested_model_name if isinstance(requested_model_name, str) else None,
+                current_model_name=model_name if isinstance(model_name, str) else None,
+                excluded_target_model_names=mapping_failover_excluded_target_model_names,
+                request_id=request_id,
+                conversation_key=conversation_key,
+                session_id=session_id,
+                reason="mapped_target_upstream_failed",
+                upstream_error=last_upstream_error,
+            )
+            if mapped_retry is not None:
+                return mapped_retry
 
         if ProxyService._should_retry_route_upstream_error(last_upstream_error):
             sleep_seconds = ProxyService._route_exhausted_retry_sleep_seconds(
@@ -2251,6 +2444,7 @@ class ProxyService:
                     setting,
                     started_at=route_retry_started_at,
                     attempt_count=attempt_count,
+                    trace=trace,
                     trace_id=trace_id,
                     last_upstream_error=last_upstream_error,
                 )
@@ -2968,6 +3162,18 @@ class ProxyService:
         return normalized
 
     @staticmethod
+    def _route_endpoint_requirements(endpoint_path: str, payload: dict[str, Any]) -> tuple[bool, bool]:
+        if endpoint_path == "/responses":
+            safety = ProxyService._assess_responses_to_chat_conversion_safety(payload)
+            allow_fallback = safety.safe and not (payload.get("stream") is True and ProxyService._payload_uses_tools(payload))
+            return False, not allow_fallback
+        if endpoint_path == "/chat/completions":
+            safety = ProxyService._assess_chat_to_responses_conversion_safety(payload)
+            allow_fallback = safety.safe and not (payload.get("stream") is True and ProxyService._payload_uses_tools(payload))
+            return not allow_fallback, False
+        return endpoint_path == "/chat/completions", endpoint_path == "/responses"
+
+    @staticmethod
     def _assess_endpoint_conversion_safety(
         *,
         from_endpoint_path: str,
@@ -2987,16 +3193,27 @@ class ProxyService:
 
     @staticmethod
     def _assess_responses_to_chat_conversion_safety(payload: dict[str, Any]) -> EndpointConversionSafety:
-        unsafe_fields = sorted(
-            key
-            for key in payload.keys()
-            if key not in ProxyService.RESPONSES_CHAT_ADAPTER_SAFE_FIELDS
-            or key in ProxyService.ENDPOINT_ADAPTER_RISKY_FIELDS
-        )
+        unsafe_fields: list[str] = []
+        for key in payload.keys():
+            if key not in ProxyService.RESPONSES_CHAT_ADAPTER_SAFE_FIELDS:
+                unsafe_fields.append(key)
+                continue
+            if key == "tools":
+                if not ProxyService._responses_tools_are_adapter_safe(payload.get("tools")):
+                    unsafe_fields.append(key)
+                continue
+            if key == "tool_choice":
+                if not ProxyService._responses_tool_choice_is_adapter_safe(payload.get("tool_choice")):
+                    unsafe_fields.append(key)
+                continue
+            if key in ProxyService.ENDPOINT_ADAPTER_RISKY_FIELDS:
+                unsafe_fields.append(key)
         unsafe_reasons: list[str] = []
         input_value = payload.get("input")
         if not ProxyService._responses_input_is_adapter_safe(input_value, unsafe_reasons=unsafe_reasons):
             pass
+        if ProxyService._value_has_key(payload, "encrypted_content"):
+            unsafe_reasons.append("responses payload contains encrypted_content state from a previous response")
         if unsafe_fields or unsafe_reasons:
             return EndpointConversionSafety(
                 safe=False,
@@ -3013,12 +3230,21 @@ class ProxyService:
 
     @staticmethod
     def _assess_chat_to_responses_conversion_safety(payload: dict[str, Any]) -> EndpointConversionSafety:
-        unsafe_fields = sorted(
-            key
-            for key in payload.keys()
-            if key not in ProxyService.CHAT_RESPONSES_ADAPTER_SAFE_FIELDS
-            or key in ProxyService.ENDPOINT_ADAPTER_RISKY_FIELDS
-        )
+        unsafe_fields: list[str] = []
+        for key in payload.keys():
+            if key not in ProxyService.CHAT_RESPONSES_ADAPTER_SAFE_FIELDS:
+                unsafe_fields.append(key)
+                continue
+            if key == "tools":
+                if not ProxyService._chat_tools_are_adapter_safe(payload.get("tools")):
+                    unsafe_fields.append(key)
+                continue
+            if key == "tool_choice":
+                if not ProxyService._chat_tool_choice_is_adapter_safe(payload.get("tool_choice")):
+                    unsafe_fields.append(key)
+                continue
+            if key in ProxyService.ENDPOINT_ADAPTER_RISKY_FIELDS:
+                unsafe_fields.append(key)
         unsafe_reasons: list[str] = []
         messages = payload.get("messages")
         if not ProxyService._chat_messages_are_adapter_safe(messages, unsafe_reasons=unsafe_reasons):
@@ -3036,6 +3262,55 @@ class ProxyService:
                 unsafe_reasons=unsafe_reasons,
             )
         return EndpointConversionSafety(safe=True)
+
+    @staticmethod
+    def _chat_tools_are_adapter_safe(value: Any) -> bool:
+        if not isinstance(value, list):
+            return False
+        for item in value:
+            if not isinstance(item, dict) or item.get("type") != "function":
+                return False
+            function = item.get("function")
+            if not isinstance(function, dict):
+                return False
+            name = function.get("name")
+            if not isinstance(name, str) or not name.strip():
+                return False
+        return True
+
+    @staticmethod
+    def _responses_tools_are_adapter_safe(value: Any) -> bool:
+        if not isinstance(value, list):
+            return False
+        for item in value:
+            if not isinstance(item, dict) or item.get("type") != "function":
+                return False
+            name = item.get("name")
+            if not isinstance(name, str) or not name.strip():
+                return False
+        return True
+
+    @staticmethod
+    def _chat_tool_choice_is_adapter_safe(value: Any) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, str):
+            return value in {"auto", "none", "required"}
+        if not isinstance(value, dict) or value.get("type") != "function":
+            return False
+        function = value.get("function")
+        return isinstance(function, dict) and isinstance(function.get("name"), str) and bool(function.get("name").strip())
+
+    @staticmethod
+    def _responses_tool_choice_is_adapter_safe(value: Any) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, str):
+            return value in {"auto", "none", "required"}
+        if not isinstance(value, dict) or value.get("type") != "function":
+            return False
+        name = value.get("name")
+        return isinstance(name, str) and bool(name.strip())
 
     @staticmethod
     def _responses_input_is_adapter_safe(value: Any, *, unsafe_reasons: list[str]) -> bool:
@@ -3217,9 +3492,11 @@ class ProxyService:
             if not isinstance(item, dict):
                 unsafe_reasons.append("chat response choice does not contain a simple message or delta object")
             else:
-                risky_keys = sorted(set(item.keys()) & {"tool_calls", "function_call", "refusal", "audio"})
+                risky_keys = sorted(set(item.keys()) & {"function_call", "refusal", "audio"})
                 if risky_keys:
                     unsafe_reasons.append(f"chat response contains risky keys: {', '.join(risky_keys)}")
+                if "tool_calls" in item and not ProxyService._chat_response_tool_calls_are_adapter_safe(item.get("tool_calls")):
+                    unsafe_reasons.append("chat response tool_calls are not convertible")
                 content = item.get("content")
                 if content is not None and not isinstance(content, str):
                     unsafe_reasons.append("chat response content is not simple text")
@@ -3245,10 +3522,14 @@ class ProxyService:
                     unsafe_reasons.append("responses output item is not an object")
                     continue
                 item_type = item.get("type")
+                if item_type in {"function_call", "tool_call"}:
+                    if not ProxyService._responses_output_tool_call_is_adapter_safe(item):
+                        unsafe_reasons.append("responses output tool call item is not convertible")
+                    continue
                 if item_type not in {None, "message"}:
                     unsafe_reasons.append(f"responses output item type {item_type!r} is not convertible")
                     continue
-                risky_keys = sorted(set(item.keys()) & {"tool_call", "function_call", "reasoning", "code_interpreter_call", "file_search_call"})
+                risky_keys = sorted(set(item.keys()) & {"reasoning", "code_interpreter_call", "file_search_call"})
                 if risky_keys:
                     unsafe_reasons.append(f"responses output item contains risky keys: {', '.join(risky_keys)}")
                 content = item.get("content")
@@ -3268,6 +3549,34 @@ class ProxyService:
                 to_endpoint_path="/chat/completions",
                 unsafe_reasons=unsafe_reasons,
             )
+
+    @staticmethod
+    def _chat_response_tool_calls_are_adapter_safe(value: Any) -> bool:
+        if not isinstance(value, list) or not value:
+            return False
+        for item in value:
+            if not isinstance(item, dict):
+                return False
+            if item.get("type") != "function":
+                return False
+            function = item.get("function")
+            if not isinstance(function, dict):
+                return False
+            if not isinstance(function.get("name"), str) or not function.get("name", "").strip():
+                return False
+            if not isinstance(function.get("arguments"), str):
+                return False
+        return True
+
+    @staticmethod
+    def _responses_output_tool_call_is_adapter_safe(item: dict[str, Any]) -> bool:
+        name = item.get("name")
+        arguments = item.get("arguments")
+        if not isinstance(name, str) or not name.strip():
+            return False
+        if not isinstance(arguments, str):
+            return False
+        return True
 
     @staticmethod
     def _raise_unsafe_response_conversion(
@@ -3320,10 +3629,19 @@ class ProxyService:
         return any(token in message for token in endpoint_tokens)
 
     @staticmethod
-    def _should_retry_same_provider_status(status_code: int) -> bool:
-        if status_code in {401, 403, 404, 429}:
+    def _classify_retry_policy(status_code: int, detail: Any | None = None) -> dict[str, Any]:
+        return OpenAIErrorService.classify_error(status_code=status_code, detail=detail)
+
+    @staticmethod
+    def _should_retry_same_provider_status(status_code: int, detail: Any | None = None) -> bool:
+        classified = ProxyService._classify_retry_policy(status_code, detail)
+        if not bool(classified.get("recoverable")):
             return False
-        if 400 <= status_code < 500:
+        # 429/425 can recover after time or another route, but immediate same-provider
+        # retries usually amplify upstream throttling.
+        if status_code in {425, status.HTTP_429_TOO_MANY_REQUESTS}:
+            return False
+        if 400 <= status_code < 500 and status_code not in {408, 409}:
             return False
         return True
 
@@ -3409,7 +3727,31 @@ class ProxyService:
     def _should_retry_route_diagnostics(diagnostics: dict[str, Any] | None) -> bool:
         if not diagnostics:
             return False
+        matching_model_mount_count = int(diagnostics.get("matching_model_mount_count") or 0)
+        pre_capacity_candidate_count = int(diagnostics.get("pre_capacity_candidate_count") or 0)
+        final_candidate_count = int(diagnostics.get("final_candidate_count") or 0)
         reason_counts = diagnostics.get("reason_counts") or {}
+        # 没有任何匹配模型挂载时，等待熔断恢复也无法凭空产生候选，直接判定为不可恢复。
+        if matching_model_mount_count <= 0:
+            return False
+        if pre_capacity_candidate_count > 0 and final_candidate_count == 0:
+            return True
+        nonrecoverable_match_reasons = {
+            "provider_not_authorized",
+            "model_disabled",
+            "model_globally_disabled",
+            "tools_not_supported",
+            "vision_not_supported",
+            "image_generation_not_supported",
+            "tools_probe_unhealthy",
+            "vision_probe_unhealthy",
+            "image_generation_probe_unhealthy",
+            "chat_not_supported",
+            "responses_not_supported",
+        }
+        nonrecoverable_match_count = sum(int(reason_counts.get(reason) or 0) for reason in nonrecoverable_match_reasons)
+        if pre_capacity_candidate_count <= 0 and nonrecoverable_match_count >= matching_model_mount_count:
+            return False
         recoverable_reasons = {
             "provider_capacity_exceeded",
             "provider_failure_rate_limited",
@@ -3420,7 +3762,7 @@ class ProxyService:
         }
         if any(int(reason_counts.get(reason) or 0) > 0 for reason in recoverable_reasons):
             return True
-        return int(diagnostics.get("pre_capacity_candidate_count") or 0) > 0 and int(diagnostics.get("final_candidate_count") or 0) == 0
+        return False
 
     @staticmethod
     def _should_retry_route_upstream_error(upstream_error: dict[str, Any] | None) -> bool:
@@ -3430,11 +3772,32 @@ class ProxyService:
             status_code = int(upstream_error.get("status_code") or 0)
         except (TypeError, ValueError):
             return False
-        if status_code == status.HTTP_429_TOO_MANY_REQUESTS:
-            return True
-        if 400 <= status_code < 500:
-            return status_code in {status.HTTP_408_REQUEST_TIMEOUT, status.HTTP_409_CONFLICT}
-        return status_code >= 500
+        classified = ProxyService._classify_retry_policy(status_code, upstream_error.get("detail"))
+        return bool(classified.get("recoverable"))
+
+    @staticmethod
+    def _should_retry_mapped_model(upstream_error: dict[str, Any] | None) -> bool:
+        if not upstream_error:
+            return False
+        try:
+            status_code = int(upstream_error.get("status_code") or 0)
+        except (TypeError, ValueError):
+            return False
+        classified = ProxyService._classify_retry_policy(status_code, upstream_error.get("detail"))
+        category = str(classified.get("category") or "")
+        if category in {"invalid_request", "authentication", "authorization", "client_cancelled"}:
+            return False
+        return category in {
+            "model_unavailable",
+            "capability_not_supported",
+            "rate_limit",
+            "timeout",
+            "network",
+            "upstream_transient",
+            "server_error",
+            "capacity_limited",
+            "route_unavailable",
+        } or bool(classified.get("recoverable"))
 
     @staticmethod
     def _build_route_exhausted_retry_upstream_error(
@@ -3442,15 +3805,17 @@ class ProxyService:
         *,
         started_at: float,
         attempt_count: int,
+        trace: list[dict] | None,
         trace_id: str | None,
         last_upstream_error: dict[str, Any] | None,
     ) -> dict[str, Any]:
         elapsed_seconds = int(round(ProxyService._route_exhausted_retry_elapsed_seconds(started_at=started_at)))
         max_wait_seconds = ProxyService._route_exhausted_retry_max_wait_seconds(setting)
+        effective_attempt_count = max(int(attempt_count or 0), LogService.derive_attempt_count(trace))
         detail: dict[str, Any] = {
             "message": f"所有可用中转站在 {max_wait_seconds} 秒等待重试窗口内均不可用或请求失败，已停止内部重试。",
             "code": "all_providers_unavailable_after_retry",
-            "attempt_count": attempt_count,
+            "attempt_count": effective_attempt_count,
             "elapsed_seconds": elapsed_seconds,
             "max_wait_seconds": max_wait_seconds,
             "retryable": True,
@@ -3518,11 +3883,102 @@ class ProxyService:
 
     @staticmethod
     def _prepare_upstream_request(provider: Provider, *, endpoint_path: str, payload: dict[str, Any]) -> PreparedUpstreamRequest:
+        normalized_payload = ProxyService._normalize_provider_request_payload(provider, payload)
         return PreparedUpstreamRequest(
             request_path=endpoint_path,
-            request_payload=payload,
+            request_payload=normalized_payload,
             adapt_chat_response_to_responses=False,
         )
+
+    @staticmethod
+    def _normalize_provider_request_payload(provider: Provider, payload: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            return payload
+        if not ProxyService._payload_has_image(payload):
+            return payload
+        if ProxyService._provider_requires_base64_image_urls(provider, payload):
+            return ProxyService._convert_remote_image_urls_to_data_urls(payload)
+        return payload
+
+    @staticmethod
+    def _provider_requires_base64_image_urls(provider: Provider, payload: dict[str, Any]) -> bool:
+        normalized_model = str(payload.get("model") or "").strip().lower()
+        normalized_base_url = str(provider.base_url or "").strip().lower()
+        if normalized_model.startswith("kimi-") or normalized_model.startswith("moonshot-v1"):
+            return True
+        return "moonshot.ai" in normalized_base_url or "moonshot.cn" in normalized_base_url
+
+    @staticmethod
+    def _convert_remote_image_urls_to_data_urls(value: Any) -> Any:
+        if isinstance(value, list):
+            return [ProxyService._convert_remote_image_urls_to_data_urls(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        converted = {key: ProxyService._convert_remote_image_urls_to_data_urls(item) for key, item in value.items()}
+        image_url_value = converted.get("image_url")
+        if isinstance(image_url_value, str):
+            normalized = ProxyService._convert_single_remote_image_url_to_data_url(image_url_value)
+            if normalized != image_url_value:
+                converted["image_url"] = normalized
+            return converted
+        if isinstance(image_url_value, dict):
+            normalized_url = ProxyService._convert_single_remote_image_url_to_data_url(image_url_value.get("url"))
+            if normalized_url != image_url_value.get("url"):
+                image_payload = dict(image_url_value)
+                image_payload["url"] = normalized_url
+                converted["image_url"] = image_payload
+        return converted
+
+    @staticmethod
+    def _convert_single_remote_image_url_to_data_url(value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip()
+        if not normalized or normalized.startswith("data:") or not normalized.lower().startswith(("http://", "https://")):
+            return value
+        return ProxyService._fetch_remote_image_as_data_url(normalized)
+
+    @staticmethod
+    def _fetch_remote_image_as_data_url(url: str) -> str:
+        max_image_bytes = 50 * 1024 * 1024
+        timeout_seconds = 30
+        session = ProxyService._get_thread_local_requests_session()
+        try:
+            response = session.get(url, timeout=timeout_seconds)
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "message": "当前上游视觉模型不支持直接传入远程图片 URL，自动抓取该图片失败，请改为传入 base64 data URL 或可用文件 ID",
+                    "code": "image_url_fetch_failed",
+                    "image_url": url,
+                },
+            ) from exc
+        content = response.content or b""
+        if len(content) > max_image_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "message": f"远程图片大小超过自动转换上限 {max_image_bytes} 字节，请改为传入 base64 data URL 或可用文件 ID",
+                    "code": "image_url_too_large_for_inline_conversion",
+                    "image_url": url,
+                    "max_image_bytes": max_image_bytes,
+                },
+            )
+        content_type = str(response.headers.get("content-type") or "").split(";", 1)[0].strip() or None
+        encoded = base64.b64encode(content).decode("ascii")
+        return ProxyService._build_data_url_from_base64(encoded, mime_type=content_type)
+
+    @staticmethod
+    def _assert_stateful_responses_mapping_safe(
+        *,
+        endpoint_path: str,
+        payload: dict[str, Any],
+        requested_model_name: Any,
+        mapping_resolution: ModelMappingResolution | None,
+    ) -> None:
+        return
 
     @staticmethod
     def _model_mapping_unavailable(mapping_resolution: ModelMappingResolution | None) -> bool:
@@ -3539,14 +3995,321 @@ class ProxyService:
         trace.append({"result": "model_mapping", **mapping_resolution.trace})
 
     @staticmethod
+    def _append_stateful_responses_route_trace(
+        trace: list[dict],
+        *,
+        endpoint_path: str,
+        payload: dict[str, Any],
+        requested_model_name: Any,
+        selected_model_name: Any,
+        mapping_resolution: ModelMappingResolution | None,
+    ) -> None:
+        if endpoint_path != "/responses" or not ProxyService._payload_has_stateful_responses_context(payload):
+            return
+        trace.append(
+            {
+                "result": "stateful_responses_routing",
+                "policy": "prefer_recent_success_target_then_failover",
+                "requested_model_name": requested_model_name,
+                "selected_model_name": selected_model_name,
+                "mapping_result": (
+                    mapping_resolution.trace.get("result")
+                    if mapping_resolution is not None and isinstance(mapping_resolution.trace, dict)
+                    else None
+                ),
+                "selection_reason": (
+                    mapping_resolution.trace.get("selection_reason")
+                    if mapping_resolution is not None and isinstance(mapping_resolution.trace, dict)
+                    else None
+                ),
+            }
+        )
+
+    @staticmethod
+    def _remaining_model_mapping_targets(
+        mapping_resolution: ModelMappingResolution | None,
+        *,
+        requested_model: str | None,
+        current_model_name: str | None,
+        excluded_target_model_names: set[str] | None = None,
+    ) -> list[str]:
+        if (
+            mapping_resolution is None
+            or not requested_model
+            or mapping_resolution.selected_model_name == requested_model
+        ):
+            return []
+        excluded = excluded_target_model_names or set()
+        current = (current_model_name or "").strip()
+        remaining: list[str] = []
+        for item in mapping_resolution.candidate_model_names:
+            model_name = str(item or "").strip()
+            if not model_name or model_name == current or model_name in excluded:
+                continue
+            remaining.append(model_name)
+        return remaining
+
+    @staticmethod
+    def _append_model_mapping_failover_trace(
+        trace: list[dict],
+        *,
+        source_model_name: str | None,
+        failed_model_name: str | None,
+        remaining_model_names: list[str],
+        reason: str,
+        upstream_error: dict[str, Any] | None = None,
+        route_diagnostics: dict[str, Any] | None = None,
+        stateful_responses_context: bool = False,
+    ) -> None:
+        item: dict[str, Any] = {
+            "result": "model_mapping_failover",
+            "source_model_name": source_model_name,
+            "failed_model_name": failed_model_name,
+            "reason": reason,
+            "remaining_model_names": remaining_model_names,
+        }
+        if stateful_responses_context:
+            item["stateful_responses_context"] = True
+            item["stateful_policy"] = "previous_target_unavailable_or_recoverable_failure_then_failover"
+        if upstream_error is not None:
+            item["status_code"] = upstream_error.get("status_code")
+            item["error_code"] = ProxyService._error_code_from_detail(upstream_error.get("detail"))
+            item["error_message"] = ProxyService._error_message_for_log(upstream_error.get("detail"))
+        if route_diagnostics is not None:
+            item["diagnostic_summary"] = route_diagnostics.get("summary")
+            item["reason_counts"] = route_diagnostics.get("reason_counts")
+        trace.append(item)
+
+    @staticmethod
+    async def _retry_with_next_mapped_model_json(
+        *,
+        db: Session | None,
+        endpoint_path: str,
+        payload: dict[str, Any],
+        log_type: str,
+        forced_provider_id: int | None,
+        route_context: RoutePolicyContext | None,
+        api_client_auth: ApiClientAuthContext | None,
+        trace_id: str | None,
+        source_ip: str | None,
+        request_path_for_log: str | None,
+        public_endpoint_path: str | None,
+        response_transform: Callable[[dict[str, Any]], dict[str, Any]] | None,
+        suppress_success_log: bool,
+        route_retry_started_at: float | None,
+        route_retry_round: int,
+        route_retry_trace: list[dict],
+        route_retry_attempt_count: int,
+        mapping_resolution: ModelMappingResolution | None,
+        requested_model_name: str | None,
+        current_model_name: str | None,
+        excluded_target_model_names: tuple[str, ...],
+        request_id: str,
+        conversation_key: str,
+        session_id: str,
+        reason: str,
+        upstream_error: dict[str, Any] | None = None,
+        route_diagnostics: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], Provider, list[dict], int] | None:
+        remaining = ProxyService._remaining_model_mapping_targets(
+            mapping_resolution,
+            requested_model=requested_model_name,
+            current_model_name=current_model_name,
+            excluded_target_model_names=set(excluded_target_model_names),
+        )
+        if not remaining:
+            return None
+        next_excluded = tuple(
+            dict.fromkeys(
+                [
+                    *(item for item in excluded_target_model_names if isinstance(item, str) and item.strip()),
+                    *(item for item in ((current_model_name or "").strip(),) if item),
+                ]
+            )
+        )
+        next_trace = list(route_retry_trace)
+        ProxyService._append_model_mapping_failover_trace(
+            next_trace,
+            source_model_name=requested_model_name,
+            failed_model_name=current_model_name,
+            remaining_model_names=remaining,
+            reason=reason,
+            upstream_error=upstream_error,
+            route_diagnostics=route_diagnostics,
+            stateful_responses_context=(
+                endpoint_path == "/responses"
+                and ProxyService._payload_has_stateful_responses_context(payload)
+            ),
+        )
+        retry_payload = {**payload, "model": requested_model_name}
+        return await ProxyService._forward_json_request_once(
+            db,
+            endpoint_path=endpoint_path,
+            payload=retry_payload,
+            log_type=log_type,
+            forced_provider_id=forced_provider_id,
+            route_context=route_context,
+            api_client_auth=api_client_auth,
+            trace_id=trace_id,
+            source_ip=source_ip,
+            request_path_for_log=request_path_for_log,
+            public_endpoint_path=public_endpoint_path,
+            response_transform=response_transform,
+            suppress_success_log=suppress_success_log,
+            route_retry_started_at=route_retry_started_at,
+            route_retry_round=route_retry_round,
+            route_retry_trace=next_trace,
+            route_retry_attempt_count=route_retry_attempt_count,
+            mapping_failover_excluded_target_model_names=next_excluded,
+            request_id_override=request_id,
+            conversation_key_override=conversation_key,
+            session_id_override=session_id,
+        )
+
+    @staticmethod
+    async def _retry_with_next_mapped_model_stream(
+        *,
+        db: Session | None,
+        endpoint_path: str,
+        payload: dict[str, Any],
+        log_type: str,
+        forced_provider_id: int | None,
+        route_context: RoutePolicyContext | None,
+        api_client_auth: ApiClientAuthContext | None,
+        trace_id: str | None,
+        source_ip: str | None,
+        request_path_for_log: str | None,
+        public_endpoint_path: str | None,
+        route_retry_started_at: float | None,
+        route_retry_round: int,
+        route_retry_trace: list[dict],
+        route_retry_attempt_count: int,
+        mapping_resolution: ModelMappingResolution | None,
+        requested_model_name: str | None,
+        current_model_name: str | None,
+        excluded_target_model_names: tuple[str, ...],
+        request_id: str,
+        conversation_key: str,
+        session_id: str,
+        reason: str,
+        upstream_error: dict[str, Any] | None = None,
+        route_diagnostics: dict[str, Any] | None = None,
+    ) -> tuple[AsyncIterator[bytes], Provider, list[dict], int] | None:
+        remaining = ProxyService._remaining_model_mapping_targets(
+            mapping_resolution,
+            requested_model=requested_model_name,
+            current_model_name=current_model_name,
+            excluded_target_model_names=set(excluded_target_model_names),
+        )
+        if not remaining:
+            return None
+        next_excluded = tuple(
+            dict.fromkeys(
+                [
+                    *(item for item in excluded_target_model_names if isinstance(item, str) and item.strip()),
+                    *(item for item in ((current_model_name or "").strip(),) if item),
+                ]
+            )
+        )
+        next_trace = list(route_retry_trace)
+        ProxyService._append_model_mapping_failover_trace(
+            next_trace,
+            source_model_name=requested_model_name,
+            failed_model_name=current_model_name,
+            remaining_model_names=remaining,
+            reason=reason,
+            upstream_error=upstream_error,
+            route_diagnostics=route_diagnostics,
+            stateful_responses_context=(
+                endpoint_path == "/responses"
+                and ProxyService._payload_has_stateful_responses_context(payload)
+            ),
+        )
+        retry_payload = {**payload, "model": requested_model_name}
+        return await ProxyService._forward_stream_request_once(
+            db,
+            endpoint_path=endpoint_path,
+            payload=retry_payload,
+            log_type=log_type,
+            forced_provider_id=forced_provider_id,
+            route_context=route_context,
+            api_client_auth=api_client_auth,
+            trace_id=trace_id,
+            source_ip=source_ip,
+            request_path_for_log=request_path_for_log,
+            public_endpoint_path=public_endpoint_path,
+            route_retry_started_at=route_retry_started_at,
+            route_retry_round=route_retry_round,
+            route_retry_trace=next_trace,
+            route_retry_attempt_count=route_retry_attempt_count,
+            mapping_failover_excluded_target_model_names=next_excluded,
+            request_id_override=request_id,
+            conversation_key_override=conversation_key,
+            session_id_override=session_id,
+        )
+
+    @staticmethod
     def _model_mapping_unavailable_diagnostics(mapping_resolution: ModelMappingResolution | None) -> dict[str, Any]:
         mapping_trace = mapping_resolution.trace if mapping_resolution is not None else {}
+        target_diagnostics = [
+            item.get("route_diagnostics")
+            for item in (mapping_trace.get("targets") or [])
+            if isinstance(item, dict) and isinstance(item.get("route_diagnostics"), dict)
+        ]
+        summary = "模型映射没有可用目标"
+        aggregated_reason_counts: dict[str, int] = {}
+        samples: list[dict[str, Any]] = []
+        for diagnostic in target_diagnostics:
+            for reason_code, count in (diagnostic.get("reason_counts") or {}).items():
+                aggregated_reason_counts[reason_code] = aggregated_reason_counts.get(reason_code, 0) + int(count or 0)
+            for sample in diagnostic.get("samples") or []:
+                if len(samples) >= 8:
+                    break
+                if isinstance(sample, dict):
+                    samples.append(sample)
+        if target_diagnostics:
+            if any((diagnostic.get("summary") or "").strip() for diagnostic in target_diagnostics):
+                summary = "；".join(
+                    str(diagnostic.get("summary")).strip()
+                    for diagnostic in target_diagnostics
+                    if str(diagnostic.get("summary") or "").strip()
+                )
         return {
-            "summary": "模型映射没有可用目标",
-            "reason_counts": {"model_mapping_target_not_available": 1},
-            "samples": [],
+            "summary": summary,
+            "reason_counts": aggregated_reason_counts or {"model_mapping_target_not_available": 1},
+            "samples": samples,
             "model_mapping": mapping_trace,
         }
+
+    @staticmethod
+    def _build_model_mapping_unavailable_error(route_diagnostics: dict[str, Any]) -> tuple[str, str]:
+        reason_counts = route_diagnostics.get("reason_counts") or {}
+        if reason_counts.get("provider_not_authorized"):
+            return (
+                "No available mapped target model within current api key authorized providers",
+                "model_mapping_target_provider_not_authorized",
+            )
+        if reason_counts.get("image_generation_not_supported") or reason_counts.get("image_generation_probe_unhealthy"):
+            return (
+                "No mapped target model supports image generation for this request",
+                "model_mapping_target_image_generation_not_available",
+            )
+        if reason_counts.get("tools_not_supported") or reason_counts.get("tools_probe_unhealthy"):
+            return (
+                "No mapped target model supports tool calls for this request",
+                "model_mapping_target_tools_not_available",
+            )
+        if reason_counts.get("responses_not_supported"):
+            return (
+                "No mapped target model supports responses endpoint for this request",
+                "model_mapping_target_responses_not_available",
+            )
+        if reason_counts.get("chat_not_supported"):
+            return (
+                "No mapped target model supports chat completions endpoint for this request",
+                "model_mapping_target_chat_not_available",
+            )
+        return ("No available mapped target model", "model_mapping_target_not_available")
 
     @staticmethod
     def _restore_mapped_response_model(
@@ -3589,6 +4352,12 @@ class ProxyService:
         for source_key, target_key in passthrough_map.items():
             if source_key in payload:
                 responses_payload[target_key] = payload[source_key]
+        if "tools" in responses_payload:
+            responses_payload["tools"] = ProxyService._normalize_chat_tools_for_responses(responses_payload.get("tools"))
+        if "tool_choice" in responses_payload:
+            responses_payload["tool_choice"] = ProxyService._normalize_chat_tool_choice_for_responses(
+                responses_payload.get("tool_choice")
+            )
         if "max_completion_tokens" in payload:
             responses_payload["max_output_tokens"] = payload["max_completion_tokens"]
         elif "max_tokens" in payload:
@@ -3676,6 +4445,12 @@ class ProxyService:
             if key in passthrough_excluded_keys or key == "model":
                 continue
             chat_payload[key] = value
+        if "tools" in chat_payload:
+            chat_payload["tools"] = ProxyService._normalize_responses_tools_for_chat(chat_payload.get("tools"))
+        if "tool_choice" in chat_payload:
+            chat_payload["tool_choice"] = ProxyService._normalize_responses_tool_choice_for_chat(
+                chat_payload.get("tool_choice")
+            )
         if "max_output_tokens" in payload and "max_completion_tokens" not in chat_payload and "max_tokens" not in chat_payload:
             chat_payload["max_completion_tokens"] = payload["max_output_tokens"]
         if "max_tokens" in payload and "max_completion_tokens" not in chat_payload:
@@ -3747,6 +4522,73 @@ class ProxyService:
         )
 
     @staticmethod
+    def _normalize_chat_tools_for_responses(value: Any) -> Any:
+        if not isinstance(value, list):
+            return value
+        normalized: list[Any] = []
+        for item in value:
+            if not isinstance(item, dict):
+                normalized.append(item)
+                continue
+            if item.get("type") != "function":
+                normalized.append(item)
+                continue
+            function = item.get("function")
+            if not isinstance(function, dict):
+                normalized.append(item)
+                continue
+            converted = {"type": "function"}
+            for key in ("name", "description", "parameters", "strict"):
+                if key in function:
+                    converted[key] = function[key]
+            normalized.append(converted)
+        return normalized
+
+    @staticmethod
+    def _normalize_responses_tools_for_chat(value: Any) -> Any:
+        if not isinstance(value, list):
+            return value
+        normalized: list[Any] = []
+        for item in value:
+            if not isinstance(item, dict):
+                normalized.append(item)
+                continue
+            if item.get("type") != "function" or isinstance(item.get("function"), dict):
+                normalized.append(item)
+                continue
+            converted = {"type": "function", "function": {}}
+            for key in ("name", "description", "parameters", "strict"):
+                if key in item:
+                    converted["function"][key] = item[key]
+            normalized.append(converted)
+        return normalized
+
+    @staticmethod
+    def _normalize_chat_tool_choice_for_responses(value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        if value.get("type") != "function":
+            return value
+        function = value.get("function")
+        if not isinstance(function, dict):
+            return value
+        name = function.get("name")
+        if not isinstance(name, str) or not name.strip():
+            return value
+        return {"type": "function", "name": name.strip()}
+
+    @staticmethod
+    def _normalize_responses_tool_choice_for_chat(value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        if value.get("type") != "function" or isinstance(value.get("function"), dict):
+            return value
+        name = value.get("name")
+        if not isinstance(name, str) or not name.strip():
+            return value
+        return {"type": "function", "function": {"name": name.strip()}}
+
+    @staticmethod
     def _convert_chat_completion_to_responses_payload(
         chat_response: dict[str, Any],
         *,
@@ -3758,35 +4600,38 @@ class ProxyService:
         choices = chat_response.get("choices")
         assistant_text = ""
         finish_reason = "completed"
+        tool_call_items: list[dict[str, Any]] = []
         if isinstance(choices, list) and choices:
             first_choice = choices[0] if isinstance(choices[0], dict) else {}
             message = first_choice.get("message") if isinstance(first_choice, dict) else {}
             if isinstance(message, dict) and isinstance(message.get("content"), str):
                 assistant_text = message["content"]
+            if isinstance(message, dict):
+                tool_call_items = ProxyService._convert_chat_tool_calls_to_responses_output(message.get("tool_calls"))
             finish_reason = str(first_choice.get("finish_reason") or finish_reason)
         usage = chat_response.get("usage") if isinstance(chat_response.get("usage"), dict) else {}
         prompt_tokens = usage.get("prompt_tokens")
         completion_tokens = usage.get("completion_tokens")
         total_tokens = usage.get("total_tokens")
         cache_read_tokens, cache_write_tokens = LogService.extract_cache_tokens({"usage": usage})
+        normalized_prompt_tokens = LogService.normalize_prompt_tokens_for_cache_usage(
+            usage,
+            ProxyService._coerce_non_negative_int(prompt_tokens),
+        )
         responses_usage = {
-            "input_tokens": int(prompt_tokens or 0),
+            "input_tokens": int(normalized_prompt_tokens or 0),
             "output_tokens": int(completion_tokens or 0),
-            "total_tokens": int(total_tokens or ((prompt_tokens or 0) + (completion_tokens or 0))),
+            "total_tokens": int(total_tokens or ((normalized_prompt_tokens or 0) + (completion_tokens or 0))),
         }
         if cache_read_tokens is not None or cache_write_tokens is not None:
             responses_usage["input_tokens_details"] = {
                 "cached_tokens": int(cache_read_tokens or 0),
                 "cache_creation_tokens": int(cache_write_tokens or 0),
+                "cache_creation_input_tokens": int(cache_write_tokens or 0),
             }
-        return {
-            "id": response_id,
-            "object": "response",
-            "created_at": created_at,
-            "status": "completed",
-            "model": model_name,
-            "output_text": assistant_text,
-            "output": [
+        output_items: list[dict[str, Any]] = []
+        if assistant_text or not tool_call_items:
+            output_items.append(
                 {
                     "id": f"msg_{uuid4().hex}",
                     "type": "message",
@@ -3801,7 +4646,16 @@ class ProxyService:
                         }
                     ],
                 }
-            ],
+            )
+        output_items.extend(tool_call_items)
+        return {
+            "id": response_id,
+            "object": "response",
+            "created_at": created_at,
+            "status": "completed",
+            "model": model_name,
+            "output_text": assistant_text,
+            "output": output_items,
             "usage": responses_usage,
         }
 
@@ -3816,21 +4670,28 @@ class ProxyService:
         model_name = str(responses_payload.get("model") or requested_model or "")
         assistant_text = ProxyService._extract_response_text(responses_payload, limit_bytes=1_048_576) or ""
         finish_reason = ProxyService._extract_finish_reason(responses_payload) or "stop"
+        tool_calls = ProxyService._extract_tool_calls_from_responses_output(responses_payload)
         usage = responses_payload.get("usage") if isinstance(responses_payload.get("usage"), dict) else {}
         input_tokens = usage.get("input_tokens", usage.get("prompt_tokens"))
         output_tokens = usage.get("output_tokens", usage.get("completion_tokens"))
         total_tokens = usage.get("total_tokens")
         cache_read_tokens, cache_write_tokens = LogService.extract_cache_tokens({"usage": usage})
+        normalized_input_tokens = LogService.normalize_prompt_tokens_for_cache_usage(
+            usage,
+            ProxyService._coerce_non_negative_int(input_tokens),
+        )
         chat_usage = {
-            "prompt_tokens": int(input_tokens or 0),
+            "prompt_tokens": int(normalized_input_tokens or 0),
             "completion_tokens": int(output_tokens or 0),
-            "total_tokens": int(total_tokens or ((input_tokens or 0) + (output_tokens or 0))),
+            "total_tokens": int(total_tokens or ((normalized_input_tokens or 0) + (output_tokens or 0))),
         }
         if cache_read_tokens is not None or cache_write_tokens is not None:
             chat_usage["prompt_tokens_details"] = {
                 "cached_tokens": int(cache_read_tokens or 0),
                 "cache_creation_tokens": int(cache_write_tokens or 0),
+                "cache_creation_input_tokens": int(cache_write_tokens or 0),
             }
+        finish_reason_value = "tool_calls" if tool_calls else (finish_reason if finish_reason != "completed" else "stop")
         return {
             "id": response_id,
             "object": "chat.completion",
@@ -3842,12 +4703,70 @@ class ProxyService:
                     "message": {
                         "role": "assistant",
                         "content": assistant_text,
+                        "tool_calls": tool_calls or None,
                     },
-                    "finish_reason": finish_reason if finish_reason != "completed" else "stop",
+                    "finish_reason": finish_reason_value,
                 }
             ],
             "usage": chat_usage,
         }
+
+    @staticmethod
+    def _convert_chat_tool_calls_to_responses_output(value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        items: list[dict[str, Any]] = []
+        for tool_call in value:
+            if not isinstance(tool_call, dict):
+                continue
+            function = tool_call.get("function")
+            if tool_call.get("type") != "function" or not isinstance(function, dict):
+                continue
+            name = function.get("name")
+            arguments = function.get("arguments")
+            if not isinstance(name, str) or not isinstance(arguments, str):
+                continue
+            tool_call_id = str(tool_call.get("id") or f"fc_{uuid4().hex}")
+            items.append(
+                {
+                    "id": tool_call_id,
+                    "type": "function_call",
+                    "status": "completed",
+                    "call_id": tool_call_id,
+                    "name": name,
+                    "arguments": arguments,
+                }
+            )
+        return items
+
+    @staticmethod
+    def _extract_tool_calls_from_responses_output(responses_payload: dict[str, Any]) -> list[dict[str, Any]]:
+        output = responses_payload.get("output")
+        if not isinstance(output, list):
+            return []
+        tool_calls: list[dict[str, Any]] = []
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            item_type = item.get("type")
+            if item_type not in {"function_call", "tool_call"}:
+                continue
+            name = item.get("name")
+            arguments = item.get("arguments")
+            if not isinstance(name, str) or not isinstance(arguments, str):
+                continue
+            tool_call_id = str(item.get("call_id") or item.get("id") or f"call_{uuid4().hex}")
+            tool_calls.append(
+                {
+                    "id": tool_call_id,
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": arguments,
+                    },
+                }
+            )
+        return tool_calls
 
     @staticmethod
     def _create_responses_stream_state(*, payload: dict[str, Any]) -> dict[str, Any]:
@@ -3928,8 +4847,12 @@ class ProxyService:
                     output_tokens = usage.get("completion_tokens", usage.get("output_tokens"))
                     total_tokens = usage.get("total_tokens")
                     cache_read_tokens, cache_write_tokens = LogService.extract_cache_tokens({"usage": usage})
-                    if isinstance(input_tokens, int):
-                        state["usage"]["input_tokens"] = input_tokens
+                    normalized_input_tokens = LogService.normalize_prompt_tokens_for_cache_usage(
+                        usage,
+                        ProxyService._coerce_non_negative_int(input_tokens),
+                    )
+                    if normalized_input_tokens is not None:
+                        state["usage"]["input_tokens"] = normalized_input_tokens
                     if isinstance(output_tokens, int):
                         state["usage"]["output_tokens"] = output_tokens
                     if isinstance(total_tokens, int):
@@ -3938,6 +4861,7 @@ class ProxyService:
                         state["usage"]["input_tokens_details"] = {
                             "cached_tokens": int(cache_read_tokens or 0),
                             "cache_creation_tokens": int(cache_write_tokens or 0),
+                            "cache_creation_input_tokens": int(cache_write_tokens or 0),
                         }
                 finish_reason = ProxyService._extract_finish_reason(parsed)
                 if isinstance(finish_reason, str) and finish_reason:
@@ -4097,17 +5021,22 @@ class ProxyService:
 
     @staticmethod
     def _format_stream_error_event(*, message: str, code: str, trace_id: str | None) -> bytes:
+        detail = {
+            "message": message,
+            "code": code,
+        }
+        classified = OpenAIErrorService.classify_error(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=detail)
         payload = {
             "error": OpenAIErrorService.build_error_payload(
                 message=message,
                 code=code,
                 trace_id=trace_id,
-                error_type="server_error",
-                retryable=True,
-                detail={
-                    "message": message,
-                    "code": code,
-                },
+                error_type=str(classified["error_type"]),
+                retryable=bool(classified["retryable"]),
+                recoverable=bool(classified["recoverable"]),
+                category=str(classified["category"]),
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=detail,
             )["error"]
         }
         return f"event: error\ndata: {dumps_json(payload)}\n\n".encode("utf-8")
@@ -4264,9 +5193,9 @@ class ProxyService:
                 model_reasoning_effort=model_reasoning_effort,
                 request_body_json=request_body_json,
                 message=message,
-                error_type=ProxyService._error_type_from_status(status_code),
+                error_type=ProxyService._error_type_from_status(status_code, detail),
                 error_code=ProxyService._error_code_from_detail(detail),
-                retryable=ProxyService._is_retryable_status(status_code),
+                retryable=ProxyService._is_retryable_status(status_code, detail),
                 **ProxyService._build_api_client_log_kwargs(api_client_auth, auth_result="authenticated"),
                 trace=trace,
                 attempt_count=attempt_count,
@@ -4303,9 +5232,9 @@ class ProxyService:
                 model_reasoning_effort=model_reasoning_effort,
                 request_body_json=request_body_json,
                 message=ProxyService._error_message_for_log(detail),
-                error_type=ProxyService._error_type_from_status(status_code),
+                error_type=ProxyService._error_type_from_status(status_code, detail),
                 error_code=ProxyService._error_code_from_detail(detail),
-                retryable=True,
+                retryable=ProxyService._is_retryable_status(status_code, detail),
                 **ProxyService._build_api_client_log_kwargs(api_client_auth, auth_result="authenticated"),
                 trace=trace,
                 attempt_count=attempt_count,
@@ -4504,11 +5433,38 @@ class ProxyService:
         if isinstance(payload.get("user"), str) and payload["user"].strip():
             return payload["user"].strip()
         metadata = payload.get("metadata")
-        if isinstance(metadata, dict):
+        client_metadata = payload.get("client_metadata")
+        for container in (metadata, client_metadata):
+            if not isinstance(container, dict):
+                continue
             for key in ("session_id", "conversation_id", "thread_id"):
-                value = metadata.get(key)
+                value = container.get(key)
                 if isinstance(value, str) and value.strip():
                     return value.strip()
+        prompt_cache_key = payload.get("prompt_cache_key")
+        if isinstance(prompt_cache_key, str) and prompt_cache_key.strip():
+            return prompt_cache_key.strip()
+        return None
+
+    @staticmethod
+    def _extract_session_sticky_key(payload: dict[str, Any]) -> str | None:
+        if not isinstance(payload, dict):
+            return None
+        metadata = payload.get("metadata")
+        client_metadata = payload.get("client_metadata")
+        containers = [
+            item
+            for item in (metadata, client_metadata, payload)
+            if isinstance(item, dict)
+        ]
+        for container in containers:
+            for key in ("session_id", "conversation_id", "thread_id", "session", "conversation_key"):
+                value = container.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        prompt_cache_key = payload.get("prompt_cache_key")
+        if isinstance(prompt_cache_key, str) and prompt_cache_key.strip():
+            return prompt_cache_key.strip()
         return None
 
     @staticmethod
@@ -4585,8 +5541,12 @@ class ProxyService:
         completion_tokens = usage.get("completion_tokens", usage.get("output_tokens"))
         total_tokens = usage.get("total_tokens")
         cache_read_tokens, cache_write_tokens = LogService.extract_cache_tokens({"usage": usage})
+        normalized_prompt_tokens = LogService.normalize_prompt_tokens_for_cache_usage(
+            usage,
+            ProxyService._coerce_non_negative_int(prompt_tokens),
+        )
         return {
-            "prompt_tokens": ProxyService._coerce_non_negative_int(prompt_tokens),
+            "prompt_tokens": normalized_prompt_tokens,
             "completion_tokens": ProxyService._coerce_non_negative_int(completion_tokens),
             "total_tokens": ProxyService._coerce_non_negative_int(total_tokens),
             "cache_read_tokens": cache_read_tokens,
@@ -5228,8 +6188,20 @@ class ProxyService:
         encoded = serialized.encode("utf-8", errors="ignore")
         if len(encoded) <= limit_bytes:
             return serialized
-        clipped = encoded[:limit_bytes].decode("utf-8", errors="ignore")
-        return f"{clipped}...[truncated]"
+        preview_budget = max(0, int(limit_bytes or 0) - 256)
+        clipped = encoded[:preview_budget].decode("utf-8", errors="ignore")
+        truncated_payload: dict[str, Any] = {
+            "_summary": "payload truncated to keep log JSON parseable",
+            "_truncated": True,
+            "_original_bytes": len(encoded),
+            "preview": clipped,
+        }
+        if isinstance(value, dict):
+            keys = [str(item) for item in value.keys()]
+            truncated_payload["key_count"] = len(keys)
+            truncated_payload["keys"] = keys[:40]
+            truncated_payload["truncated_keys"] = max(0, len(keys) - 40)
+        return dumps_json(truncated_payload)
 
     @staticmethod
     def _collect_stream_log_data(
@@ -5460,12 +6432,6 @@ class ProxyService:
     ) -> dict[str, Any]:
         if api_client_auth is None:
             return {}
-        remaining_tokens = None
-        if api_client_auth.api_client_key.token_limit_total is not None:
-            remaining_tokens = max(
-                0,
-                api_client_auth.api_client_key.token_limit_total - api_client_auth.api_client_key.total_tokens_used,
-            )
         return {
             "api_client_key_id": api_client_auth.api_client_key.id,
             "api_client_key_name": api_client_auth.api_client_key.name,
@@ -5477,7 +6443,7 @@ class ProxyService:
                 else None
             ),
             "api_client_auth_result": auth_result,
-            "api_client_remaining_tokens": remaining_tokens if remaining_tokens is not None else api_client_auth.remaining_tokens,
+            "api_client_remaining_tokens": api_client_auth.remaining_tokens,
             "api_client_remaining_requests_daily": api_client_auth.remaining_requests_daily,
             "api_client_remaining_cost_daily": api_client_auth.remaining_cost_daily,
             "api_client_policy_snapshot_json": api_client_auth.policy_snapshot_json,
@@ -5496,6 +6462,7 @@ class ProxyService:
                 if provider_model.cache_price_per_1k is not None
                 else provider_model.input_price_per_1k
             ),
+            "channel_price_cache_write_per_1k": None,
         }
 
     @staticmethod
@@ -6284,9 +7251,9 @@ class ProxyService:
             duration_ms=latency_ms,
             upstream_request_id=upstream_request_id,
             message=None if success else ProxyService._error_message_for_log(detail),
-            error_type=None if success else ProxyService._error_type_from_status(status_code),
+            error_type=None if success else ProxyService._error_type_from_status(status_code, detail),
             error_code=None if success else ProxyService._error_code_from_detail(detail),
-            retryable=None if success else ProxyService._is_retryable_status(status_code),
+            retryable=None if success else ProxyService._is_retryable_status(status_code, detail),
             **ProxyService._build_api_client_log_kwargs(api_client_auth, auth_result="authenticated"),
             trace=trace,
             attempt_count=ProxyService._attempt_count(trace),
@@ -6660,18 +7627,12 @@ class ProxyService:
         return any(token in message for token in continue_tokens)
 
     @staticmethod
-    def _error_type_from_status(status_code: int) -> str:
-        if status_code in {401, 403}:
-            return "authentication_error"
-        if status_code == 429:
-            return "rate_limit_error"
-        if status_code >= 500:
-            return "server_error"
-        return "invalid_request_error"
+    def _error_type_from_status(status_code: int, detail: Any | None = None) -> str:
+        return str(ProxyService._classify_retry_policy(status_code, detail).get("error_type") or "invalid_request_error")
 
     @staticmethod
-    def _is_retryable_status(status_code: int) -> bool:
-        return status_code in {408, 409, 429} or status_code >= 500
+    def _is_retryable_status(status_code: int, detail: Any | None = None) -> bool:
+        return bool(ProxyService._classify_retry_policy(status_code, detail).get("retryable"))
 
     @staticmethod
     def _error_code_from_detail(detail: Any) -> str | None:

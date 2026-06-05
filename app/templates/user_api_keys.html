@@ -69,7 +69,7 @@
     <article class="metric-card user-key-summary-card">
         <span>需关注</span>
         <strong>{{ ns.risk }}</strong>
-        <small>过期、额度不足或未绑定渠道</small>
+        <small>过期、配额不足、余额不足或未绑定渠道</small>
     </article>
     <article class="metric-card user-key-summary-card">
         <span>可复制明文</span>
@@ -100,7 +100,7 @@
             <div class="user-key-toolbar">
                 <label class="user-key-search">
                     <span>搜索密钥</span>
-                    <input class="field-input" id="user-api-key-search" type="search" placeholder="按名称、备注、掩码或路由模式筛选">
+                    <input class="field-input" id="user-api-key-search" type="search" placeholder="按名称、备注、掩码或路由主策略筛选">
                 </label>
                 <div class="user-key-filter-group" aria-label="状态筛选">
                     <button class="user-key-filter-chip is-active" type="button" data-user-key-filter="all">全部</button>
@@ -118,19 +118,13 @@
                     '正常可用' if item.status == 'active'
                     else '已禁用' if item.status == 'disabled'
                     else '已过期' if item.status == 'expired'
-                    else '额度耗尽' if item.status == 'quota_exhausted'
-                    else '金额额度耗尽' if item.status == 'cost_quota_exhausted'
+                    else '余额耗尽' if item.status == 'quota_exhausted'
+                    else '余额耗尽' if item.status == 'cost_quota_exhausted'
                     else '余额耗尽' if item.status == 'balance_exhausted'
                     else '未绑定渠道' if item.status == 'unbound'
                     else item.status
                 ) %}
-                {% set route_mode_label = (
-                    '故障切换' if item.route_mode == 'failover'
-                    else '手动指定' if item.route_mode == 'manual'
-                    else '按权重' if item.route_mode == 'weighted'
-                    else '粘性路由' if item.route_mode == 'sticky'
-                    else item.route_mode
-                ) %}
+                {% set route_mode_label = '健康优先' %}
                 {% set default_provider = namespace(name='未指定') %}
                 {% if item.default_provider_id %}
                     {% set default_provider.name = 'ID ' ~ item.default_provider_id %}
@@ -185,7 +179,7 @@
 
                     <div class="user-key-object-meta">
                         <div>
-                            <span>路由模式</span>
+                            <span>路由主策略</span>
                             <strong>{{ route_mode_label }}</strong>
                         </div>
                         <div>
@@ -205,7 +199,7 @@
                             <strong>{{ '%.6f'|format(item.balance_amount) if item.balance_amount is not none else '不限' }}</strong>
                         </div>
                         <div>
-                            <span>手动回退</span>
+                            <span>默认中转回退</span>
                             <strong>{{ '开启' if item.manual_allow_fallback else '关闭' }}</strong>
                         </div>
                         <div>
@@ -237,7 +231,7 @@
 
                     <details class="user-key-editor-shell" data-user-key-editor {% if editing_api_key_id == item.id %}open{% endif %}>
                         <summary>
-                            <span>编辑授权、路由与备注</span>
+                            <span>编辑路由与备注</span>
                             <small>仅在需要变更配置时展开</small>
                         </summary>
                         <div class="user-key-editor-body">
@@ -256,12 +250,9 @@
                                     <input class="field-input" name="remark" value="{{ item.remark or '' }}">
                                 </label>
                                 <label>
-                                    <span>路由模式</span>
+                                    <span>路由主策略</span>
                                     <select class="field-input" name="route_mode">
-                                        <option value="failover" {% if item.route_mode == 'failover' %}selected{% endif %}>故障切换</option>
-                                        <option value="manual" {% if item.route_mode == 'manual' %}selected{% endif %}>手动指定</option>
-                                        <option value="weighted" {% if item.route_mode == 'weighted' %}selected{% endif %}>按权重</option>
-                                        <option value="sticky" {% if item.route_mode == 'sticky' %}selected{% endif %}>粘性路由</option>
+                                        <option value="failover">健康优先</option>
                                     </select>
                                 </label>
                                 <label>
@@ -281,7 +272,7 @@
                                     </div>
                                 </label>
                                 <label>
-                                    <span>手动模式允许回退</span>
+                                    <span>默认中转不可用时允许回退</span>
                                     <div class="field-checkbox">
                                         <input id="user-api-key-fallback-{{ item.id }}" name="manual_allow_fallback" type="checkbox" {% if item.manual_allow_fallback %}checked{% endif %}>
                                         <label for="user-api-key-fallback-{{ item.id }}">开启</label>
@@ -295,15 +286,10 @@
                                     </div>
                                 </label>
                                 <div class="form-span-2">
-                                    <span>可用中转站</span>
-                                    <div class="api-key-provider-selector user-key-provider-selector">
-                                        {% for provider in providers %}
-                                        <label class="api-key-provider-option">
-                                            <input name="allowed_provider_ids" type="checkbox" value="{{ provider.id }}" {% if provider.id in item.allowed_provider_ids %}checked{% endif %}>
-                                            <span>{{ provider.name }}</span>
-                                            <span class="table-muted">已启用</span>
-                                        </label>
-                                        {% endfor %}
+                                    <span>渠道授权</span>
+                                    <div class="settings-note">
+                                        <strong>管理员统一维护</strong>
+                                        <span>当前 API Key 的可授权中转站由管理员侧统一配置。普通用户侧默认继承全部可用渠道，并随渠道增删自动同步。</span>
                                     </div>
                                 </div>
                                 <div class="form-actions form-span-2">
@@ -356,12 +342,9 @@
                     <input class="field-input" name="remark" placeholder="例如：Web 生产、内部测试、移动端灰度">
                 </label>
                 <label>
-                    <span>路由模式</span>
+                    <span>路由主策略</span>
                     <select class="field-input" name="route_mode">
-                        <option value="failover">故障切换</option>
-                        <option value="manual">手动指定</option>
-                        <option value="weighted">按权重</option>
-                        <option value="sticky">粘性路由</option>
+                        <option value="failover">健康优先</option>
                     </select>
                 </label>
                 <label>
@@ -381,7 +364,7 @@
                     </div>
                 </label>
                 <label>
-                    <span>手动模式允许回退</span>
+                    <span>默认中转不可用时允许回退</span>
                     <div class="field-checkbox">
                         <input id="user-api-key-create-fallback" name="manual_allow_fallback" type="checkbox" checked>
                         <label for="user-api-key-create-fallback">开启</label>
@@ -395,17 +378,10 @@
                     </div>
                 </label>
                 <div class="form-span-2">
-                    <span>可用中转站</span>
-                    <div class="api-key-provider-selector user-key-provider-selector">
-                        {% for provider in providers %}
-                        <label class="api-key-provider-option">
-                            <input name="allowed_provider_ids" type="checkbox" value="{{ provider.id }}">
-                            <span>{{ provider.name }}</span>
-                            <span class="table-muted">已启用</span>
-                        </label>
-                        {% else %}
-                        <div class="empty-state">当前没有已启用的中转站，暂时无法授权。</div>
-                        {% endfor %}
+                    <span>渠道授权</span>
+                    <div class="settings-note">
+                        <strong>默认全渠道</strong>
+                        <span>新建密钥后会默认授权全部可用中转站，并在管理员调整渠道集合时自动同步，无需在用户侧单独勾选。</span>
                     </div>
                 </div>
                 <div class="form-actions form-span-2">

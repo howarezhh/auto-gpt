@@ -116,8 +116,7 @@ def _dashboard_usage_overview(db: Session) -> dict:
     return CacheService.set("dashboard-usage-overview", payload, ttl_seconds=_DASHBOARD_USAGE_CACHE_TTL_SECONDS)
 
 
-@router.get("")
-def get_dashboard(db: Session = Depends(get_db)) -> dict:
+def build_dashboard_payload(db: Session) -> dict:
     settings = SettingService.get_or_create(db)
     api_key_summary = ApiKeyAdminService.get_summary(db)
     default_provider = db.get(Provider, settings.default_provider_id) if settings.default_provider_id else None
@@ -163,6 +162,7 @@ def get_dashboard(db: Session = Depends(get_db)) -> dict:
         "api_key_disabled": api_key_summary.disabled_keys,
         "api_key_expired": api_key_summary.expired_keys,
         "api_key_quota_exhausted": api_key_summary.quota_exhausted_keys,
+        "api_key_balance_exhausted": api_key_summary.balance_exhausted_keys,
         "api_key_total_requests": api_key_summary.total_requests,
         "api_key_total_prompt_tokens": api_key_summary.total_prompt_tokens,
         "api_key_total_completion_tokens": api_key_summary.total_completion_tokens,
@@ -174,3 +174,8 @@ def get_dashboard(db: Session = Depends(get_db)) -> dict:
             "max_logged_body_bytes": settings.max_logged_body_bytes,
         },
     }
+
+
+@router.get("")
+def get_dashboard(db: Session = Depends(get_db)) -> dict:
+    return build_dashboard_payload(db)

@@ -16,8 +16,8 @@
             {% if api_key.status == 'active' %}正常可用
             {% elif api_key.status == 'disabled' %}已禁用
             {% elif api_key.status == 'expired' %}已过期
-            {% elif api_key.status == 'quota_exhausted' %}额度耗尽
-            {% elif api_key.status == 'cost_quota_exhausted' %}金额额度耗尽
+            {% elif api_key.status == 'quota_exhausted' %}余额耗尽
+            {% elif api_key.status == 'cost_quota_exhausted' %}余额耗尽
             {% elif api_key.status == 'balance_exhausted' %}余额耗尽
             {% elif api_key.status == 'unbound' %}未绑定渠道
             {% else %}{{ api_key.status }}
@@ -229,14 +229,14 @@ print(resp.output_text)</pre>
         </div>
         <div class="api-key-chip-grid">
             <article class="api-key-chip-card">
-                <strong>路由模式</strong>
-                <span>{{ api_key.route_mode }}</span>
-                <span>手动回退：{{ '开启' if api_key.manual_allow_fallback else '关闭' }}</span>
+                <strong>路由主策略</strong>
+                <span>健康优先</span>
+                <span>默认中转回退：{{ '开启' if api_key.manual_allow_fallback else '关闭' }}</span>
                 <span>重试模式：{{ '无限重试' if api_key.route_exhausted_retry_infinite_enabled else '正常重试' }}</span>
             </article>
             <article class="api-key-chip-card">
                 <strong>默认中转站</strong>
-                <span>{{ api_key.default_provider_id or '未指定' }}</span>
+                <span>{{ api_key.default_provider_name or api_key.default_provider_id or '未指定' }}</span>
                 <span>未指定时按当前路由规则选择候选线路</span>
             </article>
             <article class="api-key-chip-card">
@@ -294,7 +294,7 @@ print(resp.output_text)</pre>
                 <thead>
                     <tr>
                         <th>时间</th>
-                        <th>模型</th>
+                        <th>模型映射</th>
                         <th>渠道</th>
                         <th>结果</th>
                         <th>Tokens</th>
@@ -305,7 +305,12 @@ print(resp.output_text)</pre>
                     {% for item in recent_logs %}
                     <tr>
                         <td>{{ item.created_at }}</td>
-                        <td>{{ item.requested_model or item.model_name or '-' }}</td>
+                        <td>
+                            <div class="log-model-cell">
+                                <div class="table-muted">原始：{{ item.requested_model or '-' }}</div>
+                                <strong>实际：{{ item.model_name or '-' }}</strong>
+                            </div>
+                        </td>
                         <td>{{ item.provider_name or '-' }}</td>
                         <td>{{ '成功' if item.success else '失败' }}</td>
                         <td>{{ item.total_tokens or 0 }}</td>

@@ -2,22 +2,27 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from app.models.alert_event import AlertEvent
 from app.models.alert_subscription import AlertSubscription
+from app.models.api_client_key import ApiClientKey
 from app.models.request_log import RequestLog
 from app.models.user_account import UserAccount
 from app.services.api_key_admin_service import ApiKeyAdminService
+from app.services.billing_service import BillingService
+from app.services.cache_service import CacheService
+from app.services.log_service import LogService
 from app.services.provider_service import ProviderService
 from app.services.user_auth_service import UserAuthService
-from app.services.user_portal_service import UserPortalService
 from app.services.system_metrics_service import SystemMetricsService
 from app.utils.json_utils import dumps_json, safeJsonParse
 
 
 class AlertService:
+    DASHBOARD_CACHE_KEY = "alerts-dashboard-payload:v1"
+    DASHBOARD_CACHE_TTL_SECONDS = 15
     PROVIDER_AVAILABILITY_LABELS = {
         "healthy": "全部可用",
         "degraded": "部分可用",
@@ -82,36 +87,49 @@ class AlertService:
         return subscription
 
     @staticmethod
-    def build_dashboard_payload(db: Session) -> dict:
-        snapshot = AlertService.refresh_events(db)
+    def serialize_subscription(subscription: AlertSubscription) -> dict:
         return {
-            **snapshot,
-            "events": AlertService.list_events(db, status="active", limit=50),
+            "enabled": subscription.enabled,
+            "delivery_channel": subscription.delivery_channel,
+            "notify_provider_alerts": subscription.notify_provider_alerts,
+            "notify_api_key_alerts": subscription.notify_api_key_alerts,
+            "notify_account_alerts": subscription.notify_account_alerts,
+            "notify_failure_rate_alerts": subscription.notify_failure_rate_alerts,
+            "browser_notifications_enabled": subscription.browser_notifications_enabled,
+            "poll_interval_seconds": subscription.poll_interval_seconds,
         }
 
     @staticmethod
+    def invalidate_dashboard_cache() -> None:
+        CacheService.invalidate_prefix(AlertService.DASHBOARD_CACHE_KEY)
+
+    @staticmethod
+    def build_dashboard_payload(db: Session, *, force_refresh: bool = False) -> dict:
+        if not force_refresh:
+            cached = CacheService.get(AlertService.DASHBOARD_CACHE_KEY)
+            if cached is not None:
+                return cached
+        snapshot = AlertService.refresh_events(db)
+        payload = {
+            **snapshot,
+            "events": AlertService.list_events(db, status="active", limit=50),
+        }
+        CacheService.set(
+            AlertService.DASHBOARD_CACHE_KEY,
+            payload,
+            ttl_seconds=AlertService.DASHBOARD_CACHE_TTL_SECONDS,
+        )
+        return payload
+
+    @staticmethod
     def refresh_events(db: Session) -> dict:
-        providers = ProviderService.list_provider_dicts(db)
+        providers = ProviderService.list_provider_summary_dicts(db)
         unhealthy_providers = [
             item for item in providers
             if item["health_status"] != "healthy" or item["circuit_state"] == "open"
         ]
-        api_keys = [ApiKeyAdminService.serialize_api_key(item) for item in ApiKeyAdminService.list_api_keys(db)]
-        abnormal_api_keys = [item for item in api_keys if item["status"] != "active"]
-        alert_users: list[dict] = []
-        for user in UserAuthService.list_users(db):
-            if not user.enabled:
-                continue
-            overview = UserPortalService.get_overview(db, user=user)
-            if overview["quota_warnings"]:
-                alert_users.append(
-                    {
-                        "id": user.id,
-                        "username": user.username,
-                        "warnings": overview["quota_warnings"],
-                        "available_balance": overview["account_summary"]["available_balance"],
-                    }
-                )
+        abnormal_api_keys = AlertService.list_abnormal_api_keys(db, limit=100)
+        alert_users = AlertService.list_alert_users(db, limit=100)
         recent_since = datetime.utcnow() - timedelta(hours=24)
         failure_count = int(
             db.scalar(
@@ -189,6 +207,159 @@ class AlertService:
         }
 
     @staticmethod
+    def list_abnormal_api_keys(db: Session, *, limit: int = 100) -> list[dict]:
+        now = datetime.utcnow()
+        status_expr = ApiKeyAdminService._api_key_status_expr(now)
+        rows = db.execute(
+            select(ApiClientKey, status_expr.label("status"))
+            .outerjoin(UserAccount, ApiClientKey.owner_user_id == UserAccount.id)
+            .where(status_expr != "active")
+            .order_by(ApiClientKey.last_used_at.desc(), ApiClientKey.id.desc())
+            .limit(max(1, limit))
+        ).all()
+        items: list[dict] = []
+        for api_key, status in rows:
+            owner = db.get(UserAccount, api_key.owner_user_id) if api_key.owner_user_id else None
+            balance_amount = owner.balance_amount if owner is not None else api_key.balance_amount
+            items.append(
+                {
+                    "id": api_key.id,
+                    "name": api_key.name,
+                    "owner_user_name": owner.username if owner is not None else None,
+                    "status": status,
+                    "balance_amount": BillingService.to_float(balance_amount) if balance_amount is not None else None,
+                    "last_used_at": api_key.last_used_at.isoformat() if api_key.last_used_at else None,
+                }
+            )
+        return items
+
+    @staticmethod
+    def list_alert_users(db: Session, *, limit: int = 100) -> list[dict]:
+        users = [
+            item for item in UserAuthService.list_users(db)
+            if item.enabled
+        ]
+        if not users:
+            return []
+
+        user_ids = [item.id for item in users]
+        now = datetime.utcnow()
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        usage_rows = db.execute(
+            select(
+                RequestLog.user_account_id.label("user_id"),
+                func.count(RequestLog.id).label("total_requests"),
+                func.sum(case((RequestLog.created_at >= day_start, 1), else_=0)).label("day_requests"),
+                func.sum(case((RequestLog.created_at >= month_start, 1), else_=0)).label("month_requests"),
+                func.sum(RequestLog.total_tokens).label("total_tokens"),
+                func.sum(case((RequestLog.created_at >= day_start, RequestLog.total_tokens), else_=0)).label("day_tokens"),
+                func.sum(case((RequestLog.created_at >= month_start, RequestLog.total_tokens), else_=0)).label("month_tokens"),
+            )
+            .where(
+                RequestLog.user_account_id.in_(user_ids),
+                LogService._route_traffic_expr(),
+                RequestLog.request_path != "/v1/models",
+            )
+            .group_by(RequestLog.user_account_id)
+        ).all()
+        usage_by_user_id = {
+            int(row.user_id): {
+                "total_requests": int(row.total_requests or 0),
+                "day_requests": int(row.day_requests or 0),
+                "month_requests": int(row.month_requests or 0),
+                "total_tokens": int(row.total_tokens or 0),
+                "day_tokens": int(row.day_tokens or 0),
+                "month_tokens": int(row.month_tokens or 0),
+            }
+            for row in usage_rows
+            if row.user_id is not None
+        }
+
+        abnormal_key_rows = db.execute(
+            select(ApiClientKey.owner_user_id, func.count(ApiClientKey.id).label("abnormal_count"))
+            .outerjoin(UserAccount, ApiClientKey.owner_user_id == UserAccount.id)
+            .where(
+                ApiClientKey.owner_user_id.in_(user_ids),
+                ApiKeyAdminService._api_key_status_expr(now) != "active",
+            )
+            .group_by(ApiClientKey.owner_user_id)
+        ).all()
+        abnormal_key_count_by_user_id = {
+            int(row[0]): int(row.abnormal_count or 0)
+            for row in abnormal_key_rows
+            if row[0] is not None
+        }
+
+        alert_users: list[dict] = []
+        for user in users:
+            usage = usage_by_user_id.get(user.id, {})
+            account_summary = {
+                "balance_amount": BillingService.to_float(user.balance_amount),
+                "available_balance": BillingService.to_float((user.balance_amount or 0) - (user.frozen_amount or 0)),
+                "day_requests": usage.get("day_requests", 0),
+                "month_requests": usage.get("month_requests", 0),
+                "day_tokens": usage.get("day_tokens", 0),
+                "month_tokens": usage.get("month_tokens", 0),
+                "request_limit_daily": user.request_limit_daily,
+                "request_limit_monthly": user.request_limit_monthly,
+                "token_limit_daily": user.token_limit_daily,
+                "token_limit_monthly": user.token_limit_monthly,
+            }
+            warnings = AlertService._build_account_warnings(
+                account_summary=account_summary,
+                abnormal_key_count=abnormal_key_count_by_user_id.get(user.id, 0),
+            )
+            if warnings:
+                alert_users.append(
+                    {
+                        "id": user.id,
+                        "username": user.username,
+                        "warnings": warnings,
+                        "available_balance": account_summary["available_balance"],
+                    }
+                )
+
+        alert_users.sort(
+            key=lambda item: (
+                0 if any(warning.get("level") == "danger" for warning in item["warnings"]) else 1,
+                item.get("available_balance") if item.get("available_balance") is not None else float("inf"),
+                item["id"],
+            )
+        )
+        return alert_users[:max(1, limit)]
+
+    @staticmethod
+    def _build_account_warnings(*, account_summary: dict, abnormal_key_count: int) -> list[dict]:
+        warnings: list[dict] = []
+        available_balance = account_summary.get("available_balance")
+        balance_amount = account_summary.get("balance_amount")
+        if available_balance is not None and available_balance <= 0:
+            warnings.append({"level": "danger", "message": "账户可用余额已耗尽，新请求会被拦截。"})
+        elif (
+            available_balance is not None
+            and balance_amount not in (None, 0)
+            and balance_amount
+            and available_balance / balance_amount <= 0.2
+        ):
+            warnings.append({"level": "warning", "message": "账户可用余额已低于 20%，建议尽快补充额度。"})
+
+        for current_field, limit_field, label in (
+            ("day_requests", "request_limit_daily", "日调用次数"),
+            ("month_requests", "request_limit_monthly", "月调用次数"),
+            ("day_tokens", "token_limit_daily", "日 Token"),
+            ("month_tokens", "token_limit_monthly", "月 Token"),
+        ):
+            limit = account_summary.get(limit_field)
+            current = account_summary.get(current_field) or 0
+            if limit is not None and limit > 0 and current / limit >= 0.8:
+                warnings.append({"level": "warning", "message": f"{label}已使用 {current}/{limit}，接近上限。"})
+
+        if abnormal_key_count > 0:
+            warnings.append({"level": "warning", "message": f"当前有 {abnormal_key_count} 个 API Key 处于非正常状态，建议及时处理。"})
+        return warnings
+
+    @staticmethod
     def _upsert_events(db: Session, active_events: dict[str, dict]) -> None:
         existing_items = list(db.scalars(select(AlertEvent)))
         existing_by_key = {item.alert_key: item for item in existing_items}
@@ -251,6 +422,7 @@ class AlertService:
         item.acknowledged_at = datetime.utcnow()
         db.commit()
         db.refresh(item)
+        AlertService.invalidate_dashboard_cache()
         return item
 
     @staticmethod

@@ -85,6 +85,7 @@ class LogService:
         channel_price_input_per_1k: float | None = None,
         channel_price_output_per_1k: float | None = None,
         channel_price_cache_per_1k: float | None = None,
+        channel_price_cache_write_per_1k: float | None = None,
         trace: list[dict] | dict | None = None,
         token_request_payload: dict | None = None,
         token_response_payload: dict | None = None,
@@ -203,6 +204,7 @@ class LogService:
                     else None
                 )
             ),
+            channel_price_cache_write_per_1k=channel_price_cache_write_per_1k,
             trace_json=dumps_json(trace) if trace is not None else None,
         )
         if log_type in LogService.HEALTH_CHECK_LOG_TYPES:
@@ -223,7 +225,7 @@ class LogService:
                 db.flush()
             LogService.enqueue_finalize_for_log(
                 log=log,
-                model_name=requested_model or model_name,
+                model_name=model_name or requested_model,
                 request_path=request_path,
                 token_request_payload=token_request_payload,
                 token_response_payload=token_response_payload,
@@ -283,6 +285,10 @@ class LogService:
     def serialize_log(log: RequestLog) -> dict[str, Any]:
         """把单条日志对象转换为接口返回结构。"""
         data = {column.name: getattr(log, column.name) for column in RequestLog.__table__.columns}
+        data["display_model"] = LogService.build_display_model(
+            requested_model=log.requested_model,
+            actual_model=log.model_name,
+        )
         data.update(LogService._derive_image_observability(log))
         return data
 
@@ -290,6 +296,14 @@ class LogService:
     def serialize_logs(logs: list[RequestLog]) -> list[dict[str, Any]]:
         """批量序列化日志对象。"""
         return [LogService.serialize_log(item) for item in logs]
+
+    @staticmethod
+    def build_display_model(*, requested_model: str | None, actual_model: str | None) -> str | None:
+        requested = requested_model.strip() if isinstance(requested_model, str) and requested_model.strip() else None
+        actual = actual_model.strip() if isinstance(actual_model, str) and actual_model.strip() else None
+        if requested and actual and requested != actual:
+            return f"{requested} -> {actual}"
+        return requested or actual
 
     @staticmethod
     def _derive_image_observability(log: RequestLog) -> dict[str, Any]:
@@ -714,7 +728,11 @@ class LogService:
             )
 
         provider_stmt = select(RequestLog.provider_id, RequestLog.provider_name).where(RequestLog.provider_id.is_not(None))
-        model_stmt = select(RequestLog.model_name).where(RequestLog.model_name.is_not(None))
+        model_stmt = select(RequestLog.model_name).where(RequestLog.model_name.is_not(None), RequestLog.model_name != "")
+        requested_model_stmt = select(RequestLog.requested_model).where(
+            RequestLog.requested_model.is_not(None),
+            RequestLog.requested_model != "",
+        )
         api_key_stmt = select(
             RequestLog.api_client_key_id,
             RequestLog.api_client_key_name,
@@ -747,6 +765,26 @@ class LogService:
         )
         model_stmt = LogService._apply_log_filters(
             model_stmt,
+            log_type=None,
+            log_types=None,
+            provider_id=None,
+            model_name=None,
+            model_query=None,
+            conversation_key=None,
+            api_client_key_id=None,
+            api_client_key_query=None,
+            user_account_id=user_account_id,
+            user_account_query=None,
+            tenant_name=None,
+            project_name=None,
+            app_name=None,
+            environment_name=None,
+            success=None,
+            exclude_health_checks=exclude_health_checks,
+            api_client_key_ids=api_client_key_ids,
+        )
+        requested_model_stmt = LogService._apply_log_filters(
+            requested_model_stmt,
             log_type=None,
             log_types=None,
             provider_id=None,
@@ -809,7 +847,10 @@ class LogService:
         provider_rows = db.execute(
             provider_stmt.distinct().order_by(RequestLog.provider_id.asc(), RequestLog.provider_name.asc())
         )
-        model_rows = db.execute(model_stmt.distinct().order_by(RequestLog.model_name.asc()))
+        model_rows = list(db.execute(model_stmt.distinct().order_by(RequestLog.model_name.asc())))
+        requested_model_rows = list(
+            db.execute(requested_model_stmt.distinct().order_by(RequestLog.requested_model.asc()))
+        )
         api_key_rows = db.execute(
             api_key_stmt.distinct().order_by(RequestLog.api_client_key_id.asc(), RequestLog.api_client_key_name.asc())
         )
@@ -829,13 +870,19 @@ class LogService:
             for row in provider_rows
             if row.provider_id is not None
         ]
+        model_values: set[str] = set()
+        for row in model_rows:
+            if row.model_name:
+                model_values.add(str(row.model_name))
+        for row in requested_model_rows:
+            if row.requested_model:
+                model_values.add(str(row.requested_model))
         model_names = [
             {
-                "value": str(row.model_name),
-                "label": str(row.model_name),
+                "value": value,
+                "label": value,
             }
-            for row in model_rows
-            if row.model_name
+            for value in sorted(model_values)
         ]
 
         api_client_key_ids: list[dict[str, str]] = []
@@ -976,14 +1023,20 @@ class LogService:
     ) -> str | None:
         if isinstance(payload, dict):
             metadata = payload.get("metadata")
-            containers = [metadata, payload] if isinstance(metadata, dict) else [payload]
+            client_metadata = payload.get("client_metadata")
+            containers = [
+                item
+                for item in (metadata, client_metadata, payload)
+                if isinstance(item, dict)
+            ]
             for container in containers:
-                if not isinstance(container, dict):
-                    continue
                 for key in ("session_id", "conversation_id", "thread_id", "session", "conversation_key"):
                     value = container.get(key)
                     if isinstance(value, str) and value.strip():
                         return value.strip()
+            prompt_cache_key = payload.get("prompt_cache_key")
+            if isinstance(prompt_cache_key, str) and prompt_cache_key.strip():
+                return prompt_cache_key.strip()
         return conversation_key or fallback
 
     @staticmethod
@@ -1005,7 +1058,17 @@ class LogService:
             "interrupted",
             "client_cancelled",
         }
-        return sum(1 for item in trace if isinstance(item, dict) and item.get("result") in attempt_markers)
+        direct_attempt_count = sum(
+            1 for item in trace if isinstance(item, dict) and item.get("result") in attempt_markers
+        )
+        if direct_attempt_count > 0:
+            return direct_attempt_count
+        # 当请求始终卡在“候选耗尽后等待重试”阶段时，至少回填内部重试轮次，避免 attempt_count 错误显示为 0。
+        return sum(
+            1
+            for item in trace
+            if isinstance(item, dict) and item.get("result") == "route_exhausted_wait_retry"
+        )
 
     @staticmethod
     def resolve_ttfb_ms(
@@ -1066,6 +1129,7 @@ class LogService:
             ("cache_read_tokens",),
             ("cache_read_input_tokens",),
             ("cache_read_input_token_count",),
+            ("prompt_cache_hit_tokens",),
             ("cacheReadInputTokens",),
             ("cacheReadInputTokenCount",),
             ("cached_tokens",),
@@ -1093,11 +1157,36 @@ class LogService:
             ("cacheCreationInputTokens",),
             ("cacheCreationInputTokenCount",),
             ("prompt_tokens_details", "cache_creation_tokens"),
+            ("prompt_tokens_details", "cache_creation_input_tokens"),
             ("prompt_tokens_details", "cacheCreationTokens"),
+            ("prompt_tokens_details", "cacheCreationInputTokens"),
             ("input_tokens_details", "cache_creation_tokens"),
+            ("input_tokens_details", "cache_creation_input_tokens"),
             ("input_tokens_details", "cacheCreationTokens"),
+            ("input_tokens_details", "cacheCreationInputTokens"),
         )
         return cache_read, cache_write
+
+    @staticmethod
+    def normalize_prompt_tokens_for_cache_usage(usage: dict, prompt_tokens: int | None) -> int | None:
+        """Anthropic-style usage separates cache read/write tokens from input_tokens."""
+        if prompt_tokens is None or usage.get("prompt_tokens") is not None:
+            return prompt_tokens
+        has_anthropic_style_cache = any(
+            LogService._extract_usage_int(usage, path) is not None
+            for path in (
+                ("cache_read_input_tokens",),
+                ("cache_read_input_token_count",),
+                ("cache_creation_input_tokens",),
+                ("cache_creation_input_token_count",),
+                ("cacheReadInputTokens",),
+                ("cacheCreationInputTokens",),
+            )
+        )
+        if not has_anthropic_style_cache:
+            return prompt_tokens
+        cache_read, cache_write = LogService.extract_cache_tokens({"usage": usage})
+        return max(0, int(prompt_tokens) + int(cache_read or 0) + int(cache_write or 0))
 
     @staticmethod
     def _extract_usage_int(usage: dict, *paths: tuple[str, ...]) -> int | None:
@@ -1129,7 +1218,7 @@ class LogService:
             log.reasoning_level = LogService.REASONING_LEVEL_NONE
             changed = True
         derived_attempt_count = LogService.derive_attempt_count(parsed_trace)
-        if derived_attempt_count and log.attempt_count != derived_attempt_count:
+        if derived_attempt_count and ((log.attempt_count or 0) <= 0 or derived_attempt_count > int(log.attempt_count or 0)):
             log.attempt_count = derived_attempt_count
             changed = True
         derived_ttfb = LogService.resolve_ttfb_ms(
@@ -1378,7 +1467,9 @@ class LogService:
             "request_id",
             "session_id",
             "conversation_key",
+            "model",
             "requested_model",
+            "actual_model",
             "provider_name",
             "tenant_name",
             "project_name",
@@ -1412,6 +1503,7 @@ class LogService:
             "cache_read_tokens",
             "cache_write_tokens",
             "billing_multiplier",
+            "channel_price_cache_write_per_1k",
             "pricing_tier_name",
             "total_cost",
             "billing_calculation",
@@ -1432,7 +1524,9 @@ class LogService:
                 item.request_id or "",
                 item.session_id or "",
                 item.conversation_key or "",
-                item.requested_model or item.model_name or "",
+                serialized.get("display_model") or "",
+                item.requested_model or "",
+                item.model_name or "",
                 item.provider_name or "",
                 item.tenant_name or "",
                 item.project_name or "",
@@ -1466,6 +1560,7 @@ class LogService:
                 item.cache_read_tokens if item.cache_read_tokens is not None else "",
                 item.cache_write_tokens if item.cache_write_tokens is not None else "",
                 item.billing_multiplier if item.billing_multiplier is not None else "",
+                item.channel_price_cache_write_per_1k if item.channel_price_cache_write_per_1k is not None else "",
                 item.pricing_tier_name or "",
                 item.total_cost if item.total_cost is not None else "",
                 LogService.format_billing_calculation(item),
@@ -1485,8 +1580,10 @@ class LogService:
         input_price = item.channel_price_input_per_1k
         output_price = item.channel_price_output_per_1k
         cache_price = item.channel_price_cache_per_1k if item.channel_price_cache_per_1k is not None else input_price
+        cache_write_price = item.channel_price_cache_write_per_1k if item.channel_price_cache_write_per_1k is not None else input_price
         cache_read_tokens = int(item.cache_read_tokens or 0)
-        regular_input_tokens = max(0, int(item.prompt_tokens or 0) - cache_read_tokens)
+        cache_write_tokens = int(item.cache_write_tokens or 0)
+        regular_input_tokens = max(0, int(item.prompt_tokens or 0) - cache_read_tokens - cache_write_tokens)
         input_part = (
             "输入单价未设置"
             if input_price is None
@@ -1501,6 +1598,15 @@ class LogService:
                 else f"缓存 {cache_read_tokens}/1000 × {float(cache_price):.6f}"
             )
         )
+        cache_write_part = (
+            None
+            if cache_write_tokens <= 0
+            else (
+                "缓存写入单价未设置"
+                if cache_write_price is None
+                else f"缓存写 {cache_write_tokens}/1000 × {float(cache_write_price):.6f}"
+            )
+        )
         output_part = (
             "输出单价未设置"
             if output_price is None
@@ -1509,6 +1615,8 @@ class LogService:
         parts = [input_part]
         if cache_part:
             parts.append(cache_part)
+        if cache_write_part:
+            parts.append(cache_write_part)
         parts.append(output_part)
         tier_text = f"档位 {item.pricing_tier_name}；" if item.pricing_tier_name else ""
         return f"{tier_text}倍率 {float(multiplier):.2f}x；" + " + ".join(parts)

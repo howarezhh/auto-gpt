@@ -11,6 +11,7 @@ class RequestLogOut(BaseModel):
     trace_id: str | None
     model_name: str | None
     requested_model: str | None
+    display_model: str | None = None
     tenant_name: str | None
     project_name: str | None
     app_name: str | None
@@ -48,6 +49,7 @@ class RequestLogOut(BaseModel):
     channel_price_input_per_1k: float | None
     channel_price_output_per_1k: float | None
     channel_price_cache_per_1k: float | None = None
+    channel_price_cache_write_per_1k: float | None = None
     api_client_balance_after: float | None
     prompt_tokens: int | None
     completion_tokens: int | None
@@ -121,6 +123,10 @@ class LogListResponse(BaseModel):
     total: int
     items: list[RequestLogOut]
     summary: LogSummaryOut | None = None
+    queue_idle: bool | None = None
+    queue_timed_out: bool | None = None
+    queued_request_logs: int | None = None
+    processing_request_logs: int | None = None
 
 
 class MetricItem(BaseModel):

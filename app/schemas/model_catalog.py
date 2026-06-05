@@ -37,8 +37,8 @@ class ModelCatalogBase(BaseModel):
     display_name: str | None = None
     enabled: bool = True
     supports_stream: bool = True
-    supports_vision: bool = False
-    supports_tools: bool = False
+    supports_vision: bool = True
+    supports_tools: bool = True
     supports_chat_completions: bool = True
     supports_responses: bool = True
     context_window_tokens: int | None = Field(default=None, ge=1)
@@ -162,8 +162,8 @@ class ModelCatalogOptionOut(BaseModel):
     display_name: str | None = None
     enabled: bool = True
     supports_stream: bool = True
-    supports_vision: bool = False
-    supports_tools: bool = False
+    supports_vision: bool = True
+    supports_tools: bool = True
     supports_image_generation: bool = False
     supports_chat_completions: bool = True
     supports_responses: bool = True
@@ -181,8 +181,8 @@ class UserModelOut(BaseModel):
     speed_label: str | None = None
     remark: str | None = None
     supports_stream: bool = True
-    supports_vision: bool = False
-    supports_tools: bool = False
+    supports_vision: bool = True
+    supports_tools: bool = True
     supports_image_generation: bool = False
     supports_chat_completions: bool = True
     supports_responses: bool = True

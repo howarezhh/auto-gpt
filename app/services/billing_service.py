@@ -60,6 +60,7 @@ class BillingService:
         prompt_tokens = max(0, int(log.prompt_tokens or 0))
         completion_tokens = max(0, int(log.completion_tokens or 0))
         cache_read_tokens = max(0, int(log.cache_read_tokens or 0))
+        cache_write_tokens = max(0, int(log.cache_write_tokens or 0))
         if catalog is not None:
             resolved_prices = ModelPricingService.resolve_catalog_prices_for_provider(
                 pricing_mode=catalog.pricing_mode,
@@ -82,24 +83,33 @@ class BillingService:
                 "cache_price_per_1k": to_price_decimal(provider_model.cache_price_per_1k)
                 if provider_model.cache_price_per_1k is not None
                 else to_price_decimal(provider_model.input_price_per_1k),
+                "cache_write_price_per_1k": None,
             }
         log.billing_multiplier = to_multiplier_decimal(provider_model.price_multiplier)
         log.channel_price_input_per_1k = resolved_prices["input_price_per_1k"]
         log.channel_price_output_per_1k = resolved_prices["output_price_per_1k"]
         log.channel_price_cache_per_1k = resolved_prices["cache_price_per_1k"]
+        log.channel_price_cache_write_per_1k = resolved_prices.get("cache_write_price_per_1k")
         log.pricing_tier_key = resolved_prices.get("tier_key")
         log.pricing_tier_name = resolved_prices.get("tier_name")
         input_price = to_price_decimal(resolved_prices["input_price_per_1k"])
         output_price = to_price_decimal(resolved_prices["output_price_per_1k"])
         cache_price = to_price_decimal(resolved_prices["cache_price_per_1k"]) if resolved_prices["cache_price_per_1k"] is not None else input_price
+        cache_write_price = (
+            to_price_decimal(resolved_prices.get("cache_write_price_per_1k"))
+            if resolved_prices.get("cache_write_price_per_1k") is not None
+            else input_price
+        )
 
         if input_price is None and output_price is None:
             return {"prompt_cost": BillingService.to_decimal(0), "completion_cost": BillingService.to_decimal(0), "total_cost": BillingService.to_decimal(0), "billing_status": "price_unset"}
 
-        regular_prompt_tokens = max(0, prompt_tokens - cache_read_tokens)
+        regular_prompt_tokens = max(0, prompt_tokens - cache_read_tokens - cache_write_tokens)
         prompt_cost = (Decimal(regular_prompt_tokens) / Decimal("1000")) * (input_price or Decimal("0"))
         if cache_read_tokens > 0:
             prompt_cost += (Decimal(cache_read_tokens) / Decimal("1000")) * (cache_price or input_price or Decimal("0"))
+        if cache_write_tokens > 0:
+            prompt_cost += (Decimal(cache_write_tokens) / Decimal("1000")) * (cache_write_price or input_price or Decimal("0"))
         completion_cost = (Decimal(completion_tokens) / Decimal("1000")) * (output_price or Decimal("0"))
         total_cost = BillingService.to_decimal(prompt_cost + completion_cost)
         return {
@@ -451,20 +461,12 @@ class BillingService:
         total_records = db.scalar(
             select(func.count(ApiClientBillingRecord.id)).where(ApiClientBillingRecord.api_client_key_id == api_key_id)
         ) or 0
-        remaining_cost_quota = None
-        if api_key.cost_limit_total is not None:
-            remaining_cost_quota = max(
-                Decimal("0"),
-                BillingService.to_decimal(api_key.cost_limit_total) - BillingService.to_decimal(api_key.total_cost_used),
-            )
         owner_user = db.get(UserAccount, api_key.owner_user_id) if api_key.owner_user_id is not None else None
         return ApiKeyBillingSummaryOut(
             api_client_key_id=api_key.id,
             balance_amount=BillingService.to_float(owner_user.balance_amount) if owner_user is not None else BillingService.to_float(api_key.balance_amount),
             total_cost_used=BillingService.to_float(api_key.total_cost_used) or 0,
             total_recharge_amount=BillingService.to_float(owner_user.total_recharge_amount) if owner_user is not None else (BillingService.to_float(api_key.total_recharge_amount) or 0),
-            cost_limit_total=BillingService.to_float(api_key.cost_limit_total),
-            remaining_cost_quota=BillingService.to_float(remaining_cost_quota),
             recent_billed_cost=BillingService.to_float(recent_billed_cost) or 0,
             total_billing_records=int(total_records),
             items=[BillingService.serialize_billing_record(item) for item in items],

@@ -14,6 +14,7 @@ from app.schemas.log import (
     RequestLogOut,
 )
 from app.services.log_service import LogService
+from app.services.request_log_queue_service import RequestLogQueueService
 
 
 router = APIRouter(prefix="/api/logs", tags=["logs"])
@@ -30,7 +31,7 @@ def log_filter_options(
 
 
 @router.get("", response_model=LogListResponse)
-def list_logs(
+async def list_logs(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=200),
     log_type: str | None = None,
@@ -48,8 +49,16 @@ def list_logs(
     environment_name: str | None = None,
     success: bool | None = None,
     exclude_health_checks: bool = Query(default=True),
+    wait_for_latest: bool = Query(default=False),
+    wait_timeout_ms: int = Query(default=2000, ge=0, le=10000),
     db: Session = Depends(get_db),
 ) -> LogListResponse:
+    queue_status: dict | None = None
+    if wait_for_latest:
+        queue_status = await RequestLogQueueService.wait_until_idle(
+            timeout_seconds=wait_timeout_ms / 1000,
+            poll_interval_seconds=0.05,
+        )
     total, items, summary = LogService.list_logs(
         db,
         page=page,
@@ -75,6 +84,10 @@ def list_logs(
         total=total,
         items=[RequestLogOut.model_validate(item) for item in LogService.serialize_logs(items)],
         summary=LogSummaryOut.model_validate(summary),
+        queue_idle=None if queue_status is None else bool(queue_status.get("idle")),
+        queue_timed_out=None if queue_status is None else bool(queue_status.get("timed_out")),
+        queued_request_logs=None if queue_status is None else int(queue_status.get("queued") or 0),
+        processing_request_logs=None if queue_status is None else int(queue_status.get("processing") or 0),
     )
 
 

@@ -549,7 +549,7 @@ class TokenUsageService:
             for log in logs:
                 TokenUsageService.enqueue_log_finalize(
                     log_id=log.id,
-                    model_name=log.requested_model or log.model_name,
+                    model_name=log.model_name or log.requested_model,
                     request_path=log.request_path,
                     enable_usage_fill=tiktoken is not None,
                 )
@@ -677,7 +677,7 @@ class TokenUsageService:
         accounted_prompt_tokens = original_prompt_tokens if usage_already_accounted else None
         accounted_completion_tokens = original_completion_tokens if usage_already_accounted else None
         accounted_total_tokens = original_total_tokens if usage_already_accounted else None
-        effective_model = model_name or log.requested_model or log.model_name
+        effective_model = model_name or log.model_name or log.requested_model
         effective_path = request_path or log.request_path
         request_data = request_payload if isinstance(request_payload, dict) else TokenUsageService._parse_json_object(log.request_body_json)
         response_data = response_payload if isinstance(response_payload, dict) else TokenUsageService._parse_json_object(log.response_body_json)
@@ -944,8 +944,12 @@ class TokenUsageService:
         completion_tokens = usage.get("completion_tokens", usage.get("output_tokens"))
         total_tokens = usage.get("total_tokens")
         cache_read_tokens, cache_write_tokens = LogService.extract_cache_tokens({"usage": usage})
+        normalized_prompt_tokens = LogService.normalize_prompt_tokens_for_cache_usage(
+            usage,
+            TokenUsageService._coerce_non_negative_int(prompt_tokens),
+        )
         return {
-            "prompt_tokens": TokenUsageService._coerce_non_negative_int(prompt_tokens),
+            "prompt_tokens": normalized_prompt_tokens,
             "completion_tokens": TokenUsageService._coerce_non_negative_int(completion_tokens),
             "total_tokens": TokenUsageService._coerce_non_negative_int(total_tokens),
             "cache_read_tokens": cache_read_tokens,
