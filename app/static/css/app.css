@@ -3097,6 +3097,7 @@ html[data-theme="dark"] .settings-switch-control input:checked + .settings-switc
     grid-template-columns:
         minmax(220px, 1fr)
         58px
+        minmax(128px, 0.5fr)
         minmax(86px, 0.45fr)
         auto;
     gap: 10px;
@@ -7288,18 +7289,50 @@ html[data-theme="dark"] .users-empty-state p {
         grid-template-columns: 1fr;
     }
 
-    .users-batch-selection-bar,
     .users-registry-head {
         grid-template-columns: 1fr;
     }
 
+    .users-batch-selection-bar {
+        flex-wrap: wrap;
+        align-items: flex-start;
+    }
+
+    .users-batch-selection {
+        flex-basis: 100%;
+    }
+
     .users-batch-submit-wrap {
-        justify-items: stretch;
+        align-items: flex-start;
+        width: 100%;
+    }
+
+    .users-batch-submit-wrap .table-muted {
+        max-width: none;
+        text-align: left;
     }
 
     .users-batch-row {
         grid-template-columns: 1fr;
         align-items: stretch;
+    }
+
+    .users-batch-row-input {
+        align-items: flex-start;
+        flex-wrap: wrap;
+    }
+
+    .users-batch-row-input .field-input {
+        flex-basis: 100%;
+        min-width: 0;
+    }
+
+    .users-table-password-form {
+        flex-wrap: wrap;
+    }
+
+    .users-table-password-form .table-inline-input {
+        flex-basis: min(100%, 260px);
     }
 
     .users-registry-toolbar {
@@ -10128,6 +10161,14 @@ body[data-page="settings"] .field-input {
     background: transparent;
     font-size: 14px;
     box-shadow: none;
+}
+
+body[data-page="settings"] .settings-json-textarea {
+    min-height: 112px;
+    font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    line-height: 1.55;
+    white-space: pre;
+    overflow: auto;
 }
 
 body[data-page="settings"] .field-input:hover,

@@ -28,10 +28,12 @@ class HealthService:
     PROBE_RETRY_MAX_ATTEMPTS = 2
     PROBE_RETRY_DELAY_SEC = 0.35
     MAX_PARALLEL_MODEL_PROBES = 16
-    INTERACTIVE_TEXT_PROBE_PHASE_KEYS = frozenset({"text", "text_stream"})
+    INTERACTIVE_TEXT_PROBE_PHASE_KEYS = frozenset({"text_stream"})
     INTERACTIVE_TEXT_PROBE_MAX_TOKENS = 1
-    INTERACTIVE_STREAM_CONNECT_TIMEOUT_SECONDS = 8
-    INTERACTIVE_STREAM_FIRST_TOKEN_TIMEOUT_SECONDS = 8
+    INTERACTIVE_CAPABILITY_PROBE_MAX_TOKENS = 1
+    INTERACTIVE_PROBE_TIMEOUT_SECONDS = 8.0
+    INTERACTIVE_STREAM_CONNECT_TIMEOUT_SECONDS = 4
+    INTERACTIVE_STREAM_FIRST_TOKEN_TIMEOUT_SECONDS = 4
     SCHEDULED_ACTIVE_MODEL_WINDOW_MINUTES = 30
     SCHEDULED_TEXT_PROBE_MAX_TOKENS = 4
     SCHEDULED_CAPABILITY_PROBE_MAX_TOKENS = 8
@@ -155,6 +157,8 @@ class HealthService:
         text_probe_max_tokens: int | None = None,
         capability_probe_max_tokens: int | None = None,
         interactive_mode: bool = False,
+        parallel_phases: bool = False,
+        single_endpoint_mode: bool = False,
     ) -> dict:
         model_result = (
             await HealthService._run_provider_model_checks(
@@ -166,6 +170,8 @@ class HealthService:
                 text_probe_max_tokens=text_probe_max_tokens,
                 capability_probe_max_tokens=capability_probe_max_tokens,
                 interactive_mode=interactive_mode,
+                parallel_phases=parallel_phases,
+                single_endpoint_mode=single_endpoint_mode,
             )
         )[0]
         HealthService._persist_model_health_result(db, provider, provider_model, model_result)
@@ -277,16 +283,25 @@ class HealthService:
         *,
         endpoint_path: str,
         max_tokens: int = 16,
+        interactive_mode: bool = False,
     ) -> dict[str, Any]:
         started = time.perf_counter()
         endpoint_label = "tools"
         capability_key = HealthService._endpoint_capability_key("tools", endpoint_path)
         if endpoint_path == "/responses":
-            endpoint_supported = ProviderService.provider_supports_responses(provider)
+            endpoint_supported = (
+                bool(provider_model.supports_responses)
+                if interactive_mode
+                else ProviderService.provider_supports_responses(provider)
+            )
             payload = HealthService._build_responses_tool_probe_payload(provider_model, max_output_tokens=max_tokens)
             support_label = "Responses 工具调用"
         else:
-            endpoint_supported = ProviderService.provider_supports_chat_completions(provider)
+            endpoint_supported = (
+                bool(provider_model.supports_chat_completions)
+                if interactive_mode
+                else ProviderService.provider_supports_chat_completions(provider)
+            )
             payload = HealthService._build_chat_tool_probe_payload(provider_model, max_tokens=max_tokens)
             support_label = "Chat 工具调用"
         if not endpoint_supported:
@@ -313,6 +328,11 @@ class HealthService:
                 headers={"Authorization": f"Bearer {provider.api_key}"},
                 requested_payload=payload,
                 setting=setting,
+                request_timeout_seconds=(
+                    HealthService.INTERACTIVE_PROBE_TIMEOUT_SECONDS
+                    if interactive_mode
+                    else None
+                ),
             )
             latency_ms = int((time.perf_counter() - started) * 1000)
             has_tool_call = HealthService._response_has_tool_call(response)
@@ -351,11 +371,16 @@ class HealthService:
             }
 
     @staticmethod
-    async def _probe_native_image_generation(provider: Provider, provider_model: ProviderModel) -> dict[str, Any]:
+    async def _probe_native_image_generation(
+        provider: Provider,
+        provider_model: ProviderModel,
+        *,
+        interactive_mode: bool = False,
+    ) -> dict[str, Any]:
         started = time.perf_counter()
         endpoint_label = "image_generation"
         if (
-            not ProviderService.provider_supports_responses(provider)
+            not provider_model.supports_responses
             or not ProviderService.provider_model_supports_image_generation(provider_model)
         ):
             return {
@@ -381,6 +406,11 @@ class HealthService:
                 headers={"Authorization": f"Bearer {provider.api_key}"},
                 requested_payload=payload,
                 setting=setting,
+                request_timeout_seconds=(
+                    HealthService.INTERACTIVE_PROBE_TIMEOUT_SECONDS
+                    if interactive_mode
+                    else None
+                ),
             )
             latency_ms = int((time.perf_counter() - started) * 1000)
             has_generated_image = HealthService._response_has_generated_image(response)
@@ -503,6 +533,7 @@ class HealthService:
         *,
         endpoint_path: str,
         max_tokens: int = 4,
+        interactive_mode: bool = False,
     ) -> dict[str, Any]:
         endpoint_label = "vision"
         capability_key = HealthService._endpoint_capability_key("vision", endpoint_path)
@@ -522,7 +553,11 @@ class HealthService:
                 "trace": [],
             }
         if endpoint_path == "/responses":
-            endpoint_supported = ProviderService.provider_supports_responses(provider)
+            endpoint_supported = (
+                bool(provider_model.supports_responses)
+                if interactive_mode
+                else ProviderService.provider_supports_responses(provider)
+            )
             payload = HealthService._build_responses_probe_payload(
                 provider_model,
                 vision_probe=True,
@@ -530,7 +565,11 @@ class HealthService:
             )
             support_label = "Responses 图像理解"
         else:
-            endpoint_supported = ProviderService.provider_supports_chat_completions(provider)
+            endpoint_supported = (
+                bool(provider_model.supports_chat_completions)
+                if interactive_mode
+                else ProviderService.provider_supports_chat_completions(provider)
+            )
             payload = HealthService._build_chat_probe_payload(
                 provider_model,
                 vision_probe=True,
@@ -558,6 +597,7 @@ class HealthService:
             provider_model,
             endpoint_path=endpoint_path,
             payload=payload,
+            interactive_mode=interactive_mode,
         )
         return {
             **result,
@@ -576,6 +616,7 @@ class HealthService:
         capability_probe_max_tokens: int | None = None,
         progress_callback: HealthProgressCallback | None = None,
         interactive_mode: bool = False,
+        parallel_phases: bool = False,
     ) -> list[dict]:
         providers = [provider for provider in ProviderService.list_providers(db) if provider.enabled]
         route_metrics = LogService.route_metric_summary(
@@ -896,32 +937,50 @@ class HealthService:
         capability_probe_max_tokens: int | None = None,
         progress_callback: HealthProgressCallback | None = None,
         interactive_mode: bool = False,
+        parallel_phases: bool = False,
+        single_endpoint_mode: bool = False,
     ) -> list[dict]:
         endpoint_results_by_model_id: dict[int, list[dict[str, Any]]] = {
             provider_model.id: []
             for provider_model in models_to_check
         }
-        for phase_index, phase_spec in enumerate(
-            HealthService._build_probe_phase_groups(
-                provider,
-                stream_probe=stream_probe,
-                vision_probe=vision_probe,
-                phase_keys=phase_keys,
-                text_probe_max_tokens=text_probe_max_tokens,
-                capability_probe_max_tokens=capability_probe_max_tokens,
-                interactive_mode=interactive_mode,
-            ),
-            start=1,
-        ):
-            await HealthService._run_provider_phase_group(
-                provider,
-                models_to_check,
-                phase_spec,
-                phase_index=phase_index,
-                endpoint_results_by_model_id=endpoint_results_by_model_id,
-                progress_callback=progress_callback,
-                interactive_mode=interactive_mode,
+        phase_specs = HealthService._build_probe_phase_groups(
+            provider,
+            stream_probe=stream_probe,
+            vision_probe=vision_probe,
+            phase_keys=phase_keys,
+            text_probe_max_tokens=text_probe_max_tokens,
+            capability_probe_max_tokens=capability_probe_max_tokens,
+            interactive_mode=interactive_mode,
+            single_endpoint_mode=single_endpoint_mode,
+        )
+        if interactive_mode and parallel_phases:
+            phase_results = await asyncio.gather(
+                *(
+                    HealthService._run_provider_phase_group(
+                        provider,
+                        models_to_check,
+                        phase_spec,
+                        phase_index=phase_index,
+                        endpoint_results_by_model_id=endpoint_results_by_model_id,
+                        progress_callback=progress_callback,
+                        interactive_mode=interactive_mode,
+                    )
+                    for phase_index, phase_spec in enumerate(phase_specs, start=1)
+                )
             )
+            _ = phase_results
+        else:
+            for phase_index, phase_spec in enumerate(phase_specs, start=1):
+                await HealthService._run_provider_phase_group(
+                    provider,
+                    models_to_check,
+                    phase_spec,
+                    phase_index=phase_index,
+                    endpoint_results_by_model_id=endpoint_results_by_model_id,
+                    progress_callback=progress_callback,
+                    interactive_mode=interactive_mode,
+                )
         return [
             HealthService._build_model_result(
                 provider,
@@ -943,23 +1002,197 @@ class HealthService:
         selective_capability_probes: bool = False,
         route_metrics: dict[tuple[int | None, str | None], dict] | None = None,
         interactive_mode: bool = False,
+        single_endpoint_mode: bool = False,
     ) -> list[dict[str, Any]]:
         text_max_tokens = text_probe_max_tokens or HealthService.SCHEDULED_TEXT_PROBE_MAX_TOKENS
-        capability_max_tokens = capability_probe_max_tokens or HealthService.SCHEDULED_CAPABILITY_PROBE_MAX_TOKENS
+        capability_max_tokens = capability_probe_max_tokens or (
+            HealthService.INTERACTIVE_CAPABILITY_PROBE_MAX_TOKENS
+            if interactive_mode
+            else HealthService.SCHEDULED_CAPABILITY_PROBE_MAX_TOKENS
+        )
         provider_supports_chat = ProviderService.provider_supports_chat_completions(provider)
         provider_supports_responses = ProviderService.provider_supports_responses(provider)
+
+        if single_endpoint_mode:
+            selected_endpoint = HealthService._interactive_endpoint_path
+
+            def build_selected_text_payload(model: ProviderModel, *, stream: bool) -> dict[str, Any]:
+                endpoint_path = selected_endpoint(model)
+                if endpoint_path == "/chat/completions":
+                    return HealthService._build_chat_probe_payload(
+                        model,
+                        vision_probe=vision_probe,
+                        stream_probe=stream,
+                        max_tokens=text_max_tokens,
+                    )
+                return HealthService._build_responses_probe_payload(
+                    model,
+                    vision_probe=vision_probe,
+                    max_output_tokens=text_max_tokens,
+                )
+
+            phases = [
+                {
+                    "key": "text",
+                    "label": "文字调用检查",
+                    "targets": lambda model: selected_endpoint(model) is not None,
+                    "probes": [
+                        {
+                            "key": "selected_text_endpoint",
+                            "targets": lambda model: selected_endpoint(model) is not None,
+                            "probe": lambda model: HealthService._probe_formal_endpoint(
+                                provider,
+                                model,
+                                endpoint_path=selected_endpoint(model) or "/responses",
+                                payload=build_selected_text_payload(model, stream=False),
+                                interactive_mode=interactive_mode,
+                            ),
+                        }
+                    ],
+                },
+                {
+                    "key": "text_stream",
+                    "label": "文字流式检查",
+                    "targets": lambda model: bool(model.supports_stream and selected_endpoint(model) is not None),
+                    "probes": [
+                        {
+                            "key": "selected_text_stream_endpoint",
+                            "targets": lambda model: bool(model.supports_stream and selected_endpoint(model) is not None),
+                            "probe": lambda model: HealthService._probe_formal_stream_endpoint(
+                                provider,
+                                model,
+                                endpoint_path=selected_endpoint(model) or "/responses",
+                                payload=build_selected_text_payload(model, stream=True),
+                                interactive_mode=interactive_mode,
+                            ),
+                        }
+                    ],
+                },
+                {
+                    "key": "tools",
+                    "label": "工具调用检查",
+                    "targets": lambda model: (
+                        ProviderService.provider_model_supports_tools(model)
+                        and selected_endpoint(model) is not None
+                        and (
+                            not selective_capability_probes
+                            or HealthService._should_run_scheduled_capability_probe(
+                                provider,
+                                model,
+                                capability="tools",
+                                route_metrics=route_metrics,
+                            )
+                        )
+                    ),
+                    "probes": [
+                        {
+                            "key": "selected_tools_endpoint",
+                            "targets": lambda model: selected_endpoint(model) is not None,
+                            "probe": lambda model: HealthService._probe_native_tools_endpoint(
+                                provider,
+                                model,
+                                endpoint_path=selected_endpoint(model) or "/responses",
+                                max_tokens=capability_max_tokens,
+                                interactive_mode=interactive_mode,
+                            ),
+                        }
+                    ],
+                },
+                {
+                    "key": "vision",
+                    "label": "图像理解检查",
+                    "targets": lambda model: (
+                        bool(model.supports_vision)
+                        and selected_endpoint(model) is not None
+                        and (
+                            not selective_capability_probes
+                            or HealthService._should_run_scheduled_capability_probe(
+                                provider,
+                                model,
+                                capability="vision",
+                                route_metrics=route_metrics,
+                            )
+                        )
+                    ),
+                    "probes": [
+                        {
+                            "key": "selected_vision_endpoint",
+                            "targets": lambda model: selected_endpoint(model) is not None,
+                            "probe": lambda model: HealthService._probe_native_vision_endpoint(
+                                provider,
+                                model,
+                                endpoint_path=selected_endpoint(model) or "/responses",
+                                max_tokens=capability_max_tokens,
+                                interactive_mode=interactive_mode,
+                            ),
+                        }
+                    ],
+                },
+                {
+                    "key": "image_generation",
+                    "label": "图片生成检查",
+                    "targets": lambda model: (
+                        selected_endpoint(model) == "/responses"
+                        and ProviderService.provider_model_supports_image_generation(model)
+                        and (
+                            not selective_capability_probes
+                            or HealthService._should_run_scheduled_capability_probe(
+                                provider,
+                                model,
+                                capability="image_generation",
+                                route_metrics=route_metrics,
+                            )
+                        )
+                    ),
+                    "probes": [
+                        {
+                            "key": "selected_image_generation_endpoint",
+                            "probe": lambda model: HealthService._probe_native_image_generation(
+                                provider,
+                                model,
+                                interactive_mode=interactive_mode,
+                            ),
+                        }
+                    ],
+                },
+            ]
+            if phase_keys is None:
+                return phases
+            return [phase for phase in phases if phase["key"] in phase_keys]
+
+        def _get_model_protocol(model: ProviderModel) -> str:
+            """获取模型挂载级协议类型"""
+            if bool(getattr(model, "supports_responses", False)) and bool(getattr(model, "supports_chat_completions", False)):
+                return "both"
+            if bool(getattr(model, "supports_chat_completions", False)):
+                return "chat_completions"
+            return "responses"
+
+        def _should_test_endpoint(model: ProviderModel, endpoint: str) -> bool:
+            """判断是否应该测试指定端点"""
+            protocol = _get_model_protocol(model)
+            if protocol == 'both':
+                if endpoint == 'responses':
+                    return provider_supports_responses
+                elif endpoint == 'chat':
+                    return provider_supports_chat
+            elif protocol == 'responses':
+                return endpoint == 'responses' and provider_supports_responses
+            elif protocol == 'chat_completions':
+                return endpoint == 'chat' and provider_supports_chat
+            return False
+
         phases = [
             {
                 "key": "text",
                 "label": "文字调用检查",
                 "targets": lambda model: bool(
-                    provider_supports_chat
-                    or provider_supports_responses
+                    _should_test_endpoint(model, 'chat') or _should_test_endpoint(model, 'responses')
                 ),
                 "probes": [
                     {
                         "key": "chat_completions",
-                        "targets": lambda model: bool(provider_supports_chat),
+                        "targets": lambda model: _should_test_endpoint(model, 'chat'),
                         "probe": lambda model: HealthService._probe_formal_endpoint(
                             provider,
                             model,
@@ -975,7 +1208,7 @@ class HealthService:
                     },
                     {
                         "key": "responses",
-                        "targets": lambda model: bool(provider_supports_responses),
+                        "targets": lambda model: _should_test_endpoint(model, 'responses'),
                         "probe": lambda model: HealthService._probe_formal_endpoint(
                             provider,
                             model,
@@ -995,12 +1228,12 @@ class HealthService:
                 "label": "文字流式检查",
                 "targets": lambda model: bool(
                     model.supports_stream
-                    and (provider_supports_chat or provider_supports_responses)
+                    and (_should_test_endpoint(model, 'chat') or _should_test_endpoint(model, 'responses'))
                 ),
                 "probes": [
                     {
                         "key": "chat_completions_stream",
-                        "targets": lambda model: bool(provider_supports_chat and model.supports_stream),
+                        "targets": lambda model: _should_test_endpoint(model, 'chat') and model.supports_stream,
                         "probe": lambda model: HealthService._probe_formal_stream_endpoint(
                             provider,
                             model,
@@ -1016,7 +1249,7 @@ class HealthService:
                     },
                     {
                         "key": "responses_stream",
-                        "targets": lambda model: bool(provider_supports_responses and model.supports_stream),
+                        "targets": lambda model: _should_test_endpoint(model, 'responses') and model.supports_stream,
                         "probe": lambda model: HealthService._probe_formal_stream_endpoint(
                             provider,
                             model,
@@ -1036,7 +1269,7 @@ class HealthService:
                 "label": "工具调用检查",
                 "targets": lambda model: (
                     ProviderService.provider_model_supports_tools(model)
-                    and (provider_supports_chat or provider_supports_responses)
+                    and (_should_test_endpoint(model, 'chat') or _should_test_endpoint(model, 'responses'))
                     and (
                         not selective_capability_probes
                         or HealthService._should_run_scheduled_capability_probe(
@@ -1050,22 +1283,24 @@ class HealthService:
                 "probes": [
                     {
                         "key": "tools_chat_completions",
-                        "targets": lambda model: bool(provider_supports_chat),
+                        "targets": lambda model: _should_test_endpoint(model, 'chat'),
                         "probe": lambda model: HealthService._probe_native_tools_endpoint(
                             provider,
                             model,
                             endpoint_path="/chat/completions",
                             max_tokens=capability_max_tokens,
+                            interactive_mode=interactive_mode,
                         ),
                     },
                     {
                         "key": "tools_responses",
-                        "targets": lambda model: bool(provider_supports_responses),
+                        "targets": lambda model: _should_test_endpoint(model, 'responses'),
                         "probe": lambda model: HealthService._probe_native_tools_endpoint(
                             provider,
                             model,
                             endpoint_path="/responses",
                             max_tokens=capability_max_tokens,
+                            interactive_mode=interactive_mode,
                         ),
                     }
                 ],
@@ -1075,7 +1310,7 @@ class HealthService:
                 "label": "图像理解检查",
                 "targets": lambda model: (
                     bool(model.supports_vision)
-                    and (provider_supports_chat or provider_supports_responses)
+                    and (_should_test_endpoint(model, 'chat') or _should_test_endpoint(model, 'responses'))
                     and (
                         not selective_capability_probes
                         or HealthService._should_run_scheduled_capability_probe(
@@ -1089,22 +1324,24 @@ class HealthService:
                 "probes": [
                     {
                         "key": "vision_chat_completions",
-                        "targets": lambda model: bool(provider_supports_chat),
+                        "targets": lambda model: _should_test_endpoint(model, 'chat'),
                         "probe": lambda model: HealthService._probe_native_vision_endpoint(
                             provider,
                             model,
                             endpoint_path="/chat/completions",
                             max_tokens=capability_max_tokens,
+                            interactive_mode=interactive_mode,
                         ),
                     },
                     {
                         "key": "vision_responses",
-                        "targets": lambda model: bool(provider_supports_responses),
+                        "targets": lambda model: _should_test_endpoint(model, 'responses'),
                         "probe": lambda model: HealthService._probe_native_vision_endpoint(
                             provider,
                             model,
                             endpoint_path="/responses",
                             max_tokens=capability_max_tokens,
+                            interactive_mode=interactive_mode,
                         ),
                     }
                 ],
@@ -1129,7 +1366,11 @@ class HealthService:
                 "probes": [
                     {
                         "key": "image_generation",
-                        "probe": lambda model: HealthService._probe_native_image_generation(provider, model),
+                        "probe": lambda model: HealthService._probe_native_image_generation(
+                            provider,
+                            model,
+                            interactive_mode=interactive_mode,
+                        ),
                     }
                 ],
             },
@@ -1235,13 +1476,49 @@ class HealthService:
             probe_factory: Callable[[ProviderModel], Awaitable[dict[str, Any]]],
         ) -> tuple[ProviderModel, dict[str, Any]]:
             async with semaphore:
-                endpoint_result = await HealthService._probe_with_retry(
-                    lambda: probe_factory(provider_model),
+                endpoint_result = await HealthService._run_probe_with_interactive_timeout(
+                    provider_model,
+                    probe_factory,
                     interactive_mode=interactive_mode,
                 )
                 return provider_model, endpoint_result
 
         return list(await asyncio.gather(*(run_single(provider_model, probe_factory) for provider_model, probe_factory in phase_targets)))
+
+    @staticmethod
+    async def _run_probe_with_interactive_timeout(
+        provider_model: ProviderModel,
+        probe_factory: Callable[[ProviderModel], Awaitable[dict[str, Any]]],
+        *,
+        interactive_mode: bool,
+    ) -> dict[str, Any]:
+        if not interactive_mode:
+            return await HealthService._probe_with_retry(lambda: probe_factory(provider_model), interactive_mode=False)
+        started = time.perf_counter()
+        try:
+            return await asyncio.wait_for(
+                HealthService._probe_with_retry(
+                    lambda: probe_factory(provider_model),
+                    interactive_mode=True,
+                    max_attempts=1,
+                ),
+                timeout=HealthService.INTERACTIVE_PROBE_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            return {
+                "endpoint_path": None,
+                "endpoint_label": "即时探针",
+                "success": False,
+                "native_success": False,
+                "adapted_success": False,
+                "support_mode": "timeout",
+                "support_label": "即时测试超时",
+                "latency_ms": int((time.perf_counter() - started) * 1000),
+                "status_code": 504,
+                "message": f"单项探针超过 {int(HealthService.INTERACTIVE_PROBE_TIMEOUT_SECONDS)} 秒未返回，已停止等待",
+                "trace": [],
+                "retryable": True,
+            }
 
     @staticmethod
     def _finalize_provider_check(
@@ -1311,27 +1588,19 @@ class HealthService:
         probe_coro_factory: Callable[[], Awaitable[dict[str, Any]]],
         *,
         interactive_mode: bool = False,
+        max_attempts: int | None = None,
     ) -> dict[str, Any]:
+        """执行探针，所有能力测试只执行一次，不重试"""
         last_result: dict[str, Any] | None = None
-        for attempt in range(1, HealthService.PROBE_RETRY_MAX_ATTEMPTS + 1):
+        # 所有测试只执行一次，不重试
+        attempts = 1
+        for attempt in range(1, attempts + 1):
             current_result = await probe_coro_factory()
             current_result["attempt_count"] = attempt
-            current_result["retried"] = attempt > 1
-            if current_result.get("success"):
-                if attempt > 1:
-                    message = str(current_result.get("message") or "ok")
-                    current_result["message"] = f"第 {attempt} 次探测成功；{message}"
-                return current_result
-            last_result = current_result
-            if interactive_mode and not HealthService._should_retry_probe_result(current_result):
-                return current_result
-            if attempt < HealthService.PROBE_RETRY_MAX_ATTEMPTS:
-                await asyncio.sleep(HealthService.PROBE_RETRY_DELAY_SEC)
+            current_result["retried"] = False
+            return current_result
         if last_result is None:
             return {"success": False, "message": "健康检查未返回结果", "attempt_count": 0, "retried": False}
-        message = str(last_result.get("message") or "请求失败")
-        if last_result.get("attempt_count", 1) > 1:
-            last_result["message"] = f"已重试 1 次仍失败；{message}"
         return last_result
 
     @staticmethod
@@ -1472,6 +1741,14 @@ class HealthService:
     @staticmethod
     def _capability_probe_cache_key(provider_id: int, provider_model_id: int, capability: str) -> str:
         return f"health-capability-probe:{provider_id}:{provider_model_id}:{capability}"
+
+    @staticmethod
+    def _interactive_endpoint_path(provider_model: ProviderModel) -> str | None:
+        if bool(getattr(provider_model, "supports_responses", False)):
+            return "/responses"
+        if bool(getattr(provider_model, "supports_chat_completions", False)):
+            return "/chat/completions"
+        return None
 
     @staticmethod
     def _endpoint_capability_key(capability: str, endpoint_path: str | None) -> str:
@@ -1629,6 +1906,11 @@ class HealthService:
                 payload,
                 started=started,
                 setting=setting,
+                request_timeout_seconds=(
+                    HealthService.INTERACTIVE_PROBE_TIMEOUT_SECONDS
+                    if interactive_mode
+                    else None
+                ),
             )
             latency_ms = int((time.perf_counter() - started) * 1000)
             output_text = ProxyService._extract_response_display_text(response, limit_bytes=160)

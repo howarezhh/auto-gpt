@@ -1,3 +1,5 @@
+import json
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from types import SimpleNamespace
@@ -21,6 +23,7 @@ DEFAULT_SETTING = {
     "global_max_retries": 2,
     "route_exhausted_retry_max_wait_seconds": 600,
     "route_exhausted_retry_infinite_enabled": False,
+    "max_candidate_count": 10,
     "global_max_request_tokens": 0,
     "max_v1_request_body_bytes": 20971520,
     "max_v1_chat_request_body_bytes": 0,
@@ -69,6 +72,8 @@ DEFAULT_SETTING = {
     "responses_chat_adapter_upstream_api_key": _settings.responses_chat_adapter_upstream_api_key,
     "responses_chat_adapter_upstreams_json": _settings.responses_chat_adapter_upstreams_json,
     "responses_chat_adapter_context_window_tokens": _settings.responses_chat_adapter_context_window_tokens,
+    "responses_chat_adapter_snapshot_max_bytes": _settings.responses_chat_adapter_snapshot_max_bytes,
+    "responses_chat_adapter_db_cleanup_interval_seconds": _settings.responses_chat_adapter_db_cleanup_interval_seconds,
 }
 
 
@@ -134,6 +139,7 @@ class SettingService:
             idle_timeout_seconds=payload.stream_idle_timeout_seconds,
             max_duration_seconds=payload.stream_max_duration_seconds,
         )
+        SettingService._validate_responses_chat_adapter_configuration(payload)
         for field, value in payload.model_dump().items():
             setattr(setting, field, value)
         db.commit()
@@ -200,3 +206,19 @@ class SettingService:
         ]
         if positive_timeouts and max_duration_seconds < max(positive_timeouts):
             raise ValueError("stream_max_duration_seconds must be >= enabled stream chunk timeouts")
+
+    @staticmethod
+    def _validate_responses_chat_adapter_configuration(payload: SettingUpdate) -> None:
+        for field_name, expected_types in (
+            ("responses_chat_adapter_model_map_json", (dict,)),
+            ("responses_chat_adapter_upstreams_json", (dict, list)),
+        ):
+            raw_value = getattr(payload, field_name, "")
+            if not raw_value:
+                continue
+            try:
+                parsed = json.loads(raw_value)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"{field_name} must be valid JSON") from exc
+            if not isinstance(parsed, expected_types):
+                raise ValueError(f"{field_name} must be a JSON object" if expected_types == (dict,) else f"{field_name} must be a JSON object or array")

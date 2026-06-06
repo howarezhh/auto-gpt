@@ -17,6 +17,7 @@ class AppSetting(Base):
     global_max_retries: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
     route_exhausted_retry_max_wait_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=600)
     route_exhausted_retry_infinite_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    max_candidate_count: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
     global_max_request_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     max_v1_request_body_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=20971520)
     max_v1_chat_request_body_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -65,6 +66,8 @@ class AppSetting(Base):
     responses_chat_adapter_upstream_api_key: Mapped[str] = mapped_column(Text, nullable=False, default="")
     responses_chat_adapter_upstreams_json: Mapped[str] = mapped_column(Text, nullable=False, default="")
     responses_chat_adapter_context_window_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=128000)
+    responses_chat_adapter_snapshot_max_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=1048576)
+    responses_chat_adapter_db_cleanup_interval_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=21600)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow

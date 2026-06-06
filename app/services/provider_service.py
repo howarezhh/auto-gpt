@@ -28,6 +28,8 @@ from app.schemas.provider import (
     ProviderUpdate,
     format_provider_protocol_label as schema_format_provider_protocol_label,
     normalize_provider_protocol_type as schema_normalize_provider_protocol_type,
+    protocol_type_from_supports as schema_protocol_type_from_supports,
+    supports_from_protocol_type,
 )
 from app.services.cache_service import CacheService
 from app.services.log_service import LogService
@@ -187,12 +189,12 @@ API Key: sk-yyyy
 
     @staticmethod
     def _model_name_supports_responses(normalized: str) -> bool:
-        # 协议端点能力不能从模型名前缀可靠推断；未探测或新模型默认双协议可用。
+        # 挂载级协议由管理员配置；新挂载默认 Responses，不能从模型名前缀可靠推断。
         return True
 
     @staticmethod
     def _infer_model_capabilities(model_name: str) -> dict[str, bool]:
-        """根据模型名启发式推断非协议能力；Chat/Responses 默认均为可探测。"""
+        """根据模型名启发式推断非协议能力；新增挂载协议默认 Responses。"""
         normalized = (model_name or "").strip().lower()
         supports_vision = ProviderService._model_name_supports_vision(normalized)
         supports_tools = ProviderService._model_name_supports_tools(normalized)
@@ -203,7 +205,7 @@ API Key: sk-yyyy
             "supports_vision": supports_vision,
             "supports_tools": supports_tools,
             "supports_image_generation": supports_image_generation,
-            "supports_chat_completions": True,
+            "supports_chat_completions": False,
             "supports_responses": supports_responses,
         }
 
@@ -232,6 +234,17 @@ API Key: sk-yyyy
             and ProviderService.provider_model_supports_tools(provider_model)
             and (provider_model.supports_vision or inferred.get("supports_image_generation", False))
         )
+
+    @staticmethod
+    def provider_model_protocol_type(provider_model: ProviderModel) -> str:
+        return schema_protocol_type_from_supports(
+            supports_chat_completions=bool(provider_model.supports_chat_completions),
+            supports_responses=bool(provider_model.supports_responses),
+        )
+
+    @staticmethod
+    def provider_model_protocol_label(provider_model: ProviderModel) -> str:
+        return ProviderService.provider_protocol_label(ProviderService.provider_model_protocol_type(provider_model))
 
     @staticmethod
     def _build_model_config_input_from_name(model_name: str) -> ProviderModelConfigInput:
@@ -816,7 +829,7 @@ API Key: sk-yyyy
             "supports_stream": True,
             "supports_vision": True,
             "supports_tools": True,
-            "supports_chat_completions": True,
+            "supports_chat_completions": False,
             "supports_responses": True,
         }
 
@@ -988,12 +1001,15 @@ API Key: sk-yyyy
             raise ValueError("Provider model not found")
 
         for field, value in payload.model_dump(exclude_unset=True).items():
+            if field == "protocol_type":
+                supports_chat, supports_responses = supports_from_protocol_type(value)
+                provider_model.supports_chat_completions = supports_chat
+                provider_model.supports_responses = supports_responses
+                continue
             if field in {
                 "supports_stream",
                 "supports_vision",
                 "supports_tools",
-                "supports_chat_completions",
-                "supports_responses",
                 "context_window_tokens",
                 "max_input_tokens",
                 "max_output_tokens",
@@ -1329,6 +1345,8 @@ API Key: sk-yyyy
             "supports_image_generation": ProviderService.provider_model_supports_image_generation(provider_model),
             "supports_chat_completions": provider_model.supports_chat_completions,
             "supports_responses": provider_model.supports_responses,
+            "protocol_type": ProviderService.provider_model_protocol_type(provider_model),
+            "protocol_label": ProviderService.provider_model_protocol_label(provider_model),
             "context_window_tokens": provider_model.context_window_tokens,
             "max_input_tokens": provider_model.max_input_tokens,
             "max_output_tokens": provider_model.max_output_tokens,
@@ -1482,6 +1500,8 @@ API Key: sk-yyyy
             catalog = catalogs_by_name.get(config.model_name)
             if catalog is not None:
                 ProviderService._sync_provider_model_from_catalog(provider_model, catalog)
+            provider_model.supports_chat_completions = bool(config.supports_chat_completions)
+            provider_model.supports_responses = bool(config.supports_responses)
             if provider_model.health_status not in {"healthy", "degraded", "unhealthy"}:
                 provider_model.health_status = "unknown"
             if not provider_model.circuit_state:
@@ -1550,8 +1570,6 @@ API Key: sk-yyyy
         provider_model.supports_stream = catalog.supports_stream
         provider_model.supports_vision = catalog.supports_vision
         provider_model.supports_tools = catalog.supports_tools
-        provider_model.supports_chat_completions = catalog.supports_chat_completions
-        provider_model.supports_responses = catalog.supports_responses
         provider_model.context_window_tokens = catalog.context_window_tokens
         provider_model.max_input_tokens = catalog.max_input_tokens
         provider_model.max_output_tokens = catalog.max_output_tokens

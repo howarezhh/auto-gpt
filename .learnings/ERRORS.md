@@ -713,3 +713,33 @@ Use `pwsh -NoLogo -NoProfile -Command '& { ... }'` for scripts containing `$`, `
 - Tags: powershell, tests
 
 ---
+
+## [ERR-20260606-002] migration-patch-context-drift
+
+**Logged**: 2026-06-06T00:00:00+08:00
+**Priority**: medium
+**Status**: resolved
+**Area**: backend
+
+### Summary
+Broad `apply_patch` context inserted app_settings migration backfill code into unrelated migration functions with similar loop shapes.
+
+### Error
+```text
+NameError: name 'runtime_settings' is not defined
+```
+
+### Context
+- Command attempted: `stage10_tools_regression_check.py`
+- Files involved: `app/main.py`
+- The same `changed = False` / `for column, ddl in additions.items()` pattern appears in multiple migration helpers.
+
+### Suggested Fix
+When editing migration helpers, anchor patches on function-specific names or unique target columns, then run `rg` for newly introduced identifiers to confirm they appear only in intended scopes.
+
+### Metadata
+- Reproducible: yes
+- Related Files: app/main.py
+- Tags: migrations, tests
+
+---

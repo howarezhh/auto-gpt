@@ -15,6 +15,7 @@ class SettingUpdate(BaseModel):
     global_max_retries: int = Field(default=2, ge=0)
     route_exhausted_retry_max_wait_seconds: int = Field(default=600, ge=0, le=600)
     route_exhausted_retry_infinite_enabled: bool = False
+    max_candidate_count: int = Field(default=10, ge=1, le=500)
     global_max_request_tokens: int = Field(default=0, ge=0)
     max_v1_request_body_bytes: int = Field(default=20971520, ge=0)
     max_v1_chat_request_body_bytes: int = Field(default=0, ge=0)
@@ -63,6 +64,8 @@ class SettingUpdate(BaseModel):
     responses_chat_adapter_upstream_api_key: str = ""
     responses_chat_adapter_upstreams_json: str = ""
     responses_chat_adapter_context_window_tokens: int = Field(default=128000, ge=0)
+    responses_chat_adapter_snapshot_max_bytes: int = Field(default=1048576, ge=0)
+    responses_chat_adapter_db_cleanup_interval_seconds: int = Field(default=21600, ge=300)
 
 
 class SettingOut(SettingUpdate):

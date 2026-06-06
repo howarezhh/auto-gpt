@@ -48,7 +48,6 @@
                     <th>名称</th>
                     <th>分组 / 地区</th>
                     <th>Base URL</th>
-                    <th>协议</th>
                     <th>模型</th>
                     <th>整体可用性</th>
                     <th>熔断</th>
@@ -169,6 +168,7 @@
                     <th>中转站</th>
                     <th>模型</th>
                     <th>模型健康</th>
+                    <th>端点协议</th>
                     <th>能力</th>
                     <th>倍率 / 价格</th>
                     <th>质量</th>
@@ -214,14 +214,6 @@
             <label for="provider-type">
                 <span>类型</span>
                 <input class="field-input" id="provider-type" value="openai_compatible">
-            </label>
-            <label for="provider-protocol-type">
-                <span>协议</span>
-                <select class="field-input" id="provider-protocol-type">
-                    <option value="both">双协议</option>
-                    <option value="chat_completions">Chat Completions API</option>
-                    <option value="responses">Responses API</option>
-                </select>
             </label>
             <label for="provider-group-name">
                 <span>渠道分组</span>
@@ -347,6 +339,7 @@
                 <div class="provider-model-config-head" aria-hidden="true">
                     <span>模型名称 *</span>
                     <span>启用</span>
+                    <span>端点协议</span>
                     <span>倍率</span>
                     <span>操作</span>
                 </div>

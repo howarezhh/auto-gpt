@@ -710,8 +710,7 @@
             throw new Error("当前账号无权访问该内容");
         }
         if (!response.ok) {
-            const detail = typeof data === "object" && data ? data.detail ?? data : data;
-            throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail, null, 2));
+            throw new Error(extractErrorMessage(data));
         }
         return data;
     }
@@ -719,8 +718,32 @@
     async function parseErrorResponse(response) {
         const text = await response.text();
         const data = text ? safeJsonParse(text) ?? text : null;
-        const detail = typeof data === "object" && data ? data.detail ?? data : data;
-        return typeof detail === "string" ? detail : JSON.stringify(detail, null, 2);
+        return extractErrorMessage(data);
+    }
+
+    function extractErrorMessage(payload) {
+        if (payload && typeof payload === "object") {
+            const error = payload.error;
+            if (error && typeof error === "object") {
+                if (typeof error.message === "string" && error.message.trim()) {
+                    return error.message.trim();
+                }
+                if (typeof error.next_action === "string" && error.next_action.trim()) {
+                    return error.next_action.trim();
+                }
+            }
+            if (typeof payload.message === "string" && payload.message.trim()) {
+                return payload.message.trim();
+            }
+            if (typeof payload.detail === "string" && payload.detail.trim()) {
+                return payload.detail.trim();
+            }
+            return JSON.stringify(payload, null, 2);
+        }
+        if (typeof payload === "string" && payload.trim()) {
+            return payload.trim();
+        }
+        return "请求失败";
     }
 
     async function streamJsonLines(url, data, onEvent) {
@@ -1162,9 +1185,9 @@
 
     function openTestFeaturePicker(options = {}) {
         const title = options.title || "选择测试功能";
-        const description = options.description || "默认只测试文本，并同时覆盖非流式与流式文本链路；可按需追加其它能力。";
+        const description = options.description || "默认只测试流式文本链路；可按需追加其它能力。";
         const featureOptions = [
-            { value: "text", label: "文本", detail: "非流式 + 流式文本链路", checked: true },
+            { value: "text_stream", label: "流式文本", detail: "只验证流式文本链路", checked: true },
             { value: "vision", label: "图片理解", detail: "只验证图片输入理解，不生成图片" },
             { value: "tools", label: "工具调用", detail: "验证原生 tools/function calling" },
             { value: "image_generation", label: "图片生成", detail: "专项验证 image_generation 生图结果" },
@@ -3801,7 +3824,6 @@
         const providerBaseUrlInput = document.getElementById("provider-base-url");
         const providerApiKeyInput = document.getElementById("provider-api-key");
         const providerTypeInput = document.getElementById("provider-type");
-        const providerProtocolTypeInput = document.getElementById("provider-protocol-type");
         const providerGroupNameInput = document.getElementById("provider-group-name");
         const providerRegionTagInput = document.getElementById("provider-region-tag");
         const providerPriorityInput = document.getElementById("provider-priority");
@@ -3837,6 +3859,8 @@
             supports_stream: true,
             supports_vision: true,
             supports_tools: true,
+            supports_chat_completions: false,
+            supports_responses: true,
             enabled: true,
             price_multiplier: 1,
         };
@@ -3857,7 +3881,7 @@
         let providerBatchImportTemplate = "";
         let providerBatchImportPreview = null;
 
-        if (!tableBody || !modelTableBody || !modal || !providerForm || !providerModelConfigList || !providerProtocolTypeInput) return;
+        if (!tableBody || !modelTableBody || !modal || !providerForm || !providerModelConfigList) return;
 
         function serializeProviderFormState() {
             return JSON.stringify(
@@ -3872,13 +3896,50 @@
             providerForm.dataset.dirty = serializeProviderFormState() === providerFormSnapshot ? "false" : "true";
         }
 
+        function normalizeProviderModelProtocolType(configOrValue = "responses") {
+            if (typeof configOrValue === "object" && configOrValue !== null) {
+                const rawProtocolType = String(configOrValue.protocol_type || "").trim();
+                if (["both", "chat_completions", "responses"].includes(rawProtocolType)) return rawProtocolType;
+                const supportsChat = configOrValue.supports_chat_completions === true;
+                const supportsResponses = configOrValue.supports_responses !== false;
+                if (supportsChat && supportsResponses) return "both";
+                if (supportsChat) return "chat_completions";
+                return "responses";
+            }
+            const normalized = String(configOrValue || "responses").trim();
+            return ["both", "chat_completions", "responses"].includes(normalized) ? normalized : "responses";
+        }
+
+        function providerModelProtocolSupports(protocolType) {
+            const normalized = normalizeProviderModelProtocolType(protocolType);
+            return {
+                supports_chat_completions: normalized === "both" || normalized === "chat_completions",
+                supports_responses: normalized === "both" || normalized === "responses",
+            };
+        }
+
+        function formatProviderModelProtocolLabel(configOrValue) {
+            const protocolType = normalizeProviderModelProtocolType(configOrValue);
+            if (typeof configOrValue === "object" && configOrValue?.protocol_label) {
+                return configOrValue.protocol_label;
+            }
+            if (protocolType === "chat_completions") return "Chat Completions API";
+            if (protocolType === "both") return "双协议";
+            return "Responses API";
+        }
+
         function normalizeProviderModelConfig(config = {}) {
             const modelName = String(config.model_name || "").trim();
+            const protocolType = normalizeProviderModelProtocolType(config);
+            const protocolSupports = providerModelProtocolSupports(protocolType);
             return {
                 model_name: modelName,
                 supports_stream: config.supports_stream ?? DEFAULT_PROVIDER_MODEL_CONFIG.supports_stream,
                 supports_vision: config.supports_vision ?? DEFAULT_PROVIDER_MODEL_CONFIG.supports_vision,
                 supports_tools: config.supports_tools ?? DEFAULT_PROVIDER_MODEL_CONFIG.supports_tools,
+                protocol_type: protocolType,
+                supports_chat_completions: protocolSupports.supports_chat_completions,
+                supports_responses: protocolSupports.supports_responses,
                 enabled: config.enabled ?? DEFAULT_PROVIDER_MODEL_CONFIG.enabled,
                 price_multiplier: Number.isFinite(Number(config.price_multiplier)) && Number(config.price_multiplier) > 0
                     ? Number(config.price_multiplier)
@@ -3903,6 +3964,14 @@
                 <label class="provider-model-mini-switch settings-switch-control" title="控制该模型是否参与当前中转站路由">
                     <input type="checkbox" data-model-config-field="enabled" ${item.enabled ? "checked" : ""}>
                     <span class="settings-switch-slider" aria-hidden="true"></span>
+                </label>
+                <label>
+                    <span class="visually-hidden">端点协议</span>
+                    <select class="field-input" data-model-config-field="protocol_type" aria-label="端点协议">
+                        <option value="responses" ${item.protocol_type === "responses" ? "selected" : ""}>Responses</option>
+                        <option value="chat_completions" ${item.protocol_type === "chat_completions" ? "selected" : ""}>Chat</option>
+                        <option value="both" ${item.protocol_type === "both" ? "selected" : ""}>双协议</option>
+                    </select>
                 </label>
                 <label>
                     <span class="visually-hidden">渠道倍率</span>
@@ -3970,6 +4039,8 @@
                     return null;
                 }
                 seen.add(modelName);
+                const protocolType = normalizeProviderModelProtocolType(row.querySelector('[data-model-config-field="protocol_type"]')?.value);
+                const protocolSupports = providerModelProtocolSupports(protocolType);
                 const priceMultiplierInput = row.querySelector('[data-model-config-field="price_multiplier"]');
                 const priceMultiplier = Number(priceMultiplierInput?.value || DEFAULT_PROVIDER_MODEL_CONFIG.price_multiplier);
                 if (!Number.isFinite(priceMultiplier) || priceMultiplier <= 0) {
@@ -3984,6 +4055,9 @@
                     supports_stream: row.dataset.supportsStream ? row.dataset.supportsStream === "true" : DEFAULT_PROVIDER_MODEL_CONFIG.supports_stream,
                     supports_vision: row.dataset.supportsVision ? row.dataset.supportsVision === "true" : DEFAULT_PROVIDER_MODEL_CONFIG.supports_vision,
                     supports_tools: row.dataset.supportsTools ? row.dataset.supportsTools === "true" : DEFAULT_PROVIDER_MODEL_CONFIG.supports_tools,
+                    protocol_type: protocolType,
+                    supports_chat_completions: protocolSupports.supports_chat_completions,
+                    supports_responses: protocolSupports.supports_responses,
                     enabled: row.querySelector('[data-model-config-field="enabled"]')?.checked ?? DEFAULT_PROVIDER_MODEL_CONFIG.enabled,
                     price_multiplier: priceMultiplier,
                 });
@@ -4322,7 +4396,6 @@
                 name: providerNameInput.value.trim(),
                 base_url: providerBaseUrlInput.value.trim(),
                 provider_type: providerTypeInput.value.trim() || "openai_compatible",
-                protocol_type: providerProtocolTypeInput.value || "both",
                 group_name: providerGroupNameInput.value.trim() || null,
                 region_tag: providerRegionTagInput.value.trim() || null,
                 enabled: providerEnabledInput.checked,
@@ -4489,29 +4562,6 @@
             `;
         }
 
-        function normalizeProviderProtocolType(value) {
-            const normalized = String(value || "both").trim();
-            return ["both", "chat_completions", "responses"].includes(normalized) ? normalized : "both";
-        }
-
-        function formatProviderProtocolLabel(providerOrValue) {
-            const protocolType = typeof providerOrValue === "object"
-                ? normalizeProviderProtocolType(providerOrValue?.protocol_type)
-                : normalizeProviderProtocolType(providerOrValue);
-            if (typeof providerOrValue === "object" && providerOrValue?.protocol_label) {
-                return providerOrValue.protocol_label;
-            }
-            if (protocolType === "chat_completions") return "Chat Completions API";
-            if (protocolType === "responses") return "Responses API";
-            return "双协议";
-        }
-
-        function renderProviderProtocolBadge(provider) {
-            const protocolType = normalizeProviderProtocolType(provider?.protocol_type);
-            const shortLabel = protocolType === "chat_completions" ? "Chat" : protocolType === "responses" ? "Responses" : "双协议";
-            return `<span class="status-badge status-unknown" title="${escapeHtml(formatProviderProtocolLabel(provider))}">${escapeHtml(shortLabel)}</span>`;
-        }
-
         function renderProviderStrategy(provider) {
             const maintenanceText = provider.maintenance_mode_enabled
                 ? `维护中 · ${provider.maintenance_window || "未填写维护窗口"}`
@@ -4569,6 +4619,7 @@
                             <span class="status-badge ${item.enabled ? "status-healthy" : "status-unknown"}">${item.enabled ? "已启用" : "已停用"}</span>
                         </div>
                     </td>
+                    <td>${escapeHtml(formatProviderModelProtocolLabel(item))}</td>
                     <td>${formatModelCapabilitySummary(item)}</td>
                     <td>
                         <strong>${escapeHtml(item.price_multiplier ?? 1)}x</strong>
@@ -4593,10 +4644,6 @@
                             <span>Base URL</span>
                             <strong>${escapeHtml(provider.base_url)}</strong>
                         </div>
-                        <div>
-                            <span>协议</span>
-                            <strong>${escapeHtml(formatProviderProtocolLabel(provider))}</strong>
-                        </div>
                     </div>
                     <div class="provider-model-detail-meta">
                         <div><span>模型总数</span><strong>${formatNumber(modelConfigs.length)}</strong></div>
@@ -4610,6 +4657,7 @@
                                 <tr>
                                     <th>模型</th>
                                     <th>状态</th>
+                                    <th>端点协议</th>
                                     <th>能力</th>
                                     <th>倍率 / 价格</th>
                                     <th>质量</th>
@@ -4617,7 +4665,7 @@
                                 </tr>
                             </thead>
                             <tbody>
-                                ${rows || '<tr><td colspan="6"><div class="empty-state">当前中转站尚未挂载模型。</div></td></tr>'}
+                                ${rows || '<tr><td colspan="7"><div class="empty-state">当前中转站尚未挂载模型。</div></td></tr>'}
                             </tbody>
                         </table>
                     </div>
@@ -4961,8 +5009,6 @@
                     provider.group_name || "",
                     provider.region_tag || "",
             provider.base_url,
-            provider.protocol_label || "",
-            provider.protocol_type || "",
             provider.models.join(", "),
                     provider.maintenance_window || "",
                     provider.credential_hint || "",
@@ -4981,7 +5027,6 @@
                     </td>
                     <td>${renderProviderScope(provider)}</td>
                     <td>${escapeHtml(provider.base_url)}</td>
-                    <td>${renderProviderProtocolBadge(provider)}</td>
                     <td>${renderProviderModelHealth(provider.model_configs, provider.id)}</td>
                     <td>${renderProviderAvailability(provider)}</td>
                     <td>${statusBadge(provider.circuit_state)}</td>
@@ -5001,7 +5046,7 @@
                         </div>
                     </td>
                 </tr>
-            `).join("") || '<tr><td colspan="13"><div class="empty-state">没有匹配的中转站</div></td></tr>';
+            `).join("") || '<tr><td colspan="12"><div class="empty-state">没有匹配的中转站</div></td></tr>';
             enhanceInteractiveButtons(tableBody);
         }
 
@@ -5062,12 +5107,20 @@
                 <tr>
                     <td>
                         <strong>${escapeHtml(provider.name)}</strong>
-                        <div class="table-muted">${escapeHtml(formatProviderProtocolLabel(provider))}</div>
+                        <div class="table-muted">${escapeHtml(provider.group_name || provider.region_tag || "未分组")}</div>
                     </td>
                     <td class="provider-model-name-cell">
                         <strong>${escapeHtml(model.model_name)}</strong>
                     </td>
                     <td class="provider-model-status-cell">${renderStatusWithErrorHint(model.health_status, model.last_error)}</td>
+                    <td>
+                        <select class="field-input" data-model-field="protocol_type" data-provider-id="${provider.id}" data-model-id="${model.id}" aria-label="端点协议">
+                            <option value="responses" ${normalizeProviderModelProtocolType(model) === "responses" ? "selected" : ""}>Responses</option>
+                            <option value="chat_completions" ${normalizeProviderModelProtocolType(model) === "chat_completions" ? "selected" : ""}>Chat</option>
+                            <option value="both" ${normalizeProviderModelProtocolType(model) === "both" ? "selected" : ""}>双协议</option>
+                        </select>
+                        <div class="table-muted">${escapeHtml(formatProviderModelProtocolLabel(model))}</div>
+                    </td>
                     <td>${formatModelCapabilitySummary(model)}</td>
                     <td>
                         <input class="field-input" type="number" min="0.0001" step="0.0001" value="${model.price_multiplier ?? 1}" placeholder="渠道倍率" data-model-field="price_multiplier" data-provider-id="${provider.id}" data-model-id="${model.id}">
@@ -5091,14 +5144,17 @@
                     </td>
                 </tr>
             `;
-            }).join("") || '<tr><td colspan="8"><div class="empty-state">当前筛选条件下没有模型挂载记录</div></td></tr>';
+            }).join("") || '<tr><td colspan="9"><div class="empty-state">当前筛选条件下没有模型挂载记录</div></td></tr>';
             enhanceInteractiveButtons(modelTableBody);
         }
 
         async function testProviderModel(providerId, modelId, trigger, options = {}) {
             const { owner, modelConfig } = getProviderModelContext(providerId, modelId);
             if (!owner || !modelConfig) return;
-            const features = options.features || await openTestFeaturePicker({ title: `选择模型测试功能 · ${modelConfig.model_name}` });
+            const features = options.features || await openTestFeaturePicker({
+                title: `选择模型测试功能 · ${modelConfig.model_name}`,
+                singleModel: true,
+            });
             if (!features) return;
             setButtonLoading(trigger, true);
             try {
@@ -5232,9 +5288,12 @@
 
             if (action === "save-model" || action === "toggle-model") {
                 const enabledInput = modelTableBody.querySelector(`input[data-model-field="enabled"][data-provider-id="${providerId}"][data-model-id="${modelId}"]`);
+                const protocolTypeInput = modelTableBody.querySelector(`select[data-model-field="protocol_type"][data-provider-id="${providerId}"][data-model-id="${modelId}"]`);
                 const priceMultiplierInput = modelTableBody.querySelector(`input[data-model-field="price_multiplier"][data-provider-id="${providerId}"][data-model-id="${modelId}"]`);
+                const protocolType = normalizeProviderModelProtocolType(protocolTypeInput?.value);
                 const payload = {
                     enabled: action === "toggle-model" ? !modelConfig.enabled : enabledInput.checked,
+                    protocol_type: protocolType,
                     price_multiplier: Number(priceMultiplierInput.value || 1),
                 };
                 try {
@@ -5304,7 +5363,6 @@
             providerBaseUrlInput.value = provider?.base_url ?? "";
             providerApiKeyInput.value = provider?.api_key ?? "";
             providerTypeInput.value = provider?.provider_type ?? "openai_compatible";
-            providerProtocolTypeInput.value = normalizeProviderProtocolType(provider?.protocol_type);
             providerGroupNameInput.value = provider?.group_name ?? "";
             providerRegionTagInput.value = provider?.region_tag ?? "";
             providerPriorityInput.value = provider?.priority ?? 100;
@@ -6327,7 +6385,10 @@
 
         async function testModelHealth(modelName, trigger) {
             if (!modelName) return;
-            const features = await openTestFeaturePicker({ title: `选择模型测试功能 · ${modelName}` });
+            const features = await openTestFeaturePicker({
+                title: `选择模型测试功能 · ${modelName}`,
+                singleModel: true,
+            });
             if (!features) return;
             try {
                 setButtonLoading(trigger, true);
@@ -6770,6 +6831,7 @@
         document.getElementById("setting-route-exhausted-retry-max-wait-seconds").value = settings.route_exhausted_retry_max_wait_seconds ?? 600;
         document.getElementById("setting-route-exhausted-retry-infinite-enabled").checked = settings.route_exhausted_retry_infinite_enabled ?? false;
         document.getElementById("setting-global-max-request-tokens").value = settings.global_max_request_tokens ?? 0;
+        document.getElementById("setting-max-candidate-count").value = settings.max_candidate_count ?? 10;
         document.getElementById("setting-max-v1-request-body-bytes").value = settings.max_v1_request_body_bytes ?? 20971520;
         document.getElementById("setting-max-v1-chat-request-body-bytes").value = settings.max_v1_chat_request_body_bytes ?? 0;
         document.getElementById("setting-max-v1-responses-request-body-bytes").value = settings.max_v1_responses_request_body_bytes ?? 0;
@@ -6800,48 +6862,94 @@
         document.getElementById("setting-provider-max-active-requests").value = settings.provider_max_active_requests;
         document.getElementById("setting-provider-max-active-streams").value = settings.provider_max_active_streams;
         document.getElementById("setting-concurrency-lease-ttl-seconds").value = settings.concurrency_lease_ttl_seconds;
+        document.getElementById("setting-responses-chat-adapter-enabled").checked = settings.responses_chat_adapter_enabled ?? false;
+        document.getElementById("setting-responses-chat-adapter-storage-type").value = settings.responses_chat_adapter_storage_type ?? "memory";
+        document.getElementById("setting-responses-chat-adapter-ttl-seconds").value = settings.responses_chat_adapter_ttl_seconds ?? 86400;
+        document.getElementById("setting-responses-chat-adapter-model-map-json").value = settings.responses_chat_adapter_model_map_json ?? "";
+        document.getElementById("setting-responses-chat-adapter-max-tool-rounds").value = settings.responses_chat_adapter_max_tool_rounds ?? 10;
+        document.getElementById("setting-responses-chat-adapter-web-search-enabled").checked = settings.responses_chat_adapter_web_search_enabled ?? false;
+        document.getElementById("setting-responses-chat-adapter-search-proxy-url").value = settings.responses_chat_adapter_search_proxy_url ?? "";
+        document.getElementById("setting-responses-chat-adapter-upstream-base-url").value = settings.responses_chat_adapter_upstream_base_url ?? "";
+        document.getElementById("setting-responses-chat-adapter-upstream-api-key").value = settings.responses_chat_adapter_upstream_api_key ?? "";
+        document.getElementById("setting-responses-chat-adapter-upstreams-json").value = settings.responses_chat_adapter_upstreams_json ?? "";
+        document.getElementById("setting-responses-chat-adapter-context-window-tokens").value = settings.responses_chat_adapter_context_window_tokens ?? 128000;
+        document.getElementById("setting-responses-chat-adapter-snapshot-max-bytes").value = settings.responses_chat_adapter_snapshot_max_bytes ?? 1048576;
+        document.getElementById("setting-responses-chat-adapter-db-cleanup-interval-seconds").value = settings.responses_chat_adapter_db_cleanup_interval_seconds ?? 21600;
+
+        const readJsonSetting = (id, label) => {
+            const value = document.getElementById(id).value.trim();
+            if (!value) return "";
+            try {
+                JSON.parse(value);
+            } catch (_error) {
+                throw new Error(`${label} 格式不是有效 JSON`);
+            }
+            return value;
+        };
+        const readNaturalNumberSetting = (id, label, min, max) => {
+            const rawValue = document.getElementById(id).value.trim();
+            const value = Number(rawValue);
+            if (!rawValue || !Number.isInteger(value) || value < min || value > max) {
+                throw new Error(`${label}必须是 ${min}-${max} 的自然数`);
+            }
+            return value;
+        };
 
         form.addEventListener("submit", async (event) => {
             event.preventDefault();
-            const payload = {
-                route_mode: FIXED_ROUTE_MODE,
-                default_provider_id: providerSelect.value ? Number(providerSelect.value) : null,
-                manual_allow_fallback: manualAllowFallbackInput.checked,
-                global_timeout_ms: Number(document.getElementById("setting-global-timeout-ms").value),
-                global_max_retries: Number(document.getElementById("setting-global-max-retries").value),
-                route_exhausted_retry_max_wait_seconds: Math.min(600, Math.max(0, Number(document.getElementById("setting-route-exhausted-retry-max-wait-seconds").value || 600))),
-                route_exhausted_retry_infinite_enabled: document.getElementById("setting-route-exhausted-retry-infinite-enabled").checked,
-                global_max_request_tokens: Number(document.getElementById("setting-global-max-request-tokens").value),
-                max_v1_request_body_bytes: Number(document.getElementById("setting-max-v1-request-body-bytes").value),
-                max_v1_chat_request_body_bytes: Number(document.getElementById("setting-max-v1-chat-request-body-bytes").value),
-                max_v1_responses_request_body_bytes: Number(document.getElementById("setting-max-v1-responses-request-body-bytes").value),
-                long_output_stream_threshold_tokens: Number(document.getElementById("setting-long-output-stream-threshold-tokens").value),
-                max_non_stream_response_body_bytes: Number(document.getElementById("setting-max-non-stream-response-body-bytes").value),
-                stream_token_capture_max_bytes: Number(document.getElementById("setting-stream-token-capture-max-bytes").value),
-                max_logged_metadata_bytes: Number(document.getElementById("setting-max-logged-metadata-bytes").value),
-                circuit_breaker_threshold: Number(document.getElementById("setting-circuit-breaker-threshold").value),
-                auto_health_check: document.getElementById("setting-auto-health-check").checked,
-                health_check_interval_sec: Math.max(300, Number(healthCheckIntervalInput.value || 300)),
-                recovery_probe_interval_sec: Number(document.getElementById("setting-recovery-probe-interval-sec").value),
-                enable_token_logging: document.getElementById("setting-enable-token-logging").checked,
-                enable_payload_logging: document.getElementById("setting-enable-payload-logging").checked,
-                enable_stream_response_persist: document.getElementById("setting-enable-stream-response-persist").checked,
-                mask_sensitive_fields: document.getElementById("setting-mask-sensitive-fields").checked,
-                max_logged_body_bytes: Number(document.getElementById("setting-max-logged-body-bytes").value),
-                allow_public_user_registration: document.getElementById("setting-allow-public-user-registration").checked,
-                request_log_retention_days: Number(document.getElementById("setting-request-log-retention-days").value),
-                admin_audit_log_retention_days: Number(document.getElementById("setting-admin-audit-log-retention-days").value),
-                global_max_active_requests: Number(document.getElementById("setting-global-max-active-requests").value),
-                global_max_active_streams: Number(document.getElementById("setting-global-max-active-streams").value),
-                api_key_max_active_requests: Number(document.getElementById("setting-api-key-max-active-requests").value),
-                api_key_max_active_streams: Number(document.getElementById("setting-api-key-max-active-streams").value),
-                account_max_active_requests: Number(document.getElementById("setting-account-max-active-requests").value),
-                account_max_active_streams: Number(document.getElementById("setting-account-max-active-streams").value),
-                provider_max_active_requests: Number(document.getElementById("setting-provider-max-active-requests").value),
-                provider_max_active_streams: Number(document.getElementById("setting-provider-max-active-streams").value),
-                concurrency_lease_ttl_seconds: Number(document.getElementById("setting-concurrency-lease-ttl-seconds").value),
-            };
             try {
+                const payload = {
+                    route_mode: FIXED_ROUTE_MODE,
+                    default_provider_id: providerSelect.value ? Number(providerSelect.value) : null,
+                    manual_allow_fallback: manualAllowFallbackInput.checked,
+                    global_timeout_ms: Number(document.getElementById("setting-global-timeout-ms").value),
+                    global_max_retries: Number(document.getElementById("setting-global-max-retries").value),
+                    route_exhausted_retry_max_wait_seconds: Math.min(600, Math.max(0, Number(document.getElementById("setting-route-exhausted-retry-max-wait-seconds").value || 600))),
+                    route_exhausted_retry_infinite_enabled: document.getElementById("setting-route-exhausted-retry-infinite-enabled").checked,
+                    global_max_request_tokens: Number(document.getElementById("setting-global-max-request-tokens").value),
+                    max_candidate_count: readNaturalNumberSetting("setting-max-candidate-count", "最大候选数", 1, 500),
+                    max_v1_request_body_bytes: Number(document.getElementById("setting-max-v1-request-body-bytes").value),
+                    max_v1_chat_request_body_bytes: Number(document.getElementById("setting-max-v1-chat-request-body-bytes").value),
+                    max_v1_responses_request_body_bytes: Number(document.getElementById("setting-max-v1-responses-request-body-bytes").value),
+                    long_output_stream_threshold_tokens: Number(document.getElementById("setting-long-output-stream-threshold-tokens").value),
+                    max_non_stream_response_body_bytes: Number(document.getElementById("setting-max-non-stream-response-body-bytes").value),
+                    stream_token_capture_max_bytes: Number(document.getElementById("setting-stream-token-capture-max-bytes").value),
+                    max_logged_metadata_bytes: Number(document.getElementById("setting-max-logged-metadata-bytes").value),
+                    circuit_breaker_threshold: Number(document.getElementById("setting-circuit-breaker-threshold").value),
+                    auto_health_check: document.getElementById("setting-auto-health-check").checked,
+                    health_check_interval_sec: Math.max(300, Number(healthCheckIntervalInput.value || 300)),
+                    recovery_probe_interval_sec: Number(document.getElementById("setting-recovery-probe-interval-sec").value),
+                    enable_token_logging: document.getElementById("setting-enable-token-logging").checked,
+                    enable_payload_logging: document.getElementById("setting-enable-payload-logging").checked,
+                    enable_stream_response_persist: document.getElementById("setting-enable-stream-response-persist").checked,
+                    mask_sensitive_fields: document.getElementById("setting-mask-sensitive-fields").checked,
+                    max_logged_body_bytes: Number(document.getElementById("setting-max-logged-body-bytes").value),
+                    allow_public_user_registration: document.getElementById("setting-allow-public-user-registration").checked,
+                    request_log_retention_days: Number(document.getElementById("setting-request-log-retention-days").value),
+                    admin_audit_log_retention_days: Number(document.getElementById("setting-admin-audit-log-retention-days").value),
+                    global_max_active_requests: Number(document.getElementById("setting-global-max-active-requests").value),
+                    global_max_active_streams: Number(document.getElementById("setting-global-max-active-streams").value),
+                    api_key_max_active_requests: Number(document.getElementById("setting-api-key-max-active-requests").value),
+                    api_key_max_active_streams: Number(document.getElementById("setting-api-key-max-active-streams").value),
+                    account_max_active_requests: Number(document.getElementById("setting-account-max-active-requests").value),
+                    account_max_active_streams: Number(document.getElementById("setting-account-max-active-streams").value),
+                    provider_max_active_requests: Number(document.getElementById("setting-provider-max-active-requests").value),
+                    provider_max_active_streams: Number(document.getElementById("setting-provider-max-active-streams").value),
+                    concurrency_lease_ttl_seconds: Number(document.getElementById("setting-concurrency-lease-ttl-seconds").value),
+                    responses_chat_adapter_enabled: document.getElementById("setting-responses-chat-adapter-enabled").checked,
+                    responses_chat_adapter_storage_type: document.getElementById("setting-responses-chat-adapter-storage-type").value,
+                    responses_chat_adapter_ttl_seconds: Number(document.getElementById("setting-responses-chat-adapter-ttl-seconds").value || 0),
+                    responses_chat_adapter_model_map_json: readJsonSetting("setting-responses-chat-adapter-model-map-json", "模型映射 JSON"),
+                    responses_chat_adapter_max_tool_rounds: Number(document.getElementById("setting-responses-chat-adapter-max-tool-rounds").value || 10),
+                    responses_chat_adapter_web_search_enabled: document.getElementById("setting-responses-chat-adapter-web-search-enabled").checked,
+                    responses_chat_adapter_search_proxy_url: document.getElementById("setting-responses-chat-adapter-search-proxy-url").value.trim(),
+                    responses_chat_adapter_upstream_base_url: document.getElementById("setting-responses-chat-adapter-upstream-base-url").value.trim(),
+                    responses_chat_adapter_upstream_api_key: document.getElementById("setting-responses-chat-adapter-upstream-api-key").value.trim(),
+                    responses_chat_adapter_upstreams_json: readJsonSetting("setting-responses-chat-adapter-upstreams-json", "多上游 JSON"),
+                    responses_chat_adapter_context_window_tokens: Number(document.getElementById("setting-responses-chat-adapter-context-window-tokens").value || 0),
+                    responses_chat_adapter_snapshot_max_bytes: Number(document.getElementById("setting-responses-chat-adapter-snapshot-max-bytes").value || 0),
+                    responses_chat_adapter_db_cleanup_interval_seconds: Math.max(300, Number(document.getElementById("setting-responses-chat-adapter-db-cleanup-interval-seconds").value || 21600)),
+                };
                 setButtonLoading(submitBtn, true);
                 await api.put("/api/settings", payload);
                 showToast("设置已保存");

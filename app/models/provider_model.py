@@ -35,6 +35,7 @@ class ProviderModel(Base):
     supports_tools: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     supports_chat_completions: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     supports_responses: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    protocol_type: Mapped[str] = mapped_column(Text, nullable=False, default="responses")
     context_window_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)

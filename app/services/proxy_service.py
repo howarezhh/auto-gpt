@@ -1252,6 +1252,17 @@ class ProxyService:
             else:
                 route_message = "No available provider for requested model"
                 error_code = "model_not_available"
+            route_error_detail = ProxyService._build_route_unavailable_error_detail(
+                route_diagnostics,
+                message=route_message,
+                code=error_code,
+                endpoint_path=effective_public_endpoint_path,
+                requested_model=requested_model_name if isinstance(requested_model_name, str) else None,
+                selected_model=model_name if isinstance(model_name, str) else None,
+                requires_tools=require_tools,
+                requires_image_generation=require_image_generation,
+                model_mapping_unavailable=model_mapping_unavailable,
+            )
             mapped_retry = await ProxyService._retry_with_next_mapped_model_json(
                 db=db,
                 endpoint_path=endpoint_path,
@@ -1379,13 +1390,7 @@ class ProxyService:
             )
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail={
-                    "message": route_message,
-                    "code": error_code,
-                    "requires_tools": require_tools,
-                    "requires_image_generation": require_image_generation,
-                    "route_diagnostics": route_diagnostics,
-                },
+                detail=route_error_detail,
             )
 
         for candidate in candidates:
@@ -1911,6 +1916,17 @@ class ProxyService:
             else:
                 route_message = "No available provider for requested model"
                 error_code = "model_not_available"
+            route_error_detail = ProxyService._build_route_unavailable_error_detail(
+                route_diagnostics,
+                message=route_message,
+                code=error_code,
+                endpoint_path=effective_public_endpoint_path,
+                requested_model=requested_model_name if isinstance(requested_model_name, str) else None,
+                selected_model=model_name if isinstance(model_name, str) else None,
+                requires_tools=require_tools,
+                requires_image_generation=require_image_generation,
+                model_mapping_unavailable=model_mapping_unavailable,
+            )
             mapped_retry = await ProxyService._retry_with_next_mapped_model_stream(
                 db=db,
                 endpoint_path=endpoint_path,
@@ -2036,13 +2052,7 @@ class ProxyService:
             )
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail={
-                    "message": route_message,
-                    "code": error_code,
-                    "requires_tools": require_tools,
-                    "requires_image_generation": require_image_generation,
-                    "route_diagnostics": route_diagnostics,
-                },
+                detail=route_error_detail,
             )
 
         for candidate in candidates:
@@ -2552,6 +2562,7 @@ class ProxyService:
         *,
         started: float,
         setting: Any,
+        request_timeout_seconds: float | None = None,
     ) -> tuple[dict[str, Any], str | None, list[dict]]:
         headers = {"Authorization": f"Bearer {provider.api_key}"}
         prepared = ProxyService._prepare_upstream_request(provider, endpoint_path=endpoint_path, payload=payload)
@@ -2561,6 +2572,7 @@ class ProxyService:
             headers=headers,
             requested_payload=payload,
             setting=setting,
+            request_timeout_seconds=request_timeout_seconds,
         )
         return response_json, upstream_request_id, []
 
@@ -2572,16 +2584,28 @@ class ProxyService:
         headers: dict[str, str],
         requested_payload: dict[str, Any],
         setting: Any,
+        request_timeout_seconds: float | None = None,
     ) -> tuple[dict[str, Any], str | None]:
         if ProxyService._payload_needs_image_transport(prepared.request_payload):
-            return await ProxyService._forward_json_image_request(provider, prepared=prepared, headers=headers, setting=setting)
+            return await ProxyService._forward_json_image_request(
+                provider,
+                prepared=prepared,
+                headers=headers,
+                setting=setting,
+                request_timeout_seconds=request_timeout_seconds,
+            )
         client = ProxyService._select_upstream_client(payload=prepared.request_payload)
         response = await ProxyService._post_json_with_response_size_limit(
             client,
             f"{provider.base_url}{prepared.request_path}",
             headers=headers,
             json=prepared.request_payload,
-            timeout=ProxyService._build_httpx_timeout(provider, payload=prepared.request_payload, is_stream=False),
+            timeout=ProxyService._build_httpx_timeout(
+                provider,
+                payload=prepared.request_payload,
+                is_stream=False,
+                request_timeout_seconds=request_timeout_seconds,
+            ),
             max_response_bytes=int(getattr(setting, "max_non_stream_response_body_bytes", 20971520) or 0),
         )
         response.raise_for_status()
@@ -2607,6 +2631,7 @@ class ProxyService:
         prepared: PreparedUpstreamRequest,
         headers: dict[str, str],
         setting: Any,
+        request_timeout_seconds: float | None = None,
     ) -> tuple[dict[str, Any], str | None]:
         client = ProxyService._select_upstream_client(payload=prepared.request_payload)
         response = await ProxyService._post_json_with_response_size_limit(
@@ -2614,7 +2639,12 @@ class ProxyService:
             f"{provider.base_url}{prepared.request_path}",
             headers=headers,
             json=prepared.request_payload,
-            timeout=ProxyService._build_httpx_timeout(provider, payload=prepared.request_payload, is_stream=False),
+            timeout=ProxyService._build_httpx_timeout(
+                provider,
+                payload=prepared.request_payload,
+                is_stream=False,
+                request_timeout_seconds=request_timeout_seconds,
+            ),
             max_response_bytes=int(getattr(setting, "max_non_stream_response_body_bytes", 20971520) or 0),
         )
         response.raise_for_status()
@@ -2913,9 +2943,13 @@ class ProxyService:
         payload: dict[str, Any],
         is_stream: bool,
         stream_connect_timeout_seconds: int | None = None,
+        request_timeout_seconds: float | None = None,
     ) -> httpx.Timeout:
         settings = get_settings()
-        base_timeout_seconds = max(provider.timeout_ms / 1000, 1.0)
+        if request_timeout_seconds is not None:
+            base_timeout_seconds = max(float(request_timeout_seconds), 1.0)
+        else:
+            base_timeout_seconds = max(provider.timeout_ms / 1000, 1.0)
         connect_timeout: float | None = base_timeout_seconds
         read_timeout: float | None
         if is_stream:
@@ -2930,7 +2964,7 @@ class ProxyService:
                 else None
             )
             read_timeout = None
-        elif ProxyService._payload_needs_image_transport(payload):
+        elif request_timeout_seconds is None and ProxyService._payload_needs_image_transport(payload):
             read_timeout = max(base_timeout_seconds, 180.0)
         else:
             read_timeout = base_timeout_seconds
@@ -4204,17 +4238,169 @@ class ProxyService:
                 "No mapped target model supports image generation for this request",
                 "model_mapping_target_image_generation_not_available",
             )
-        if reason_counts.get("responses_not_supported") or reason_counts.get("responses_probe_unhealthy"):
+        if (
+            reason_counts.get("provider_responses_protocol_not_supported")
+            or reason_counts.get("responses_not_supported")
+            or reason_counts.get("responses_probe_unhealthy")
+        ):
             return (
                 "No mapped target model supports responses endpoint for this request",
                 "model_mapping_target_responses_not_available",
             )
-        if reason_counts.get("chat_not_supported") or reason_counts.get("chat_probe_unhealthy"):
+        if (
+            reason_counts.get("provider_chat_protocol_not_supported")
+            or reason_counts.get("chat_not_supported")
+            or reason_counts.get("chat_probe_unhealthy")
+        ):
             return (
                 "No mapped target model supports chat completions endpoint for this request",
                 "model_mapping_target_chat_not_available",
             )
         return ("No available mapped target model", "model_mapping_target_not_available")
+
+    @staticmethod
+    def _build_route_unavailable_error_detail(
+        route_diagnostics: dict[str, Any],
+        *,
+        message: str,
+        code: str,
+        endpoint_path: str,
+        requested_model: str | None,
+        selected_model: str | None,
+        requires_tools: bool,
+        requires_image_generation: bool,
+        model_mapping_unavailable: bool,
+    ) -> dict[str, Any]:
+        requested_endpoint = ProxyService._external_v1_endpoint(endpoint_path)
+        endpoint_detail = ProxyService._endpoint_unavailable_detail(route_diagnostics, requested_endpoint=requested_endpoint)
+        if endpoint_detail is not None:
+            message = str(endpoint_detail["message"])
+            code = str(endpoint_detail["code"])
+        detail: dict[str, Any] = {
+            "message": message,
+            "code": code,
+            "requested_model": requested_model,
+            "selected_model": selected_model,
+            "requested_endpoint": requested_endpoint,
+            "requires_tools": requires_tools,
+            "requires_image_generation": requires_image_generation,
+            "model_mapping_unavailable": model_mapping_unavailable,
+            "retryable": False,
+            "recoverable": False,
+            "route_diagnostics": route_diagnostics,
+        }
+        if endpoint_detail is not None:
+            detail.update(endpoint_detail)
+        return detail
+
+    @staticmethod
+    def _external_v1_endpoint(endpoint_path: str) -> str:
+        normalized = endpoint_path if endpoint_path.startswith("/") else f"/{endpoint_path}"
+        return normalized if normalized.startswith("/v1/") else f"/v1{normalized}"
+
+    @staticmethod
+    def _endpoint_unavailable_detail(
+        route_diagnostics: dict[str, Any],
+        *,
+        requested_endpoint: str,
+    ) -> dict[str, Any] | None:
+        reason_counts = route_diagnostics.get("reason_counts") or {}
+        if requested_endpoint == "/v1/responses":
+            reasons = {
+                "provider_responses_protocol_not_supported",
+                "responses_not_supported",
+                "responses_probe_unhealthy",
+            }
+            if not any(int(reason_counts.get(reason) or 0) > 0 for reason in reasons):
+                return None
+            return ProxyService._build_endpoint_capability_error_detail(
+                route_diagnostics,
+                code="responses_endpoint_not_supported",
+                requested_endpoint=requested_endpoint,
+                required_endpoint="/v1/responses",
+                required_protocol="responses",
+                missing_capability="native_responses_endpoint",
+                primary_reason_code=ProxyService._first_present_reason(reason_counts, reasons),
+            )
+        if requested_endpoint == "/v1/chat/completions":
+            reasons = {
+                "provider_chat_protocol_not_supported",
+                "chat_not_supported",
+                "chat_probe_unhealthy",
+            }
+            if not any(int(reason_counts.get(reason) or 0) > 0 for reason in reasons):
+                return None
+            return ProxyService._build_endpoint_capability_error_detail(
+                route_diagnostics,
+                code="chat_completions_endpoint_not_supported",
+                requested_endpoint=requested_endpoint,
+                required_endpoint="/v1/chat/completions",
+                required_protocol="chat_completions",
+                missing_capability="native_chat_completions_endpoint",
+                primary_reason_code=ProxyService._first_present_reason(reason_counts, reasons),
+            )
+        return None
+
+    @staticmethod
+    def _build_endpoint_capability_error_detail(
+        route_diagnostics: dict[str, Any],
+        *,
+        code: str,
+        requested_endpoint: str,
+        required_endpoint: str,
+        required_protocol: str,
+        missing_capability: str,
+        primary_reason_code: str | None,
+    ) -> dict[str, Any]:
+        reason_details = ProxyService._route_reason_details(route_diagnostics)
+        reason_summary = "；".join(
+            f"{item['label']} {item['count']}"
+            for item in reason_details[:5]
+        )
+        if not reason_summary:
+            reason_summary = str(route_diagnostics.get("summary") or "未记录到候选筛除原因")
+        return {
+            "message": (
+                f"请求入口 {requested_endpoint} 需要原生 {required_protocol} 端点，"
+                f"但当前候选中转站或模型不支持该端点。具体原因：{reason_summary}。"
+            ),
+            "code": code,
+            "requested_endpoint": requested_endpoint,
+            "required_endpoint": required_endpoint,
+            "required_protocol": required_protocol,
+            "missing_capability": missing_capability,
+            "primary_reason": {
+                "code": primary_reason_code,
+                "label": RouterService._diagnostic_reason_label(primary_reason_code) if primary_reason_code else None,
+            },
+            "reason_counts": route_diagnostics.get("reason_counts") or {},
+            "reason_details": reason_details,
+            "diagnostic_samples": route_diagnostics.get("samples") or [],
+        }
+
+    @staticmethod
+    def _route_reason_details(route_diagnostics: dict[str, Any]) -> list[dict[str, Any]]:
+        reason_counts = route_diagnostics.get("reason_counts") or {}
+        ordered = sorted(reason_counts.items(), key=lambda item: (-int(item[1] or 0), item[0]))
+        return [
+            {
+                "code": str(reason_code),
+                "label": RouterService._diagnostic_reason_label(str(reason_code)),
+                "count": int(count or 0),
+            }
+            for reason_code, count in ordered
+        ]
+
+    @staticmethod
+    def _first_present_reason(reason_counts: dict[str, Any], reasons: set[str]) -> str | None:
+        ordered = sorted(
+            ((reason, int(reason_counts.get(reason) or 0)) for reason in reasons),
+            key=lambda item: (-item[1], item[0]),
+        )
+        for reason, count in ordered:
+            if count > 0:
+                return reason
+        return None
 
     @staticmethod
     def _restore_mapped_response_model(

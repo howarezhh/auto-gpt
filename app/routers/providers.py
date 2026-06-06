@@ -30,6 +30,7 @@ from app.models.provider_model import ProviderModel
 from app.services.health_service import HealthService
 from app.services.provider_service import ProviderService
 from app.services.setting_service import SettingService
+from app.utils.test_features import normalize_test_features, phase_keys_from_test_features
 
 
 router = APIRouter(prefix="/api/providers", tags=["providers"])
@@ -44,28 +45,6 @@ def _health_stream_headers() -> dict[str, str]:
         "Cache-Control": "no-cache, no-transform",
         "X-Accel-Buffering": "no",
     }
-
-
-def _normalize_test_features(payload: dict | None = None) -> set[str]:
-    raw_features = (payload or {}).get("features")
-    if not isinstance(raw_features, list):
-        raw_features = ["text"]
-    allowed = {"text", "vision", "tools", "image_generation"}
-    features = {str(item).strip() for item in raw_features if str(item).strip() in allowed}
-    return features or {"text"}
-
-
-def _phase_keys_from_test_features(features: set[str]) -> frozenset[str]:
-    phase_keys: set[str] = set()
-    if "text" in features:
-        phase_keys.update({"text", "text_stream"})
-    if "vision" in features:
-        phase_keys.add("vision")
-    if "tools" in features:
-        phase_keys.add("tools")
-    if "image_generation" in features:
-        phase_keys.add("image_generation")
-    return frozenset(phase_keys or {"text", "text_stream"})
 
 
 async def _stream_health_check_events(
@@ -275,11 +254,11 @@ async def test_provider(provider_id: int, payload: dict | None = None, db: Sessi
         HealthService.claim_manual_check_slot(f"provider:{provider.id}", f"中转站 {provider.name}")
     except ValueError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
-    features = _normalize_test_features(payload)
+    features = normalize_test_features(payload)
     return await HealthService.check_provider(
         db,
         provider,
-        phase_keys=_phase_keys_from_test_features(features),
+        phase_keys=phase_keys_from_test_features(features),
         text_probe_max_tokens=HealthService.INTERACTIVE_TEXT_PROBE_MAX_TOKENS,
         capability_probe_max_tokens=HealthService.SCHEDULED_CAPABILITY_PROBE_MAX_TOKENS,
         interactive_mode=True,
@@ -296,7 +275,7 @@ async def test_provider_stream(provider_id: int, payload: dict | None = None, db
     except ValueError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
 
-    features = _normalize_test_features(payload)
+    features = normalize_test_features(payload)
 
     async def worker(progress_reporter: Callable[[dict], Awaitable[None]]) -> dict:
         stream_db = SessionLocal()
@@ -307,7 +286,7 @@ async def test_provider_stream(provider_id: int, payload: dict | None = None, db
             return await HealthService.check_provider(
                 stream_db,
                 stream_provider,
-                phase_keys=_phase_keys_from_test_features(features),
+                phase_keys=phase_keys_from_test_features(features),
                 text_probe_max_tokens=HealthService.INTERACTIVE_TEXT_PROBE_MAX_TOKENS,
                 capability_probe_max_tokens=HealthService.SCHEDULED_CAPABILITY_PROBE_MAX_TOKENS,
                 progress_callback=progress_reporter,
@@ -337,17 +316,19 @@ async def test_provider_model(
     if provider_model is None:
         raise HTTPException(status_code=404, detail="Provider model not found")
     body = payload or {}
-    features = _normalize_test_features(body)
+    features = normalize_test_features(body, single_model=True)
     return await HealthService.check_provider_model(
         db,
         provider,
         provider_model,
         stream_probe=body.get("stream_probe") is True,
         vision_probe=body.get("vision_probe") is True,
-        phase_keys=_phase_keys_from_test_features(features),
+        phase_keys=phase_keys_from_test_features(features),
         text_probe_max_tokens=HealthService.INTERACTIVE_TEXT_PROBE_MAX_TOKENS,
-        capability_probe_max_tokens=HealthService.SCHEDULED_CAPABILITY_PROBE_MAX_TOKENS,
+        capability_probe_max_tokens=HealthService.INTERACTIVE_CAPABILITY_PROBE_MAX_TOKENS,
         interactive_mode=True,
+        parallel_phases=True,
+        single_endpoint_mode=True,
     )
 
 
@@ -357,11 +338,11 @@ async def test_all_providers(payload: dict | None = None, db: Session = Depends(
         HealthService.claim_manual_check_slot("all", "全部中转站")
     except ValueError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
-    features = _normalize_test_features(payload)
+    features = normalize_test_features(payload)
     return await HealthService.check_all(
         db,
         selective=False,
-        phase_keys=_phase_keys_from_test_features(features),
+        phase_keys=phase_keys_from_test_features(features),
         text_probe_max_tokens=HealthService.INTERACTIVE_TEXT_PROBE_MAX_TOKENS,
         capability_probe_max_tokens=HealthService.SCHEDULED_CAPABILITY_PROBE_MAX_TOKENS,
         interactive_mode=True,
@@ -375,7 +356,7 @@ async def test_all_providers_stream(payload: dict | None = None, db: Session = D
     except ValueError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
 
-    features = _normalize_test_features(payload)
+    features = normalize_test_features(payload)
 
     async def worker(progress_reporter: Callable[[dict], Awaitable[None]]) -> list[dict]:
         stream_db = SessionLocal()
@@ -383,7 +364,7 @@ async def test_all_providers_stream(payload: dict | None = None, db: Session = D
             return await HealthService.check_all(
                 stream_db,
                 selective=False,
-                phase_keys=_phase_keys_from_test_features(features),
+                phase_keys=phase_keys_from_test_features(features),
                 text_probe_max_tokens=HealthService.INTERACTIVE_TEXT_PROBE_MAX_TOKENS,
                 capability_probe_max_tokens=HealthService.SCHEDULED_CAPABILITY_PROBE_MAX_TOKENS,
                 progress_callback=progress_reporter,

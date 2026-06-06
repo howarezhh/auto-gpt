@@ -22,31 +22,10 @@ from app.services.admin_audit_service import AdminAuditService
 from app.services.model_catalog_service import ModelCatalogService
 from app.services.model_mapping_service import ModelMappingService
 from app.services.user_auth_service import require_admin_api_user, require_session_api_user
+from app.utils.test_features import normalize_test_features, phase_keys_from_test_features
 
 
 router = APIRouter(tags=["models"])
-
-
-def _normalize_test_features(payload: dict | None = None) -> set[str]:
-    raw_features = (payload or {}).get("features")
-    if not isinstance(raw_features, list):
-        raw_features = ["text"]
-    allowed = {"text", "vision", "tools", "image_generation"}
-    features = {str(item).strip() for item in raw_features if str(item).strip() in allowed}
-    return features or {"text"}
-
-
-def _phase_keys_from_test_features(features: set[str]) -> frozenset[str]:
-    phase_keys: set[str] = set()
-    if "text" in features:
-        phase_keys.update({"text", "text_stream"})
-    if "vision" in features:
-        phase_keys.add("vision")
-    if "tools" in features:
-        phase_keys.add("tools")
-    if "image_generation" in features:
-        phase_keys.add("image_generation")
-    return frozenset(phase_keys or {"text", "text_stream"})
 
 
 @router.get("/api/models", dependencies=[Depends(require_admin_api_user)])
@@ -147,7 +126,7 @@ def batch_update_model_context_window(
 async def test_all_model_health(payload: dict | None = None, db: Session = Depends(get_db)) -> list[dict]:
     return await ModelCatalogService.test_all_model_health(
         db,
-        phase_keys=_phase_keys_from_test_features(_normalize_test_features(payload)),
+        phase_keys=phase_keys_from_test_features(normalize_test_features(payload)),
     )
 
 
@@ -157,7 +136,7 @@ async def test_model_health(model_name: str, payload: dict | None = None, db: Se
         return await ModelCatalogService.test_model_health(
             db,
             model_name,
-            phase_keys=_phase_keys_from_test_features(_normalize_test_features(payload)),
+            phase_keys=phase_keys_from_test_features(normalize_test_features(payload, single_model=True)),
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

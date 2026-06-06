@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import httpx
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
@@ -22,6 +22,7 @@ from app.services.api_key_service import ApiClientAuthContext
 from app.services.proxy_service import ProxyService
 from app.services.redis_service import RedisService
 from app.services.router_service import RoutePolicyContext
+from app.services.setting_service import SettingService
 from app.utils.json_utils import dumps_json, loads_json, safeJsonParse
 
 
@@ -53,6 +54,8 @@ class PreparedAdapterRequest:
     tool_round_count: int
     history_cache_hit: bool
     compacted_history: bool
+    truncation_mode: str | None
+    compact_threshold: int | None
 
 
 class ResponsesChatAdapterService:
@@ -62,7 +65,7 @@ class ResponsesChatAdapterService:
 
     @staticmethod
     def enabled() -> bool:
-        return bool(get_settings().responses_chat_adapter_enabled)
+        return bool(ResponsesChatAdapterService._setting_value("responses_chat_adapter_enabled", False))
 
     @staticmethod
     def sync_env_upstreams(db: Session) -> None:
@@ -84,7 +87,7 @@ class ResponsesChatAdapterService:
                     provider_type="openai_compatible",
                     protocol_type="chat_completions",
                     enabled=True,
-                    remark="由 Responses→Chat 兼容适配环境变量自动维护",
+                    remark="由 Responses→Chat 兼容适配设置自动维护",
                 )
                 db.add(provider)
                 db.flush()
@@ -283,7 +286,13 @@ class ResponsesChatAdapterService:
         adapter_payload = dict(payload)
         new_messages = await ResponsesChatAdapterService._maybe_apply_web_search_proxy(adapter_payload, new_messages)
         raw_messages = base_messages + new_messages
-        messages = ResponsesChatAdapterService._maybe_compact_history_once(raw_messages)
+        truncation_mode = str(adapter_payload.get("truncation") or "").strip().lower() or None
+        compact_threshold = ResponsesChatAdapterService._compact_threshold_from_context_management(adapter_payload.get("context_management"))
+        messages = ResponsesChatAdapterService._maybe_compact_history_once(
+            raw_messages,
+            compact_threshold=compact_threshold,
+            truncation_mode=truncation_mode,
+        )
         compacted_history = len(messages) != len(raw_messages) or (
             bool(messages)
             and bool(raw_messages)
@@ -291,13 +300,14 @@ class ResponsesChatAdapterService:
         )
         tool_round_count = int(previous_state.tool_round_count if previous_state else 0)
         if new_messages and all(item.get("role") == "tool" for item in new_messages):
-            if tool_round_count >= int(get_settings().responses_chat_adapter_max_tool_rounds or 10):
+            max_tool_rounds = int(ResponsesChatAdapterService._setting_value("responses_chat_adapter_max_tool_rounds", 10) or 10)
+            if tool_round_count >= max_tool_rounds:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail={
                         "message": "Responses→Chat adapter maximum tool-call rounds exceeded",
                         "code": "responses_chat_adapter_tool_round_limit_exceeded",
-                        "max_tool_rounds": int(get_settings().responses_chat_adapter_max_tool_rounds or 10),
+                        "max_tool_rounds": max_tool_rounds,
                     },
                 )
         chat_payload = ResponsesChatAdapterService._build_chat_payload(
@@ -318,6 +328,8 @@ class ResponsesChatAdapterService:
             tool_round_count=tool_round_count,
             history_cache_hit=history_cache_hit,
             compacted_history=compacted_history,
+            truncation_mode=truncation_mode,
+            compact_threshold=compact_threshold,
         )
 
     @staticmethod
@@ -333,6 +345,8 @@ class ResponsesChatAdapterService:
             "storage_type": ResponsesChatAdapterService._storage_type(),
             "cache_prefix_policy": "immutable_history_prefix",
             "compacted_history": prepared.compacted_history,
+            "truncation_mode": prepared.truncation_mode,
+            "compact_threshold": prepared.compact_threshold,
         }
 
     @staticmethod
@@ -363,6 +377,8 @@ class ResponsesChatAdapterService:
                 tool_round_count=tool_round_count,
             ),
             previous_response_id=prepared.previous_response_id,
+            truncation_mode=prepared.truncation_mode,
+            compact_threshold=prepared.compact_threshold,
         )
 
     @staticmethod
@@ -483,7 +499,7 @@ class ResponsesChatAdapterService:
                         "code": f"responses_chat_adapter_{tool_type}_unsupported",
                     },
                 )
-            if tool_type in {"web_search", "web_search_preview"} and not get_settings().responses_chat_adapter_web_search_enabled:
+            if tool_type in {"web_search", "web_search_preview"} and not ResponsesChatAdapterService._setting_value("responses_chat_adapter_web_search_enabled", False):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail={
@@ -510,7 +526,7 @@ class ResponsesChatAdapterService:
         ]
         if not payload["tools"]:
             payload.pop("tools", None)
-        settings = get_settings()
+        settings = ResponsesChatAdapterService._adapter_settings()
         if not settings.responses_chat_adapter_web_search_enabled:
             return messages
         proxy_url = settings.responses_chat_adapter_search_proxy_url.strip()
@@ -621,15 +637,27 @@ class ResponsesChatAdapterService:
         return injected
 
     @staticmethod
-    def _maybe_compact_history_once(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        context_window = int(get_settings().responses_chat_adapter_context_window_tokens or 0)
-        if context_window <= 0:
+    def _maybe_compact_history_once(
+        messages: list[dict[str, Any]],
+        *,
+        compact_threshold: int | None = None,
+        truncation_mode: str | None = None,
+    ) -> list[dict[str, Any]]:
+        context_window = int(ResponsesChatAdapterService._setting_value("responses_chat_adapter_context_window_tokens", 0) or 0)
+        threshold = compact_threshold if isinstance(compact_threshold, int) and compact_threshold > 0 else context_window
+        if threshold <= 0:
             return messages
         if not messages or ResponsesChatAdapterService._has_adapter_summary_system(messages):
             return messages
-        estimated_tokens = ResponsesChatAdapterService._estimate_messages_tokens(messages)
-        if estimated_tokens < int(context_window * 0.8):
+        if truncation_mode == "disabled" and compact_threshold is None:
             return messages
+        estimated_tokens = ResponsesChatAdapterService._estimate_messages_tokens(messages)
+        if estimated_tokens < threshold:
+            return messages
+        return ResponsesChatAdapterService._compact_messages_for_snapshot(messages)
+
+    @staticmethod
+    def _compact_messages_for_snapshot(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         system_messages = [item for item in messages if item.get("role") == "system"]
         first_system = system_messages[0] if system_messages else None
         non_system = [item for item in messages if item.get("role") != "system"]
@@ -637,17 +665,55 @@ class ResponsesChatAdapterService:
             return messages
         preserved_tail = non_system[-4:]
         summarized_prefix = non_system[:-4]
+        preserved_user_prefix = [
+            ResponsesChatAdapterService._copy_message(item)
+            for item in summarized_prefix
+            if item.get("role") == "user"
+        ]
+        summarized_non_user_prefix = [
+            item
+            for item in summarized_prefix
+            if item.get("role") != "user"
+        ]
         base_system_text = str(first_system.get("content") or "") if first_system else ""
-        summary_text = ResponsesChatAdapterService._deterministic_summary(summarized_prefix)
+        summary_text = ResponsesChatAdapterService._deterministic_summary(summarized_non_user_prefix)
         compacted_system = {
             "role": "system",
             "content": (
                 f"{base_system_text}\n\n"
                 "[Responses→Chat adapter immutable summary]\n"
+                "Official Responses compaction produces opaque encrypted compaction items. "
+                "This Chat-only compatibility layer preserves older user messages where possible "
+                "and summarizes older assistant/tool/reasoning context deterministically.\n"
                 f"{summary_text}"
             ).strip(),
         }
-        return [compacted_system] + preserved_tail
+        return [compacted_system] + preserved_user_prefix + preserved_tail
+
+    @staticmethod
+    def _compact_threshold_from_context_management(value: Any) -> int | None:
+        if isinstance(value, list):
+            for item in value:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("type") or "").strip().lower() != "compaction":
+                    continue
+                threshold = item.get("compact_threshold")
+                if isinstance(threshold, int) and threshold > 0:
+                    return threshold
+                if isinstance(threshold, str) and threshold.isdigit():
+                    parsed = int(threshold)
+                    if parsed > 0:
+                        return parsed
+        elif isinstance(value, dict):
+            threshold = value.get("compact_threshold")
+            if isinstance(threshold, int) and threshold > 0:
+                return threshold
+            if isinstance(threshold, str) and threshold.isdigit():
+                parsed = int(threshold)
+                if parsed > 0:
+                    return parsed
+        return None
 
     @staticmethod
     def _has_adapter_summary_system(messages: list[dict[str, Any]]) -> bool:
@@ -691,9 +757,20 @@ class ResponsesChatAdapterService:
         return ResponsesChatAdapterService._load_state_memory(response_id)
 
     @staticmethod
-    async def save_state(state: AdapterConversationState, *, previous_response_id: str | None) -> None:
+    async def save_state(
+        state: AdapterConversationState,
+        *,
+        previous_response_id: str | None,
+        truncation_mode: str | None = None,
+        compact_threshold: int | None = None,
+    ) -> None:
         storage_type = ResponsesChatAdapterService._storage_type()
         payload = ResponsesChatAdapterService._state_to_payload(state, previous_response_id=previous_response_id)
+        payload = ResponsesChatAdapterService._fit_payload_to_snapshot_limit(
+            payload,
+            compact_threshold=compact_threshold,
+            truncation_mode=truncation_mode,
+        )
         ttl_seconds = ResponsesChatAdapterService._ttl_seconds()
         if storage_type == "redis":
             await ResponsesChatAdapterService._save_state_redis(str(state.response_id), payload, ttl_seconds)
@@ -720,6 +797,68 @@ class ResponsesChatAdapterService:
             "updated_at": now,
             "expires_at": now + ttl_seconds if ttl_seconds > 0 else None,
         }
+
+    @staticmethod
+    def _fit_payload_to_snapshot_limit(
+        payload: dict[str, Any],
+        *,
+        compact_threshold: int | None = None,
+        truncation_mode: str | None = None,
+    ) -> dict[str, Any]:
+        limit = ResponsesChatAdapterService._snapshot_max_bytes()
+        if limit <= 0:
+            return payload
+        encoded = dumps_json(payload).encode("utf-8")
+        if len(encoded) <= limit:
+            return payload
+        if truncation_mode == "disabled" and compact_threshold is None:
+            ResponsesChatAdapterService._raise_snapshot_too_large(len(encoded), limit)
+        messages = payload.get("messages")
+        if not isinstance(messages, list):
+            ResponsesChatAdapterService._raise_snapshot_too_large(len(encoded), limit)
+        compacted_payload = dict(payload)
+        compacted_payload["messages"] = ResponsesChatAdapterService._compact_messages_for_snapshot(
+            [ResponsesChatAdapterService._copy_message(item) for item in messages if isinstance(item, dict)]
+        )
+        compacted_payload["snapshot_compacted"] = True
+        compacted_payload["snapshot_original_bytes"] = len(encoded)
+        compacted_encoded = dumps_json(compacted_payload).encode("utf-8")
+        if len(compacted_encoded) <= limit:
+            return compacted_payload
+        messages_copy = [ResponsesChatAdapterService._copy_message(item) for item in compacted_payload.get("messages") or [] if isinstance(item, dict)]
+        while messages_copy:
+            compacted_payload["messages"] = messages_copy
+            final_encoded = dumps_json(compacted_payload).encode("utf-8")
+            if len(final_encoded) <= limit:
+                return compacted_payload
+            if len(messages_copy) <= 1:
+                break
+            messages_copy = ResponsesChatAdapterService._drop_oldest_message(messages_copy)
+        final_encoded = dumps_json(compacted_payload).encode("utf-8")
+        ResponsesChatAdapterService._raise_snapshot_too_large(len(final_encoded), limit)
+        return compacted_payload
+
+    @staticmethod
+    def _drop_oldest_message(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not messages:
+            return []
+        if messages[0].get("role") == "system":
+            if len(messages) <= 1:
+                return messages
+            return [messages[0]] + messages[2:]
+        return messages[1:]
+
+    @staticmethod
+    def _raise_snapshot_too_large(actual_bytes: int, limit: int) -> None:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail={
+                "message": "Responses→Chat adapter session snapshot exceeds configured byte limit",
+                "code": "responses_chat_adapter_snapshot_too_large",
+                "actual_bytes": actual_bytes,
+                "max_bytes": limit,
+            },
+        )
 
     @staticmethod
     def _payload_to_state(payload: dict[str, Any] | None) -> AdapterConversationState | None:
@@ -823,6 +962,17 @@ class ResponsesChatAdapterService:
             db.close()
 
     @staticmethod
+    def cleanup_expired_database_sessions(db: Session) -> int:
+        result = db.execute(
+            delete(ResponsesChatAdapterSession).where(
+                ResponsesChatAdapterSession.expires_at.is_not(None),
+                ResponsesChatAdapterSession.expires_at < datetime.utcnow(),
+            )
+        )
+        db.commit()
+        return int(result.rowcount or 0)
+
+    @staticmethod
     def _extract_completed_response_from_sse_chunk(chunk: bytes) -> dict[str, Any] | None:
         for event in chunk.decode("utf-8", errors="ignore").split("\n\n"):
             for line in event.splitlines():
@@ -862,7 +1012,7 @@ class ResponsesChatAdapterService:
         for spec in upstream_specs:
             if spec["requested_model"] == model_name:
                 return spec["upstream_model"]
-        mapping = safeJsonParse(get_settings().responses_chat_adapter_model_map_json or "")
+        mapping = safeJsonParse(ResponsesChatAdapterService._setting_value("responses_chat_adapter_model_map_json", "") or "")
         if isinstance(mapping, dict):
             mapped = mapping.get(model_name)
             if isinstance(mapped, str) and mapped.strip():
@@ -871,7 +1021,7 @@ class ResponsesChatAdapterService:
 
     @staticmethod
     def _env_upstream_specs() -> list[dict[str, str]]:
-        settings = get_settings()
+        settings = ResponsesChatAdapterService._adapter_settings()
         specs: list[dict[str, str]] = []
         raw = safeJsonParse(settings.responses_chat_adapter_upstreams_json or "")
         if isinstance(raw, dict):
@@ -921,12 +1071,30 @@ class ResponsesChatAdapterService:
 
     @staticmethod
     def _storage_type() -> str:
-        value = get_settings().responses_chat_adapter_storage_type.strip().lower()
+        value = str(ResponsesChatAdapterService._setting_value("responses_chat_adapter_storage_type", "memory") or "memory").strip().lower()
         return value or "memory"
 
     @staticmethod
     def _ttl_seconds() -> int:
-        return max(0, int(get_settings().responses_chat_adapter_ttl_seconds or 0))
+        return max(0, int(ResponsesChatAdapterService._setting_value("responses_chat_adapter_ttl_seconds", 0) or 0))
+
+    @staticmethod
+    def _snapshot_max_bytes() -> int:
+        return max(0, int(ResponsesChatAdapterService._setting_value("responses_chat_adapter_snapshot_max_bytes", 1048576) or 0))
+
+    @staticmethod
+    def _adapter_settings() -> Any:
+        try:
+            return SettingService.get_cached()
+        except Exception:
+            return get_settings()
+
+    @staticmethod
+    def _setting_value(name: str, default: Any = None) -> Any:
+        settings = ResponsesChatAdapterService._adapter_settings()
+        if hasattr(settings, name):
+            return getattr(settings, name)
+        return getattr(get_settings(), name, default)
 
     @staticmethod
     def _redis_key(response_id: str) -> str:

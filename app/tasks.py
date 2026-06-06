@@ -11,6 +11,7 @@ from app.scheduler import scheduler
 from app.services.data_retention_service import DataRetentionService
 from app.services.health_service import HealthService
 from app.services.redis_service import RedisService
+from app.services.responses_chat_adapter_service import ResponsesChatAdapterService
 from app.services.setting_service import SettingService
 from app.services.token_usage_service import TokenUsageService
 
@@ -182,10 +183,24 @@ def scheduled_data_retention_cleanup() -> None:
         db.close()
 
 
+@distributed_job_lock("responses_chat_adapter_session_cleanup", ttl_seconds=60 * 60)
+def scheduled_responses_chat_adapter_session_cleanup() -> None:
+    db = SessionLocal()
+    try:
+        setting = SettingService.get_or_create(db)
+        if str(setting.responses_chat_adapter_storage_type or "").strip().lower() not in {"database", "postgresql", "postgres"}:
+            return
+        ResponsesChatAdapterService.cleanup_expired_database_sessions(db)
+    finally:
+        db.close()
+
+
 def configure_scheduler() -> None:
     db = SessionLocal()
     try:
-        interval = max(300, SettingService.get_or_create(db).health_check_interval_sec)
+        setting = SettingService.get_or_create(db)
+        interval = max(300, setting.health_check_interval_sec)
+        adapter_cleanup_interval = max(300, setting.responses_chat_adapter_db_cleanup_interval_seconds)
     finally:
         db.close()
     try:
@@ -225,5 +240,12 @@ def configure_scheduler() -> None:
         "interval",
         hours=6,
         id="data_retention_cleanup",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        scheduled_responses_chat_adapter_session_cleanup,
+        "interval",
+        seconds=adapter_cleanup_interval,
+        id="responses_chat_adapter_session_cleanup",
         replace_existing=True,
     )

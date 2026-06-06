@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -23,6 +24,7 @@ from app.services.responses_chat_adapter_service import (
     AdapterConversationState,
     ResponsesChatAdapterService,
 )
+from app.services.setting_service import SettingService
 
 
 def _assert(condition: bool, message: str) -> None:
@@ -299,6 +301,81 @@ async def _storage_backends_should_roundtrip() -> None:
     settings.responses_chat_adapter_storage_type = "memory"
 
 
+async def _snapshot_limit_should_reject_oversized_state() -> None:
+    settings = get_settings()
+    settings.responses_chat_adapter_storage_type = "memory"
+    settings.responses_chat_adapter_snapshot_max_bytes = 400
+    try:
+        await ResponsesChatAdapterService.save_state(
+            AdapterConversationState(
+                response_id="resp_snapshot_limit",
+                requested_model="gpt-4o",
+                upstream_model="deepseek-chat",
+                instructions="系统",
+                messages=[{"role": "user", "content": "x" * 2000}],
+                pending_tool_call_ids=[],
+                tool_round_count=0,
+            ),
+            previous_response_id=None,
+            truncation_mode="disabled",
+        )
+    except HTTPException as exc:
+        _assert(exc.status_code == 413, f"snapshot limit should reject oversized payload: {exc.status_code}")
+        _assert(exc.detail["code"] == "responses_chat_adapter_snapshot_too_large", f"unexpected error detail: {exc.detail}")
+    else:
+        raise AssertionError("oversized session snapshot should be rejected")
+    finally:
+        settings.responses_chat_adapter_snapshot_max_bytes = 1048576
+
+
+async def _context_management_compaction_should_override_disabled_truncation() -> None:
+    settings = get_settings()
+    settings.responses_chat_adapter_context_window_tokens = 128000
+    prepared = await ResponsesChatAdapterService.prepare_request(
+        {
+            "model": "gpt-4o",
+            "truncation": "disabled",
+            "context_management": [{"type": "compaction", "compact_threshold": 10}],
+            "input": [
+                {"role": "user", "content": "必须保留的旧用户问题"},
+                {"role": "assistant", "content": "旧 assistant 回复" * 20},
+                {"role": "tool", "tool_call_id": "call_old", "content": "旧工具结果" * 20},
+                {"role": "user", "content": "新的用户问题"},
+                {"role": "assistant", "content": "新的 assistant 回复"},
+                {"role": "user", "content": "最终问题"},
+            ],
+        }
+    )
+    messages = prepared.chat_payload["messages"]
+    _assert(prepared.compact_threshold == 10, f"compact threshold should be parsed: {prepared}")
+    _assert(prepared.compacted_history is True, f"explicit compaction should run: {messages}")
+    _assert(messages[0]["role"] == "system", f"compaction should add system summary: {messages}")
+    _assert("opaque encrypted compaction items" in messages[0]["content"], f"compatibility note missing: {messages[0]}")
+    _assert(any(item.get("content") == "必须保留的旧用户问题" for item in messages), f"user messages should be preserved where possible: {messages}")
+
+
+def _database_cleanup_should_delete_expired_sessions() -> None:
+    settings = get_settings()
+    settings.responses_chat_adapter_storage_type = "database"
+    Base.metadata.tables["responses_chat_adapter_sessions"].create(bind=engine, checkfirst=True)
+    db = SessionLocal()
+    try:
+        db.merge(
+            ResponsesChatAdapterSession(
+                response_id="resp_cleanup_test",
+                messages_json="[]",
+                expires_at=datetime.utcnow() - timedelta(seconds=5),
+            )
+        )
+        db.commit()
+        cleaned = ResponsesChatAdapterService.cleanup_expired_database_sessions(db)
+        _assert(cleaned >= 1, f"expired database sessions should be removed, cleaned={cleaned}")
+        still = db.get(ResponsesChatAdapterSession, "resp_cleanup_test")
+        _assert(still is None, "expired session should not remain in database")
+    finally:
+        db.close()
+
+
 def _http_responses_endpoint_should_switch_by_flag() -> None:
     settings = get_settings()
     app.dependency_overrides[require_api_client_auth] = _fake_auth_context
@@ -332,6 +409,7 @@ def _http_responses_endpoint_should_switch_by_flag() -> None:
         with (
             patch("app.routers.proxy._acquire_request_concurrency", side_effect=fake_acquire),
             patch("app.routers.proxy._release_request_concurrency", side_effect=fake_release),
+            patch.object(SettingService, "get_cached", return_value=get_settings()),
             patch.object(ResponsesChatAdapterService, "forward_json_response", side_effect=fake_adapter_forward_json_response),
             patch.object(ProxyService, "forward_json_request", side_effect=fake_native_forward_json_request),
         ):
@@ -402,6 +480,7 @@ def _http_responses_endpoint_should_run_real_adapter_json_path() -> None:
         with (
             patch("app.routers.proxy._acquire_request_concurrency", side_effect=fake_acquire),
             patch("app.routers.proxy._release_request_concurrency", side_effect=fake_release),
+            patch.object(SettingService, "get_cached", return_value=get_settings()),
             patch.object(ProxyService, "forward_json_request", side_effect=fake_forward_json_request),
         ):
             client = TestClient(app)
@@ -475,19 +554,49 @@ def _env_upstream_specs_should_drive_model_mapping() -> None:
     settings.responses_chat_adapter_model_map_json = '{"gpt-4o":"deepseek-chat"}'
 
 
+def _settings_schema_should_accept_and_validate_adapter_fields() -> None:
+    from app.schemas.setting import SettingUpdate
+
+    payload = SettingUpdate(
+        route_mode="failover",
+        responses_chat_adapter_enabled=True,
+        responses_chat_adapter_storage_type="database",
+        responses_chat_adapter_model_map_json='{"gpt-4o":"deepseek-chat"}',
+        responses_chat_adapter_upstreams_json='{"gpt-4o":{"upstream_model":"deepseek-chat","base_url":"https://api.deepseek.example/v1","api_key":"sk-test"}}',
+    )
+    _assert(payload.responses_chat_adapter_enabled is True, "settings schema should include adapter enabled flag")
+    _assert(payload.responses_chat_adapter_storage_type == "database", "settings schema should include adapter storage type")
+    SettingService._validate_responses_chat_adapter_configuration(payload)
+
+    invalid_payload = SettingUpdate(
+        route_mode="failover",
+        responses_chat_adapter_model_map_json="[",
+    )
+    try:
+        SettingService._validate_responses_chat_adapter_configuration(invalid_payload)
+    except ValueError:
+        return
+    raise AssertionError("invalid adapter JSON should be rejected by settings service")
+
+
 def main() -> None:
-    asyncio.run(_prepare_and_state_roundtrip_should_preserve_prefix())
-    _builtin_tools_should_fail_closed()
-    asyncio.run(_web_search_enabled_requires_proxy_url())
-    _upstream_marker_should_be_stripped()
-    _chat_stream_should_emit_responses_events()
-    asyncio.run(_history_should_compact_once_at_context_threshold())
-    asyncio.run(_storage_backends_should_roundtrip())
-    _http_responses_endpoint_should_switch_by_flag()
-    _http_responses_endpoint_should_run_real_adapter_json_path()
-    asyncio.run(_stream_wrapper_should_emit_failed_and_done_without_reraising())
-    asyncio.run(_prepare_latency_should_stay_under_budget())
-    _env_upstream_specs_should_drive_model_mapping()
+    with patch.object(ResponsesChatAdapterService, "_adapter_settings", side_effect=get_settings):
+        asyncio.run(_prepare_and_state_roundtrip_should_preserve_prefix())
+        _builtin_tools_should_fail_closed()
+        asyncio.run(_web_search_enabled_requires_proxy_url())
+        _upstream_marker_should_be_stripped()
+        _chat_stream_should_emit_responses_events()
+        asyncio.run(_history_should_compact_once_at_context_threshold())
+        asyncio.run(_storage_backends_should_roundtrip())
+        asyncio.run(_snapshot_limit_should_reject_oversized_state())
+        asyncio.run(_context_management_compaction_should_override_disabled_truncation())
+        _database_cleanup_should_delete_expired_sessions()
+        _http_responses_endpoint_should_switch_by_flag()
+        _http_responses_endpoint_should_run_real_adapter_json_path()
+        asyncio.run(_stream_wrapper_should_emit_failed_and_done_without_reraising())
+        asyncio.run(_prepare_latency_should_stay_under_budget())
+        _env_upstream_specs_should_drive_model_mapping()
+        _settings_schema_should_accept_and_validate_adapter_fields()
     print("stage31 responses chat adapter regression check passed")
 
 

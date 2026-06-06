@@ -34,10 +34,11 @@ class ModelCatalogService:
     """负责模型目录管理、provider 绑定和目录同步。"""
 
     MODEL_HEALTH_MAX_PARALLEL_MODELS = 12
+    INTERACTIVE_MODEL_TEST_TOTAL_TIMEOUT_SECONDS = 10.0
 
     @staticmethod
     def _backfill_default_protocol_support(db: Session) -> bool:
-        """模型级 Chat/Responses 协议未探测时默认均可用；实际失败由健康探针收紧。"""
+        """模型目录级 Chat/Responses 协议未探测时默认均可用；挂载级协议由管理员配置。"""
         changed = False
         catalog_result = db.execute(
             update(ModelCatalog)
@@ -53,20 +54,6 @@ class ModelCatalogService:
             )
         )
         changed = changed or bool(getattr(catalog_result, "rowcount", 0) or 0)
-        provider_model_result = db.execute(
-            update(ProviderModel)
-            .where(
-                or_(
-                    ProviderModel.supports_chat_completions.is_(False),
-                    ProviderModel.supports_responses.is_(False),
-                )
-            )
-            .values(
-                supports_chat_completions=True,
-                supports_responses=True,
-            )
-        )
-        changed = changed or bool(getattr(provider_model_result, "rowcount", 0) or 0)
         return changed
 
     @staticmethod
@@ -421,12 +408,6 @@ class ModelCatalogService:
                     changed = True
                 if item.supports_tools != catalog.supports_tools:
                     item.supports_tools = catalog.supports_tools
-                    changed = True
-                if item.supports_chat_completions != catalog.supports_chat_completions:
-                    item.supports_chat_completions = catalog.supports_chat_completions
-                    changed = True
-                if item.supports_responses != catalog.supports_responses:
-                    item.supports_responses = catalog.supports_responses
                     changed = True
                 for field in ("context_window_tokens", "max_input_tokens", "max_output_tokens"):
                     if getattr(item, field) != getattr(catalog, field):
@@ -783,8 +764,6 @@ class ModelCatalogService:
             provider_model.supports_stream = catalog.supports_stream
             provider_model.supports_vision = catalog.supports_vision
             provider_model.supports_tools = catalog.supports_tools
-            provider_model.supports_chat_completions = catalog.supports_chat_completions
-            provider_model.supports_responses = catalog.supports_responses
             provider_model.context_window_tokens = catalog.context_window_tokens
             provider_model.max_input_tokens = catalog.max_input_tokens
             provider_model.max_output_tokens = catalog.max_output_tokens
@@ -904,7 +883,9 @@ class ModelCatalogService:
         targets = ModelCatalogService._collect_catalog_test_targets(catalog, providers)
         if not targets:
             return {"catalog": catalog, "channel_results": []}
-        channel_semaphore = asyncio.Semaphore(max(1, int(HealthService.MAX_PARALLEL_MODEL_PROBES)))
+        channel_semaphore = asyncio.Semaphore(
+            max(1, min(len(targets), int(HealthService.MAX_PARALLEL_MODEL_PROBES) * 4))
+        )
 
         async def run_channel(provider: Provider, provider_model: ProviderModel) -> tuple[Provider, ProviderModel, dict[str, Any]]:
             async with channel_semaphore:
@@ -922,14 +903,86 @@ class ModelCatalogService:
                             if quick_text_only
                             else None
                         ),
-                        capability_probe_max_tokens=HealthService.SCHEDULED_CAPABILITY_PROBE_MAX_TOKENS,
+                        capability_probe_max_tokens=HealthService.INTERACTIVE_CAPABILITY_PROBE_MAX_TOKENS,
                         interactive_mode=True,
+                        parallel_phases=True,
+                        single_endpoint_mode=True,
                     )
                 )[0]
                 return provider, provider_model, result
 
-        channel_results = await asyncio.gather(*(run_channel(provider, provider_model) for provider, provider_model in targets))
+        tasks = [
+            asyncio.create_task(run_channel(provider, provider_model))
+            for provider, provider_model in targets
+        ]
+        done, pending = await asyncio.wait(
+            tasks,
+            timeout=ModelCatalogService.INTERACTIVE_MODEL_TEST_TOTAL_TIMEOUT_SECONDS,
+        )
+        channel_results: list[tuple[Provider, ProviderModel, dict[str, Any]]] = []
+        task_target_map = {
+            task: target
+            for task, target in zip(tasks, targets, strict=False)
+        }
+        for task in done:
+            try:
+                channel_results.append(task.result())
+            except Exception as exc:
+                provider, provider_model = task_target_map[task]
+                channel_results.append(
+                    (
+                        provider,
+                        provider_model,
+                        ModelCatalogService._build_channel_timeout_result(
+                            provider_model,
+                            message=f"即时测试执行异常：{exc}",
+                        ),
+                    )
+                )
+        for task in pending:
+            task.cancel()
+            provider, provider_model = task_target_map[task]
+            channel_results.append(
+                (
+                    provider,
+                    provider_model,
+                    ModelCatalogService._build_channel_timeout_result(
+                        provider_model,
+                        message=f"单模型测试总耗时超过 {int(ModelCatalogService.INTERACTIVE_MODEL_TEST_TOTAL_TIMEOUT_SECONDS)} 秒，已停止等待该渠道结果",
+                    ),
+                )
+            )
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         return {"catalog": catalog, "channel_results": channel_results}
+
+    @staticmethod
+    def _build_channel_timeout_result(provider_model: ProviderModel, *, message: str) -> dict[str, Any]:
+        return {
+            "model_name": provider_model.model_name,
+            "success": False,
+            "provider_success": False,
+            "health_status": "unhealthy",
+            "latency_ms": int(ModelCatalogService.INTERACTIVE_MODEL_TEST_TOTAL_TIMEOUT_SECONDS * 1000),
+            "status_code": 504,
+            "message": message,
+            "endpoint_results": [
+                {
+                    "endpoint_path": None,
+                    "endpoint_label": "即时测试",
+                    "success": False,
+                    "native_success": False,
+                    "adapted_success": False,
+                    "support_mode": "timeout",
+                    "support_label": "即时测试超时",
+                    "latency_ms": int(ModelCatalogService.INTERACTIVE_MODEL_TEST_TOTAL_TIMEOUT_SECONDS * 1000),
+                    "status_code": 504,
+                    "message": message,
+                    "trace": [],
+                    "retryable": True,
+                }
+            ],
+        }
 
     @staticmethod
     def _finalize_catalog_health_test(
@@ -1020,8 +1073,6 @@ class ModelCatalogService:
             provider_model.supports_stream = catalog.supports_stream
             provider_model.supports_vision = catalog.supports_vision
             provider_model.supports_tools = catalog.supports_tools
-            provider_model.supports_chat_completions = catalog.supports_chat_completions
-            provider_model.supports_responses = catalog.supports_responses
             provider_model.context_window_tokens = catalog.context_window_tokens
             provider_model.max_input_tokens = catalog.max_input_tokens
             provider_model.max_output_tokens = catalog.max_output_tokens

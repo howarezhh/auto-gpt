@@ -260,10 +260,6 @@ class RouterService:
                 continue
             if allowed_provider_ids is not None and provider.id not in allowed_provider_ids:
                 continue
-            if require_chat_completions and not ProviderService.provider_supports_chat_completions(provider):
-                continue
-            if require_responses and not ProviderService.provider_supports_responses(provider):
-                continue
             for provider_model in provider.provider_models:
                 if not provider_model.enabled:
                     continue
@@ -272,6 +268,10 @@ class RouterService:
                 if model_name and provider_model.model_name != model_name:
                     continue
                 if require_stream and not provider_model.supports_stream:
+                    continue
+                if require_chat_completions and not provider_model.supports_chat_completions:
+                    continue
+                if require_responses and not provider_model.supports_responses:
                     continue
                 if require_vision and not provider_model.supports_vision:
                     continue
@@ -610,12 +610,6 @@ class RouterService:
             if allowed_provider_ids is not None and provider.id not in allowed_provider_ids:
                 RouterService._record_diagnostic_reason(diagnostics, "provider_not_authorized", provider=provider)
                 continue
-            if require_chat_completions and not ProviderService.provider_supports_chat_completions(provider):
-                RouterService._record_diagnostic_reason(diagnostics, "provider_chat_protocol_not_supported", provider=provider)
-                continue
-            if require_responses and not ProviderService.provider_supports_responses(provider):
-                RouterService._record_diagnostic_reason(diagnostics, "provider_responses_protocol_not_supported", provider=provider)
-                continue
             for provider_model in provider.provider_models:
                 diagnostics["mounted_model_total"] += 1
                 if model_name and provider_model.model_name == model_name:
@@ -631,6 +625,12 @@ class RouterService:
                     continue
                 if require_stream and not provider_model.supports_stream:
                     RouterService._record_diagnostic_reason(diagnostics, "stream_not_supported", provider=provider, provider_model=provider_model)
+                    continue
+                if require_chat_completions and not provider_model.supports_chat_completions:
+                    RouterService._record_diagnostic_reason(diagnostics, "chat_not_supported", provider=provider, provider_model=provider_model)
+                    continue
+                if require_responses and not provider_model.supports_responses:
+                    RouterService._record_diagnostic_reason(diagnostics, "responses_not_supported", provider=provider, provider_model=provider_model)
                     continue
                 if require_vision and not provider_model.supports_vision:
                     RouterService._record_diagnostic_reason(diagnostics, "vision_not_supported", provider=provider, provider_model=provider_model)
@@ -845,9 +845,22 @@ class RouterService:
 
     @staticmethod
     def _trim_candidates(candidates: list[RouteCandidate], *, route_context: RoutePolicyContext | None) -> list[RouteCandidate]:
-        if route_context and route_context.max_candidate_count is not None:
-            return candidates[: max(1, route_context.max_candidate_count)]
-        return candidates
+        return candidates[: RouterService._effective_max_candidate_count(route_context)]
+
+    @staticmethod
+    def _effective_max_candidate_count(route_context: RoutePolicyContext | None) -> int:
+        value = route_context.max_candidate_count if route_context and route_context.max_candidate_count is not None else None
+        if value is None:
+            try:
+                setting = SettingService.get_cached()
+                value = getattr(setting, "max_candidate_count", 10)
+            except Exception:
+                value = 10
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = 10
+        return max(1, min(parsed, 500))
 
     @staticmethod
     def _filter_capacity_candidates(candidates: list[RouteCandidate], *, is_stream: bool) -> list[RouteCandidate]:
@@ -1048,7 +1061,7 @@ class RouterService:
                     ",".join(str(item) for item in (route_context.allowed_provider_ids or [])),
                     ",".join(str(item) for item in (route_context.preferred_provider_ids or [])),
                     ",".join(item for item in (route_context.preferred_region_tags or [])),
-                    str(route_context.max_candidate_count or 0),
+                    str(RouterService._effective_max_candidate_count(route_context)),
                     str(route_context.latency_bias),
                     str(route_context.success_rate_bias),
                     str(route_context.cost_bias),

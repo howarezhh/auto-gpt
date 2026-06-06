@@ -40,7 +40,7 @@ class ApiKeyBase(BaseModel):
     allowed_source_ips: list[str] = Field(default_factory=list)
     preferred_provider_ids: list[int] = Field(default_factory=list)
     preferred_region_tags: list[str] = Field(default_factory=list)
-    max_candidate_count: int | None = Field(default=None, ge=1, le=20)
+    max_candidate_count: int | None = Field(default=None, ge=1, le=500)
     latency_bias: int = Field(default=1, ge=0, le=10)
     success_rate_bias: int = Field(default=1, ge=0, le=10)
     cost_bias: int = Field(default=0, ge=0, le=10)
@@ -143,7 +143,7 @@ class ApiKeyUpdate(BaseModel):
     allowed_source_ips: list[str] | None = None
     preferred_provider_ids: list[int] | None = None
     preferred_region_tags: list[str] | None = None
-    max_candidate_count: int | None = Field(default=None, ge=1, le=20)
+    max_candidate_count: int | None = Field(default=None, ge=1, le=500)
     latency_bias: int | None = Field(default=None, ge=0, le=10)
     success_rate_bias: int | None = Field(default=None, ge=0, le=10)
     cost_bias: int | None = Field(default=None, ge=0, le=10)

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.services.error_catalog_service import ErrorCatalogService
+
 
 class OpenAIErrorService:
     RECOVERABLE_STATUS_CODES = {408, 409, 425, 429}
@@ -75,11 +77,42 @@ class OpenAIErrorService:
         category: str | None = None,
         status_code: int | None = None,
         retry_after_ms: int | None = None,
+        next_action: str | None = None,
         detail: Any | None = None,
     ) -> dict[str, Any]:
+        resolved = ErrorCatalogService.resolve(
+            status_code=status_code,
+            detail=detail,
+            code=code,
+            message=message,
+        )
+        public_resolved = ErrorCatalogService.public_spec_for(resolved)
+        if resolved.public:
+            effective_message = ErrorCatalogService.effective_message(public_resolved, raw_message=message)
+            payload_detail = detail
+        else:
+            effective_message = resolved.public_message or public_resolved.message
+            payload_detail = {"message": "详细内部原因已写入服务端日志，请使用 trace_id 排查。"} if detail is not None else None
+            retryable = public_resolved.retryable
+            recoverable = public_resolved.recoverable
+            category = public_resolved.category
+            next_action = public_resolved.next_action
+            error_type = public_resolved.error_type
+        if retryable is None:
+            retryable = public_resolved.retryable
+        if recoverable is None:
+            recoverable = public_resolved.recoverable
+        if category is None:
+            category = public_resolved.category
+        if next_action is None:
+            next_action = public_resolved.next_action
+        if code is None or not resolved.public:
+            code = public_resolved.code
+        if error_type == "invalid_request_error" and public_resolved.error_type != "invalid_request_error":
+            error_type = public_resolved.error_type
         payload: dict[str, Any] = {
             "error": {
-                "message": message,
+                "message": effective_message,
                 "type": error_type,
                 "code": code,
             }
@@ -98,8 +131,10 @@ class OpenAIErrorService:
             payload["error"]["status_code"] = status_code
         if retry_after_ms is not None:
             payload["error"]["retry_after_ms"] = retry_after_ms
-        if detail is not None:
-            payload["error"]["detail"] = detail
+        if next_action is not None:
+            payload["error"]["next_action"] = next_action
+        if payload_detail is not None:
+            payload["error"]["detail"] = payload_detail
         return payload
 
     @staticmethod
@@ -110,6 +145,16 @@ class OpenAIErrorService:
     @staticmethod
     def classify_error(*, status_code: int, detail: Any | None = None) -> dict[str, Any]:
         detail_code = OpenAIErrorService.extract_code(detail)
+        catalog_spec = ErrorCatalogService.resolve(status_code=status_code, detail=detail, code=detail_code)
+        if detail_code is not None and ErrorCatalogService.normalize_code(detail_code) in ErrorCatalogService.SPECS:
+            return OpenAIErrorService._classification(
+                catalog_spec.error_type,
+                catalog_spec.code,
+                catalog_spec.retryable,
+                catalog_spec.recoverable,
+                catalog_spec.category,
+                catalog_spec.next_action,
+            )
         normalized_code = (detail_code or "").strip().lower()
         normalized_message = OpenAIErrorService.extract_message(detail, fallback="").strip().lower()
         basis = f"{normalized_code} {normalized_message}"
@@ -121,6 +166,7 @@ class OpenAIErrorService:
                 False,
                 False,
                 "client_cancelled",
+                catalog_spec.next_action,
             )
         if status_code == 401:
             return OpenAIErrorService._classification(
@@ -129,6 +175,7 @@ class OpenAIErrorService:
                 False,
                 False,
                 "authentication",
+                catalog_spec.next_action,
             )
         if status_code == 403:
             return OpenAIErrorService._classification(
@@ -137,6 +184,7 @@ class OpenAIErrorService:
                 False,
                 False,
                 "authorization",
+                catalog_spec.next_action,
             )
         if any(token in basis for token in OpenAIErrorService.AUTH_ERROR_TOKENS):
             return OpenAIErrorService._classification(
@@ -145,6 +193,7 @@ class OpenAIErrorService:
                 False,
                 False,
                 "authentication",
+                catalog_spec.next_action,
             )
         if any(token in basis for token in OpenAIErrorService.MODEL_ERROR_TOKENS):
             return OpenAIErrorService._classification(
@@ -153,6 +202,7 @@ class OpenAIErrorService:
                 False,
                 False,
                 "model_unavailable",
+                catalog_spec.next_action,
             )
         if status_code == 413 or any(token in basis for token in OpenAIErrorService.LOGICAL_ERROR_TOKENS):
             return OpenAIErrorService._classification(
@@ -161,6 +211,7 @@ class OpenAIErrorService:
                 False,
                 False,
                 "invalid_request",
+                catalog_spec.next_action,
             )
         if any(token in basis for token in OpenAIErrorService.CAPABILITY_ERROR_TOKENS):
             return OpenAIErrorService._classification(
@@ -169,6 +220,7 @@ class OpenAIErrorService:
                 False,
                 False,
                 "capability_not_supported",
+                catalog_spec.next_action,
             )
         if status_code in {400, 422}:
             return OpenAIErrorService._classification(
@@ -177,6 +229,7 @@ class OpenAIErrorService:
                 False,
                 False,
                 "invalid_request",
+                catalog_spec.next_action,
             )
         if status_code in {408, 504} or "timeout" in basis:
             return OpenAIErrorService._classification(
@@ -185,6 +238,7 @@ class OpenAIErrorService:
                 True,
                 True,
                 "timeout",
+                catalog_spec.next_action,
             )
         if status_code == 429:
             return OpenAIErrorService._classification(
@@ -193,6 +247,7 @@ class OpenAIErrorService:
                 True,
                 True,
                 "rate_limit",
+                catalog_spec.next_action,
             )
         if status_code == 409:
             return OpenAIErrorService._classification(
@@ -201,6 +256,7 @@ class OpenAIErrorService:
                 True,
                 True,
                 "upstream_transient",
+                catalog_spec.next_action,
             )
         if status_code == 425:
             return OpenAIErrorService._classification(
@@ -209,6 +265,7 @@ class OpenAIErrorService:
                 True,
                 True,
                 "upstream_transient",
+                catalog_spec.next_action,
             )
         if 500 <= status_code < 600:
             category = "network" if any(token in basis for token in ("connect", "network", "pool")) else "server_error"
@@ -218,6 +275,7 @@ class OpenAIErrorService:
                 True,
                 True,
                 category,
+                catalog_spec.next_action,
             )
         if any(token in basis for token in OpenAIErrorService.TRANSIENT_ERROR_TOKENS):
             return OpenAIErrorService._classification(
@@ -226,6 +284,7 @@ class OpenAIErrorService:
                 True,
                 True,
                 "upstream_transient",
+                catalog_spec.next_action,
             )
         return OpenAIErrorService._classification(
             "invalid_request_error",
@@ -233,6 +292,7 @@ class OpenAIErrorService:
             False,
             False,
             "invalid_request",
+            catalog_spec.next_action,
         )
 
     @staticmethod
@@ -242,6 +302,7 @@ class OpenAIErrorService:
         retryable: bool,
         recoverable: bool,
         category: str,
+        next_action: str | None = None,
     ) -> dict[str, Any]:
         return {
             "error_type": error_type,
@@ -249,6 +310,7 @@ class OpenAIErrorService:
             "retryable": retryable,
             "recoverable": recoverable,
             "category": category,
+            "next_action": next_action,
         }
 
     @staticmethod

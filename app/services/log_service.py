@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.models.provider_model import ProviderModel
 from app.models.request_log import RequestLog
 from app.services.cache_service import CacheService
+from app.services.error_catalog_service import ErrorCatalogService
 from app.services.runtime_state_service import RuntimeStateService
 from app.utils.json_utils import dumps_json, safeJsonParse
 
@@ -126,6 +127,23 @@ class LogService:
             duration_ms=effective_duration_ms,
             ttfb_ms=effective_ttfb_ms,
         )
+        if not success and error_code:
+            error_context = ErrorCatalogService.build_log_context(
+                status_code=status_code,
+                detail={"code": error_code, "message": message or ""},
+                code=error_code,
+                message=message,
+                trace_id=trace_id,
+            )
+            message = str(error_context.get("message") or message or "")
+            error_type = str(error_context.get("error_type") or error_type or "")
+            error_code = str(error_context.get("code") or error_code)
+            retryable = bool(error_context.get("retryable")) if retryable is None else retryable
+            response_body_json = LogService._merge_error_context_into_response_body(
+                response_body_json=response_body_json,
+                error_context=error_context,
+            )
+            trace = LogService._merge_error_context_into_trace(trace=trace, error_context=error_context)
         log = RequestLog(
             log_type=log_type,
             provider_id=provider_id,
@@ -231,8 +249,51 @@ class LogService:
                 token_response_payload=token_response_payload,
                 token_response_text=token_response_text,
                 schedule_token_fill=schedule_token_fill,
-            )
+        )
         return log
+
+    @staticmethod
+    def _merge_error_context_into_response_body(*, response_body_json: str | None, error_context: dict[str, Any]) -> str:
+        safe_context = {
+            "code": error_context.get("code"),
+            "message": error_context.get("message"),
+            "public_code": error_context.get("public_code"),
+            "public_message": error_context.get("public_message"),
+            "trace_id": error_context.get("trace_id"),
+            "category": error_context.get("category"),
+            "retryable": error_context.get("retryable"),
+            "recoverable": error_context.get("recoverable"),
+            "handling_strategy": error_context.get("handling_strategy"),
+            "alert_level": error_context.get("alert_level"),
+        }
+        parsed = safeJsonParse(response_body_json) if response_body_json else None
+        if isinstance(parsed, dict):
+            parsed.setdefault("error_context", safe_context)
+            return dumps_json(parsed)
+        if isinstance(parsed, list):
+            return dumps_json({"response_items": parsed, "error_context": safe_context})
+        return dumps_json({"error_context": safe_context})
+
+    @staticmethod
+    def _merge_error_context_into_trace(*, trace: list[dict] | dict | None, error_context: dict[str, Any]) -> list[dict] | dict:
+        safe_context = {
+            "code": error_context.get("code"),
+            "public_code": error_context.get("public_code"),
+            "trace_id": error_context.get("trace_id"),
+            "category": error_context.get("category"),
+            "handling_strategy": error_context.get("handling_strategy"),
+            "alert_level": error_context.get("alert_level"),
+        }
+        event = {
+            "result": "error_catalog_context",
+            "error_context": safe_context,
+            "latency_ms": 0,
+        }
+        if isinstance(trace, list):
+            return [*trace, event]
+        if isinstance(trace, dict):
+            return {"trace": trace, "error_context": safe_context}
+        return [event]
 
     @staticmethod
     def _token_job_payload_or_none(payload: dict | None) -> dict | None:

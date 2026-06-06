@@ -84,6 +84,8 @@ class Settings(BaseSettings):
     responses_chat_adapter_upstream_api_key: str = ""
     responses_chat_adapter_upstreams_json: str = ""
     responses_chat_adapter_context_window_tokens: int = 128000
+    responses_chat_adapter_snapshot_max_bytes: int = 1048576
+    responses_chat_adapter_db_cleanup_interval_seconds: int = 21600
 
     model_config = SettingsConfigDict(
         env_file=".env",

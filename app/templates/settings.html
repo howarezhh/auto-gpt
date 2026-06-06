@@ -129,6 +129,21 @@
                     <input class="field-input" id="setting-global-max-request-tokens" type="number" min="0" placeholder="0 表示不限制">
                 </label>
                 <label>
+                    <span class="settings-field-label">
+                        <span>最大候选数</span>
+                        <span class="settings-help">
+                            <button class="settings-help-btn" type="button" aria-label="查看最大候选数说明" data-settings-tooltip-trigger="true">
+                                <i class="bi bi-question-circle" aria-hidden="true"></i>
+                            </button>
+                            <div class="settings-tooltip-content hidden">
+                                <div class="settings-tooltip-title">最大候选数说明</div>
+                                <div class="settings-tooltip-copy">每次路由在完成权限、能力、健康、容量筛选和健康优先排序后，最多保留多少个候选中转站参与后续尝试。默认 10；API Key 单独配置候选数时会覆盖这里的全局值。</div>
+                            </div>
+                        </span>
+                    </span>
+                    <input class="field-input" id="setting-max-candidate-count" type="number" min="1" max="500" step="1" required placeholder="默认 10">
+                </label>
+                <label>
                     <span>长输出非流式阈值（tok）</span>
                     <input class="field-input" id="setting-long-output-stream-threshold-tokens" type="number" min="0" placeholder="0 表示不强制">
                 </label>
@@ -218,6 +233,84 @@
             <span>并发租约 TTL（s）</span>
             <input class="field-input" id="setting-concurrency-lease-ttl-seconds" type="number" min="60">
         </label>
+        <div class="form-span-2 settings-group" aria-labelledby="settings-responses-chat-adapter-title">
+            <div class="settings-group-head">
+                <div class="panel-kicker">Responses / Chat</div>
+                <h4 id="settings-responses-chat-adapter-title">Responses→Chat 兼容适配</h4>
+            </div>
+            <div class="settings-switch-grid">
+                <label class="settings-switch-card">
+                    <span class="settings-switch-copy">
+                        <strong>启用单向适配</strong>
+                        <small>开启后，/v1/responses 可按模型映射转发到 Chat-only 国内上游。</small>
+                    </span>
+                    <span class="settings-switch-control">
+                        <input id="setting-responses-chat-adapter-enabled" type="checkbox">
+                        <span class="settings-switch-slider"></span>
+                    </span>
+                </label>
+                <label class="settings-switch-card">
+                    <span class="settings-switch-copy">
+                        <strong>启用搜索代理</strong>
+                        <small>仅 web_search 使用；file_search 与 code_interpreter 仍直接拒绝。</small>
+                    </span>
+                    <span class="settings-switch-control">
+                        <input id="setting-responses-chat-adapter-web-search-enabled" type="checkbox">
+                        <span class="settings-switch-slider"></span>
+                    </span>
+                </label>
+            </div>
+            <div class="form-grid settings-subgrid">
+                <label>
+                    <span>会话存储</span>
+                    <select class="field-input" id="setting-responses-chat-adapter-storage-type">
+                        <option value="memory">内存</option>
+                        <option value="redis">Redis</option>
+                        <option value="database">数据库</option>
+                    </select>
+                </label>
+                <label>
+                    <span>会话 TTL（s）</span>
+                    <input class="field-input" id="setting-responses-chat-adapter-ttl-seconds" type="number" min="0">
+                </label>
+                <label>
+                    <span>最大工具轮次</span>
+                    <input class="field-input" id="setting-responses-chat-adapter-max-tool-rounds" type="number" min="1" max="100">
+                </label>
+                <label>
+                    <span>上下文窗口（tok）</span>
+                    <input class="field-input" id="setting-responses-chat-adapter-context-window-tokens" type="number" min="0">
+                </label>
+                <label>
+                    <span>单快照上限（B）</span>
+                    <input class="field-input" id="setting-responses-chat-adapter-snapshot-max-bytes" type="number" min="0">
+                </label>
+                <label>
+                    <span>数据库清理间隔（s）</span>
+                    <input class="field-input" id="setting-responses-chat-adapter-db-cleanup-interval-seconds" type="number" min="300">
+                </label>
+                <label>
+                    <span>单上游地址</span>
+                    <input class="field-input" id="setting-responses-chat-adapter-upstream-base-url" type="url" placeholder="https://api.deepseek.com/v1">
+                </label>
+                <label>
+                    <span>单上游密钥</span>
+                    <input class="field-input" id="setting-responses-chat-adapter-upstream-api-key" type="password" autocomplete="new-password" placeholder="sk-...">
+                </label>
+                <label>
+                    <span>搜索代理地址</span>
+                    <input class="field-input" id="setting-responses-chat-adapter-search-proxy-url" type="url" placeholder="https://search.example.com/query">
+                </label>
+                <label class="form-span-2">
+                    <span>模型映射 JSON</span>
+                    <textarea class="field-input settings-json-textarea" id="setting-responses-chat-adapter-model-map-json" rows="4" spellcheck="false" placeholder='{"gpt-4o":"deepseek-chat"}'></textarea>
+                </label>
+                <label class="form-span-2">
+                    <span>多上游 JSON</span>
+                    <textarea class="field-input settings-json-textarea" id="setting-responses-chat-adapter-upstreams-json" rows="6" spellcheck="false" placeholder='{"gpt-4o":{"upstream_model":"deepseek-chat","base_url":"https://api.deepseek.com/v1","api_key":"sk-..."}}'></textarea>
+                </label>
+            </div>
+        </div>
         <div class="form-span-2 settings-switch-grid">
             <label class="settings-switch-card">
                 <span class="settings-switch-copy">

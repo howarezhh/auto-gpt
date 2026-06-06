@@ -38,6 +38,7 @@ from app.services.api_key_auth_cache import ApiKeyAuthCache
 from app.services.api_key_admin_service import ApiKeyAdminService
 from app.services.api_key_service import ApiClientAuthError
 from app.services.log_service import LogService
+from app.services.error_catalog_service import ErrorCatalogService
 from app.services.model_catalog_service import ModelCatalogService
 from app.services.model_mapping_service import ModelMappingService
 from app.services.openai_error_service import OpenAIErrorService
@@ -188,6 +189,7 @@ def _migrate_app_setting_concurrency_columns(db) -> None:
         "global_max_request_tokens": "ALTER TABLE app_settings ADD COLUMN global_max_request_tokens INTEGER DEFAULT 0",
         "route_exhausted_retry_max_wait_seconds": "ALTER TABLE app_settings ADD COLUMN route_exhausted_retry_max_wait_seconds INTEGER DEFAULT 600",
         "route_exhausted_retry_infinite_enabled": f"ALTER TABLE app_settings ADD COLUMN route_exhausted_retry_infinite_enabled BOOLEAN DEFAULT {false_default}",
+        "max_candidate_count": "ALTER TABLE app_settings ADD COLUMN max_candidate_count INTEGER DEFAULT 10",
         "max_v1_request_body_bytes": "ALTER TABLE app_settings ADD COLUMN max_v1_request_body_bytes INTEGER DEFAULT 20971520",
         "max_v1_chat_request_body_bytes": "ALTER TABLE app_settings ADD COLUMN max_v1_chat_request_body_bytes INTEGER DEFAULT 0",
         "max_v1_responses_request_body_bytes": "ALTER TABLE app_settings ADD COLUMN max_v1_responses_request_body_bytes INTEGER DEFAULT 0",
@@ -219,13 +221,32 @@ def _migrate_app_setting_concurrency_columns(db) -> None:
         "responses_chat_adapter_upstream_api_key": "ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_upstream_api_key TEXT DEFAULT ''",
         "responses_chat_adapter_upstreams_json": "ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_upstreams_json TEXT DEFAULT ''",
         "responses_chat_adapter_context_window_tokens": f"ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_context_window_tokens INTEGER DEFAULT {runtime_settings.responses_chat_adapter_context_window_tokens}",
+        "responses_chat_adapter_snapshot_max_bytes": f"ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_snapshot_max_bytes INTEGER DEFAULT {runtime_settings.responses_chat_adapter_snapshot_max_bytes}",
+        "responses_chat_adapter_db_cleanup_interval_seconds": f"ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_db_cleanup_interval_seconds INTEGER DEFAULT {runtime_settings.responses_chat_adapter_db_cleanup_interval_seconds}",
     }
     changed = False
+    added_columns: set[str] = set()
     for column, ddl in additions.items():
         if column in existing_columns:
             continue
         db.execute(text(ddl))
+        added_columns.add(column)
         changed = True
+    adapter_text_defaults = {
+        "responses_chat_adapter_storage_type": runtime_settings.responses_chat_adapter_storage_type,
+        "responses_chat_adapter_model_map_json": runtime_settings.responses_chat_adapter_model_map_json,
+        "responses_chat_adapter_search_proxy_url": runtime_settings.responses_chat_adapter_search_proxy_url,
+        "responses_chat_adapter_upstream_base_url": runtime_settings.responses_chat_adapter_upstream_base_url,
+        "responses_chat_adapter_upstream_api_key": runtime_settings.responses_chat_adapter_upstream_api_key,
+        "responses_chat_adapter_upstreams_json": runtime_settings.responses_chat_adapter_upstreams_json,
+    }
+    for column, value in adapter_text_defaults.items():
+        if column not in added_columns or not str(value or "").strip():
+            continue
+        db.execute(
+            text(f"UPDATE app_settings SET {column} = :value WHERE {column} IS NULL OR {column} = ''"),
+            {"value": str(value)},
+        )
     if changed:
         db.commit()
 
@@ -580,6 +601,7 @@ def _migrate_request_log_columns(db) -> None:
         "global_max_request_tokens": "ALTER TABLE app_settings ADD COLUMN global_max_request_tokens INTEGER NOT NULL DEFAULT 0",
         "route_exhausted_retry_max_wait_seconds": "ALTER TABLE app_settings ADD COLUMN route_exhausted_retry_max_wait_seconds INTEGER NOT NULL DEFAULT 600",
         "route_exhausted_retry_infinite_enabled": "ALTER TABLE app_settings ADD COLUMN route_exhausted_retry_infinite_enabled BOOLEAN NOT NULL DEFAULT 0",
+        "max_candidate_count": "ALTER TABLE app_settings ADD COLUMN max_candidate_count INTEGER NOT NULL DEFAULT 10",
         "max_v1_request_body_bytes": "ALTER TABLE app_settings ADD COLUMN max_v1_request_body_bytes INTEGER NOT NULL DEFAULT 20971520",
         "max_v1_chat_request_body_bytes": "ALTER TABLE app_settings ADD COLUMN max_v1_chat_request_body_bytes INTEGER NOT NULL DEFAULT 0",
         "max_v1_responses_request_body_bytes": "ALTER TABLE app_settings ADD COLUMN max_v1_responses_request_body_bytes INTEGER NOT NULL DEFAULT 0",
@@ -609,6 +631,8 @@ def _migrate_request_log_columns(db) -> None:
         "responses_chat_adapter_upstream_api_key": "ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_upstream_api_key TEXT NOT NULL DEFAULT ''",
         "responses_chat_adapter_upstreams_json": "ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_upstreams_json TEXT NOT NULL DEFAULT ''",
         "responses_chat_adapter_context_window_tokens": "ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_context_window_tokens INTEGER NOT NULL DEFAULT 128000",
+        "responses_chat_adapter_snapshot_max_bytes": "ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_snapshot_max_bytes INTEGER NOT NULL DEFAULT 1048576",
+        "responses_chat_adapter_db_cleanup_interval_seconds": "ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_db_cleanup_interval_seconds INTEGER NOT NULL DEFAULT 21600",
     }
     changed_settings = False
     for column, ddl in app_setting_additions.items():
@@ -890,7 +914,7 @@ async def api_client_auth_error_handler(request: Request, exc: ApiClientAuthErro
 
 @app.exception_handler(RequestValidationError)
 async def request_validation_exception_handler(request: Request, exc: RequestValidationError):
-    if not _is_external_v1_path(request.url.path):
+    if not (_is_external_v1_path(request.url.path) or request.url.path.startswith("/api/")):
         return JSONResponse(status_code=422, content={"detail": exc.errors()})
     trace_id = getattr(request.state, "trace_id", None)
     detail = {"errors": _make_json_safe(exc.errors())}
@@ -922,18 +946,18 @@ async def request_validation_exception_handler(request: Request, exc: RequestVal
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
-    if not _is_external_v1_path(request.url.path):
+    if not (_is_external_v1_path(request.url.path) or request.url.path.startswith("/api/")):
         return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
     trace_id = getattr(request.state, "trace_id", None)
-    message = OpenAIErrorService.extract_message(exc.detail, fallback="Request failed")
     detail_payload = exc.detail if isinstance(exc.detail, dict) else None
+    error_object = ErrorCatalogService.build_error_object(
+        status_code=exc.status_code,
+        detail=detail_payload if detail_payload is not None else exc.detail,
+        trace_id=trace_id,
+    )
+    message = str(error_object["message"])
+    error_code = str(error_object["code"])
     classified = OpenAIErrorService.classify_error(status_code=exc.status_code, detail=detail_payload)
-    error_code = str(classified["code"])
-    if isinstance(detail_payload, dict):
-        if isinstance(detail_payload.get("code"), str):
-            error_code = detail_payload["code"]
-        elif isinstance(detail_payload.get("error"), dict) and isinstance(detail_payload["error"].get("code"), str):
-            error_code = detail_payload["error"]["code"]
     _log_v1_request_rejected_before_route(
         request=request,
         status_code=exc.status_code,
@@ -952,10 +976,16 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         recoverable=bool(classified["recoverable"]),
         category=str(classified["category"]),
         status_code=exc.status_code,
-        detail=detail_payload if isinstance(detail_payload, dict) else None,
+        next_action=str(error_object["next_action"]),
+        detail=error_object.get("detail") if isinstance(error_object.get("detail"), dict) else detail_payload,
     )
     if detail_payload is not None:
-        content["detail"] = detail_payload
+        content["detail"] = ErrorCatalogService.normalize_detail(
+            status_code=exc.status_code,
+            detail=detail_payload,
+            code=error_code,
+            message=message,
+        )
     return JSONResponse(
         status_code=exc.status_code,
         content=content,
@@ -979,11 +1009,12 @@ def _build_unhandled_v1_error_response(request: Request, exc: Exception) -> JSON
         "message": message,
     }
     classified = OpenAIErrorService.classify_error(status_code=500, detail=detail)
+    error_object = ErrorCatalogService.build_error_object(status_code=500, detail=detail, trace_id=trace_id)
     _log_v1_request_rejected_before_route(
         request=request,
         status_code=500,
         message=message,
-        error_code="internal_server_error",
+        error_code=str(error_object["code"]),
         retryable=bool(classified["retryable"]),
         detail=detail,
         request_body_json=getattr(request.state, "v1_request_body_structure_json", None),
@@ -991,14 +1022,15 @@ def _build_unhandled_v1_error_response(request: Request, exc: Exception) -> JSON
     return JSONResponse(
         status_code=500,
         content=OpenAIErrorService.build_error_payload(
-            message=message,
-            code="internal_server_error",
+            message=str(error_object["message"]),
+            code=str(error_object["code"]),
             trace_id=trace_id,
             error_type=str(classified["error_type"]),
             retryable=bool(classified["retryable"]),
             recoverable=bool(classified["recoverable"]),
             category=str(classified["category"]),
             status_code=500,
+            next_action=str(error_object["next_action"]),
             detail=detail,
         ),
         headers={"X-Trace-Id": trace_id or "", "X-Request-Id": trace_id or ""},
@@ -1020,6 +1052,13 @@ def _log_v1_request_rejected_before_route(
     db = SessionLocal()
     try:
         trace_id = getattr(request.state, "trace_id", None)
+        log_context = ErrorCatalogService.build_log_context(
+            status_code=status_code,
+            detail=detail if detail is not None else {"message": message, "code": error_code},
+            code=error_code,
+            message=message,
+            trace_id=trace_id,
+        )
         if trace_id:
             existing = db.query(RequestLog.id).filter(RequestLog.trace_id == trace_id).first()
             if existing is not None:
@@ -1036,11 +1075,32 @@ def _log_v1_request_rejected_before_route(
             success=False,
             status_code=status_code,
             request_body_json=request_body_json,
-            response_body_json=ProxySafeHelpers.truncate_json({"detail": detail} if detail is not None else {"message": message}, 16384),
-            message=message,
-            error_type=OpenAIErrorService.classify_status_code(status_code)[0],
-            error_code=error_code,
-            retryable=retryable,
+            response_body_json=ProxySafeHelpers.truncate_json(
+                {
+                    "detail": detail,
+                    "error_context": {
+                        "code": log_context.get("code"),
+                        "message": log_context.get("message"),
+                        "handling_strategy": log_context.get("handling_strategy"),
+                        "alert_level": log_context.get("alert_level"),
+                    },
+                }
+                if detail is not None
+                else {
+                    "message": message,
+                    "error_context": {
+                        "code": log_context.get("code"),
+                        "message": log_context.get("message"),
+                        "handling_strategy": log_context.get("handling_strategy"),
+                        "alert_level": log_context.get("alert_level"),
+                    },
+                },
+                16384,
+            ),
+            message=str(log_context.get("message") or message),
+            error_type=str(log_context.get("error_type") or OpenAIErrorService.classify_status_code(status_code)[0]),
+            error_code=str(log_context.get("code") or error_code),
+            retryable=bool(log_context.get("retryable", retryable)),
             api_client_auth_result=error_code,
             trace=[{"result": "request_rejected_before_route", "error": error_code, "latency_ms": 0}],
             attempt_count=0,

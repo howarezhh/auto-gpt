@@ -51,15 +51,29 @@ def format_provider_protocol_label(value: str | None) -> str:
     return PROVIDER_PROTOCOL_TYPE_LABELS.get(normalize_provider_protocol_type(value), PROVIDER_PROTOCOL_TYPE_LABELS["both"])
 
 
+def protocol_type_from_supports(*, supports_chat_completions: bool, supports_responses: bool) -> str:
+    if supports_chat_completions and supports_responses:
+        return "both"
+    if supports_chat_completions:
+        return "chat_completions"
+    return "responses"
+
+
+def supports_from_protocol_type(value: str | None) -> tuple[bool, bool]:
+    normalized = normalize_provider_protocol_type(value or "responses")
+    return normalized in {"both", "chat_completions"}, normalized in {"both", "responses"}
+
+
 class ProviderModelConfigBase(BaseModel):
     model_name: str = Field(..., min_length=1)
     enabled: bool = True
     priority: int = 100
     weight: int = 100
+    protocol_type: str = "responses"
     supports_stream: bool = True
     supports_vision: bool = True
     supports_tools: bool = True
-    supports_chat_completions: bool = True
+    supports_chat_completions: bool = False
     supports_responses: bool = True
     context_window_tokens: int | None = Field(default=None, ge=1)
     max_input_tokens: int | None = Field(default=None, ge=1)
@@ -74,6 +88,11 @@ class ProviderModelConfigBase(BaseModel):
     def normalize_model_name(cls, value: str) -> str:
         return value.strip()
 
+    @field_validator("protocol_type")
+    @classmethod
+    def normalize_protocol_type(cls, value: str | None) -> str:
+        return normalize_provider_protocol_type(value or "responses")
+
 
 class ProviderModelConfigInput(ProviderModelConfigBase):
     pass
@@ -81,6 +100,8 @@ class ProviderModelConfigInput(ProviderModelConfigBase):
 
 class ProviderModelConfigOut(ProviderModelConfigBase):
     id: int
+    protocol_type: str = "responses"
+    protocol_label: str = "Responses API"
     supports_image_generation: bool = False
     health_status: str
     circuit_state: str
@@ -129,6 +150,7 @@ class ProviderModelConfigUpdate(BaseModel):
     enabled: bool | None = None
     priority: int | None = None
     weight: int | None = None
+    protocol_type: str | None = None
     supports_stream: bool | None = None
     supports_vision: bool | None = None
     supports_tools: bool | None = None
@@ -141,6 +163,13 @@ class ProviderModelConfigUpdate(BaseModel):
     input_price_per_1k: float | None = Field(default=None, ge=0)
     output_price_per_1k: float | None = Field(default=None, ge=0)
     cache_price_per_1k: float | None = Field(default=None, ge=0)
+
+    @field_validator("protocol_type")
+    @classmethod
+    def normalize_protocol_type(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return normalize_provider_protocol_type(value)
 
 
 class ProviderBatchConnectivityTestRequest(BaseModel):

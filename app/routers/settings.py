@@ -5,6 +5,8 @@ from app.database import get_db
 from app.schemas.setting import SettingOut, SettingUpdate
 from app.tasks import configure_scheduler
 from app.services.admin_audit_service import AdminAuditService
+from app.services.model_catalog_service import ModelCatalogService
+from app.services.responses_chat_adapter_service import ResponsesChatAdapterService
 from app.services.setting_service import SettingService
 from app.services.user_auth_service import require_admin_api_user
 
@@ -27,7 +29,14 @@ def update_settings(
         setting = SettingService.update(db, payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    ResponsesChatAdapterService.sync_env_upstreams(db)
+    ModelCatalogService.sync_model_catalogs(db)
     configure_scheduler()
+    audit_detail = payload.model_dump(exclude_unset=True)
+    if audit_detail.get("responses_chat_adapter_upstream_api_key"):
+        audit_detail["responses_chat_adapter_upstream_api_key"] = "***"
+    if audit_detail.get("responses_chat_adapter_upstreams_json"):
+        audit_detail["responses_chat_adapter_upstreams_json"] = "***"
     AdminAuditService.create_log(
         db,
         actor_user_id=current_user.id,
@@ -37,6 +46,6 @@ def update_settings(
         entity_id=setting.id,
         entity_name="app_settings",
         summary="更新系统设置",
-        detail=payload.model_dump(exclude_unset=True),
+        detail=audit_detail,
     )
     return SettingOut.model_validate(setting)
