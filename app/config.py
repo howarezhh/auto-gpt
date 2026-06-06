@@ -73,6 +73,17 @@ class Settings(BaseSettings):
     api_key_encryption_secret: str = DEFAULT_API_KEY_ENCRYPTION_SECRET
     external_base_url: str = ""
     uploads_dir: str = str(UPLOADS_DIR)
+    responses_chat_adapter_enabled: bool = False
+    responses_chat_adapter_storage_type: str = "memory"
+    responses_chat_adapter_ttl_seconds: int = 86400
+    responses_chat_adapter_model_map_json: str = ""
+    responses_chat_adapter_max_tool_rounds: int = 10
+    responses_chat_adapter_web_search_enabled: bool = False
+    responses_chat_adapter_search_proxy_url: str = ""
+    responses_chat_adapter_upstream_base_url: str = ""
+    responses_chat_adapter_upstream_api_key: str = ""
+    responses_chat_adapter_upstreams_json: str = ""
+    responses_chat_adapter_context_window_tokens: int = 128000
 
     model_config = SettingsConfigDict(
         env_file=".env",

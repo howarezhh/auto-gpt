@@ -14,6 +14,7 @@ class Provider(Base):
     base_url: Mapped[str] = mapped_column(Text, nullable=False)
     api_key: Mapped[str] = mapped_column(Text, nullable=False)
     provider_type: Mapped[str] = mapped_column(Text, nullable=False, default="openai_compatible")
+    protocol_type: Mapped[str] = mapped_column(Text, nullable=False, default="both")
     group_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     region_tag: Mapped[str | None] = mapped_column(Text, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)

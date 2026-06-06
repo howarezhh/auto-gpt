@@ -44,6 +44,7 @@ from app.services.openai_error_service import OpenAIErrorService
 from app.services.provider_service import ProviderService
 from app.services.redis_service import RedisService
 from app.services.request_log_queue_service import RequestLogQueueService
+from app.services.responses_chat_adapter_service import ResponsesChatAdapterService
 from app.services.runtime_state_service import RuntimeStateService
 from app.services.setting_service import SettingService
 from app.services.token_usage_service import TokenUsageService
@@ -75,10 +76,12 @@ def init_database(*, allow_production_ddl: bool = False) -> None:
     db = SessionLocal()
     try:
         _migrate_provider_capacity_columns(db)
+        _migrate_provider_metadata_columns(db)
         _migrate_app_setting_concurrency_columns(db)
         api_key_columns_changed = _migrate_api_client_key_columns(db)
         _migrate_cache_price_columns(db)
         _migrate_model_mapping_table(db)
+        _migrate_responses_chat_adapter_session_table(db)
         if _is_sqlite_session(db):
             _migrate_request_log_columns(db)
         else:
@@ -94,6 +97,7 @@ def init_database(*, allow_production_ddl: bool = False) -> None:
         else:
             ApiKeyAdminService.sync_auto_provider_bindings(db)
         ProviderService.sync_legacy_provider_models(db)
+        ResponsesChatAdapterService.sync_env_upstreams(db)
         ModelCatalogService.sync_model_catalogs(db)
     finally:
         db.close()
@@ -133,12 +137,53 @@ def _migrate_provider_capacity_columns(db) -> None:
         db.commit()
 
 
+def _migrate_provider_metadata_columns(db) -> None:
+    """为 providers 表补充路由、协议与运维治理字段。"""
+    existing_columns = _get_table_columns(db, "providers")
+    if not existing_columns:
+        return
+    dialect_name = db.get_bind().dialect.name
+    false_default = "FALSE" if dialect_name == "postgresql" else "0"
+    true_default = "TRUE" if dialect_name == "postgresql" else "1"
+    datetime_type = "TIMESTAMP" if dialect_name == "postgresql" else "DATETIME"
+    additions = {
+        "group_name": "ALTER TABLE providers ADD COLUMN group_name TEXT",
+        "region_tag": "ALTER TABLE providers ADD COLUMN region_tag TEXT",
+        "protocol_type": "ALTER TABLE providers ADD COLUMN protocol_type TEXT NOT NULL DEFAULT 'both'",
+        "maintenance_window": "ALTER TABLE providers ADD COLUMN maintenance_window TEXT",
+        "maintenance_mode_enabled": f"ALTER TABLE providers ADD COLUMN maintenance_mode_enabled BOOLEAN NOT NULL DEFAULT {false_default}",
+        "auto_circuit_break_enabled": f"ALTER TABLE providers ADD COLUMN auto_circuit_break_enabled BOOLEAN NOT NULL DEFAULT {true_default}",
+        "auto_recover_enabled": f"ALTER TABLE providers ADD COLUMN auto_recover_enabled BOOLEAN NOT NULL DEFAULT {true_default}",
+        "circuit_breaker_threshold_override": "ALTER TABLE providers ADD COLUMN circuit_breaker_threshold_override INTEGER",
+        "recovery_probe_interval_sec_override": "ALTER TABLE providers ADD COLUMN recovery_probe_interval_sec_override INTEGER",
+        "credential_rotated_at": f"ALTER TABLE providers ADD COLUMN credential_rotated_at {datetime_type}",
+        "credential_hint": "ALTER TABLE providers ADD COLUMN credential_hint TEXT",
+    }
+    changed = False
+    for column, ddl in additions.items():
+        if column in existing_columns:
+            continue
+        db.execute(text(ddl))
+        changed = True
+    if changed:
+        db.commit()
+    if "protocol_type" in existing_columns or changed:
+        db.execute(
+            text(
+                "UPDATE providers SET protocol_type = 'both' "
+                "WHERE protocol_type IS NULL OR protocol_type NOT IN ('both', 'chat_completions', 'responses')"
+            )
+        )
+        db.commit()
+
+
 def _migrate_app_setting_concurrency_columns(db) -> None:
     """为 app_settings 表补充并发、超时与限额字段。"""
     existing_columns = _get_table_columns(db, "app_settings")
     runtime_settings = get_settings()
     dialect_name = db.get_bind().dialect.name
     false_default = "FALSE" if dialect_name == "postgresql" else "0"
+    true_default = "TRUE" if dialect_name == "postgresql" else "1"
     additions = {
         "global_max_request_tokens": "ALTER TABLE app_settings ADD COLUMN global_max_request_tokens INTEGER DEFAULT 0",
         "route_exhausted_retry_max_wait_seconds": "ALTER TABLE app_settings ADD COLUMN route_exhausted_retry_max_wait_seconds INTEGER DEFAULT 600",
@@ -163,6 +208,17 @@ def _migrate_app_setting_concurrency_columns(db) -> None:
         "stream_first_token_timeout_seconds": f"ALTER TABLE app_settings ADD COLUMN stream_first_token_timeout_seconds INTEGER DEFAULT {runtime_settings.stream_first_token_timeout_seconds}",
         "stream_idle_timeout_seconds": f"ALTER TABLE app_settings ADD COLUMN stream_idle_timeout_seconds INTEGER DEFAULT {runtime_settings.stream_idle_timeout_seconds}",
         "stream_max_duration_seconds": f"ALTER TABLE app_settings ADD COLUMN stream_max_duration_seconds INTEGER DEFAULT {runtime_settings.stream_max_duration_seconds}",
+        "responses_chat_adapter_enabled": f"ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_enabled BOOLEAN DEFAULT {true_default if runtime_settings.responses_chat_adapter_enabled else false_default}",
+        "responses_chat_adapter_storage_type": "ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_storage_type TEXT DEFAULT 'memory'",
+        "responses_chat_adapter_ttl_seconds": f"ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_ttl_seconds INTEGER DEFAULT {runtime_settings.responses_chat_adapter_ttl_seconds}",
+        "responses_chat_adapter_model_map_json": "ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_model_map_json TEXT DEFAULT ''",
+        "responses_chat_adapter_max_tool_rounds": f"ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_max_tool_rounds INTEGER DEFAULT {runtime_settings.responses_chat_adapter_max_tool_rounds}",
+        "responses_chat_adapter_web_search_enabled": f"ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_web_search_enabled BOOLEAN DEFAULT {true_default if runtime_settings.responses_chat_adapter_web_search_enabled else false_default}",
+        "responses_chat_adapter_search_proxy_url": "ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_search_proxy_url TEXT DEFAULT ''",
+        "responses_chat_adapter_upstream_base_url": "ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_upstream_base_url TEXT DEFAULT ''",
+        "responses_chat_adapter_upstream_api_key": "ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_upstream_api_key TEXT DEFAULT ''",
+        "responses_chat_adapter_upstreams_json": "ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_upstreams_json TEXT DEFAULT ''",
+        "responses_chat_adapter_context_window_tokens": f"ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_context_window_tokens INTEGER DEFAULT {runtime_settings.responses_chat_adapter_context_window_tokens}",
     }
     changed = False
     for column, ddl in additions.items():
@@ -277,6 +333,15 @@ def _migrate_model_mapping_table(db) -> None:
     Base.metadata.tables["model_mappings"].create(bind=db.get_bind(), checkfirst=True)
     db.commit()
     ModelMappingService.invalidate_cache()
+
+
+def _migrate_responses_chat_adapter_session_table(db) -> None:
+    """补齐 Responses→Chat 兼容适配层会话表。"""
+    inspector = inspect(db.get_bind())
+    if "responses_chat_adapter_sessions" in inspector.get_table_names():
+        return
+    Base.metadata.tables["responses_chat_adapter_sessions"].create(bind=db.get_bind(), checkfirst=True)
+    db.commit()
 
 
 def _migrate_request_log_columns(db) -> None:
@@ -475,6 +540,7 @@ def _migrate_request_log_columns(db) -> None:
     provider_additions = {
         "group_name": "ALTER TABLE providers ADD COLUMN group_name TEXT",
         "region_tag": "ALTER TABLE providers ADD COLUMN region_tag TEXT",
+        "protocol_type": "ALTER TABLE providers ADD COLUMN protocol_type TEXT NOT NULL DEFAULT 'both'",
         "maintenance_window": "ALTER TABLE providers ADD COLUMN maintenance_window TEXT",
         "maintenance_mode_enabled": "ALTER TABLE providers ADD COLUMN maintenance_mode_enabled BOOLEAN NOT NULL DEFAULT 0",
         "auto_circuit_break_enabled": "ALTER TABLE providers ADD COLUMN auto_circuit_break_enabled BOOLEAN NOT NULL DEFAULT 1",
@@ -491,6 +557,14 @@ def _migrate_request_log_columns(db) -> None:
         db.execute(text(ddl))
         changed_providers = True
     if changed_providers:
+        db.commit()
+    if not existing_provider_columns or "protocol_type" in existing_provider_columns or changed_providers:
+        db.execute(
+            text(
+                "UPDATE providers SET protocol_type = 'both' "
+                "WHERE protocol_type IS NULL OR protocol_type NOT IN ('both', 'chat_completions', 'responses')"
+            )
+        )
         db.commit()
 
     existing_settings_columns = {
@@ -524,6 +598,17 @@ def _migrate_request_log_columns(db) -> None:
         "stream_first_token_timeout_seconds": "ALTER TABLE app_settings ADD COLUMN stream_first_token_timeout_seconds INTEGER NOT NULL DEFAULT 60",
         "stream_idle_timeout_seconds": "ALTER TABLE app_settings ADD COLUMN stream_idle_timeout_seconds INTEGER NOT NULL DEFAULT 120",
         "stream_max_duration_seconds": "ALTER TABLE app_settings ADD COLUMN stream_max_duration_seconds INTEGER NOT NULL DEFAULT 600",
+        "responses_chat_adapter_enabled": "ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_enabled BOOLEAN NOT NULL DEFAULT 0",
+        "responses_chat_adapter_storage_type": "ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_storage_type TEXT NOT NULL DEFAULT 'memory'",
+        "responses_chat_adapter_ttl_seconds": "ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_ttl_seconds INTEGER NOT NULL DEFAULT 86400",
+        "responses_chat_adapter_model_map_json": "ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_model_map_json TEXT NOT NULL DEFAULT ''",
+        "responses_chat_adapter_max_tool_rounds": "ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_max_tool_rounds INTEGER NOT NULL DEFAULT 10",
+        "responses_chat_adapter_web_search_enabled": "ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_web_search_enabled BOOLEAN NOT NULL DEFAULT 0",
+        "responses_chat_adapter_search_proxy_url": "ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_search_proxy_url TEXT NOT NULL DEFAULT ''",
+        "responses_chat_adapter_upstream_base_url": "ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_upstream_base_url TEXT NOT NULL DEFAULT ''",
+        "responses_chat_adapter_upstream_api_key": "ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_upstream_api_key TEXT NOT NULL DEFAULT ''",
+        "responses_chat_adapter_upstreams_json": "ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_upstreams_json TEXT NOT NULL DEFAULT ''",
+        "responses_chat_adapter_context_window_tokens": "ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_context_window_tokens INTEGER NOT NULL DEFAULT 128000",
     }
     changed_settings = False
     for column, ddl in app_setting_additions.items():

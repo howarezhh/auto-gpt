@@ -91,56 +91,120 @@ def _generic_provider_should_keep_remote_image_url() -> None:
     )
 
 
-def _tool_call_response_conversion_should_roundtrip() -> None:
-    chat_response = {
-        "id": "chatcmpl_stage23",
-        "model": "deepseek-chat",
-        "created": 1710000000,
-        "choices": [
+def _mimo_chat_should_use_official_output_token_field() -> None:
+    provider = _provider(name="stage23-mimo", base_url="https://platform.xiaomimimo.com/v1")
+    payload = {
+        "model": "mimo-v2.5-pro",
+        "messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": 8,
+    }
+    prepared = ProxyService._prepare_upstream_request(provider, endpoint_path="/chat/completions", payload=payload)
+    _assert("max_tokens" not in prepared.request_payload, f"mimo payload should not keep max_tokens: {prepared.request_payload}")
+    _assert(
+        prepared.request_payload.get("max_completion_tokens") == 8,
+        f"mimo payload should map max_tokens to max_completion_tokens: {prepared.request_payload}",
+    )
+
+
+def _generic_chat_should_keep_max_tokens() -> None:
+    provider = _provider(name="stage23-qwen", base_url="https://dashscope.aliyuncs.com/compatible-mode/v1")
+    payload = {
+        "model": "qwen-plus",
+        "messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": 8,
+    }
+    prepared = ProxyService._prepare_upstream_request(provider, endpoint_path="/chat/completions", payload=payload)
+    _assert(prepared.request_payload.get("max_tokens") == 8, f"generic chat payload should keep max_tokens: {prepared.request_payload}")
+    _assert(
+        "max_completion_tokens" not in prepared.request_payload,
+        f"generic chat payload should not add max_completion_tokens: {prepared.request_payload}",
+    )
+
+
+def _route_endpoint_requirements_should_be_native_only() -> None:
+    responses_payload = {
+        "model": "glm-5.1",
+        "input": "ping",
+        "stream": True,
+        "tools": [{"type": "function", "name": "noop", "parameters": {"type": "object", "properties": {}}}],
+    }
+    chat_payload = {
+        "model": "glm-5.1",
+        "messages": [{"role": "user", "content": "ping"}],
+        "stream": True,
+        "tools": [{"type": "function", "function": {"name": "noop", "parameters": {"type": "object", "properties": {}}}}],
+    }
+    _assert(
+        ProxyService._route_endpoint_requirements("/responses", responses_payload) == (False, True),
+        "responses requests must require native responses support",
+    )
+    _assert(
+        ProxyService._route_endpoint_requirements("/chat/completions", chat_payload) == (True, False),
+        "chat requests must require native chat/completions support",
+    )
+
+
+def _native_endpoint_payloads_should_not_enable_adapter_flags() -> None:
+    provider = _provider(name="stage23-qwen", base_url="https://dashscope.aliyuncs.com/compatible-mode/v1")
+    chat_payload = {
+        "model": "qwen-plus",
+        "messages": [
             {
-                "message": {
-                    "role": "assistant",
-                    "tool_calls": [
-                        {
-                            "id": "call_stage23",
-                            "type": "function",
-                            "function": {"name": "get_weather", "arguments": '{"city":"Beijing"}'},
-                        }
-                    ],
-                },
-                "finish_reason": "tool_calls",
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "请看图并调用工具"},
+                    {"type": "image_url", "image_url": {"url": "https://example.com/cat.png"}},
+                ],
             }
         ],
-        "usage": {"prompt_tokens": 12, "completion_tokens": 4, "total_tokens": 16},
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ],
+        "stream": True,
     }
-    ProxyService._assert_chat_response_adapter_safe(chat_response)
-    responses_payload = ProxyService._convert_chat_completion_to_responses_payload(
-        chat_response,
-        requested_model="deepseek-chat",
-    )
-    output = responses_payload["output"]
-    _assert(isinstance(output, list) and output[-1]["type"] == "function_call", f"unexpected responses output: {output}")
-    _assert(output[-1]["name"] == "get_weather", f"tool call name lost: {output}")
-    _assert(output[-1]["arguments"] == '{"city":"Beijing"}', f"tool call args lost: {output}")
-
-    ProxyService._assert_responses_response_adapter_safe(responses_payload)
-    chat_payload = ProxyService._convert_responses_payload_to_chat_completion(
-        responses_payload,
-        requested_model="deepseek-chat",
-    )
-    message = chat_payload["choices"][0]["message"]
-    _assert(message["tool_calls"][0]["function"]["name"] == "get_weather", f"chat tool call name lost: {chat_payload}")
-    _assert(
-        message["tool_calls"][0]["function"]["arguments"] == '{"city":"Beijing"}',
-        f"chat tool call args lost: {chat_payload}",
-    )
-    _assert(chat_payload["choices"][0]["finish_reason"] == "tool_calls", f"finish reason lost: {chat_payload}")
+    responses_payload = {
+        "model": "qwen-plus",
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "请看图并调用工具"},
+                    {"type": "input_image", "image_url": "https://example.com/cat.png"},
+                ],
+            }
+        ],
+        "tools": [
+            {
+                "type": "function",
+                "name": "get_weather",
+                "parameters": {"type": "object", "properties": {}},
+            }
+        ],
+        "stream": True,
+    }
+    prepared_chat = ProxyService._prepare_upstream_request(provider, endpoint_path="/chat/completions", payload=chat_payload)
+    prepared_responses = ProxyService._prepare_upstream_request(provider, endpoint_path="/responses", payload=responses_payload)
+    _assert(prepared_chat.request_path == "/chat/completions", f"chat endpoint should stay native: {prepared_chat}")
+    _assert(prepared_responses.request_path == "/responses", f"responses endpoint should stay native: {prepared_responses}")
+    _assert(not prepared_chat.adapt_responses_response_to_chat, f"chat should not enable responses adapter: {prepared_chat}")
+    _assert(not prepared_responses.adapt_chat_response_to_responses, f"responses should not enable chat adapter: {prepared_responses}")
+    _assert(prepared_chat.request_payload["tools"][0]["function"]["name"] == "get_weather", f"chat tools changed: {prepared_chat.request_payload}")
+    _assert(prepared_responses.request_payload["tools"][0]["name"] == "get_weather", f"responses tools changed: {prepared_responses.request_payload}")
 
 
 def main() -> None:
     _kimi_remote_image_should_be_inlined()
     _generic_provider_should_keep_remote_image_url()
-    _tool_call_response_conversion_should_roundtrip()
+    _mimo_chat_should_use_official_output_token_field()
+    _generic_chat_should_keep_max_tokens()
+    _route_endpoint_requirements_should_be_native_only()
+    _native_endpoint_payloads_should_not_enable_adapter_flags()
     print("stage23 provider payload adapter regression check passed")
 
 

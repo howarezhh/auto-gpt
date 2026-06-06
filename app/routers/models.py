@@ -54,22 +54,26 @@ def list_models(
     paginated: bool = Query(default=False),
     keyword: str | None = Query(default=None),
     enabled: bool | None = Query(default=None),
+    health_status: str | None = Query(default=None),
     provider_id: int | None = Query(default=None, ge=1),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=10, le=100),
     db: Session = Depends(get_db),
 ) -> list[ModelCatalogOut] | ModelCatalogPageOut:
     if paginated:
-        return ModelCatalogPageOut(
-            **ModelCatalogService.list_model_page(
+        try:
+            payload = ModelCatalogService.list_model_page(
                 db,
                 keyword=keyword,
                 enabled=enabled,
+                health_status=health_status,
                 provider_id=provider_id,
                 page=page,
                 page_size=page_size,
             )
-        )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return ModelCatalogPageOut(**payload)
     return [ModelCatalogOut(**item) for item in ModelCatalogService.list_model_dicts(db)]
 
 

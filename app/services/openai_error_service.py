@@ -42,6 +42,8 @@ class OpenAIErrorService:
         "image_generation_not_supported",
         "chat_not_supported",
         "responses_not_supported",
+        "chat_probe_unhealthy",
+        "responses_probe_unhealthy",
         "capability",
     )
     TRANSIENT_ERROR_TOKENS = (

@@ -255,9 +255,8 @@ OPENAI_BASE_URL={{ external_v1_base_url }}</code></pre></div>
     "model": "gpt-4o-mini",
     "input": "你好，请用一句话介绍本平台"
   }'</code></pre></div>
-            <p><code>/v1/responses</code> 会优先按原始 Responses 协议透传到命中的上游；只有当上游明确返回端点或模型兼容性错误时，平台才会尝试一次安全互转 fallback。</p>
-            <p>当前仅简单文本、普通图片和基础流式请求允许进入互转；这类 fallback 可安全适配字段包括 <code>model</code>、<code>instructions</code>、<code>input</code>、<code>temperature</code>、<code>top_p</code>、<code>presence_penalty</code>、<code>frequency_penalty</code>、<code>stream</code>、<code>user</code>、<code>metadata</code>、<code>seed</code>、<code>max_output_tokens</code>、<code>max_tokens</code>。</p>
-            <p>工具调用、状态上下文、reasoning、结构化输出选项和复杂多模态内容会继续按原请求优先透传；只有在确实需要互转时，平台才会因为存在这些高风险能力而直接返回明确错误码和原因。</p>
+            <p><code>/v1/responses</code> 会按原始 Responses 协议透传到命中的原生 Responses 上游；平台不会把该请求自动转换为 <code>/v1/chat/completions</code>。</p>
+            <p><code>/v1/chat/completions</code> 与 <code>/v1/responses</code> 两种入口相对独立。文本、流式、工具调用和图像理解请求都会按当前入口筛选原生支持的模型渠道；若没有可用原生候选，会返回明确错误码和原因。</p>
             <div class="hero-actions">
                 <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="curl {{ external_v1_base_url }}/responses &#10;  -H &quot;Content-Type: application/json&quot; &#10;  -H &quot;Authorization: Bearer YOUR_PLATFORM_API_KEY&quot; &#10;  -d '{&#10;    &quot;model&quot;: &quot;gpt-4o-mini&quot;,&#10;    &quot;input&quot;: &quot;你好，请用一句话介绍本平台&quot;&#10;  }'">复制 responses 示例</button>
             </div>
@@ -503,15 +502,15 @@ data: {"error":{"message":"具体错误说明","code":"stream_interrupted"}}
 data: [DONE]</code></pre></div>
         </article>
         <article class="docs-module-card">
-            <h4>端点适配错误</h4>
-            <p>当请求包含不适合在 <code>chat/completions</code> 与 <code>responses</code> 间互转的能力时，平台会返回 <code>endpoint_fallback_conversion_unsafe</code> 或 <code>endpoint_response_conversion_unsafe</code>，并列出不转换原因。</p>
+            <h4>端点能力错误</h4>
+            <p>当当前模型或授权渠道没有原生支持所请求的入口能力时，平台会返回模型不可用或能力不支持错误，并保留 <code>trace_id</code> 便于排查。</p>
             <div class="doc-code-block compact"><pre><code>{
   "error": {
-    "message": "不安全转换说明",
-    "code": "endpoint_fallback_conversion_unsafe",
+    "message": "No available provider for requested model",
+    "code": "model_not_available",
     "detail": {
-      "unsafe_fields": ["tools"],
-      "unsafe_reasons": ["工具调用不能安全互转"]
+      "requires_tools": true,
+      "route_diagnostics": {"summary": "没有满足原生端点能力的候选"}
     }
   }
 }</code></pre></div>

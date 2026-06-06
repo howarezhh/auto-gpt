@@ -26,6 +26,8 @@ from app.schemas.provider import (
     ProviderModelConfigInput,
     ProviderModelConfigUpdate,
     ProviderUpdate,
+    format_provider_protocol_label as schema_format_provider_protocol_label,
+    normalize_provider_protocol_type as schema_normalize_provider_protocol_type,
 )
 from app.services.cache_service import CacheService
 from app.services.log_service import LogService
@@ -99,6 +101,7 @@ class ProviderService:
 Base URL: https://example.com/v1
 API Key: sk-xxxx
 类型: openai_compatible
+协议: 双协议
 分组: 第三方聚合
 地区: hk
 优先级: 100
@@ -121,9 +124,36 @@ API Key: sk-xxxx
 名称: 第二个中文渠道名
 Base URL: https://another.example.com/v1
 API Key: sk-yyyy
+协议: 双协议
 模型:
 模型能力:
 """
+
+    @staticmethod
+    def normalize_provider_protocol_type(value: str | None) -> str:
+        return schema_normalize_provider_protocol_type(value)
+
+    @staticmethod
+    def provider_protocol_label(value: str | None) -> str:
+        try:
+            return schema_format_provider_protocol_label(value)
+        except ValueError:
+            return schema_format_provider_protocol_label("both")
+
+    @staticmethod
+    def provider_protocol_type(provider: Provider) -> str:
+        try:
+            return ProviderService.normalize_provider_protocol_type(getattr(provider, "protocol_type", None))
+        except ValueError:
+            return "both"
+
+    @staticmethod
+    def provider_supports_chat_completions(provider: Provider) -> bool:
+        return ProviderService.provider_protocol_type(provider) in {"both", "chat_completions"}
+
+    @staticmethod
+    def provider_supports_responses(provider: Provider) -> bool:
+        return ProviderService.provider_protocol_type(provider) in {"both", "responses"}
 
     @staticmethod
     def _model_name_supports_vision(normalized: str) -> bool:
@@ -157,22 +187,12 @@ API Key: sk-yyyy
 
     @staticmethod
     def _model_name_supports_responses(normalized: str) -> bool:
-        if not normalized:
-            return True
-        chat_only_prefixes = (
-            "deepseek",
-            "glm",
-            "kimi",
-            "moonshot-v1",
-            "mimo",
-        )
-        if normalized.startswith(chat_only_prefixes):
-            return False
+        # 协议端点能力不能从模型名前缀可靠推断；未探测或新模型默认双协议可用。
         return True
 
     @staticmethod
     def _infer_model_capabilities(model_name: str) -> dict[str, bool]:
-        """根据模型名启发式推断视觉、工具和图像生成能力。"""
+        """根据模型名启发式推断非协议能力；Chat/Responses 默认均为可探测。"""
         normalized = (model_name or "").strip().lower()
         supports_vision = ProviderService._model_name_supports_vision(normalized)
         supports_tools = ProviderService._model_name_supports_tools(normalized)
@@ -440,6 +460,7 @@ API Key: sk-yyyy
             base_url=payload.base_url.rstrip("/"),
             api_key=payload.api_key,
             provider_type=payload.provider_type,
+            protocol_type=payload.protocol_type,
             group_name=payload.group_name,
             region_tag=payload.region_tag,
             enabled=payload.enabled,
@@ -633,6 +654,14 @@ API Key: sk-yyyy
             "type": "provider_type",
             "providertype": "provider_type",
             "provider_type": "provider_type",
+            "协议": "protocol_type",
+            "协议类型": "protocol_type",
+            "支持协议": "protocol_type",
+            "protocol": "protocol_type",
+            "protocoltype": "protocol_type",
+            "protocol_type": "protocol_type",
+            "supportedprotocol": "protocol_type",
+            "supported_protocol": "protocol_type",
             "分组": "group_name",
             "渠道分组": "group_name",
             "group": "group_name",
@@ -722,11 +751,19 @@ API Key: sk-yyyy
             ProviderService._build_batch_model_config(model_name, model_capabilities).model_dump()
             for model_name in model_names
         ]
+        try:
+            protocol_type = ProviderService.normalize_provider_protocol_type(
+                ProviderService._clean_optional_text(normalized.get("protocol_type"))
+            )
+        except ValueError as exc:
+            errors.append(str(exc))
+            return None
         provider_payload = {
             "name": name,
             "base_url": base_url.rstrip("/"),
             "api_key": api_key,
             "provider_type": ProviderService._clean_optional_text(normalized.get("provider_type")) or "openai_compatible",
+            "protocol_type": protocol_type,
             "group_name": ProviderService._clean_optional_text(normalized.get("group_name")),
             "region_tag": ProviderService._clean_optional_text(normalized.get("region_tag")),
             "enabled": ProviderService._parse_batch_bool(normalized.get("enabled"), default=True),
@@ -1001,6 +1038,8 @@ API Key: sk-yyyy
             "api_key": provider.api_key,
             "api_key_masked": ProviderService.mask_api_key(provider.api_key),
             "provider_type": provider.provider_type,
+            "protocol_type": ProviderService.provider_protocol_type(provider),
+            "protocol_label": ProviderService.provider_protocol_label(getattr(provider, "protocol_type", None)),
             "group_name": provider.group_name,
             "region_tag": provider.region_tag,
             "enabled": provider.enabled,
@@ -1057,6 +1096,8 @@ API Key: sk-yyyy
             "region_tag": provider.region_tag,
             "enabled": provider.enabled,
             "health_status": provider.health_status,
+            "protocol_type": ProviderService.provider_protocol_type(provider),
+            "protocol_label": ProviderService.provider_protocol_label(getattr(provider, "protocol_type", None)),
             "models": [item.model_name for item in provider.provider_models],
         }
 
@@ -1092,6 +1133,8 @@ API Key: sk-yyyy
             "priority": provider.priority,
             "weight": provider.weight,
             "health_status": provider.health_status,
+            "protocol_type": ProviderService.provider_protocol_type(provider),
+            "protocol_label": ProviderService.provider_protocol_label(getattr(provider, "protocol_type", None)),
             "circuit_state": provider.circuit_state,
             "last_latency_ms": provider.last_latency_ms,
             "models": [item.model_name for item in provider.provider_models],
@@ -1309,6 +1352,8 @@ API Key: sk-yyyy
                 "id": provider.id,
                 "name": provider.name,
                 "base_url": provider.base_url,
+                "protocol_type": ProviderService.provider_protocol_type(provider),
+                "protocol_label": ProviderService.provider_protocol_label(getattr(provider, "protocol_type", None)),
                 "group_name": provider.group_name,
                 "region_tag": provider.region_tag,
                 "enabled": provider.enabled,

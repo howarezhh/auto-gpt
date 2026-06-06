@@ -42,6 +42,8 @@ class RequestLogQueueService:
     def enqueue(cls, **kwargs: Any) -> bool:
         if not cls.enabled():
             return False
+        if not cls._has_active_workers():
+            return False
         loop = RedisService.event_loop()
         if loop is not None:
             try:
@@ -65,6 +67,10 @@ class RequestLogQueueService:
         except (RedisError, RuntimeError, TypeError, ValueError) as exc:
             logger.warning("Failed to enqueue request log; falling back to sync write: %s", exc)
             return False
+
+    @classmethod
+    def _has_active_workers(cls) -> bool:
+        return any(not worker.done() for worker in cls._workers)
 
     @classmethod
     def _ensure_ingress_worker(cls, loop: asyncio.AbstractEventLoop) -> None:
@@ -222,6 +228,7 @@ class RequestLogQueueService:
     @staticmethod
     def _write_batch(raw_items: list[str]) -> None:
         from app.services.log_service import LogService
+        from app.models.provider import Provider
 
         if not raw_items:
             return
@@ -234,6 +241,7 @@ class RequestLogQueueService:
                 if not isinstance(kwargs, dict):
                     continue
                 payload_kwargs = dict(kwargs)
+                RequestLogQueueService._sanitize_log_provider_id(db, payload_kwargs, Provider)
                 payload_kwargs["auto_commit"] = False
                 payload_kwargs["refresh_after_create"] = False
                 payload_kwargs["flush_after_add"] = False
@@ -253,6 +261,7 @@ class RequestLogQueueService:
     @staticmethod
     def _write_kwargs_batch(items: list[dict[str, Any]]) -> None:
         from app.services.log_service import LogService
+        from app.models.provider import Provider
 
         if not items:
             return
@@ -263,6 +272,7 @@ class RequestLogQueueService:
                 if not isinstance(kwargs, dict):
                     continue
                 payload = dict(kwargs)
+                RequestLogQueueService._sanitize_log_provider_id(db, payload, Provider)
                 payload["auto_commit"] = False
                 payload["refresh_after_create"] = False
                 payload["flush_after_add"] = False
@@ -278,6 +288,19 @@ class RequestLogQueueService:
             raise
         finally:
             db.close()
+
+    @staticmethod
+    def _sanitize_log_provider_id(db, payload: dict[str, Any], provider_cls) -> None:
+        provider_id = payload.get("provider_id")
+        if provider_id is None:
+            return
+        try:
+            normalized_provider_id = int(provider_id)
+        except (TypeError, ValueError):
+            payload["provider_id"] = None
+            return
+        if db.get(provider_cls, normalized_provider_id) is None:
+            payload["provider_id"] = None
 
     @staticmethod
     def _enqueue_finalize_jobs(finalize_jobs: list[tuple[Any, dict[str, Any]]]) -> None:

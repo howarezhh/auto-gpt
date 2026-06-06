@@ -48,6 +48,7 @@
                     <th>名称</th>
                     <th>分组 / 地区</th>
                     <th>Base URL</th>
+                    <th>协议</th>
                     <th>模型</th>
                     <th>整体可用性</th>
                     <th>熔断</th>
@@ -213,6 +214,14 @@
             <label for="provider-type">
                 <span>类型</span>
                 <input class="field-input" id="provider-type" value="openai_compatible">
+            </label>
+            <label for="provider-protocol-type">
+                <span>协议</span>
+                <select class="field-input" id="provider-protocol-type">
+                    <option value="both">双协议</option>
+                    <option value="chat_completions">Chat Completions API</option>
+                    <option value="responses">Responses API</option>
+                </select>
             </label>
             <label for="provider-group-name">
                 <span>渠道分组</span>

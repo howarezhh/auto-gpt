@@ -11,6 +11,7 @@ from app.models.model_mapping import ModelMapping
 from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
 from app.models.request_log import RequestLog
+from app.models.responses_chat_adapter_session import ResponsesChatAdapterSession
 from app.models.uploaded_asset import UploadedAsset
 from app.models.user_account import UserAccount
 from app.models.user_account_billing_record import UserAccountBillingRecord
@@ -29,6 +30,7 @@ __all__ = [
     "Provider",
     "ProviderModel",
     "RequestLog",
+    "ResponsesChatAdapterSession",
     "UploadedAsset",
     "UserAccount",
     "UserAccountBillingRecord",

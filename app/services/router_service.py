@@ -156,15 +156,75 @@ class RouterService:
         return f"{RouterService.CAPABILITY_HEALTH_CACHE_PREFIX}:{provider_id}:{provider_model_id}:{capability}"
 
     @staticmethod
-    def _capability_probe_failed(provider: Provider, provider_model: ProviderModel, capability: str) -> bool:
+    def _capability_probe_failed(
+        provider: Provider,
+        provider_model: ProviderModel,
+        capability: str,
+        *,
+        endpoint_path: str | None = None,
+    ) -> bool:
+        capability_keys = RouterService._capability_probe_lookup_keys(capability, endpoint_path=endpoint_path)
         capability_state = ProviderHealthStateService.get_model_capability_state(provider.id, provider_model.id)
-        if isinstance(capability_state, dict) and isinstance(capability_state.get(capability), dict):
-            payload = capability_state[capability]
-            if capability == "tools":
-                return payload.get("native_ok") is False
+        if isinstance(capability_state, dict):
+            for capability_key in capability_keys:
+                payload = capability_state.get(capability_key)
+                if not isinstance(payload, dict):
+                    continue
+                if capability == "tools":
+                    return payload.get("native_ok") is False
+                return payload.get("success") is False
+        for capability_key in capability_keys:
+            payload = CacheService.get(RouterService._capability_probe_cache_key(provider.id, provider_model.id, capability_key))
+            if isinstance(payload, dict):
+                return payload.get("success") is False
+        return False
+
+    @staticmethod
+    def _capability_probe_lookup_keys(capability: str, *, endpoint_path: str | None = None) -> list[str]:
+        if capability not in {"tools", "vision"}:
+            return [capability]
+        if endpoint_path == "/chat/completions":
+            return [f"{capability}_chat_completions"]
+        if endpoint_path == "/responses":
+            return [f"{capability}_responses"]
+        return [capability]
+
+    @staticmethod
+    def _endpoint_probe_key(endpoint_path: str, *, stream: bool) -> str | None:
+        if endpoint_path == "/chat/completions":
+            return "chat_completions_stream" if stream else "chat_completions"
+        if endpoint_path == "/responses":
+            return "responses_stream" if stream else "responses"
+        return None
+
+    @staticmethod
+    def _endpoint_probe_failed(
+        provider: Provider,
+        provider_model: ProviderModel,
+        endpoint_path: str,
+        *,
+        stream: bool = False,
+    ) -> bool:
+        probe_key = RouterService._endpoint_probe_key(endpoint_path, stream=stream)
+        if not probe_key:
+            return False
+        capability_state = ProviderHealthStateService.get_model_capability_state(provider.id, provider_model.id)
+        if isinstance(capability_state, dict):
+            payload = capability_state.get(probe_key)
+            if isinstance(payload, dict):
+                return payload.get("success") is False
+        payload = CacheService.get(RouterService._capability_probe_cache_key(provider.id, provider_model.id, probe_key))
+        if isinstance(payload, dict):
             return payload.get("success") is False
-        payload = CacheService.get(RouterService._capability_probe_cache_key(provider.id, provider_model.id, capability))
-        return isinstance(payload, dict) and payload.get("success") is False
+        return False
+
+    @staticmethod
+    def _required_endpoint_path(*, require_chat_completions: bool, require_responses: bool) -> str | None:
+        if require_chat_completions and not require_responses:
+            return "/chat/completions"
+        if require_responses and not require_chat_completions:
+            return "/responses"
+        return None
 
     @staticmethod
     def _load_available_candidates_uncached(
@@ -190,11 +250,19 @@ class RouterService:
         except Exception:
             capacity_snapshots = {}
 
+        required_endpoint_path = RouterService._required_endpoint_path(
+            require_chat_completions=require_chat_completions,
+            require_responses=require_responses,
+        )
         candidates: list[RouteCandidate] = []
         for provider in providers:
             if not provider.enabled or provider.circuit_state == "open" or provider.maintenance_mode_enabled:
                 continue
             if allowed_provider_ids is not None and provider.id not in allowed_provider_ids:
+                continue
+            if require_chat_completions and not ProviderService.provider_supports_chat_completions(provider):
+                continue
+            if require_responses and not ProviderService.provider_supports_responses(provider):
                 continue
             for provider_model in provider.provider_models:
                 if not provider_model.enabled:
@@ -207,19 +275,30 @@ class RouterService:
                     continue
                 if require_vision and not provider_model.supports_vision:
                     continue
-                if require_tools and not ProviderService.provider_model_supports_tools(provider_model):
-                    continue
                 if require_image_generation and not ProviderService.provider_model_supports_image_generation(provider_model):
                     continue
-                if require_tools and RouterService._capability_probe_failed(provider, provider_model, "tools"):
-                    continue
-                if require_vision and RouterService._capability_probe_failed(provider, provider_model, "vision"):
+                if require_vision and RouterService._capability_probe_failed(
+                    provider,
+                    provider_model,
+                    "vision",
+                    endpoint_path=required_endpoint_path,
+                ):
                     continue
                 if require_image_generation and RouterService._capability_probe_failed(provider, provider_model, "image_generation"):
                     continue
-                if require_chat_completions and not provider_model.supports_chat_completions:
+                if require_chat_completions and RouterService._endpoint_probe_failed(
+                    provider,
+                    provider_model,
+                    "/chat/completions",
+                    stream=require_stream,
+                ):
                     continue
-                if require_responses and not provider_model.supports_responses:
+                if require_responses and RouterService._endpoint_probe_failed(
+                    provider,
+                    provider_model,
+                    "/responses",
+                    stream=require_stream,
+                ):
                     continue
                 if provider_model.circuit_state == "open":
                     if not RouterService._should_probe_open_model(
@@ -508,6 +587,10 @@ class RouterService:
                 extra={"provider_id": effective_forced_provider_id},
             )
         pre_capacity_candidates: list[RouteCandidate] = []
+        required_endpoint_path = RouterService._required_endpoint_path(
+            require_chat_completions=require_chat_completions,
+            require_responses=require_responses,
+        )
         for provider in providers:
             if effective_forced_provider_id is not None and provider.id != effective_forced_provider_id:
                 continue
@@ -526,6 +609,12 @@ class RouterService:
                 continue
             if allowed_provider_ids is not None and provider.id not in allowed_provider_ids:
                 RouterService._record_diagnostic_reason(diagnostics, "provider_not_authorized", provider=provider)
+                continue
+            if require_chat_completions and not ProviderService.provider_supports_chat_completions(provider):
+                RouterService._record_diagnostic_reason(diagnostics, "provider_chat_protocol_not_supported", provider=provider)
+                continue
+            if require_responses and not ProviderService.provider_supports_responses(provider):
+                RouterService._record_diagnostic_reason(diagnostics, "provider_responses_protocol_not_supported", provider=provider)
                 continue
             for provider_model in provider.provider_models:
                 diagnostics["mounted_model_total"] += 1
@@ -546,26 +635,35 @@ class RouterService:
                 if require_vision and not provider_model.supports_vision:
                     RouterService._record_diagnostic_reason(diagnostics, "vision_not_supported", provider=provider, provider_model=provider_model)
                     continue
-                if require_tools and not ProviderService.provider_model_supports_tools(provider_model):
-                    RouterService._record_diagnostic_reason(diagnostics, "tools_not_supported", provider=provider, provider_model=provider_model)
-                    continue
                 if require_image_generation and not ProviderService.provider_model_supports_image_generation(provider_model):
                     RouterService._record_diagnostic_reason(diagnostics, "image_generation_not_supported", provider=provider, provider_model=provider_model)
                     continue
-                if require_tools and RouterService._capability_probe_failed(provider, provider_model, "tools"):
-                    RouterService._record_diagnostic_reason(diagnostics, "tools_probe_unhealthy", provider=provider, provider_model=provider_model)
-                    continue
-                if require_vision and RouterService._capability_probe_failed(provider, provider_model, "vision"):
+                if require_vision and RouterService._capability_probe_failed(
+                    provider,
+                    provider_model,
+                    "vision",
+                    endpoint_path=required_endpoint_path,
+                ):
                     RouterService._record_diagnostic_reason(diagnostics, "vision_probe_unhealthy", provider=provider, provider_model=provider_model)
                     continue
                 if require_image_generation and RouterService._capability_probe_failed(provider, provider_model, "image_generation"):
                     RouterService._record_diagnostic_reason(diagnostics, "image_generation_probe_unhealthy", provider=provider, provider_model=provider_model)
                     continue
-                if require_chat_completions and not provider_model.supports_chat_completions:
-                    RouterService._record_diagnostic_reason(diagnostics, "chat_not_supported", provider=provider, provider_model=provider_model)
+                if require_chat_completions and RouterService._endpoint_probe_failed(
+                    provider,
+                    provider_model,
+                    "/chat/completions",
+                    stream=require_stream,
+                ):
+                    RouterService._record_diagnostic_reason(diagnostics, "chat_probe_unhealthy", provider=provider, provider_model=provider_model)
                     continue
-                if require_responses and not provider_model.supports_responses:
-                    RouterService._record_diagnostic_reason(diagnostics, "responses_not_supported", provider=provider, provider_model=provider_model)
+                if require_responses and RouterService._endpoint_probe_failed(
+                    provider,
+                    provider_model,
+                    "/responses",
+                    stream=require_stream,
+                ):
+                    RouterService._record_diagnostic_reason(diagnostics, "responses_probe_unhealthy", provider=provider, provider_model=provider_model)
                     continue
                 if provider_model.circuit_state == "open" and not RouterService._should_probe_open_model(
                     provider=provider,
@@ -886,6 +984,8 @@ class RouterService:
             "provider_circuit_open": "中转站已熔断",
             "provider_maintenance_mode": "中转站维护中",
             "provider_not_authorized": "当前密钥未授权该中转站",
+            "provider_chat_protocol_not_supported": "中转站不支持 Chat Completions API",
+            "provider_responses_protocol_not_supported": "中转站不支持 Responses API",
             "model_disabled": "中转站模型已禁用",
             "model_globally_disabled": "模型管理中已禁用",
             "model_name_mismatch": "模型名不匹配",
@@ -898,6 +998,8 @@ class RouterService:
             "image_generation_probe_unhealthy": "图片生成探针不可用",
             "chat_not_supported": "模型不支持 chat/completions",
             "responses_not_supported": "模型不支持 responses",
+            "chat_probe_unhealthy": "chat/completions 端点探针不可用",
+            "responses_probe_unhealthy": "responses 端点探针不可用",
             "model_circuit_open": "模型已熔断",
             "model_unhealthy": "模型健康状态异常",
             "capacity_snapshot_unavailable": "未获取到容量快照",

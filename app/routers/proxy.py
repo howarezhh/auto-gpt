@@ -21,6 +21,7 @@ from app.services.concurrency_service import (
 from app.services.log_service import LogService
 from app.services.proxy_service import ProxyService
 from app.services.openai_error_service import OpenAIErrorService
+from app.services.responses_chat_adapter_service import ResponsesChatAdapterService
 from app.services.setting_service import SettingService
 from app.utils.json_utils import dumps_json
 from app.utils.http_headers import build_proxy_response_headers
@@ -886,15 +887,24 @@ async def responses(
     if payload.get("stream") is True:
         lease = await _acquire_request_concurrency(request=request, api_client_auth=api_client_auth, is_stream=True)
         try:
-            stream, provider, trace, latency_ms = await ProxyService.forward_stream_request(
-                endpoint_path="/responses",
-                payload=payload,
-                log_type="responses",
-                route_context=api_client_auth.route_context,
-                api_client_auth=api_client_auth,
-                trace_id=getattr(request.state, "trace_id", None),
-                source_ip=source_ip,
-            )
+            if ResponsesChatAdapterService.enabled():
+                stream, provider, trace, latency_ms = await ResponsesChatAdapterService.forward_stream_response(
+                    payload=payload,
+                    route_context=api_client_auth.route_context,
+                    api_client_auth=api_client_auth,
+                    trace_id=getattr(request.state, "trace_id", None),
+                    source_ip=source_ip,
+                )
+            else:
+                stream, provider, trace, latency_ms = await ProxyService.forward_stream_request(
+                    endpoint_path="/responses",
+                    payload=payload,
+                    log_type="responses",
+                    route_context=api_client_auth.route_context,
+                    api_client_auth=api_client_auth,
+                    trace_id=getattr(request.state, "trace_id", None),
+                    source_ip=source_ip,
+                )
             headers = build_proxy_response_headers(
                 provider_id=provider.id,
                 provider_name=provider.name,
@@ -913,15 +923,24 @@ async def responses(
 
     lease = await _acquire_request_concurrency(request=request, api_client_auth=api_client_auth, is_stream=False)
     try:
-        result, provider, trace, latency_ms = await ProxyService.forward_json_request(
-            endpoint_path="/responses",
-            payload=payload,
-            log_type="responses",
-            route_context=api_client_auth.route_context,
-            api_client_auth=api_client_auth,
-            trace_id=getattr(request.state, "trace_id", None),
-            source_ip=source_ip,
-        )
+        if ResponsesChatAdapterService.enabled():
+            result, provider, trace, latency_ms = await ResponsesChatAdapterService.forward_json_response(
+                payload=payload,
+                route_context=api_client_auth.route_context,
+                api_client_auth=api_client_auth,
+                trace_id=getattr(request.state, "trace_id", None),
+                source_ip=source_ip,
+            )
+        else:
+            result, provider, trace, latency_ms = await ProxyService.forward_json_request(
+                endpoint_path="/responses",
+                payload=payload,
+                log_type="responses",
+                route_context=api_client_auth.route_context,
+                api_client_auth=api_client_auth,
+                trace_id=getattr(request.state, "trace_id", None),
+                source_ip=source_ip,
+            )
     finally:
         await _release_request_concurrency(lease)
     for key, value in build_proxy_response_headers(

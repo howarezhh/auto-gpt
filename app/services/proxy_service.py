@@ -57,6 +57,8 @@ class PreparedUpstreamRequest:
     adapt_chat_response_to_responses: bool = False
     adapt_responses_response_to_chat: bool = False
     fallback_from_path: str | None = None
+    response_model_override: str | None = None
+    response_id_override: str | None = None
 
 
 @dataclass(slots=True)
@@ -151,6 +153,15 @@ class ProxyService:
         "max_output_tokens",
         "max_tokens",
     }
+    RESPONSES_CHAT_ADAPTER_MAPPABLE_FIELDS = {
+        "reasoning",
+        "reasoning_effort",
+        "store",
+        "include",
+        "parallel_tool_calls",
+        "prompt_cache_key",
+        "client_metadata",
+    }
     CHAT_RESPONSES_ADAPTER_SAFE_FIELDS = {
         "model",
         "messages",
@@ -242,6 +253,8 @@ class ProxyService:
         if args:
             return False
         if operation is LogService.create_log:
+            if kwargs.get("success") is False:
+                return False
             return RequestLogQueueService.enqueue(**kwargs)
         if operation is ProxyService._create_success_log_with_provider_status:
             if not RequestLogQueueService.enqueue(**kwargs):
@@ -483,9 +496,52 @@ class ProxyService:
 
     @staticmethod
     def _payload_uses_tools(payload: dict[str, Any]) -> bool:
-        if any(key in payload for key in ("tools", "tool_choice", "functions", "function_call", "parallel_tool_calls")):
+        if ProxyService._value_has_callable_tool_definition(payload.get("tools")):
+            return True
+        if ProxyService._value_has_callable_function_definition(payload.get("functions")):
+            return True
+        if ProxyService._tool_choice_requires_tool(payload.get("tool_choice")):
+            return True
+        if ProxyService._function_call_requires_tool(payload.get("function_call")):
             return True
         return ProxyService._value_has_tool_context(payload.get("messages")) or ProxyService._value_has_tool_context(payload.get("input"))
+
+    @staticmethod
+    def _value_has_callable_tool_definition(value: Any) -> bool:
+        if isinstance(value, list):
+            return any(ProxyService._value_has_callable_tool_definition(item) for item in value)
+        if not isinstance(value, dict):
+            return False
+        item_type = value.get("type")
+        if isinstance(item_type, str) and item_type in {"function", "image_generation"}:
+            return True
+        if "function" in value and isinstance(value.get("function"), dict):
+            return True
+        return False
+
+    @staticmethod
+    def _value_has_callable_function_definition(value: Any) -> bool:
+        if isinstance(value, list):
+            return any(isinstance(item, dict) and isinstance(item.get("name"), str) and bool(item.get("name", "").strip()) for item in value)
+        return isinstance(value, dict) and isinstance(value.get("name"), str) and bool(value.get("name", "").strip())
+
+    @staticmethod
+    def _tool_choice_requires_tool(value: Any) -> bool:
+        if isinstance(value, str):
+            return value in {"required"}
+        if not isinstance(value, dict):
+            return False
+        item_type = value.get("type")
+        if isinstance(item_type, str) and item_type in {"function", "image_generation"}:
+            return True
+        function = value.get("function")
+        return isinstance(function, dict) and isinstance(function.get("name"), str) and bool(function.get("name", "").strip())
+
+    @staticmethod
+    def _function_call_requires_tool(value: Any) -> bool:
+        if isinstance(value, str):
+            return value not in {"", "none", "auto"}
+        return isinstance(value, dict) and isinstance(value.get("name"), str) and bool(value.get("name", "").strip())
 
     @staticmethod
     def _payload_has_stateful_responses_context(payload: Any) -> bool:
@@ -1193,9 +1249,6 @@ class ProxyService:
             elif require_image_generation:
                 route_message = "No native image-generation-capable provider for requested model"
                 error_code = "model_image_generation_not_available"
-            elif require_tools:
-                route_message = "No native tool-capable provider for requested model"
-                error_code = "model_tools_not_available"
             else:
                 route_message = "No available provider for requested model"
                 error_code = "model_not_available"
@@ -1855,9 +1908,6 @@ class ProxyService:
             elif require_image_generation:
                 route_message = "No native image-generation-capable provider for requested model"
                 error_code = "model_image_generation_not_available"
-            elif require_tools:
-                route_message = "No native tool-capable provider for requested model"
-                error_code = "model_tools_not_available"
             else:
                 route_message = "No available provider for requested model"
                 error_code = "model_not_available"
@@ -2051,7 +2101,10 @@ class ProxyService:
                         generated_image_summary: dict[str, Any] | None = {} if has_image else None
                         event_buffer = bytearray()
                         downstream_transform_state = (
-                            ProxyService._create_responses_stream_state(payload=payload)
+                            ProxyService._create_responses_stream_state(
+                                payload=payload,
+                                response_id=prepared.response_id_override,
+                            )
                             if prepared.adapt_chat_response_to_responses
                             else None
                         )
@@ -2111,8 +2164,12 @@ class ProxyService:
                                     if prepared.adapt_chat_response_to_responses:
                                         for downstream_chunk in ProxyService._adapt_chat_stream_chunk_to_responses_events(
                                             upstream_chunk,
-                                            state=downstream_transform_state or ProxyService._create_responses_stream_state(payload=payload),
-                                            requested_model=str(requested_model_name or payload.get("model") or ""),
+                                            state=downstream_transform_state
+                                            or ProxyService._create_responses_stream_state(
+                                                payload=payload,
+                                                response_id=prepared.response_id_override,
+                                            ),
+                                            requested_model=str(prepared.response_model_override or requested_model_name or payload.get("model") or ""),
                                         ):
                                             yield downstream_chunk
                                     elif prepared.adapt_responses_response_to_chat:
@@ -2137,7 +2194,11 @@ class ProxyService:
                                 return
                             if prepared.adapt_chat_response_to_responses:
                                 for downstream_chunk in ProxyService._build_responses_stream_completion_events(
-                                    downstream_transform_state or ProxyService._create_responses_stream_state(payload=payload)
+                                    downstream_transform_state
+                                    or ProxyService._create_responses_stream_state(
+                                        payload=payload,
+                                        response_id=prepared.response_id_override,
+                                    )
                                 ):
                                     yield downstream_chunk
                             elif prepared.adapt_responses_response_to_chat:
@@ -2494,114 +2555,14 @@ class ProxyService:
     ) -> tuple[dict[str, Any], str | None, list[dict]]:
         headers = {"Authorization": f"Bearer {provider.api_key}"}
         prepared = ProxyService._prepare_upstream_request(provider, endpoint_path=endpoint_path, payload=payload)
-        try:
-            response_json, upstream_request_id = await ProxyService._send_prepared_json(
-                provider,
-                prepared=prepared,
-                headers=headers,
-                requested_payload=payload,
-                setting=setting,
-            )
-            return response_json, upstream_request_id, []
-        except httpx.HTTPStatusError as exc:
-            primary_error_body = await ProxyService._extract_response_error(exc.response)
-            if not ProxyService._should_try_endpoint_fallback(
-                provider,
-                endpoint_path=prepared.request_path,
-                status_code=exc.response.status_code,
-                error_detail=primary_error_body,
-            ):
-                raise
-            fallback_prepared = ProxyService._build_endpoint_fallback_request(
-                requested_endpoint_path=endpoint_path,
-                failed_request_path=prepared.request_path,
-                payload=payload,
-                primary_error=primary_error_body,
-            )
-            fallback_trace = [
-                ProxyService._build_trace_item(
-                    provider,
-                    provider_model,
-                    "endpoint_fallback",
-                    int((time.perf_counter() - started) * 1000),
-                    status_code=exc.response.status_code,
-                    error=primary_error_body,
-                    extra={
-                        "from_endpoint": prepared.request_path,
-                        "to_endpoint": fallback_prepared.request_path,
-                    },
-                )
-            ]
-            response_json, upstream_request_id = await ProxyService._send_prepared_json(
-                provider,
-                prepared=fallback_prepared,
-                headers=headers,
-                requested_payload=payload,
-                setting=setting,
-            )
-            fallback_trace.append(
-                ProxyService._build_trace_item(
-                    provider,
-                    provider_model,
-                    "endpoint_fallback_success",
-                    int((time.perf_counter() - started) * 1000),
-                    status_code=200,
-                    extra={
-                        "from_endpoint": prepared.request_path,
-                        "to_endpoint": fallback_prepared.request_path,
-                    },
-                )
-            )
-            return response_json, upstream_request_id, fallback_trace
-        except RequestsUpstreamHTTPError as exc:
-            if not ProxyService._should_try_endpoint_fallback(
-                provider,
-                endpoint_path=prepared.request_path,
-                status_code=exc.status_code,
-                error_detail=exc.detail,
-            ):
-                raise
-            fallback_prepared = ProxyService._build_endpoint_fallback_request(
-                requested_endpoint_path=endpoint_path,
-                failed_request_path=prepared.request_path,
-                payload=payload,
-                primary_error=exc.detail,
-            )
-            fallback_trace = [
-                ProxyService._build_trace_item(
-                    provider,
-                    provider_model,
-                    "endpoint_fallback",
-                    int((time.perf_counter() - started) * 1000),
-                    status_code=exc.status_code,
-                    error=ProxyService._error_message_for_log(exc.detail),
-                    extra={
-                        "from_endpoint": prepared.request_path,
-                        "to_endpoint": fallback_prepared.request_path,
-                    },
-                )
-            ]
-            response_json, upstream_request_id = await ProxyService._send_prepared_json(
-                provider,
-                prepared=fallback_prepared,
-                headers=headers,
-                requested_payload=payload,
-                setting=setting,
-            )
-            fallback_trace.append(
-                ProxyService._build_trace_item(
-                    provider,
-                    provider_model,
-                    "endpoint_fallback_success",
-                    int((time.perf_counter() - started) * 1000),
-                    status_code=200,
-                    extra={
-                        "from_endpoint": prepared.request_path,
-                        "to_endpoint": fallback_prepared.request_path,
-                    },
-                )
-            )
-            return response_json, upstream_request_id, fallback_trace
+        response_json, upstream_request_id = await ProxyService._send_prepared_json(
+            provider,
+            prepared=prepared,
+            headers=headers,
+            requested_payload=payload,
+            setting=setting,
+        )
+        return response_json, upstream_request_id, []
 
     @staticmethod
     async def _send_prepared_json(
@@ -2629,7 +2590,7 @@ class ProxyService:
             ProxyService._assert_chat_response_adapter_safe(response_json)
             response_json = ProxyService._convert_chat_completion_to_responses_payload(
                 response_json,
-                requested_model=str(requested_payload.get("model") or response_json.get("model") or ""),
+                requested_model=str(prepared.response_model_override or requested_payload.get("model") or response_json.get("model") or ""),
             )
         if prepared.adapt_responses_response_to_chat:
             ProxyService._assert_responses_response_adapter_safe(response_json)
@@ -2662,7 +2623,7 @@ class ProxyService:
             ProxyService._assert_chat_response_adapter_safe(response_json)
             response_json = ProxyService._convert_chat_completion_to_responses_payload(
                 response_json,
-                requested_model=str(prepared.request_payload.get("model") or response_json.get("model") or ""),
+                requested_model=str(prepared.response_model_override or prepared.request_payload.get("model") or response_json.get("model") or ""),
             )
         if prepared.adapt_responses_response_to_chat:
             ProxyService._assert_responses_response_adapter_safe(response_json)
@@ -2924,65 +2885,9 @@ class ProxyService:
             await ProxyService._raise_stream_response_for_status(response)
             return response, opened_prepared, stream_context, []
         except httpx.HTTPStatusError as exc:
-            error_body = await ProxyService._extract_response_error(exc.response)
             if stream_context_entered:
                 await stream_context.__aexit__(type(exc), exc, exc.__traceback__)
-            if not ProxyService._should_try_endpoint_fallback(
-                provider,
-                endpoint_path=prepared.request_path,
-                status_code=exc.response.status_code,
-                error_detail=error_body,
-            ):
-                raise
-            fallback_prepared = ProxyService._build_endpoint_fallback_request(
-                requested_endpoint_path=endpoint_path,
-                failed_request_path=prepared.request_path,
-                payload=payload,
-                primary_error=error_body,
-            )
-            fallback_trace = [
-                ProxyService._build_trace_item(
-                    provider,
-                    provider_model,
-                    "endpoint_fallback",
-                    int((time.perf_counter() - started) * 1000),
-                    status_code=exc.response.status_code,
-                    error=error_body,
-                    extra={
-                        "from_endpoint": prepared.request_path,
-                        "to_endpoint": fallback_prepared.request_path,
-                    },
-                )
-            ]
-            fallback_context = ProxyService._stream_prepared_request(
-                provider,
-                prepared=fallback_prepared,
-                headers=headers,
-                stream_connect_timeout_seconds=stream_connect_timeout_seconds,
-            )
-            fallback_context_entered = False
-            try:
-                fallback_response, opened_fallback_prepared = await fallback_context.__aenter__()
-                fallback_context_entered = True
-                await ProxyService._raise_stream_response_for_status(fallback_response)
-            except Exception as fallback_exc:
-                if fallback_context_entered:
-                    await fallback_context.__aexit__(type(fallback_exc), fallback_exc, fallback_exc.__traceback__)
-                raise
-            fallback_trace.append(
-                ProxyService._build_trace_item(
-                    provider,
-                    provider_model,
-                    "endpoint_fallback_success",
-                    int((time.perf_counter() - started) * 1000),
-                    status_code=200,
-                    extra={
-                        "from_endpoint": prepared.request_path,
-                        "to_endpoint": fallback_prepared.request_path,
-                    },
-                )
-            )
-            return fallback_response, opened_fallback_prepared, fallback_context, fallback_trace
+            raise
         except Exception as exc:
             if stream_context_entered:
                 await stream_context.__aexit__(type(exc), exc, exc.__traceback__)
@@ -3164,13 +3069,9 @@ class ProxyService:
     @staticmethod
     def _route_endpoint_requirements(endpoint_path: str, payload: dict[str, Any]) -> tuple[bool, bool]:
         if endpoint_path == "/responses":
-            safety = ProxyService._assess_responses_to_chat_conversion_safety(payload)
-            allow_fallback = safety.safe and not (payload.get("stream") is True and ProxyService._payload_uses_tools(payload))
-            return False, not allow_fallback
+            return False, True
         if endpoint_path == "/chat/completions":
-            safety = ProxyService._assess_chat_to_responses_conversion_safety(payload)
-            allow_fallback = safety.safe and not (payload.get("stream") is True and ProxyService._payload_uses_tools(payload))
-            return not allow_fallback, False
+            return True, False
         return endpoint_path == "/chat/completions", endpoint_path == "/responses"
 
     @staticmethod
@@ -3195,6 +3096,8 @@ class ProxyService:
     def _assess_responses_to_chat_conversion_safety(payload: dict[str, Any]) -> EndpointConversionSafety:
         unsafe_fields: list[str] = []
         for key in payload.keys():
+            if key in ProxyService.RESPONSES_CHAT_ADAPTER_MAPPABLE_FIELDS:
+                continue
             if key not in ProxyService.RESPONSES_CHAT_ADAPTER_SAFE_FIELDS:
                 unsafe_fields.append(key)
                 continue
@@ -3607,26 +3510,7 @@ class ProxyService:
         status_code: int,
         error_detail: Any,
     ) -> bool:
-        if provider.provider_type != "openai_compatible":
-            return False
-        if endpoint_path not in {"/responses", "/chat/completions"}:
-            return False
-        if status_code not in {400, 404, 405, 422, 501}:
-            return False
-        message = ProxyService._error_message_for_log(error_detail).lower()
-        endpoint_tokens = (
-            "unsupported",
-            "not support",
-            "not_supported",
-            "invalidparameter",
-            "invalid parameter",
-            "not found",
-            "unknown",
-            "responses",
-            "chat/completions",
-            "model",
-        )
-        return any(token in message for token in endpoint_tokens)
+        return False
 
     @staticmethod
     def _classify_retry_policy(status_code: int, detail: Any | None = None) -> dict[str, Any]:
@@ -3740,14 +3624,14 @@ class ProxyService:
             "provider_not_authorized",
             "model_disabled",
             "model_globally_disabled",
-            "tools_not_supported",
             "vision_not_supported",
             "image_generation_not_supported",
-            "tools_probe_unhealthy",
             "vision_probe_unhealthy",
             "image_generation_probe_unhealthy",
             "chat_not_supported",
             "responses_not_supported",
+            "chat_probe_unhealthy",
+            "responses_probe_unhealthy",
         }
         nonrecoverable_match_count = sum(int(reason_counts.get(reason) or 0) for reason in nonrecoverable_match_reasons)
         if pre_capacity_candidate_count <= 0 and nonrecoverable_match_count >= matching_model_mount_count:
@@ -3838,67 +3722,93 @@ class ProxyService:
         payload: dict[str, Any],
         primary_error: Any | None = None,
     ) -> PreparedUpstreamRequest:
-        if failed_request_path == "/responses":
-            safety = ProxyService._assess_endpoint_conversion_safety(
-                from_endpoint_path="/responses",
-                to_endpoint_path="/chat/completions",
-                payload=payload,
-            )
-            if not safety.safe:
-                ProxyService._raise_unsafe_endpoint_conversion(
-                    from_endpoint_path="/responses",
-                    to_endpoint_path="/chat/completions",
-                    safety=safety,
-                    primary_error=primary_error,
-                )
-            return PreparedUpstreamRequest(
-                request_path="/chat/completions",
-                request_payload=ProxyService._build_chat_payload_from_responses_payload(payload),
-                adapt_chat_response_to_responses=requested_endpoint_path == "/responses",
-                fallback_from_path=failed_request_path,
-            )
-        if failed_request_path == "/chat/completions":
-            safety = ProxyService._assess_endpoint_conversion_safety(
-                from_endpoint_path="/chat/completions",
-                to_endpoint_path="/responses",
-                payload=payload,
-            )
-            if not safety.safe:
-                ProxyService._raise_unsafe_endpoint_conversion(
-                    from_endpoint_path="/chat/completions",
-                    to_endpoint_path="/responses",
-                    safety=safety,
-                    primary_error=primary_error,
-                )
-            return PreparedUpstreamRequest(
-                request_path="/responses",
-                request_payload=ProxyService._build_responses_payload_from_chat_payload(payload),
-                adapt_responses_response_to_chat=requested_endpoint_path == "/chat/completions",
-                fallback_from_path=failed_request_path,
-            )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"message": "Unsupported endpoint fallback path", "code": "unsupported_endpoint_fallback"},
+            detail={
+                "message": "Endpoint conversion fallback is disabled; use the requested endpoint's native upstream support",
+                "code": "endpoint_conversion_disabled",
+                "requested_endpoint": requested_endpoint_path,
+                "failed_endpoint": failed_request_path,
+            },
         )
+
+    @staticmethod
+    def _prepare_upstream_request_for_provider_model(
+        provider: Provider,
+        provider_model: ProviderModel,
+        *,
+        endpoint_path: str,
+        payload: dict[str, Any],
+    ) -> PreparedUpstreamRequest:
+        return ProxyService._prepare_upstream_request(provider, endpoint_path=endpoint_path, payload=payload)
+
+    @staticmethod
+    def _build_preselected_endpoint_fallback_trace(
+        provider: Provider,
+        provider_model: ProviderModel,
+        *,
+        prepared: PreparedUpstreamRequest,
+        started: float,
+    ) -> list[dict]:
+        if prepared.fallback_from_path is None:
+            return []
+        return [
+            ProxyService._build_trace_item(
+                provider,
+                provider_model,
+                "endpoint_fallback_preselected",
+                int((time.perf_counter() - started) * 1000),
+                extra={
+                    "from_endpoint": prepared.fallback_from_path,
+                    "to_endpoint": prepared.request_path,
+                    "reason": "provider_model_endpoint_not_supported",
+                },
+            )
+        ]
 
     @staticmethod
     def _prepare_upstream_request(provider: Provider, *, endpoint_path: str, payload: dict[str, Any]) -> PreparedUpstreamRequest:
-        normalized_payload = ProxyService._normalize_provider_request_payload(provider, payload)
+        internal_payload = dict(payload)
+        adapt_chat_response_to_responses = bool(internal_payload.pop("__aotu_responses_chat_adapter", False))
+        response_model_override = internal_payload.pop("__aotu_response_model_override", None)
+        response_id_override = internal_payload.pop("__aotu_response_id_override", None)
+        normalized_payload = ProxyService._normalize_provider_request_payload(provider, endpoint_path=endpoint_path, payload=internal_payload)
         return PreparedUpstreamRequest(
             request_path=endpoint_path,
             request_payload=normalized_payload,
-            adapt_chat_response_to_responses=False,
+            adapt_chat_response_to_responses=adapt_chat_response_to_responses,
+            response_model_override=response_model_override if isinstance(response_model_override, str) else None,
+            response_id_override=response_id_override if isinstance(response_id_override, str) else None,
         )
 
     @staticmethod
-    def _normalize_provider_request_payload(provider: Provider, payload: dict[str, Any]) -> dict[str, Any]:
+    def _normalize_provider_request_payload(provider: Provider, *, endpoint_path: str, payload: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(payload, dict):
             return payload
-        if not ProxyService._payload_has_image(payload):
+        normalized_payload = payload
+        if endpoint_path == "/chat/completions" and ProxyService._provider_requires_max_completion_tokens(provider, payload):
+            normalized_payload = ProxyService._convert_max_tokens_to_max_completion_tokens(normalized_payload)
+        if ProxyService._payload_has_image(normalized_payload) and ProxyService._provider_requires_base64_image_urls(provider, normalized_payload):
+            normalized_payload = ProxyService._convert_remote_image_urls_to_data_urls(normalized_payload)
+        return normalized_payload
+
+    @staticmethod
+    def _provider_requires_max_completion_tokens(provider: Provider, payload: dict[str, Any]) -> bool:
+        normalized_model = str(payload.get("model") or "").strip().lower()
+        normalized_base_url = str(provider.base_url or "").strip().lower()
+        if normalized_model.startswith("mimo-"):
+            return True
+        return "xiaomimimo.com" in normalized_base_url
+
+    @staticmethod
+    def _convert_max_tokens_to_max_completion_tokens(payload: dict[str, Any]) -> dict[str, Any]:
+        if "max_tokens" not in payload:
             return payload
-        if ProxyService._provider_requires_base64_image_urls(provider, payload):
-            return ProxyService._convert_remote_image_urls_to_data_urls(payload)
-        return payload
+        normalized = dict(payload)
+        if "max_completion_tokens" not in normalized:
+            normalized["max_completion_tokens"] = normalized.get("max_tokens")
+        normalized.pop("max_tokens", None)
+        return normalized
 
     @staticmethod
     def _provider_requires_base64_image_urls(provider: Provider, payload: dict[str, Any]) -> bool:
@@ -4294,17 +4204,12 @@ class ProxyService:
                 "No mapped target model supports image generation for this request",
                 "model_mapping_target_image_generation_not_available",
             )
-        if reason_counts.get("tools_not_supported") or reason_counts.get("tools_probe_unhealthy"):
-            return (
-                "No mapped target model supports tool calls for this request",
-                "model_mapping_target_tools_not_available",
-            )
-        if reason_counts.get("responses_not_supported"):
+        if reason_counts.get("responses_not_supported") or reason_counts.get("responses_probe_unhealthy"):
             return (
                 "No mapped target model supports responses endpoint for this request",
                 "model_mapping_target_responses_not_available",
             )
-        if reason_counts.get("chat_not_supported"):
+        if reason_counts.get("chat_not_supported") or reason_counts.get("chat_probe_unhealthy"):
             return (
                 "No mapped target model supports chat completions endpoint for this request",
                 "model_mapping_target_chat_not_available",
@@ -4440,11 +4345,23 @@ class ProxyService:
                 messages.append(converted)
         chat_payload["messages"] = messages or [{"role": "user", "content": ""}]
 
-        passthrough_excluded_keys = {"input", "instructions", "max_output_tokens"}
-        for key, value in payload.items():
-            if key in passthrough_excluded_keys or key == "model":
-                continue
-            chat_payload[key] = value
+        passthrough_keys = {
+            "temperature",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty",
+            "tools",
+            "tool_choice",
+            "stream",
+            "user",
+            "metadata",
+            "seed",
+        }
+        for key in passthrough_keys:
+            if key in payload:
+                chat_payload[key] = payload[key]
+        if "parallel_tool_calls" in payload:
+            chat_payload["parallel_tool_calls"] = payload["parallel_tool_calls"]
         if "tools" in chat_payload:
             chat_payload["tools"] = ProxyService._normalize_responses_tools_for_chat(chat_payload.get("tools"))
         if "tool_choice" in chat_payload:
@@ -4769,14 +4686,15 @@ class ProxyService:
         return tool_calls
 
     @staticmethod
-    def _create_responses_stream_state(*, payload: dict[str, Any]) -> dict[str, Any]:
+    def _create_responses_stream_state(*, payload: dict[str, Any], response_id: str | None = None) -> dict[str, Any]:
         return {
             "buffer": bytearray(),
-            "response_id": f"resp_{uuid4().hex}",
+            "response_id": response_id if isinstance(response_id, str) and response_id.strip() else f"resp_{uuid4().hex}",
             "message_id": f"msg_{uuid4().hex}",
             "created_at": int(datetime.utcnow().timestamp()),
             "model": str(payload.get("model") or ""),
             "output_text_parts": [],
+            "tool_calls": {},
             "finish_reason": None,
             "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
             "created_sent": False,
@@ -4808,9 +4726,8 @@ class ProxyService:
                 if not isinstance(parsed, dict):
                     continue
                 if not state["created_sent"]:
-                    state["response_id"] = str(parsed.get("id") or state["response_id"])
                     state["created_at"] = int(parsed.get("created") or state["created_at"])
-                    state["model"] = str(parsed.get("model") or requested_model or state["model"])
+                    state["model"] = str(requested_model or parsed.get("model") or state["model"])
                     state["created_sent"] = True
                     events.append(
                         ProxyService._format_sse_event(
@@ -4841,6 +4758,7 @@ class ProxyService:
                             }
                         )
                     )
+                ProxyService._merge_chat_stream_delta_tool_calls(parsed, state=state)
                 usage = parsed.get("usage")
                 if isinstance(usage, dict):
                     input_tokens = usage.get("prompt_tokens", usage.get("input_tokens"))
@@ -4875,6 +4793,7 @@ class ProxyService:
             return []
         state["completed_sent"] = True
         output_text = "".join(state["output_text_parts"])
+        tool_call_items = ProxyService._responses_output_from_chat_stream_tool_calls(state.get("tool_calls"))
         finish_reason = state.get("finish_reason") or "completed"
         usage = dict(state["usage"])
         if not usage.get("total_tokens"):
@@ -4886,25 +4805,39 @@ class ProxyService:
             "status": "completed",
             "model": state["model"],
             "output_text": output_text,
-            "output": [
-                {
-                    "id": state["message_id"],
-                    "type": "message",
-                    "status": "completed",
-                    "role": "assistant",
-                    "finish_reason": finish_reason,
-                    "content": [
-                        {
-                            "type": "output_text",
-                            "text": output_text,
-                            "annotations": [],
-                        }
-                    ],
-                }
-            ],
+            "output": (
+                [
+                    {
+                        "id": state["message_id"],
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "finish_reason": finish_reason,
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": output_text,
+                                "annotations": [],
+                            }
+                        ],
+                    }
+                ]
+                if output_text or not tool_call_items
+                else []
+            ) + tool_call_items,
             "usage": usage,
         }
         return [
+            *[
+                ProxyService._format_sse_event(
+                    {
+                        "type": "response.function_call.completed",
+                        "response_id": state["response_id"],
+                        "item": item,
+                    }
+                )
+                for item in tool_call_items
+            ],
             ProxyService._format_sse_event(
                 {
                     "type": "response.output_text.done",
@@ -4918,6 +4851,55 @@ class ProxyService:
             ProxyService._format_sse_event({"type": "response.completed", "response": response_payload}),
             b"data: [DONE]\n\n",
         ]
+
+    @staticmethod
+    def _merge_chat_stream_delta_tool_calls(event_json: dict[str, Any], *, state: dict[str, Any]) -> None:
+        choices = event_json.get("choices")
+        if not isinstance(choices, list):
+            return
+        tool_calls_state = state.get("tool_calls")
+        if not isinstance(tool_calls_state, dict):
+            tool_calls_state = {}
+            state["tool_calls"] = tool_calls_state
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            delta = choice.get("delta")
+            if not isinstance(delta, dict):
+                continue
+            tool_calls = delta.get("tool_calls")
+            if not isinstance(tool_calls, list):
+                continue
+            for fallback_index, tool_call_delta in enumerate(tool_calls):
+                if not isinstance(tool_call_delta, dict):
+                    continue
+                index_value = tool_call_delta.get("index", fallback_index)
+                try:
+                    index = int(index_value)
+                except (TypeError, ValueError):
+                    index = fallback_index
+                current = tool_calls_state.setdefault(
+                    index,
+                    {"id": None, "type": "function", "function": {"name": "", "arguments": ""}},
+                )
+                if isinstance(tool_call_delta.get("id"), str):
+                    current["id"] = tool_call_delta["id"]
+                if isinstance(tool_call_delta.get("type"), str):
+                    current["type"] = tool_call_delta["type"]
+                function_delta = tool_call_delta.get("function")
+                if isinstance(function_delta, dict):
+                    current_function = current.setdefault("function", {"name": "", "arguments": ""})
+                    if isinstance(function_delta.get("name"), str):
+                        current_function["name"] = f"{current_function.get('name') or ''}{function_delta['name']}"
+                    if isinstance(function_delta.get("arguments"), str):
+                        current_function["arguments"] = f"{current_function.get('arguments') or ''}{function_delta['arguments']}"
+
+    @staticmethod
+    def _responses_output_from_chat_stream_tool_calls(value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, dict):
+            return []
+        ordered_calls = [value[index] for index in sorted(value) if isinstance(value.get(index), dict)]
+        return ProxyService._convert_chat_tool_calls_to_responses_output(ordered_calls)
 
     @staticmethod
     def _create_chat_stream_state(*, payload: dict[str, Any]) -> dict[str, Any]:

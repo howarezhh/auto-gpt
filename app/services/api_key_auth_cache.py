@@ -25,13 +25,22 @@ class ApiKeyAuthCache:
 
     @classmethod
     def _run_async_compat(cls, coro) -> Any:
+        scheduled = False
         try:
-            loop = RedisService.event_loop()
+            redis_loop = RedisService.event_loop()
+            try:
+                current_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                current_loop = None
+            loop = redis_loop if redis_loop is not None and redis_loop.is_running() else current_loop
             if loop is not None and loop.is_running():
-                if RedisService.event_loop_thread_id() == threading.get_ident():
+                if loop is current_loop or RedisService.event_loop_thread_id() == threading.get_ident():
                     loop.create_task(coro)
+                    scheduled = True
                     return None
+                scheduled = True
                 return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=3)
+            scheduled = True
             return asyncio.run(coro)
         except TimeoutError as exc:
             cls._last_error = str(exc) or "api key auth cache async bridge timed out"
@@ -39,6 +48,9 @@ class ApiKeyAuthCache:
         except Exception as exc:
             cls._last_error = str(exc)
             return None
+        finally:
+            if not scheduled:
+                coro.close()
 
     @classmethod
     def last_error(cls) -> str | None:

@@ -53,11 +53,11 @@ def main() -> None:
     provider = _provider(max_active_requests=100)
     model = _provider_model()
 
-    _assert(HealthService._determine_parallel_probe_limit(provider, 100) == 8, "parallel cap should respect max cap 8")
+    _assert(HealthService._determine_parallel_probe_limit(provider, 100) == 16, "parallel cap should respect max cap 16")
     provider.max_active_requests = 10
     _assert(HealthService._determine_parallel_probe_limit(provider, 100) == 2, "parallel cap should use 20% provider capacity")
     provider.max_active_requests = 0
-    _assert(HealthService._determine_parallel_probe_limit(provider, 100) == 4, "missing capacity should use conservative cap")
+    _assert(HealthService._determine_parallel_probe_limit(provider, 100) == 8, "missing capacity should use conservative cap 8")
 
     chat_payload = HealthService._build_chat_probe_payload(model, vision_probe=False, stream_probe=False, max_tokens=4)
     responses_payload = HealthService._build_responses_probe_payload(model, vision_probe=False, max_output_tokens=4)
@@ -103,12 +103,61 @@ def main() -> None:
         return_value=None,
     ):
         _assert(not RouterService._capability_probe_failed(provider, model, "tools"), "missing Redis health should fall back without excluding")
+        _assert(
+            not RouterService._endpoint_probe_failed(provider, model, "/responses"),
+            "missing responses endpoint probe should default to routable",
+        )
 
     with patch(
         "app.services.router_service.ProviderHealthStateService.get_model_capability_state",
         return_value={"tools": {"native_ok": False, "success": False}},
     ):
-        _assert(RouterService._capability_probe_failed(provider, model, "tools"), "failed native tools probe should exclude tools route")
+        _assert(RouterService._capability_probe_failed(provider, model, "tools"), "failed native tools probe should remain observable")
+
+    endpoint_capability_state = {
+        "tools_chat_completions": {"native_ok": True, "success": True},
+        "tools_responses": {"native_ok": False, "success": False},
+        "vision_chat_completions": {"success": False},
+        "vision_responses": {"success": True},
+    }
+    with patch(
+        "app.services.router_service.ProviderHealthStateService.get_model_capability_state",
+        return_value=endpoint_capability_state,
+    ):
+        _assert(
+            not RouterService._capability_probe_failed(provider, model, "tools", endpoint_path="/chat/completions"),
+            "Responses tools failure must not block native Chat tools route",
+        )
+        _assert(
+            RouterService._capability_probe_failed(provider, model, "tools", endpoint_path="/responses"),
+            "Responses tools failure should remain isolated to the native Responses probe key",
+        )
+        _assert(
+            RouterService._capability_probe_failed(provider, model, "vision", endpoint_path="/chat/completions"),
+            "Chat vision failure should block native Chat vision route",
+        )
+        _assert(
+            not RouterService._capability_probe_failed(provider, model, "vision", endpoint_path="/responses"),
+            "Chat vision failure must not block native Responses vision route",
+        )
+
+    endpoint_state = {
+        "chat_completions": {"success": True},
+        "responses": {"success": False},
+        "responses_stream": {"success": True},
+    }
+    with patch(
+        "app.services.router_service.ProviderHealthStateService.get_model_capability_state",
+        return_value=endpoint_state,
+    ):
+        _assert(
+            RouterService._endpoint_probe_failed(provider, model, "/responses"),
+            "failed non-stream responses endpoint probe should block non-stream responses route",
+        )
+        _assert(
+            not RouterService._endpoint_probe_failed(provider, model, "/responses", stream=True),
+            "non-stream responses failure must not block a healthy responses stream probe",
+        )
 
     print("stage14 health routing regression check passed")
 

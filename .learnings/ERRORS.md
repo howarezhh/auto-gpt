@@ -545,7 +545,7 @@ httpx.ResponseNotRead: Attempted to access streaming response content, without h
 
 **Logged**: 2026-06-05T00:00:00+08:00
 **Priority**: low
-**Status**: pending
+**Status**: resolved
 **Area**: infra
 
 ### Summary
@@ -625,3 +625,91 @@ Use `CacheService.invalidate_prefix(...)` for the relevant cache prefixes, or ru
 ### Metadata
 - Reproducible: yes
 - Related Files: app/services/cache_service.py
+## [ERR-20260605-001] regression-test-expectation-drift
+
+**Logged**: 2026-06-05T00:00:00Z
+**Priority**: medium
+**Status**: resolved
+**Area**: tests
+
+### Summary
+Endpoint-independence refactor invalidated old fallback-oriented regression expectations.
+
+### Error
+`stage22_model_family_compat_regression_check.py` and `stage14_health_routing_regression_check.py` failed because their assertions still expected endpoint fallback or older parallel probe caps.
+
+### Context
+- `stage22_model_family_compat_regression_check.py`
+- `stage14_health_routing_regression_check.py`
+
+### Suggested Fix
+When removing or disabling a compatibility path, rewrite regression assertions to validate the new primary behavior instead of the old fallback path.
+
+### Metadata
+- Reproducible: no
+- Related Files: app/services/proxy_service.py, app/services/health_service.py
+- Tags: tests, backend
+
+---
+
+## [ERR-20260605-002] provider-out-protocol-fields
+
+**Logged**: 2026-06-05T00:00:00Z
+**Priority**: medium
+**Status**: pending
+**Area**: backend
+
+### Summary
+Provider creation regression still reports missing `protocol_type` and `protocol_label` in `ProviderOut`.
+
+### Error
+`stage10_tools_regression_check.py` failed while creating a provider because `ProviderOut` validation reported missing `protocol_type` and `protocol_label`.
+
+### Context
+- `stage10_tools_regression_check.py`
+- `app/routers/providers.py`
+- `app/services/provider_service.py`
+
+### Suggested Fix
+Verify the create-provider response payload always includes the protocol fields expected by `ProviderOut`, and reconcile any schema drift between the service dict and the response model.
+
+### Metadata
+- Reproducible: unknown
+- Related Files: app/schemas/provider.py, app/services/provider_service.py
+- Tags: backend, tests
+
+### Resolution
+- **Resolved**: 2026-06-05T00:00:00Z
+- **Notes**: Verified `ProviderService.provider_to_dict()` includes both fields and reran `stage10_tools_regression_check.py` successfully.
+
+---
+
+## [ERR-20260606-001] powershell-nested-command-quoting
+
+**Logged**: 2026-06-06T00:00:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+Nested `pwsh -Command "..."` calls can let the outer shell expand `$variables` or break regex quoting before PowerShell 7 receives the command.
+
+### Error
+```text
+The term 'POST' is not recognized as a name of a cmdlet...
+Missing type name after '['.
+```
+
+### Context
+- Commands attempted: `rg -n "...POST /v1/responses..."` and `$lines[120..260]` inside a nested `pwsh -Command "..."`.
+- Environment: Windows shell command wrapper with project-required PowerShell 7.
+
+### Suggested Fix
+Use `pwsh -NoLogo -NoProfile -Command '& { ... }'` for scripts containing `$`, `[]`, pipes, regex alternation, or nested quotes.
+
+### Metadata
+- Reproducible: yes
+- Related Files: 项目全局规范.md
+- Tags: powershell, tests
+
+---

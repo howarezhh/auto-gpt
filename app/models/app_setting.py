@@ -54,6 +54,17 @@ class AppSetting(Base):
     stream_first_token_timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=60)
     stream_idle_timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=120)
     stream_max_duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=600)
+    responses_chat_adapter_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    responses_chat_adapter_storage_type: Mapped[str] = mapped_column(Text, nullable=False, default="memory")
+    responses_chat_adapter_ttl_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=86400)
+    responses_chat_adapter_model_map_json: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    responses_chat_adapter_max_tool_rounds: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
+    responses_chat_adapter_web_search_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    responses_chat_adapter_search_proxy_url: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    responses_chat_adapter_upstream_base_url: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    responses_chat_adapter_upstream_api_key: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    responses_chat_adapter_upstreams_json: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    responses_chat_adapter_context_window_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=128000)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow

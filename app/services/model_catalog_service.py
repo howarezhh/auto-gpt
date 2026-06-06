@@ -5,7 +5,7 @@ from collections import defaultdict
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.api_client_key import ApiClientKey
@@ -34,6 +34,40 @@ class ModelCatalogService:
     """负责模型目录管理、provider 绑定和目录同步。"""
 
     MODEL_HEALTH_MAX_PARALLEL_MODELS = 12
+
+    @staticmethod
+    def _backfill_default_protocol_support(db: Session) -> bool:
+        """模型级 Chat/Responses 协议未探测时默认均可用；实际失败由健康探针收紧。"""
+        changed = False
+        catalog_result = db.execute(
+            update(ModelCatalog)
+            .where(
+                or_(
+                    ModelCatalog.supports_chat_completions.is_(False),
+                    ModelCatalog.supports_responses.is_(False),
+                )
+            )
+            .values(
+                supports_chat_completions=True,
+                supports_responses=True,
+            )
+        )
+        changed = changed or bool(getattr(catalog_result, "rowcount", 0) or 0)
+        provider_model_result = db.execute(
+            update(ProviderModel)
+            .where(
+                or_(
+                    ProviderModel.supports_chat_completions.is_(False),
+                    ProviderModel.supports_responses.is_(False),
+                )
+            )
+            .values(
+                supports_chat_completions=True,
+                supports_responses=True,
+            )
+        )
+        changed = changed or bool(getattr(provider_model_result, "rowcount", 0) or 0)
+        return changed
 
     @staticmethod
     def _catalog_supports_tools(catalog: ModelCatalog) -> bool:
@@ -82,6 +116,7 @@ class ModelCatalogService:
         *,
         keyword: str | None = None,
         enabled: bool | None = None,
+        health_status: str | None = None,
         provider_id: int | None = None,
         page: int = 1,
         page_size: int = 20,
@@ -89,19 +124,40 @@ class ModelCatalogService:
         """分页返回模型目录列表。"""
         page = max(int(page or 1), 1)
         page_size = min(max(int(page_size or 20), 10), 100)
-        query = ModelCatalogService._model_filter_query(keyword=keyword, enabled=enabled, provider_id=provider_id)
-        total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
-        total_pages = max((total + page_size - 1) // page_size, 1)
-        page = min(page, total_pages)
-        catalogs = list(
-            db.scalars(
-                query.order_by(ModelCatalog.model_name.asc())
-                .offset((page - 1) * page_size)
-                .limit(page_size)
-            )
-        )
         providers = ProviderService.list_providers(db)
-        items = [ModelCatalogService._serialize_catalog(catalog, providers) for catalog in catalogs]
+        normalized_health_status = ModelCatalogService._normalize_model_health_filter(health_status)
+        if normalized_health_status is not None:
+            catalogs = list(
+                db.scalars(
+                    ModelCatalogService._model_filter_query(
+                        keyword=keyword,
+                        enabled=enabled,
+                        provider_id=provider_id,
+                    ).order_by(ModelCatalog.model_name.asc())
+                )
+            )
+            filtered_items = [
+                item
+                for item in (ModelCatalogService._serialize_catalog(catalog, providers) for catalog in catalogs)
+                if item["health_status"] == normalized_health_status
+            ]
+            total = len(filtered_items)
+            total_pages = max((total + page_size - 1) // page_size, 1)
+            page = min(page, total_pages)
+            items = filtered_items[(page - 1) * page_size : page * page_size]
+        else:
+            query = ModelCatalogService._model_filter_query(keyword=keyword, enabled=enabled, provider_id=provider_id)
+            total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
+            total_pages = max((total + page_size - 1) // page_size, 1)
+            page = min(page, total_pages)
+            catalogs = list(
+                db.scalars(
+                    query.order_by(ModelCatalog.model_name.asc())
+                    .offset((page - 1) * page_size)
+                    .limit(page_size)
+                )
+            )
+            items = [ModelCatalogService._serialize_catalog(catalog, providers) for catalog in catalogs]
         return {
             "items": items,
             "total": total,
@@ -314,6 +370,7 @@ class ModelCatalogService:
     @staticmethod
     def sync_model_catalogs(db: Session) -> None:
         """根据 provider model 挂载情况同步模型目录。"""
+        changed = ModelCatalogService._backfill_default_protocol_support(db)
         catalogs = {item.model_name: item for item in ModelCatalogService.list_catalogs(db)}
         provider_models = list(
             db.scalars(
@@ -326,7 +383,6 @@ class ModelCatalogService:
         for item in provider_models:
             grouped[item.model_name].append(item)
 
-        changed = False
         for model_name, items in grouped.items():
             catalog = catalogs.get(model_name)
             catalog_created = False
@@ -395,6 +451,7 @@ class ModelCatalogService:
         if changed:
             db.commit()
             ModelCatalogService.invalidate_model_runtime_cache()
+            ProviderService.invalidate_provider_runtime_cache()
 
     @staticmethod
     def list_user_models(db: Session, *, user: UserAccount) -> list[dict]:
@@ -538,6 +595,15 @@ class ModelCatalogService:
                 )
             )
         return query
+
+    @staticmethod
+    def _normalize_model_health_filter(value: str | None) -> str | None:
+        normalized = str(value or "").strip().lower()
+        if not normalized:
+            return None
+        if normalized not in {"healthy", "unhealthy"}:
+            raise ValueError("模型健康状态筛选仅支持 healthy 或 unhealthy")
+        return normalized
 
     @staticmethod
     def _serialize_catalog(catalog: ModelCatalog, providers: list[Provider], *, include_all_providers: bool = False) -> dict:

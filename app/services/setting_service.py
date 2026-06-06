@@ -58,6 +58,17 @@ DEFAULT_SETTING = {
     "stream_first_token_timeout_seconds": _settings.stream_first_token_timeout_seconds,
     "stream_idle_timeout_seconds": _settings.stream_idle_timeout_seconds,
     "stream_max_duration_seconds": _settings.stream_max_duration_seconds,
+    "responses_chat_adapter_enabled": _settings.responses_chat_adapter_enabled,
+    "responses_chat_adapter_storage_type": _settings.responses_chat_adapter_storage_type,
+    "responses_chat_adapter_ttl_seconds": _settings.responses_chat_adapter_ttl_seconds,
+    "responses_chat_adapter_model_map_json": _settings.responses_chat_adapter_model_map_json,
+    "responses_chat_adapter_max_tool_rounds": _settings.responses_chat_adapter_max_tool_rounds,
+    "responses_chat_adapter_web_search_enabled": _settings.responses_chat_adapter_web_search_enabled,
+    "responses_chat_adapter_search_proxy_url": _settings.responses_chat_adapter_search_proxy_url,
+    "responses_chat_adapter_upstream_base_url": _settings.responses_chat_adapter_upstream_base_url,
+    "responses_chat_adapter_upstream_api_key": _settings.responses_chat_adapter_upstream_api_key,
+    "responses_chat_adapter_upstreams_json": _settings.responses_chat_adapter_upstreams_json,
+    "responses_chat_adapter_context_window_tokens": _settings.responses_chat_adapter_context_window_tokens,
 }
 
 

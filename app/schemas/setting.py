@@ -52,6 +52,17 @@ class SettingUpdate(BaseModel):
     stream_first_token_timeout_seconds: int = Field(default=60, ge=0)
     stream_idle_timeout_seconds: int = Field(default=120, ge=0)
     stream_max_duration_seconds: int = Field(default=600, ge=0)
+    responses_chat_adapter_enabled: bool = False
+    responses_chat_adapter_storage_type: Literal["memory", "redis", "database", "postgresql", "postgres"] = "memory"
+    responses_chat_adapter_ttl_seconds: int = Field(default=86400, ge=0)
+    responses_chat_adapter_model_map_json: str = ""
+    responses_chat_adapter_max_tool_rounds: int = Field(default=10, ge=1, le=100)
+    responses_chat_adapter_web_search_enabled: bool = False
+    responses_chat_adapter_search_proxy_url: str = ""
+    responses_chat_adapter_upstream_base_url: str = ""
+    responses_chat_adapter_upstream_api_key: str = ""
+    responses_chat_adapter_upstreams_json: str = ""
+    responses_chat_adapter_context_window_tokens: int = Field(default=128000, ge=0)
 
 
 class SettingOut(SettingUpdate):

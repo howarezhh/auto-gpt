@@ -804,6 +804,7 @@ html[data-theme="dark"] body::before {
 .hero-actions,
 .form-actions {
     display: flex;
+    align-items: center;
     gap: 10px;
     flex-wrap: wrap;
 }
@@ -818,7 +819,11 @@ html[data-theme="dark"] body::before {
     display: inline-flex;
     align-items: center;
     justify-content: center;
+    flex: 0 0 auto;
+    width: fit-content;
+    max-width: 100%;
     min-height: 42px;
+    min-width: unset;
     padding: 0 18px;
     border-radius: 999px;
     border: 1px solid transparent;
@@ -826,6 +831,7 @@ html[data-theme="dark"] body::before {
     cursor: pointer;
     font-size: 15px;
     font-weight: 700;
+    white-space: nowrap;
     position: relative;
     overflow: hidden;
     transition: transform 140ms ease, box-shadow 180ms ease, background 180ms ease, border-color 180ms ease, color 180ms ease;
@@ -1772,7 +1778,14 @@ html[data-theme="dark"] body::before {
 }
 
 .table-action-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    width: fit-content;
+    max-width: 100%;
     min-height: 34px;
+    min-width: unset;
     padding: 0 12px;
     border: 1px solid transparent;
     border-radius: 8px;
@@ -1780,6 +1793,7 @@ html[data-theme="dark"] body::before {
     color: var(--text);
     font-size: 14px;
     font-weight: 700;
+    white-space: nowrap;
     cursor: pointer;
     position: relative;
     overflow: hidden;
@@ -2212,7 +2226,19 @@ textarea.field-input {
 }
 
 .users-directory-filter-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
     align-self: end;
+    gap: 10px;
+}
+
+.users-directory-filter-actions .btn,
+.users-hero .hero-actions .btn,
+.users-empty-actions .btn {
+    width: fit-content;
+    min-width: unset;
+    padding-inline: 16px;
 }
 
 .users-directory-summary {
@@ -2243,14 +2269,15 @@ textarea.field-input {
 }
 
 .users-batch-selection-bar {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 16px;
+    display: flex;
+    gap: 12px;
     align-items: end;
 }
 
 .users-batch-selection {
     display: grid;
+    flex: 1 1 320px;
+    min-width: 0;
     gap: 8px;
 }
 
@@ -2264,9 +2291,23 @@ textarea.field-input {
 }
 
 .users-batch-submit-wrap {
-    display: grid;
-    justify-items: end;
+    display: flex;
+    flex: 0 0 auto;
+    flex-direction: column;
+    align-items: flex-end;
+    width: fit-content;
     gap: 8px;
+}
+
+.users-batch-submit-wrap .table-muted {
+    max-width: 300px;
+    text-align: right;
+}
+
+.users-batch-submit-wrap .btn {
+    width: fit-content;
+    min-width: unset;
+    padding-inline: 16px;
 }
 
 .users-batch-list {
@@ -2292,9 +2333,14 @@ textarea.field-input {
 }
 
 .users-batch-row-input {
-    display: grid;
-    justify-items: stretch;
-    gap: 6px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.users-batch-row-input .field-input {
+    flex: 1 1 220px;
+    min-width: 180px;
 }
 
 .users-batch-title {
@@ -2303,6 +2349,7 @@ textarea.field-input {
 }
 
 .users-batch-row-hint {
+    flex: 0 0 auto;
     color: var(--muted);
     font-size: 12px;
     font-weight: 600;
@@ -2372,12 +2419,24 @@ textarea.field-input {
 }
 
 .users-table-password-form {
+    display: flex;
+    align-items: center;
+    flex-wrap: nowrap;
     width: 100%;
     margin-top: 4px;
 }
 
 .users-table-password-form .table-inline-input {
-    width: min(240px, 100%);
+    flex: 1 1 170px;
+    width: auto;
+    min-width: 160px;
+}
+
+.users-table-password-form .table-action-btn {
+    flex: 0 0 auto;
+    width: fit-content;
+    min-width: unset;
+    padding-inline: 12px;
 }
 
 .users-registry-list {
@@ -2463,6 +2522,19 @@ textarea.field-input {
 
 .users-directory-table .table-actions form {
     display: flex;
+    flex: 0 0 auto;
+    width: fit-content;
+}
+
+.users-directory-table .table-actions {
+    align-items: center;
+}
+
+.users-directory-table .table-action-btn,
+.users-directory-pagination .topbar-btn,
+.users-detail-link {
+    width: fit-content;
+    min-width: unset;
 }
 
 .users-empty-state {
@@ -4524,15 +4596,21 @@ body[data-page="models"] .model-mapping-panel {
 }
 
 .benchmark-model-list {
+    --benchmark-model-row-height: 78px;
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
     gap: 10px;
+    max-height: calc(var(--benchmark-model-row-height) * 10 + 10px * 9);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding-right: 4px;
 }
 
 .benchmark-model-option {
     display: grid;
     gap: 12px;
     width: 100%;
+    min-height: var(--benchmark-model-row-height);
     padding: 14px 16px;
     border: 1px solid var(--line);
     border-radius: 14px;
@@ -9994,9 +10072,17 @@ body[data-page="benchmark"] #benchmark-form {
     gap: 16px;
 }
 
+body[data-page="settings"] #settings-form {
+    gap: 8px;
+}
+
 body[data-page="settings"] #settings-form,
 body[data-page="playground"] #playground-form {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+body[data-page="settings"] #settings-form {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
 }
 
 body[data-page="benchmark"] #benchmark-form,
@@ -10018,33 +10104,81 @@ body[data-page="benchmark"] .benchmark-advanced-grid > label {
     background: color-mix(in srgb, var(--surface-soft) 64%, transparent);
 }
 
+body[data-page="settings"] #settings-form > label:not(.settings-switch-card),
+body[data-page="settings"] .settings-subgrid > label:not(.settings-switch-card) {
+    min-height: 50px;
+    padding: 6px 8px;
+    border-color: transparent;
+    background: transparent;
+    transition: background 160ms ease, border-color 160ms ease;
+}
+
+body[data-page="settings"] #settings-form > label:not(.settings-switch-card) > span,
+body[data-page="settings"] .settings-subgrid > label:not(.settings-switch-card) > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+body[data-page="settings"] .field-input {
+    min-height: 38px;
+    padding: 7px 10px;
+    border-color: transparent;
+    border-radius: 12px;
+    background: transparent;
+    font-size: 14px;
+    box-shadow: none;
+}
+
+body[data-page="settings"] .field-input:hover,
+body[data-page="settings"] .field-input:focus {
+    border-color: transparent;
+    background: transparent;
+    box-shadow: none;
+}
+
+body[data-page="settings"] #settings-form > label:not(.settings-switch-card):hover,
+body[data-page="settings"] .settings-subgrid > label:not(.settings-switch-card):hover {
+    border-color: color-mix(in srgb, var(--button-border-cue) 70%, transparent);
+    background: color-mix(in srgb, var(--surface-soft) 34%, transparent);
+}
+
 body[data-page="settings"] #settings-form > label.form-span-2,
 body[data-page="playground"] #playground-form > label.form-span-2,
 body[data-page="benchmark"] #benchmark-form > label.form-span-2 {
     min-height: 78px;
 }
 
+body[data-page="settings"] #settings-form > label.form-span-2 {
+    min-height: 50px;
+}
+
 body[data-page="settings"] .settings-group {
-    gap: 16px;
+    gap: 8px;
     height: 100%;
-    padding: 16px;
-    border: 1px solid var(--line);
-    border-radius: 18px;
-    background: color-mix(in srgb, var(--surface) 86%, transparent);
+    padding: 8px 0 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
 }
 
 body[data-page="settings"] .settings-group-head {
-    min-height: 46px;
+    min-height: 28px;
     align-content: start;
 }
 
+body[data-page="settings"] .settings-group-head h4 {
+    font-size: 16px;
+}
+
 body[data-page="settings"] .settings-subgrid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
     align-items: stretch;
 }
 
 body[data-page="settings"] .settings-health-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
 }
 
 body[data-page="settings"] .settings-health-grid .settings-health-switch-card {
@@ -10052,47 +10186,67 @@ body[data-page="settings"] .settings-health-grid .settings-health-switch-card {
 }
 
 body[data-page="settings"] .settings-switch-grid {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
     align-items: stretch;
-    gap: 12px;
+    gap: 8px;
 }
 
 body[data-page="settings"] .settings-switch-card {
-    min-height: 68px;
+    min-height: 44px;
     height: 100%;
-    padding: 12px 14px;
-    gap: 10px;
-    align-items: flex-start;
+    padding: 6px 8px;
+    gap: 8px;
+    align-items: center;
+    border-color: transparent;
+    border-radius: 12px;
+    background: transparent;
+    transition: background 160ms ease, border-color 160ms ease;
+}
+
+body[data-page="settings"] .settings-switch-card:hover,
+body[data-page="settings"] .settings-switch-card:focus-within {
+    border-color: color-mix(in srgb, var(--button-border-cue) 70%, transparent);
+    background: color-mix(in srgb, var(--surface-soft) 34%, transparent);
 }
 
 body[data-page="settings"] .settings-switch-copy {
-    gap: 2px;
+    gap: 0;
 }
 
 body[data-page="settings"] .settings-switch-copy strong {
-    font-size: 14px;
-    line-height: 1.35;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 13px;
+    line-height: 1.25;
 }
 
 body[data-page="settings"] .settings-switch-copy small {
-    margin-top: 2px;
-    font-size: 12px;
-    line-height: 1.45;
+    display: none;
+}
+
+body[data-page="settings"] .settings-switch-grid .settings-switch-card {
+    min-height: 40px;
+}
+
+body[data-page="settings"] .settings-switch-grid .settings-switch-control {
+    transform: scale(0.82);
+    transform-origin: right center;
 }
 
 body[data-page="settings"] .settings-switch-control {
-    margin-top: 2px;
+    margin-top: 0;
 }
 
 @media (max-width: 1400px) {
     body[data-page="settings"] .settings-switch-grid {
-        grid-template-columns: repeat(3, minmax(0, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
     }
 }
 
 @media (max-width: 1100px) {
     body[data-page="settings"] .settings-switch-grid {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
     }
 }
 

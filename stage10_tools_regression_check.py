@@ -28,6 +28,8 @@ from app.services.user_auth_service import USER_ROLE_ADMIN, UserAuthService
 async def _fake_forward_json_with_endpoint_fallback(provider, provider_model, endpoint_path: str, payload: dict, *, started, setting):
     model_name = payload.get("model", "unknown")
     if payload.get("tools"):
+        if endpoint_path == "/responses":
+            return (_responses_tool_call_response(provider.name, model_name), f"upstream-{provider.name}", [])
         return (_tool_call_response(provider.name, model_name), f"upstream-{provider.name}", [])
     return (
         {
@@ -53,6 +55,8 @@ async def _fake_forward_json_with_endpoint_fallback(provider, provider_model, en
 async def _fake_send_prepared_json(provider, *, prepared, headers, requested_payload, setting):
     model_name = prepared.request_payload.get("model", "unknown")
     if prepared.request_payload.get("tools"):
+        if prepared.request_path == "/responses":
+            return _responses_tool_call_response(provider.name, model_name), f"upstream-{provider.name}"
         return _tool_call_response(provider.name, model_name), f"upstream-{provider.name}"
     return {
         "id": f"chatcmpl-{provider.name}",
@@ -69,6 +73,29 @@ async def _fake_send_prepared_json(provider, *, prepared, headers, requested_pay
             "total_tokens": 12,
         },
     }, f"upstream-{provider.name}"
+
+
+def _responses_tool_call_response(provider_name: str, model_name: str) -> dict:
+    return {
+        "id": f"resp-{provider_name}",
+        "object": "response",
+        "status": "completed",
+        "model": model_name,
+        "output": [
+            {
+                "id": "fc_stage10",
+                "type": "function_call",
+                "call_id": "call_stage10",
+                "name": "get_weather",
+                "arguments": "{}",
+            }
+        ],
+        "usage": {
+            "input_tokens": 18,
+            "output_tokens": 6,
+            "total_tokens": 24,
+        },
+    }
 
 
 def _tool_call_response(provider_name: str, model_name: str) -> dict:
@@ -239,7 +266,19 @@ def main() -> None:
                         "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}],
                     }
                 ),
-                "payload with tools should require tool-capable routing",
+                "payload with callable tools should be detected as a tool request",
+            )
+            _assert(
+                not ProxyService._payload_uses_tools(
+                    {
+                        "model": "plain-chat-model",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "tools": [],
+                        "tool_choice": "auto",
+                        "parallel_tool_calls": True,
+                    }
+                ),
+                "empty/default tool fields must not be treated as a semantic tool request",
             )
             _assert(
                 HealthService._response_has_tool_call(
@@ -289,6 +328,23 @@ def main() -> None:
                 _assert(len(candidates) == 1, f"tool routing should keep exactly one glm candidate: {[(item.provider.name, item.provider_model.model_name) for item in candidates]}")
                 _assert(candidates[0].provider.id == glm_provider["id"], f"tool routing selected wrong provider: {candidates[0].provider.id}")
 
+                no_tools_candidates = RouterService.order_candidates(
+                    db,
+                    model_name="plain-chat-model",
+                    route_context=RoutePolicyContext(
+                        route_mode="failover",
+                        default_provider_id=no_tools_provider["id"],
+                        manual_allow_fallback=True,
+                        allowed_provider_ids=[no_tools_provider["id"], glm_provider["id"]],
+                    ),
+                    require_tools=True,
+                    require_chat_completions=True,
+                )
+                _assert(
+                    len(no_tools_candidates) == 1 and no_tools_candidates[0].provider.id == no_tools_provider["id"],
+                    f"tool routing must not hard-filter supports_tools=false models: {[(item.provider.name, item.provider_model.model_name) for item in no_tools_candidates]}",
+                )
+
                 glm_provider_record = db.scalar(select(Provider).where(Provider.id == glm_provider["id"]))
                 _assert(glm_provider_record is not None, "glm provider record missing")
                 glm_provider_model = next((item for item in glm_provider_record.provider_models if item.model_name == "glm-5.1"), None)
@@ -325,6 +381,57 @@ def main() -> None:
             message = choice.get("message", {}) if isinstance(choice, dict) else {}
             _assert(choice.get("finish_reason") == "tool_calls", f"finish_reason should be tool_calls: {body}")
             _assert(bool(message.get("tool_calls")), f"tool_calls missing in response body: {body}")
+
+            plain_chat_response = client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key['raw_api_key']}"},
+                json={
+                    "model": "plain-chat-model",
+                    "messages": [{"role": "user", "content": "请调用 get_weather 工具"}],
+                    "tools": [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "description": "Get current weather",
+                                "parameters": {"type": "object", "properties": {}},
+                            },
+                        }
+                    ],
+                    "tool_choice": {"type": "function", "function": {"name": "get_weather"}},
+                },
+            )
+            _assert(
+                plain_chat_response.status_code == 200,
+                f"supports_tools=false chat tool request should still route: {plain_chat_response.status_code} {plain_chat_response.text}",
+            )
+
+            plain_responses_response = client.post(
+                "/v1/responses",
+                headers={"Authorization": f"Bearer {api_key['raw_api_key']}"},
+                json={
+                    "model": "plain-chat-model",
+                    "input": "请调用 get_weather 工具",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "get_weather",
+                            "description": "Get current weather",
+                            "parameters": {"type": "object", "properties": {}},
+                        }
+                    ],
+                    "tool_choice": {"type": "function", "name": "get_weather"},
+                },
+            )
+            _assert(
+                plain_responses_response.status_code == 200,
+                f"supports_tools=false responses tool request should still route: {plain_responses_response.status_code} {plain_responses_response.text}",
+            )
+            responses_body = plain_responses_response.json()
+            _assert(
+                responses_body.get("output", [{}])[0].get("type") == "function_call",
+                f"responses function_call output missing: {responses_body}",
+            )
 
 
 if __name__ == "__main__":

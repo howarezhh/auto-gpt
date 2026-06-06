@@ -899,7 +899,7 @@
 
     function formatEndpointSupportMode(mode) {
         if (mode === "native") return "原生支持";
-        if (mode === "adapted") return "通过适配支持";
+        if (mode === "adapted") return "原生支持";
         if (mode === "unsupported") return "不支持";
         return "支持状态未知";
     }
@@ -1319,16 +1319,10 @@
         );
     }
 
-    function formatModelCapabilitySummary(modelConfig) {
-        const parts = [
-            modelConfig?.supports_stream ? "流式" : "非流式",
-            modelConfig?.supports_vision ? "图像理解" : "仅文本",
-            modelConfig?.supports_tools ? "工具调用" : "无工具",
-        ];
-        if (supportsImageGeneration(modelConfig)) {
-            parts.push("图片生成");
-        }
-        return parts.join(" / ");
+    const MODEL_MANAGEMENT_CAPABILITY_TEXT = "流式 / 仅文本 / 工具调用 / 图像理解";
+
+    function formatModelCapabilitySummary() {
+        return MODEL_MANAGEMENT_CAPABILITY_TEXT;
     }
 
     function getDefaultProviderLabel(providers = [], providerId) {
@@ -2057,15 +2051,12 @@
         const visibleModels = modelConfigs.slice(0, 1);
         const enabledCount = modelConfigs.filter((item) => item.enabled).length;
         const healthyCount = modelConfigs.filter((item) => item.health_status === "healthy").length;
-        const streamCount = modelConfigs.filter((item) => item.supports_stream).length;
-        const visionCount = modelConfigs.filter((item) => item.supports_vision).length;
-        const imageGenerationCount = modelConfigs.filter((item) => supportsImageGeneration(item)).length;
         const hiddenCount = Math.max(modelConfigs.length - visibleModels.length, 0);
         return `
             <div class="provider-model-summary">
                 <div class="provider-model-summary-head">
                     <strong>${formatNumber(modelConfigs.length)} 个模型</strong>
-                    <span>${formatNumber(enabledCount)} 启用 · ${formatNumber(healthyCount)} 模型健康 · ${formatNumber(streamCount)} 流式 · ${formatNumber(visionCount)} 识图 · ${formatNumber(imageGenerationCount)} 生图</span>
+                    <span>${formatNumber(enabledCount)} 启用 · ${formatNumber(healthyCount)} 模型健康 · ${MODEL_MANAGEMENT_CAPABILITY_TEXT}</span>
                 </div>
                 <div class="provider-model-preview-list">
                     ${visibleModels.map((item) => `
@@ -3810,6 +3801,7 @@
         const providerBaseUrlInput = document.getElementById("provider-base-url");
         const providerApiKeyInput = document.getElementById("provider-api-key");
         const providerTypeInput = document.getElementById("provider-type");
+        const providerProtocolTypeInput = document.getElementById("provider-protocol-type");
         const providerGroupNameInput = document.getElementById("provider-group-name");
         const providerRegionTagInput = document.getElementById("provider-region-tag");
         const providerPriorityInput = document.getElementById("provider-priority");
@@ -3865,7 +3857,7 @@
         let providerBatchImportTemplate = "";
         let providerBatchImportPreview = null;
 
-        if (!tableBody || !modelTableBody || !modal || !providerForm || !providerModelConfigList) return;
+        if (!tableBody || !modelTableBody || !modal || !providerForm || !providerModelConfigList || !providerProtocolTypeInput) return;
 
         function serializeProviderFormState() {
             return JSON.stringify(
@@ -4330,6 +4322,7 @@
                 name: providerNameInput.value.trim(),
                 base_url: providerBaseUrlInput.value.trim(),
                 provider_type: providerTypeInput.value.trim() || "openai_compatible",
+                protocol_type: providerProtocolTypeInput.value || "both",
                 group_name: providerGroupNameInput.value.trim() || null,
                 region_tag: providerRegionTagInput.value.trim() || null,
                 enabled: providerEnabledInput.checked,
@@ -4496,6 +4489,29 @@
             `;
         }
 
+        function normalizeProviderProtocolType(value) {
+            const normalized = String(value || "both").trim();
+            return ["both", "chat_completions", "responses"].includes(normalized) ? normalized : "both";
+        }
+
+        function formatProviderProtocolLabel(providerOrValue) {
+            const protocolType = typeof providerOrValue === "object"
+                ? normalizeProviderProtocolType(providerOrValue?.protocol_type)
+                : normalizeProviderProtocolType(providerOrValue);
+            if (typeof providerOrValue === "object" && providerOrValue?.protocol_label) {
+                return providerOrValue.protocol_label;
+            }
+            if (protocolType === "chat_completions") return "Chat Completions API";
+            if (protocolType === "responses") return "Responses API";
+            return "双协议";
+        }
+
+        function renderProviderProtocolBadge(provider) {
+            const protocolType = normalizeProviderProtocolType(provider?.protocol_type);
+            const shortLabel = protocolType === "chat_completions" ? "Chat" : protocolType === "responses" ? "Responses" : "双协议";
+            return `<span class="status-badge status-unknown" title="${escapeHtml(formatProviderProtocolLabel(provider))}">${escapeHtml(shortLabel)}</span>`;
+        }
+
         function renderProviderStrategy(provider) {
             const maintenanceText = provider.maintenance_mode_enabled
                 ? `维护中 · ${provider.maintenance_window || "未填写维护窗口"}`
@@ -4542,9 +4558,6 @@
             const modelConfigs = Array.isArray(provider?.model_configs) ? provider.model_configs : [];
             const enabledCount = modelConfigs.filter((item) => item.enabled).length;
             const healthyCount = modelConfigs.filter((item) => item.health_status === "healthy").length;
-            const streamCount = modelConfigs.filter((item) => item.supports_stream).length;
-            const visionCount = modelConfigs.filter((item) => item.supports_vision).length;
-            const imageGenerationCount = modelConfigs.filter((item) => supportsImageGeneration(item)).length;
             const rows = modelConfigs.map((item) => `
                 <tr>
                     <td class="provider-model-name-cell">
@@ -4580,12 +4593,16 @@
                             <span>Base URL</span>
                             <strong>${escapeHtml(provider.base_url)}</strong>
                         </div>
+                        <div>
+                            <span>协议</span>
+                            <strong>${escapeHtml(formatProviderProtocolLabel(provider))}</strong>
+                        </div>
                     </div>
                     <div class="provider-model-detail-meta">
                         <div><span>模型总数</span><strong>${formatNumber(modelConfigs.length)}</strong></div>
                         <div><span>已启用</span><strong>${formatNumber(enabledCount)}</strong></div>
                         <div><span>状态正常</span><strong>${formatNumber(healthyCount)}</strong></div>
-                        <div><span>流式 / 识图 / 生图</span><strong>${formatNumber(streamCount)} / ${formatNumber(visionCount)} / ${formatNumber(imageGenerationCount)}</strong></div>
+                        <div><span>模型能力</span><strong>${MODEL_MANAGEMENT_CAPABILITY_TEXT}</strong></div>
                     </div>
                     <div class="table-shell provider-model-detail-table-shell">
                         <table class="data-table provider-model-detail-table">
@@ -4943,8 +4960,10 @@
                     provider.name,
                     provider.group_name || "",
                     provider.region_tag || "",
-                    provider.base_url,
-                    provider.models.join(", "),
+            provider.base_url,
+            provider.protocol_label || "",
+            provider.protocol_type || "",
+            provider.models.join(", "),
                     provider.maintenance_window || "",
                     provider.credential_hint || "",
                     provider.remark || "",
@@ -4962,6 +4981,7 @@
                     </td>
                     <td>${renderProviderScope(provider)}</td>
                     <td>${escapeHtml(provider.base_url)}</td>
+                    <td>${renderProviderProtocolBadge(provider)}</td>
                     <td>${renderProviderModelHealth(provider.model_configs, provider.id)}</td>
                     <td>${renderProviderAvailability(provider)}</td>
                     <td>${statusBadge(provider.circuit_state)}</td>
@@ -4981,7 +5001,7 @@
                         </div>
                     </td>
                 </tr>
-            `).join("") || '<tr><td colspan="12"><div class="empty-state">没有匹配的中转站</div></td></tr>';
+            `).join("") || '<tr><td colspan="13"><div class="empty-state">没有匹配的中转站</div></td></tr>';
             enhanceInteractiveButtons(tableBody);
         }
 
@@ -5040,7 +5060,10 @@
                 const model = item.model || {};
                 return `
                 <tr>
-                    <td>${escapeHtml(provider.name)}</td>
+                    <td>
+                        <strong>${escapeHtml(provider.name)}</strong>
+                        <div class="table-muted">${escapeHtml(formatProviderProtocolLabel(provider))}</div>
+                    </td>
                     <td class="provider-model-name-cell">
                         <strong>${escapeHtml(model.model_name)}</strong>
                     </td>
@@ -5281,6 +5304,7 @@
             providerBaseUrlInput.value = provider?.base_url ?? "";
             providerApiKeyInput.value = provider?.api_key ?? "";
             providerTypeInput.value = provider?.provider_type ?? "openai_compatible";
+            providerProtocolTypeInput.value = normalizeProviderProtocolType(provider?.protocol_type);
             providerGroupNameInput.value = provider?.group_name ?? "";
             providerRegionTagInput.value = provider?.region_tag ?? "";
             providerPriorityInput.value = provider?.priority ?? 100;
@@ -5491,6 +5515,7 @@
     async function initModels() {
         const tableBody = document.getElementById("models-table-body");
         const searchInput = document.getElementById("models-search");
+        const healthStatusSelect = document.getElementById("models-health-status");
         const enabledSelect = document.getElementById("models-enabled");
         const providerSelect = document.getElementById("models-provider-id");
         const pageSizeSelect = document.getElementById("models-page-size");
@@ -5541,7 +5566,7 @@
         const mappingResetBtn = document.getElementById("model-mapping-reset-btn");
         const modelNameOptions = document.getElementById("model-name-options");
         if (
-            !tableBody || !searchInput || !enabledSelect || !providerSelect || !pageSizeSelect || !cachePriceInput
+            !tableBody || !searchInput || !healthStatusSelect || !enabledSelect || !providerSelect || !pageSizeSelect || !cachePriceInput
             || !supportsStreamInput || !supportsVisionInput || !supportsToolsInput || !supportsChatCompletionsInput
             || !supportsResponsesInput || !contextWindowInput || !maxInputTokensInput || !maxOutputTokensInput
             || !selectPageInput || !batchMeta || !batchContextWindowInput || !batchContextApplyBtn
@@ -5627,14 +5652,8 @@
             const endpointLabels = [];
             if (item.supports_chat_completions) endpointLabels.push("Chat");
             if (item.supports_responses) endpointLabels.push("Responses");
-            const abilityLabels = [
-                item.supports_stream ? "流式" : "非流式",
-                "仅文本",
-                item.supports_tools ? "工具调用" : "无工具",
-            ];
-            if (item.supports_vision) abilityLabels.push("图像理解");
             return `
-                <div>${escapeHtml(abilityLabels.join(" / "))}</div>
+                <div>${escapeHtml(MODEL_MANAGEMENT_CAPABILITY_TEXT)}</div>
                 <div class="table-muted">${escapeHtml(endpointLabels.join("、") || "未配置原生端点")}</div>
             `;
         }
@@ -6029,6 +6048,7 @@
             });
             const keyword = searchInput.value.trim();
             if (keyword) params.set("keyword", keyword);
+            if (healthStatusSelect.value) params.set("health_status", healthStatusSelect.value);
             if (enabledSelect.value) params.set("enabled", enabledSelect.value);
             if (providerSelect.value) params.set("provider_id", providerSelect.value);
             return params;
@@ -6268,6 +6288,7 @@
             const normalizedModelName = String(modelName || "").trim();
             if (!normalizedModelName) return false;
             searchInput.value = normalizedModelName;
+            healthStatusSelect.value = "";
             enabledSelect.value = "";
             providerSelect.value = "";
             state.page = 1;
@@ -6671,6 +6692,13 @@
                     showToast(error.message, "error");
                 }
             }, 250);
+        });
+        healthStatusSelect.addEventListener("change", async () => {
+            try {
+                await reloadFirstPage();
+            } catch (error) {
+                showToast(error.message, "error");
+            }
         });
         enabledSelect.addEventListener("change", async () => {
             try {

@@ -181,7 +181,7 @@ class HealthService:
         started = time.perf_counter()
         endpoint_label = "tools"
         probe_specs: list[tuple[str, dict[str, Any]]] = []
-        if provider_model.supports_responses:
+        if ProviderService.provider_supports_responses(provider):
             probe_specs.append(
                 (
                     "/responses",
@@ -191,7 +191,7 @@ class HealthService:
                     ),
                 )
             )
-        if provider_model.supports_chat_completions:
+        if ProviderService.provider_supports_chat_completions(provider):
             probe_specs.append(
                 (
                     "/chat/completions",
@@ -271,10 +271,93 @@ class HealthService:
         }
 
     @staticmethod
+    async def _probe_native_tools_endpoint(
+        provider: Provider,
+        provider_model: ProviderModel,
+        *,
+        endpoint_path: str,
+        max_tokens: int = 16,
+    ) -> dict[str, Any]:
+        started = time.perf_counter()
+        endpoint_label = "tools"
+        capability_key = HealthService._endpoint_capability_key("tools", endpoint_path)
+        if endpoint_path == "/responses":
+            endpoint_supported = ProviderService.provider_supports_responses(provider)
+            payload = HealthService._build_responses_tool_probe_payload(provider_model, max_output_tokens=max_tokens)
+            support_label = "Responses 工具调用"
+        else:
+            endpoint_supported = ProviderService.provider_supports_chat_completions(provider)
+            payload = HealthService._build_chat_tool_probe_payload(provider_model, max_tokens=max_tokens)
+            support_label = "Chat 工具调用"
+        if not endpoint_supported:
+            return {
+                "endpoint_path": endpoint_path,
+                "endpoint_label": endpoint_label,
+                "capability_key": capability_key,
+                "success": False,
+                "native_success": False,
+                "adapted_success": False,
+                "support_mode": "unsupported",
+                "support_label": f"不支持 {support_label}",
+                "latency_ms": 0,
+                "status_code": None,
+                "message": "中转站或模型未启用该端点原生工具调用探测",
+                "trace": [],
+            }
+        setting = await ProxyService._get_setting_async()
+        try:
+            prepared = ProxyService._prepare_upstream_request(provider, endpoint_path=endpoint_path, payload=payload)
+            response, _ = await ProxyService._send_prepared_json(
+                provider,
+                prepared=prepared,
+                headers={"Authorization": f"Bearer {provider.api_key}"},
+                requested_payload=payload,
+                setting=setting,
+            )
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            has_tool_call = HealthService._response_has_tool_call(response)
+            return {
+                "endpoint_path": endpoint_path,
+                "endpoint_label": endpoint_label,
+                "capability_key": capability_key,
+                "success": has_tool_call,
+                "native_success": has_tool_call,
+                "adapted_success": False,
+                "support_mode": "native" if has_tool_call else "unsupported",
+                "support_label": f"原生支持 {support_label}" if has_tool_call else f"不支持 {support_label}",
+                "latency_ms": latency_ms,
+                "status_code": 200,
+                "message": "ok" if has_tool_call else "未返回工具调用",
+                "trace": [],
+            }
+        except Exception as exc:
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            status_code = getattr(exc, "status_code", None)
+            detail = getattr(exc, "detail", None)
+            message = ProxyService._error_message_for_log(detail) if detail is not None else str(exc)
+            return {
+                "endpoint_path": endpoint_path,
+                "endpoint_label": endpoint_label,
+                "capability_key": capability_key,
+                "success": False,
+                "native_success": False,
+                "adapted_success": False,
+                "support_mode": "unsupported",
+                "support_label": f"不支持 {support_label}",
+                "latency_ms": latency_ms,
+                "status_code": status_code,
+                "message": message,
+                "trace": [],
+            }
+
+    @staticmethod
     async def _probe_native_image_generation(provider: Provider, provider_model: ProviderModel) -> dict[str, Any]:
         started = time.perf_counter()
         endpoint_label = "image_generation"
-        if not ProviderService.provider_model_supports_image_generation(provider_model):
+        if (
+            not ProviderService.provider_supports_responses(provider)
+            or not ProviderService.provider_model_supports_image_generation(provider_model)
+        ):
             return {
                 "endpoint_path": "/responses",
                 "endpoint_label": endpoint_label,
@@ -285,7 +368,7 @@ class HealthService:
                 "support_label": "不支持 image_generation",
                 "latency_ms": 0,
                 "status_code": None,
-                "message": "模型未满足 Responses + Tools + 图片生成探测条件",
+                "message": "中转站或模型未满足 Responses + Tools + 图片生成探测条件",
                 "trace": [],
             }
         setting = await ProxyService._get_setting_async()
@@ -360,7 +443,7 @@ class HealthService:
                 "trace": [],
             }
         probe_specs: list[tuple[str, dict[str, Any]]] = []
-        if provider_model.supports_responses:
+        if ProviderService.provider_supports_responses(provider):
             probe_specs.append(
                 (
                     "/responses",
@@ -371,7 +454,7 @@ class HealthService:
                     ),
                 )
             )
-        if provider_model.supports_chat_completions:
+        if ProviderService.provider_supports_chat_completions(provider):
             probe_specs.append(
                 (
                     "/chat/completions",
@@ -395,7 +478,7 @@ class HealthService:
                 return {
                     **result,
                     "endpoint_label": endpoint_label,
-                    "support_label": "原生支持 vision" if result.get("support_mode") == "native" else "通过适配支持 vision",
+                    "support_label": "原生支持 vision",
                 }
             last_error = result
         latency_ms = int((time.perf_counter() - started) * 1000)
@@ -411,6 +494,76 @@ class HealthService:
             "status_code": last_error.get("status_code") if last_error else None,
             "message": last_error.get("message") if last_error else "图像理解探测失败",
             "trace": last_error.get("trace") if last_error else [],
+        }
+
+    @staticmethod
+    async def _probe_native_vision_endpoint(
+        provider: Provider,
+        provider_model: ProviderModel,
+        *,
+        endpoint_path: str,
+        max_tokens: int = 4,
+    ) -> dict[str, Any]:
+        endpoint_label = "vision"
+        capability_key = HealthService._endpoint_capability_key("vision", endpoint_path)
+        if not provider_model.supports_vision:
+            return {
+                "endpoint_path": endpoint_path,
+                "endpoint_label": endpoint_label,
+                "capability_key": capability_key,
+                "success": False,
+                "native_success": False,
+                "adapted_success": False,
+                "support_mode": "unsupported",
+                "support_label": "不支持 vision",
+                "latency_ms": 0,
+                "status_code": None,
+                "message": "模型未声明支持图像理解",
+                "trace": [],
+            }
+        if endpoint_path == "/responses":
+            endpoint_supported = ProviderService.provider_supports_responses(provider)
+            payload = HealthService._build_responses_probe_payload(
+                provider_model,
+                vision_probe=True,
+                max_output_tokens=max_tokens,
+            )
+            support_label = "Responses 图像理解"
+        else:
+            endpoint_supported = ProviderService.provider_supports_chat_completions(provider)
+            payload = HealthService._build_chat_probe_payload(
+                provider_model,
+                vision_probe=True,
+                stream_probe=False,
+                max_tokens=max_tokens,
+            )
+            support_label = "Chat 图像理解"
+        if not endpoint_supported:
+            return {
+                "endpoint_path": endpoint_path,
+                "endpoint_label": endpoint_label,
+                "capability_key": capability_key,
+                "success": False,
+                "native_success": False,
+                "adapted_success": False,
+                "support_mode": "unsupported",
+                "support_label": f"不支持 {support_label}",
+                "latency_ms": 0,
+                "status_code": None,
+                "message": "中转站或模型未启用该端点原生图像理解探测",
+                "trace": [],
+            }
+        result = await HealthService._probe_formal_endpoint(
+            provider,
+            provider_model,
+            endpoint_path=endpoint_path,
+            payload=payload,
+        )
+        return {
+            **result,
+            "endpoint_label": endpoint_label,
+            "capability_key": capability_key,
+            "support_label": f"原生支持 {support_label}" if result.get("success") else f"不支持 {support_label}",
         }
 
     @staticmethod
@@ -793,15 +946,20 @@ class HealthService:
     ) -> list[dict[str, Any]]:
         text_max_tokens = text_probe_max_tokens or HealthService.SCHEDULED_TEXT_PROBE_MAX_TOKENS
         capability_max_tokens = capability_probe_max_tokens or HealthService.SCHEDULED_CAPABILITY_PROBE_MAX_TOKENS
+        provider_supports_chat = ProviderService.provider_supports_chat_completions(provider)
+        provider_supports_responses = ProviderService.provider_supports_responses(provider)
         phases = [
             {
                 "key": "text",
                 "label": "文字调用检查",
-                "targets": lambda model: True,
+                "targets": lambda model: bool(
+                    provider_supports_chat
+                    or provider_supports_responses
+                ),
                 "probes": [
                     {
                         "key": "chat_completions",
-                        "targets": lambda model: bool(model.supports_chat_completions),
+                        "targets": lambda model: bool(provider_supports_chat),
                         "probe": lambda model: HealthService._probe_formal_endpoint(
                             provider,
                             model,
@@ -817,7 +975,7 @@ class HealthService:
                     },
                     {
                         "key": "responses",
-                        "targets": lambda model: bool(model.supports_responses),
+                        "targets": lambda model: bool(provider_supports_responses),
                         "probe": lambda model: HealthService._probe_formal_endpoint(
                             provider,
                             model,
@@ -835,11 +993,14 @@ class HealthService:
             {
                 "key": "text_stream",
                 "label": "文字流式检查",
-                "targets": lambda model: bool(model.supports_stream),
+                "targets": lambda model: bool(
+                    model.supports_stream
+                    and (provider_supports_chat or provider_supports_responses)
+                ),
                 "probes": [
                     {
                         "key": "chat_completions_stream",
-                        "targets": lambda model: bool(model.supports_chat_completions and model.supports_stream),
+                        "targets": lambda model: bool(provider_supports_chat and model.supports_stream),
                         "probe": lambda model: HealthService._probe_formal_stream_endpoint(
                             provider,
                             model,
@@ -855,7 +1016,7 @@ class HealthService:
                     },
                     {
                         "key": "responses_stream",
-                        "targets": lambda model: bool(model.supports_responses and model.supports_stream),
+                        "targets": lambda model: bool(provider_supports_responses and model.supports_stream),
                         "probe": lambda model: HealthService._probe_formal_stream_endpoint(
                             provider,
                             model,
@@ -875,6 +1036,7 @@ class HealthService:
                 "label": "工具调用检查",
                 "targets": lambda model: (
                     ProviderService.provider_model_supports_tools(model)
+                    and (provider_supports_chat or provider_supports_responses)
                     and (
                         not selective_capability_probes
                         or HealthService._should_run_scheduled_capability_probe(
@@ -887,10 +1049,22 @@ class HealthService:
                 ),
                 "probes": [
                     {
-                        "key": "tools",
-                        "probe": lambda model: HealthService._probe_native_tools(
+                        "key": "tools_chat_completions",
+                        "targets": lambda model: bool(provider_supports_chat),
+                        "probe": lambda model: HealthService._probe_native_tools_endpoint(
                             provider,
                             model,
+                            endpoint_path="/chat/completions",
+                            max_tokens=capability_max_tokens,
+                        ),
+                    },
+                    {
+                        "key": "tools_responses",
+                        "targets": lambda model: bool(provider_supports_responses),
+                        "probe": lambda model: HealthService._probe_native_tools_endpoint(
+                            provider,
+                            model,
+                            endpoint_path="/responses",
                             max_tokens=capability_max_tokens,
                         ),
                     }
@@ -901,6 +1075,7 @@ class HealthService:
                 "label": "图像理解检查",
                 "targets": lambda model: (
                     bool(model.supports_vision)
+                    and (provider_supports_chat or provider_supports_responses)
                     and (
                         not selective_capability_probes
                         or HealthService._should_run_scheduled_capability_probe(
@@ -913,10 +1088,22 @@ class HealthService:
                 ),
                 "probes": [
                     {
-                        "key": "vision",
-                        "probe": lambda model: HealthService._probe_native_vision(
+                        "key": "vision_chat_completions",
+                        "targets": lambda model: bool(provider_supports_chat),
+                        "probe": lambda model: HealthService._probe_native_vision_endpoint(
                             provider,
                             model,
+                            endpoint_path="/chat/completions",
+                            max_tokens=capability_max_tokens,
+                        ),
+                    },
+                    {
+                        "key": "vision_responses",
+                        "targets": lambda model: bool(provider_supports_responses),
+                        "probe": lambda model: HealthService._probe_native_vision_endpoint(
+                            provider,
+                            model,
+                            endpoint_path="/responses",
                             max_tokens=capability_max_tokens,
                         ),
                     }
@@ -926,6 +1113,8 @@ class HealthService:
                 "key": "image_generation",
                 "label": "图片生成检查",
                 "targets": lambda model: (
+                    provider_supports_responses
+                    and
                     ProviderService.provider_model_supports_image_generation(model)
                     and (
                         not selective_capability_probes
@@ -1222,8 +1411,8 @@ class HealthService:
                 latency_ms=int(model_result.get("latency_ms") or 0),
             )
         for endpoint_result in model_result.get("endpoint_results") or []:
-            capability = endpoint_result.get("endpoint_label")
-            if capability not in {"tools", "vision", "image_generation"}:
+            capability = endpoint_result.get("capability_key") or endpoint_result.get("endpoint_label")
+            if not HealthService._is_capability_probe_key(str(capability or "")):
                 continue
             ProviderHealthStateService.record_capability_probe(
                 provider,
@@ -1285,6 +1474,16 @@ class HealthService:
         return f"health-capability-probe:{provider_id}:{provider_model_id}:{capability}"
 
     @staticmethod
+    def _endpoint_capability_key(capability: str, endpoint_path: str | None) -> str:
+        if capability not in {"tools", "vision"}:
+            return capability
+        if endpoint_path == "/chat/completions":
+            return f"{capability}_chat_completions"
+        if endpoint_path == "/responses":
+            return f"{capability}_responses"
+        return capability
+
+    @staticmethod
     def _has_recent_capability_probe_cache(provider: Provider, provider_model: ProviderModel, capability: str) -> bool:
         payload = CacheService.get(HealthService._capability_probe_cache_key(provider.id, provider_model.id, capability))
         if not isinstance(payload, dict):
@@ -1326,8 +1525,8 @@ class HealthService:
         checked_at = datetime.utcnow().isoformat()
         for provider_model, model_result in zip(models_to_check, model_results, strict=False):
             for endpoint_result in model_result.get("endpoint_results") or []:
-                capability = endpoint_result.get("endpoint_label")
-                if capability not in {"tools", "vision", "image_generation"}:
+                capability = endpoint_result.get("capability_key") or endpoint_result.get("endpoint_label")
+                if not HealthService._is_capability_probe_key(str(capability or "")):
                     continue
                 payload = {
                     "success": bool(endpoint_result.get("success")),
@@ -1345,13 +1544,29 @@ class HealthService:
                 ProviderHealthStateService.record_capability_probe(
                     provider,
                     provider_model,
-                    capability=capability,
+                    capability=str(capability),
                     success=bool(endpoint_result.get("success")),
                     latency_ms=int(endpoint_result.get("latency_ms") or 0),
                     status_code=endpoint_result.get("status_code"),
                     message=str(endpoint_result.get("message") or ""),
                     support_mode=str(endpoint_result.get("support_mode") or ""),
                 )
+
+    @staticmethod
+    def _is_capability_probe_key(value: str) -> bool:
+        return value in {
+            "chat_completions",
+            "responses",
+            "chat_completions_stream",
+            "responses_stream",
+            "tools",
+            "tools_chat_completions",
+            "tools_responses",
+            "vision",
+            "vision_chat_completions",
+            "vision_responses",
+            "image_generation",
+        }
 
     @staticmethod
     def _determine_parallel_probe_limit(provider: Provider, target_count: int) -> int:
@@ -1405,7 +1620,6 @@ class HealthService:
         setting = await ProxyService._get_setting_async()
         endpoint_label = "chat/completions" if endpoint_path == "/chat/completions" else "responses"
         native_support_label = f"原生支持 {endpoint_label}"
-        adapted_support_label = f"通过适配支持 {endpoint_label}"
         unsupported_label = f"不支持 {endpoint_label}"
         try:
             response, _, fallback_trace = await ProxyService._forward_json_with_endpoint_fallback(
@@ -1418,15 +1632,14 @@ class HealthService:
             )
             latency_ms = int((time.perf_counter() - started) * 1000)
             output_text = ProxyService._extract_response_display_text(response, limit_bytes=160)
-            adapted = any(item.get("result") == "endpoint_fallback_success" for item in fallback_trace)
             return {
                 "endpoint_path": endpoint_path,
                 "endpoint_label": endpoint_label,
                 "success": True,
-                "native_success": not adapted,
-                "adapted_success": adapted,
-                "support_mode": "adapted" if adapted else "native",
-                "support_label": adapted_support_label if adapted else native_support_label,
+                "native_success": True,
+                "adapted_success": False,
+                "support_mode": "native",
+                "support_label": native_support_label,
                 "latency_ms": latency_ms,
                 "status_code": 200,
                 "message": output_text or "ok",
@@ -1512,7 +1725,6 @@ class HealthService:
         setting = await ProxyService._get_setting_async()
         endpoint_label = "chat/completions stream" if endpoint_path == "/chat/completions" else "responses stream"
         native_support_label = f"原生支持 {endpoint_label}"
-        adapted_support_label = f"通过适配支持 {endpoint_label}"
         unsupported_label = f"不支持 {endpoint_label}"
         stream_context = None
         exc_type = exc_value = exc_traceback = None
@@ -1547,15 +1759,14 @@ class HealthService:
                 timeout_policy=timeout_policy,
             )
             latency_ms = int((time.perf_counter() - started) * 1000)
-            adapted = any(item.get("result") == "endpoint_fallback_success" for item in fallback_trace)
             return {
                 "endpoint_path": endpoint_path,
                 "endpoint_label": endpoint_label,
                 "success": bool(chunk),
-                "native_success": bool(chunk) and not adapted,
-                "adapted_success": bool(chunk) and adapted,
-                "support_mode": "adapted" if adapted else "native",
-                "support_label": adapted_support_label if adapted else native_support_label,
+                "native_success": bool(chunk),
+                "adapted_success": False,
+                "support_mode": "native" if chunk else "unsupported",
+                "support_label": native_support_label if chunk else unsupported_label,
                 "latency_ms": latency_ms,
                 "status_code": 200,
                 "message": "已收到流式首个数据块" if chunk else "流式响应为空",

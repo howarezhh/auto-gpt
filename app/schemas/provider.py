@@ -4,6 +4,53 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator
 
 
+PROVIDER_PROTOCOL_TYPE_LABELS = {
+    "both": "双协议",
+    "chat_completions": "Chat Completions API",
+    "responses": "Responses API",
+}
+
+
+def normalize_provider_protocol_type(value: str | None) -> str:
+    raw = str(value or "").strip()
+    normalized = raw.lower().replace("-", "_").replace(" ", "_")
+    compact = raw.lower().replace(" ", "").replace("_", "").replace("-", "")
+    aliases = {
+        "": "both",
+        "both": "both",
+        "all": "both",
+        "dual": "both",
+        "dualprotocol": "both",
+        "chatandresponses": "both",
+        "chatresponses": "both",
+        "都支持": "both",
+        "双协议": "both",
+        "全部": "both",
+        "全协议": "both",
+        "chat": "chat_completions",
+        "chatcompletion": "chat_completions",
+        "chatcompletions": "chat_completions",
+        "chatcompletionapi": "chat_completions",
+        "chatcompletionsapi": "chat_completions",
+        "聊天": "chat_completions",
+        "对话": "chat_completions",
+        "responses": "responses",
+        "response": "responses",
+        "responsesapi": "responses",
+        "响应": "responses",
+        "响应式": "responses",
+    }
+    if normalized in PROVIDER_PROTOCOL_TYPE_LABELS:
+        return normalized
+    if compact in aliases:
+        return aliases[compact]
+    raise ValueError("协议仅支持 双协议、Chat Completions API 或 Responses API")
+
+
+def format_provider_protocol_label(value: str | None) -> str:
+    return PROVIDER_PROTOCOL_TYPE_LABELS.get(normalize_provider_protocol_type(value), PROVIDER_PROTOCOL_TYPE_LABELS["both"])
+
+
 class ProviderModelConfigBase(BaseModel):
     model_name: str = Field(..., min_length=1)
     enabled: bool = True
@@ -57,6 +104,8 @@ class ProviderModelMountProviderOut(BaseModel):
     id: int
     name: str
     base_url: str
+    protocol_type: str = "both"
+    protocol_label: str = "双协议"
     group_name: str | None = None
     region_tag: str | None = None
     enabled: bool
@@ -137,6 +186,7 @@ class ProviderBase(BaseModel):
     base_url: str = Field(..., min_length=1)
     api_key: str = Field(..., min_length=1)
     provider_type: str = "openai_compatible"
+    protocol_type: str = "both"
     group_name: str | None = None
     region_tag: str | None = None
     enabled: bool = True
@@ -177,6 +227,11 @@ class ProviderBase(BaseModel):
             normalized.append(item)
         return normalized
 
+    @field_validator("protocol_type")
+    @classmethod
+    def normalize_protocol_type(cls, value: str | None) -> str:
+        return normalize_provider_protocol_type(value)
+
 
 class ProviderCreate(ProviderBase):
     pass
@@ -187,6 +242,7 @@ class ProviderUpdate(BaseModel):
     base_url: str | None = None
     api_key: str | None = None
     provider_type: str | None = None
+    protocol_type: str | None = None
     group_name: str | None = None
     region_tag: str | None = None
     enabled: bool | None = None
@@ -231,6 +287,13 @@ class ProviderUpdate(BaseModel):
             normalized.append(item)
         return normalized
 
+    @field_validator("protocol_type")
+    @classmethod
+    def normalize_protocol_type(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return normalize_provider_protocol_type(value)
+
 
 class ProviderOut(BaseModel):
     id: int
@@ -239,6 +302,8 @@ class ProviderOut(BaseModel):
     api_key: str
     api_key_masked: str
     provider_type: str
+    protocol_type: str
+    protocol_label: str
     group_name: str | None
     region_tag: str | None
     enabled: bool
@@ -304,6 +369,8 @@ class ProviderOptionOut(BaseModel):
     region_tag: str | None = None
     enabled: bool
     health_status: str
+    protocol_type: str = "both"
+    protocol_label: str = "双协议"
     models: list[str] = Field(default_factory=list)
 
 
@@ -326,6 +393,8 @@ class ProviderPlaygroundOut(BaseModel):
     region_tag: str | None = None
     enabled: bool
     health_status: str
+    protocol_type: str = "both"
+    protocol_label: str = "双协议"
     models: list[str] = Field(default_factory=list)
     model_configs: list[ProviderPlaygroundModelOut] = Field(default_factory=list)
 
@@ -339,6 +408,8 @@ class ProviderSummaryOut(BaseModel):
     priority: int
     weight: int
     health_status: str
+    protocol_type: str = "both"
+    protocol_label: str = "双协议"
     circuit_state: str
     last_latency_ms: int | None = None
     models: list[str] = Field(default_factory=list)
