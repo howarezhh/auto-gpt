@@ -11,7 +11,9 @@ from sqlalchemy.orm import Session
 from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
 from app.services.cache_service import CacheService
+from app.services.content_guard_probe_service import ContentGuardProbeService
 from app.services.log_service import LogService
+from app.logging.adapters.health_adapter import HealthLogRecorder
 from app.services.provider_health_state_service import ProviderHealthStateService
 from app.services.provider_service import ProviderService
 from app.services.proxy_service import ProxyService, StreamTimeoutPolicy
@@ -38,6 +40,7 @@ class HealthService:
     SCHEDULED_TEXT_PROBE_MAX_TOKENS = 4
     SCHEDULED_CAPABILITY_PROBE_MAX_TOKENS = 8
     SCHEDULED_CAPABILITY_RESULT_TTL_SECONDS = 60 * 30
+    CONTENT_GUARD_PROBE_PHASE_KEYS = ContentGuardProbeService.PROBE_PHASE_KEYS
 
     @staticmethod
     def cached_provider_status_summary(db: Session) -> dict:
@@ -67,7 +70,19 @@ class HealthService:
         capability_probe_max_tokens: int | None = None,
         progress_callback: HealthProgressCallback | None = None,
         interactive_mode: bool = False,
+        single_endpoint_mode: bool = False,
     ) -> dict:
+        run = (
+            HealthLogRecorder.start_run(
+                db,
+                trigger_type="manual_single",
+                scope_type="provider",
+                scope_id=provider.id,
+                phase_keys=phase_keys or HealthService.INTERACTIVE_TEXT_PROBE_PHASE_KEYS,
+            )
+            if interactive_mode
+            else None
+        )
         models_to_check = [item for item in provider.provider_models if include_disabled_models or item.enabled]
         model_results = await HealthService._run_provider_model_checks(
             provider,
@@ -77,8 +92,18 @@ class HealthService:
             capability_probe_max_tokens=capability_probe_max_tokens,
             progress_callback=progress_callback,
             interactive_mode=interactive_mode,
+            single_endpoint_mode=single_endpoint_mode,
         )
-        return HealthService._finalize_provider_check(db, provider, models_to_check, model_results)
+        provider_result = HealthService._finalize_provider_check(db, provider, models_to_check, model_results)
+        if run is not None:
+            run_payload = [{
+                "provider_id": provider.id,
+                "provider_name": provider.name,
+                **provider_result,
+            }]
+            HealthService._record_run_results(db, run_id=run.run_id, provider_results=run_payload)
+            HealthLogRecorder.finish_run(db, run_id=run.run_id, results=run_payload)
+        return provider_result
 
     @staticmethod
     async def check_selected_providers(
@@ -89,7 +114,19 @@ class HealthService:
         phase_keys: set[str] | frozenset[str] | None = None,
         text_probe_max_tokens: int | None = None,
         interactive_mode: bool = False,
+        single_endpoint_mode: bool = False,
     ) -> list[dict]:
+        run = (
+            HealthLogRecorder.start_run(
+                db,
+                trigger_type="manual_batch",
+                scope_type="provider" if provider_ids else "all",
+                scope_id=",".join(str(item) for item in provider_ids) if provider_ids else None,
+                phase_keys=phase_keys or HealthService.INTERACTIVE_TEXT_PROBE_PHASE_KEYS,
+            )
+            if interactive_mode
+            else None
+        )
         providers = ProviderService.list_providers(db)
         if provider_ids:
             provider_map = {provider.id: provider for provider in providers}
@@ -104,6 +141,7 @@ class HealthService:
                 provider,
                 phase_keys=phase_keys,
                 text_probe_max_tokens=text_probe_max_tokens,
+                single_endpoint_mode=single_endpoint_mode,
             )
             for provider in providers
         }
@@ -143,6 +181,9 @@ class HealthService:
                     **HealthService._finalize_provider_check(db, provider, models_to_check, model_results),
                 }
             )
+        if run is not None:
+            HealthService._record_run_results(db, run_id=run.run_id, provider_results=results)
+            HealthLogRecorder.finish_run(db, run_id=run.run_id, results=results)
         return results
 
     @staticmethod
@@ -160,6 +201,17 @@ class HealthService:
         parallel_phases: bool = False,
         single_endpoint_mode: bool = False,
     ) -> dict:
+        run = (
+            HealthLogRecorder.start_run(
+                db,
+                trigger_type="manual_single",
+                scope_type="model",
+                scope_id=provider_model.id,
+                phase_keys=phase_keys or HealthService.INTERACTIVE_TEXT_PROBE_PHASE_KEYS,
+            )
+            if interactive_mode
+            else None
+        )
         model_result = (
             await HealthService._run_provider_model_checks(
                 provider,
@@ -175,6 +227,40 @@ class HealthService:
             )
         )[0]
         HealthService._persist_model_health_result(db, provider, provider_model, model_result)
+        if interactive_mode:
+            content_result = (
+                await HealthService._run_provider_model_checks(
+                    provider,
+                    [provider_model],
+                    phase_keys=ContentGuardProbeService.PROBE_PHASE_KEYS,
+                    text_probe_max_tokens=text_probe_max_tokens,
+                    capability_probe_max_tokens=capability_probe_max_tokens,
+                    interactive_mode=interactive_mode,
+                    parallel_phases=parallel_phases,
+                    single_endpoint_mode=False,
+                )
+            )[0]
+            HealthService._persist_model_health_result(
+                db,
+                provider,
+                provider_model,
+                content_result,
+                request_path="/content-integrity-test",
+                update_health_state=False,
+            )
+            model_result["trust_status"] = ProviderService.provider_model_trust_status(provider_model)
+            model_result["trust_status_label"] = ProviderService.provider_model_to_dict(provider_model).get("trust_status_label")
+            model_result["trust_status_reason"] = ProviderService.provider_model_to_dict(provider_model).get("trust_status_reason")
+            model_result["content_probe_results"] = content_result.get("endpoint_results") or []
+        if run is not None:
+            provider_result = {
+                "provider_id": provider.id,
+                "provider_name": provider.name,
+                "success": bool(model_result.get("success")),
+                "model_results": [model_result],
+            }
+            HealthService._record_run_results(db, run_id=run.run_id, provider_results=[provider_result])
+            HealthLogRecorder.finish_run(db, run_id=run.run_id, results=[model_result])
         return model_result
 
     @staticmethod
@@ -316,7 +402,7 @@ class HealthService:
                 "support_label": f"不支持 {support_label}",
                 "latency_ms": 0,
                 "status_code": None,
-                "message": "中转站或模型未启用该端点原生工具调用探测",
+                "message": "提供商或模型未启用该端点原生工具调用探测",
                 "trace": [],
             }
         setting = await ProxyService._get_setting_async()
@@ -393,7 +479,7 @@ class HealthService:
                 "support_label": "不支持 image_generation",
                 "latency_ms": 0,
                 "status_code": None,
-                "message": "中转站或模型未满足 Responses + Tools + 图片生成探测条件",
+                "message": "提供商或模型未满足 Responses + Tools + 图片生成探测条件",
                 "trace": [],
             }
         setting = await ProxyService._get_setting_async()
@@ -589,7 +675,7 @@ class HealthService:
                 "support_label": f"不支持 {support_label}",
                 "latency_ms": 0,
                 "status_code": None,
-                "message": "中转站或模型未启用该端点原生图像理解探测",
+                "message": "提供商或模型未启用该端点原生图像理解探测",
                 "trace": [],
             }
         result = await HealthService._probe_formal_endpoint(
@@ -617,7 +703,18 @@ class HealthService:
         progress_callback: HealthProgressCallback | None = None,
         interactive_mode: bool = False,
         parallel_phases: bool = False,
+        single_endpoint_mode: bool = False,
     ) -> list[dict]:
+        run = (
+            HealthLogRecorder.start_run(
+                db,
+                trigger_type="manual_batch",
+                scope_type="all",
+                phase_keys=phase_keys or HealthService.INTERACTIVE_TEXT_PROBE_PHASE_KEYS,
+            )
+            if interactive_mode
+            else None
+        )
         providers = [provider for provider in ProviderService.list_providers(db) if provider.enabled]
         route_metrics = LogService.route_metric_summary(
             db,
@@ -669,6 +766,7 @@ class HealthService:
                 route_metrics=route_metrics,
                 text_probe_max_tokens=text_probe_max_tokens or HealthService.SCHEDULED_TEXT_PROBE_MAX_TOKENS,
                 capability_probe_max_tokens=capability_probe_max_tokens or HealthService.SCHEDULED_CAPABILITY_PROBE_MAX_TOKENS,
+                single_endpoint_mode=single_endpoint_mode,
             )
             for provider in providers
         }
@@ -739,6 +837,10 @@ class HealthService:
                     "models_failed": provider_result.get("models_failed"),
                 },
             )
+        if run is not None:
+            provider_results = [item for item in results if item.get("scope") == "provider"]
+            HealthService._record_run_results(db, run_id=run.run_id, provider_results=provider_results)
+            HealthLogRecorder.finish_run(db, run_id=run.run_id, results=results)
         return results
 
     @staticmethod
@@ -747,6 +849,12 @@ class HealthService:
         *,
         progress_callback: HealthProgressCallback | None = None,
     ) -> list[dict]:
+        run = HealthLogRecorder.start_run(
+            db,
+            trigger_type="manual_batch" if progress_callback is not None else "scheduled_l0",
+            scope_type="all",
+            phase_keys=["connectivity"],
+        )
         providers = [provider for provider in ProviderService.list_providers(db) if provider.enabled]
         results: list[dict] = []
         total_providers = len(providers)
@@ -772,6 +880,19 @@ class HealthService:
                     **provider_result,
                 }
             )
+            HealthLogRecorder.record_probe(
+                db,
+                run_id=run.run_id,
+                provider_id=provider.id,
+                model_name=provider.name,
+                probe_type="connectivity",
+                endpoint_path="/models",
+                success=bool(provider_result.get("success")),
+                status_code=provider_result.get("status_code"),
+                latency_ms=provider_result.get("latency_ms"),
+                error_code=None if provider_result.get("success") else "provider_connectivity_failed",
+                auto_commit=False,
+            )
             await HealthService._emit_progress(
                 progress_callback,
                 {
@@ -784,6 +905,8 @@ class HealthService:
                     "success": provider_result.get("success"),
                 },
             )
+        db.commit()
+        HealthLogRecorder.finish_run(db, run_id=run.run_id, results=results)
         return results
 
     @staticmethod
@@ -792,13 +915,19 @@ class HealthService:
         *,
         progress_callback: HealthProgressCallback | None = None,
     ) -> list[dict]:
+        run = HealthLogRecorder.start_run(
+            db,
+            trigger_type="manual_batch" if progress_callback is not None else "scheduled_l1",
+            scope_type="model",
+            phase_keys=["text_stream"],
+        )
         route_metrics = LogService.route_metric_summary(
             db,
             window_minutes=HealthService.SCHEDULED_ACTIVE_MODEL_WINDOW_MINUTES,
         )
         active_model_keys = set(route_metrics.keys())
         providers = [provider for provider in ProviderService.list_providers(db) if provider.enabled]
-        return await HealthService._check_scheduled_provider_models(
+        results = await HealthService._check_scheduled_provider_models(
             db,
             providers,
             selector=lambda provider, provider_model: HealthService._should_run_scheduled_text_probe(
@@ -812,6 +941,9 @@ class HealthService:
             update_health_state=True,
             progress_callback=progress_callback,
         )
+        HealthService._record_run_results(db, run_id=run.run_id, provider_results=results)
+        HealthLogRecorder.finish_run(db, run_id=run.run_id, results=results)
+        return results
 
     @staticmethod
     async def check_scheduled_capability_models(
@@ -819,8 +951,14 @@ class HealthService:
         *,
         progress_callback: HealthProgressCallback | None = None,
     ) -> list[dict]:
+        run = HealthLogRecorder.start_run(
+            db,
+            trigger_type="manual_batch" if progress_callback is not None else "scheduled_l2",
+            scope_type="model",
+            phase_keys=["tools", "vision"],
+        )
         providers = [provider for provider in ProviderService.list_providers(db) if provider.enabled]
-        return await HealthService._check_scheduled_provider_models(
+        results = await HealthService._check_scheduled_provider_models(
             db,
             providers,
             selector=lambda provider, provider_model: HealthService._should_run_scheduled_capability_probe(
@@ -833,6 +971,48 @@ class HealthService:
             update_health_state=False,
             progress_callback=progress_callback,
         )
+        HealthService._record_run_results(db, run_id=run.run_id, provider_results=results)
+        HealthLogRecorder.finish_run(db, run_id=run.run_id, results=results)
+        return results
+
+    @staticmethod
+    async def check_scheduled_content_integrity_models(
+        db: Session,
+        *,
+        progress_callback: HealthProgressCallback | None = None,
+    ) -> list[dict]:
+        setting = SettingService.get_or_create(db)
+        if not bool(getattr(setting, "content_guard_enabled", True)):
+            return []
+        run = HealthLogRecorder.start_run(
+            db,
+            trigger_type="manual_batch" if progress_callback is not None else "scheduled_l3",
+            scope_type="model",
+            phase_keys=list(HealthService.CONTENT_GUARD_PROBE_PHASE_KEYS),
+        )
+        providers = [
+            provider
+            for provider in ProviderService.list_providers(db)
+            if provider.enabled and bool(getattr(provider, "content_guard_enabled", True))
+        ]
+        results = await HealthService._check_scheduled_provider_models(
+            db,
+            providers,
+            selector=lambda provider, provider_model: HealthService._should_run_scheduled_content_probe(
+                provider,
+                provider_model,
+                setting=setting,
+            ),
+            phase_keys=set(HealthService.CONTENT_GUARD_PROBE_PHASE_KEYS),
+            level="l3_content_integrity",
+            text_probe_max_tokens=32,
+            capability_probe_max_tokens=32,
+            update_health_state=True,
+            progress_callback=progress_callback,
+        )
+        HealthService._record_run_results(db, run_id=run.run_id, provider_results=results)
+        HealthLogRecorder.finish_run(db, run_id=run.run_id, results=results)
+        return results
 
     @staticmethod
     async def _check_scheduled_provider_models(
@@ -924,6 +1104,47 @@ class HealthService:
                 },
             )
         return results
+
+    @staticmethod
+    def _record_run_results(db: Session, *, run_id: str, provider_results: list[dict]) -> None:
+        for provider_result in provider_results:
+            provider_id = provider_result.get("provider_id")
+            for model_result in provider_result.get("model_results") or []:
+                endpoint_results = model_result.get("endpoint_results") or []
+                if not endpoint_results:
+                    HealthLogRecorder.record_probe(
+                        db,
+                        run_id=run_id,
+                        provider_id=provider_id,
+                        model_name=model_result.get("model_name"),
+                        probe_type="model_probe",
+                        success=bool(model_result.get("success")),
+                        status_code=model_result.get("status_code"),
+                        latency_ms=model_result.get("latency_ms"),
+                        error_code=None if model_result.get("success") else "probe_failed",
+                        capability_result=model_result,
+                        auto_commit=False,
+                    )
+                    continue
+                for endpoint_result in endpoint_results:
+                    HealthLogRecorder.record_probe(
+                        db,
+                        run_id=run_id,
+                        provider_id=provider_id,
+                        provider_model_id=endpoint_result.get("provider_model_id"),
+                        model_name=model_result.get("model_name"),
+                        probe_type=str(endpoint_result.get("capability_key") or endpoint_result.get("endpoint_label") or "probe"),
+                        endpoint_path=endpoint_result.get("endpoint_path"),
+                        protocol_type="chat_completions" if endpoint_result.get("endpoint_path") == "/chat/completions" else "responses",
+                        success=bool(endpoint_result.get("success")),
+                        status_code=endpoint_result.get("status_code"),
+                        latency_ms=endpoint_result.get("latency_ms"),
+                        error_code=None if endpoint_result.get("success") else str(endpoint_result.get("support_mode") or "probe_failed"),
+                        capability_result=endpoint_result,
+                        content_guard_result=endpoint_result.get("content_guard_result"),
+                        auto_commit=False,
+                    )
+        db.commit()
 
     @staticmethod
     async def _run_provider_model_checks(
@@ -1374,6 +1595,93 @@ class HealthService:
                     }
                 ],
             },
+            {
+                "key": "content_fixed_answer",
+                "label": "固定答案完整性探针",
+                "targets": lambda model: bool(
+                    _should_test_endpoint(model, 'chat') or _should_test_endpoint(model, 'responses')
+                ),
+                "probes": [
+                    {
+                        "key": "content_fixed_answer",
+                        "probe": lambda model: ContentGuardProbeService.probe_fixed_answer(
+                            provider,
+                            model,
+                            endpoint_path=ContentGuardProbeService.content_probe_endpoint_path(provider, model) or "/responses",
+                        ),
+                    }
+                ],
+            },
+            {
+                "key": "content_json",
+                "label": "严格 JSON 完整性探针",
+                "targets": lambda model: bool(
+                    _should_test_endpoint(model, 'chat') or _should_test_endpoint(model, 'responses')
+                ),
+                "probes": [
+                    {
+                        "key": "content_json",
+                        "probe": lambda model: ContentGuardProbeService.probe_json(
+                            provider,
+                            model,
+                            endpoint_path=ContentGuardProbeService.content_probe_endpoint_path(provider, model) or "/responses",
+                        ),
+                    }
+                ],
+            },
+            {
+                "key": "content_sse",
+                "label": "SSE 完整性探针",
+                "targets": lambda model: bool(
+                    model.supports_stream
+                    and (_should_test_endpoint(model, 'chat') or _should_test_endpoint(model, 'responses'))
+                ),
+                "probes": [
+                    {
+                        "key": "content_sse",
+                        "probe": lambda model: ContentGuardProbeService.probe_sse(
+                            provider,
+                            model,
+                            endpoint_path=ContentGuardProbeService.content_probe_endpoint_path(provider, model) or "/responses",
+                        ),
+                    }
+                ],
+            },
+            {
+                "key": "content_refusal",
+                "label": "拒答完整性探针",
+                "targets": lambda model: bool(
+                    _should_test_endpoint(model, 'chat') or _should_test_endpoint(model, 'responses')
+                ),
+                "probes": [
+                    {
+                        "key": "content_refusal",
+                        "probe": lambda model: ContentGuardProbeService.probe_refusal(
+                            provider,
+                            model,
+                            endpoint_path=ContentGuardProbeService.content_probe_endpoint_path(provider, model) or "/responses",
+                        ),
+                    }
+                ],
+            },
+            {
+                "key": "content_tools",
+                "label": "工具调用完整性探针",
+                "targets": lambda model: (
+                    ProviderService.provider_model_supports_tools(model)
+                    and (_should_test_endpoint(model, 'chat') or _should_test_endpoint(model, 'responses'))
+                ),
+                "probes": [
+                    {
+                        "key": "content_tools",
+                        "probe": lambda model: ContentGuardProbeService.probe_tools(
+                            provider,
+                            model,
+                            endpoint_path=ContentGuardProbeService.content_probe_endpoint_path(provider, model) or "/responses",
+                        ),
+                    }
+                ],
+            },
         ]
         if phase_keys is None:
             return phases
@@ -1428,6 +1736,7 @@ class HealthService:
         )
         results_by_model_id: dict[int, list[dict[str, Any]]] = {provider_model.id: [] for provider_model in targets}
         for provider_model, endpoint_result in phase_results:
+            endpoint_result["capability_key"] = endpoint_result.get("capability_key") or phase_spec["key"]
             endpoint_results_by_model_id.setdefault(provider_model.id, []).append(endpoint_result)
             results_by_model_id.setdefault(provider_model.id, []).append(endpoint_result)
         success_count = sum(
@@ -1643,6 +1952,8 @@ class HealthService:
     ) -> None:
         success = bool(model_result.get("success"))
         message = model_result.get("message")
+        endpoint_results = model_result.get("endpoint_results") or []
+        content_guard_result = ContentGuardProbeService.first_content_guard_result(endpoint_results)
         if update_health_state:
             HealthService._apply_model_health(
                 db,
@@ -1651,6 +1962,14 @@ class HealthService:
                 health_status=str(model_result.get("health_status") or "unknown"),
                 latency_ms=int(model_result.get("latency_ms") or 0),
                 error_message=None if success else (str(message) if message is not None else None),
+            )
+        if content_guard_result is not None:
+            ContentGuardProbeService.apply_content_probe_health(
+                db,
+                provider,
+                provider_model,
+                content_guard_result=content_guard_result,
+                endpoint_results=endpoint_results,
             )
         LogService.create_log(
             db,
@@ -1737,6 +2056,33 @@ class HealthService:
             not HealthService._has_recent_capability_probe_cache(provider, provider_model, capability_key)
             for capability_key in capabilities
         )
+
+    @staticmethod
+    def _should_run_scheduled_content_probe(
+        provider: Provider,
+        provider_model: ProviderModel,
+        *,
+        setting: Any,
+    ) -> bool:
+        interval_seconds = max(300, int(getattr(setting, "content_guard_probe_interval_sec", 3600) or 3600))
+        if provider_model.content_probe_last_passed_at is None and provider_model.content_probe_last_failed_at is None:
+            return True
+        if provider_model.content_integrity_status in {"unknown", "degraded", "blocked"}:
+            return True
+        last_probe_at = max(
+            (
+                item
+                for item in (
+                    provider_model.content_probe_last_passed_at,
+                    provider_model.content_probe_last_failed_at,
+                )
+                if item is not None
+            ),
+            default=None,
+        )
+        if last_probe_at is None:
+            return True
+        return (datetime.utcnow() - last_probe_at).total_seconds() >= interval_seconds
 
     @staticmethod
     def _capability_probe_cache_key(provider_id: int, provider_model_id: int, capability: str) -> str:
@@ -1913,6 +2259,22 @@ class HealthService:
                 ),
             )
             latency_ms = int((time.perf_counter() - started) * 1000)
+            guard_result = ContentGuardProbeService.inspect_probe_json_response(
+                response,
+                provider=provider,
+                provider_model=provider_model,
+                endpoint_path=endpoint_path,
+                request_payload=payload,
+            )
+            if guard_result.result != ContentGuardProbeService.RESULT_PASS:
+                return ContentGuardProbeService.probe_failure(
+                    endpoint_path=endpoint_path,
+                    endpoint_label=endpoint_label,
+                    support_label=native_support_label,
+                    latency_ms=latency_ms,
+                    status_code=200,
+                    guard_result=guard_result,
+                )
             output_text = ProxyService._extract_response_display_text(response, limit_bytes=160)
             return {
                 "endpoint_path": endpoint_path,
@@ -2041,6 +2403,19 @@ class HealthService:
                 timeout_policy=timeout_policy,
             )
             latency_ms = int((time.perf_counter() - started) * 1000)
+            guard_result = ContentGuardProbeService.inspect_probe_stream_chunk(
+                chunk,
+                endpoint_path=endpoint_path,
+            )
+            if guard_result.result != ContentGuardProbeService.RESULT_PASS:
+                return ContentGuardProbeService.probe_failure(
+                    endpoint_path=endpoint_path,
+                    endpoint_label=endpoint_label,
+                    support_label=native_support_label if chunk else unsupported_label,
+                    latency_ms=latency_ms,
+                    status_code=200,
+                    guard_result=guard_result,
+                )
             return {
                 "endpoint_path": endpoint_path,
                 "endpoint_label": endpoint_label,

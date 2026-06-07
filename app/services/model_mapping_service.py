@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import random
 from dataclasses import dataclass
 from typing import Any
 
@@ -22,7 +21,6 @@ from app.utils.json_utils import dumps_json, loads_json
 class ModelMappingResolution:
     source_model_name: str
     selected_model_name: str
-    strategy: str
     mapping_id: int | None
     candidate_model_names: tuple[str, ...]
     trace: dict[str, Any]
@@ -32,7 +30,6 @@ class ModelMappingService:
     """负责模型映射规则管理和路由前目标模型选择。"""
 
     CACHE_PREFIX = "model-mappings"
-    STRATEGIES = {"auto", "priority", "weighted"}
 
     @staticmethod
     def list_mappings(db: Session) -> list[dict[str, Any]]:
@@ -51,7 +48,6 @@ class ModelMappingService:
         mapping = ModelMapping(
             source_model_name=payload.source_model_name,
             enabled=payload.enabled,
-            strategy=payload.strategy,
             targets_json=dumps_json([item.model_dump() for item in payload.targets]),
             remark=payload.remark,
         )
@@ -90,7 +86,6 @@ class ModelMappingService:
             "id": mapping.id,
             "source_model_name": mapping.source_model_name,
             "enabled": mapping.enabled,
-            "strategy": mapping.strategy,
             "targets": ModelMappingService._parse_targets(mapping.targets_json),
             "remark": mapping.remark,
             "created_at": mapping.created_at,
@@ -102,6 +97,25 @@ class ModelMappingService:
         CacheService.invalidate_prefix(ModelMappingService.CACHE_PREFIX)
         CacheService.invalidate_prefix("route-candidates")
         CacheService.invalidate_prefix("v1-models")
+
+    @staticmethod
+    def normalize_legacy_mapping_data(db: Session) -> bool:
+        """清理模型映射历史策略字段与目标优先级/权重残留。"""
+        changed = False
+        mappings = list(db.scalars(select(ModelMapping)))
+        for mapping in mappings:
+            normalized_targets = ModelMappingService._parse_targets(mapping.targets_json)
+            normalized_raw = dumps_json(normalized_targets)
+            if mapping.targets_json != normalized_raw:
+                mapping.targets_json = normalized_raw
+                changed = True
+            if getattr(mapping, "strategy", None) != "auto":
+                mapping.strategy = "auto"
+                changed = True
+        if changed:
+            db.commit()
+            ModelMappingService.invalidate_cache()
+        return changed
 
     @staticmethod
     async def resolve_for_request(
@@ -242,19 +256,16 @@ class ModelMappingService:
                 return ModelMappingResolution(
                     source_model_name=source_model_name,
                     selected_model_name=source_model_name,
-                    strategy=mapping.strategy,
                     mapping_id=mapping.id,
                     candidate_model_names=(),
                     trace={
                         "result": "model_mapping_no_available_target",
                         "source_model_name": source_model_name,
-                        "strategy": mapping.strategy,
                         "targets": evaluated,
                     },
                 )
             ordered_targets = ModelMappingService._order_targets(
                 available,
-                strategy=mapping.strategy,
                 sticky_key=sticky_key or source_model_name,
                 recent_model_name=recent_route.model_name if recent_route is not None else None,
             )
@@ -267,7 +278,6 @@ class ModelMappingService:
             return ModelMappingResolution(
                 source_model_name=source_model_name,
                 selected_model_name=str(selected["model_name"]),
-                strategy=mapping.strategy,
                 mapping_id=mapping.id,
                 candidate_model_names=candidate_model_names,
                 trace={
@@ -275,7 +285,6 @@ class ModelMappingService:
                     "mapping_id": mapping.id,
                     "source_model_name": source_model_name,
                     "selected_model_name": selected["model_name"],
-                    "strategy": mapping.strategy,
                     "capability_checks_skipped": False,
                     "capability_requirements": {
                         "require_vision": require_vision,
@@ -298,7 +307,6 @@ class ModelMappingService:
     def _order_targets(
         targets: list[dict[str, Any]],
         *,
-        strategy: str,
         sticky_key: str | None,
         recent_model_name: str | None = None,
     ) -> list[dict[str, Any]]:
@@ -330,41 +338,21 @@ class ModelMappingService:
                 ordered.append(item)
                 seen.add(model_name)
         if ordered and not ordered[0].get("selection_reason"):
-            ordered[0]["selection_reason"] = "按健康层级、渠道负载、路由得分和目标权重综合分发"
+            ordered[0]["selection_reason"] = "按健康层级、渠道负载和路由得分综合分发"
         return ordered
 
     @staticmethod
-    def _target_selection_weight(target: dict[str, Any]) -> float:
-        weight = max(0.0, float(target.get("weight") or 0.0))
-        score = max(1.0, float(target.get("score") or 0.0))
-        load_factor = max(0.0, min(1.0, float(target.get("provider_load_factor") or 0.0)))
-        return weight * score * max(0.05, 1.0 - load_factor)
-
-    @staticmethod
     def _balanced_target_shuffle(targets: list[dict[str, Any]], *, sticky_key: str | None) -> list[dict[str, Any]]:
-        remaining = sorted(
+        return sorted(
             list(targets),
             key=lambda item: (
                 float(item.get("provider_load_factor") or 0.0),
                 -float(item.get("score") or 0.0),
-                int(item.get("priority") or 100),
                 int(item.get("order") or 0),
+                -ModelMappingService._target_sticky_affinity(item, sticky_key),
                 str(item.get("model_name") or ""),
             ),
         )
-        ordered: list[dict[str, Any]] = []
-        while remaining:
-            weights = [ModelMappingService._target_selection_weight(item) for item in remaining]
-            if not any(value > 0 for value in weights):
-                ordered.extend(remaining)
-                break
-            rng = random if sticky_key is None else random.Random(
-                f"{sticky_key}:{len(ordered)}:{','.join(str(item.get('model_name') or '') for item in remaining)}"
-            )
-            chosen = rng.choices(remaining, weights=weights, k=1)[0]
-            ordered.append(chosen)
-            remaining.remove(chosen)
-        return ordered
 
     @staticmethod
     def _target_trace(
@@ -378,16 +366,12 @@ class ModelMappingService:
         route_diagnostics: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         model_name = str(target.get("model_name") or "").strip()
-        priority = int(target.get("priority") or 100)
-        weight = int(target.get("weight") or 0)
         route_score = float(candidate.route_score) if candidate is not None else 0.0
         success_rate = float(candidate.recent_success_rate) if candidate is not None else 0.0
         latency_ms = candidate.recent_avg_latency_ms if candidate is not None else None
         health_tier = int(candidate.health_tier) if candidate is not None else 1
         cost = ModelMappingService._candidate_cost(candidate) if candidate is not None else None
         score = ModelMappingService._target_score(
-            priority=priority,
-            weight=weight,
             route_score=route_score,
             success_rate=success_rate,
             latency_ms=latency_ms,
@@ -397,8 +381,6 @@ class ModelMappingService:
             "model_name": model_name,
             "available": available,
             "enabled": bool(target.get("enabled", True)),
-            "priority": priority,
-            "weight": weight,
             "order": index,
             "route_score": route_score,
             "score": score,
@@ -426,19 +408,15 @@ class ModelMappingService:
     @staticmethod
     def _target_score(
         *,
-        priority: int,
-        weight: int,
         route_score: float,
         success_rate: float,
         latency_ms: float | None,
         cost: float | None,
     ) -> float:
-        priority_bonus = max(0.0, 40.0 - float(priority))
-        weight_bonus = max(0.0, min(float(weight), 1000.0)) / 20.0
         success_bonus = max(0.0, min(success_rate, 1.0)) * 30.0
         latency_penalty = min(25.0, float(latency_ms or 0) / 120.0)
         cost_penalty = min(20.0, float(cost or 0) * 2.0) if cost is not None else 0.0
-        return float(route_score) + priority_bonus + weight_bonus + success_bonus - latency_penalty - cost_penalty
+        return float(route_score) + success_bonus - latency_penalty - cost_penalty
 
     @staticmethod
     def _candidate_cost(candidate: RouteCandidate | None) -> float | None:
@@ -452,12 +430,6 @@ class ModelMappingService:
         if not values:
             return None
         return float(sum(values) / len(values))
-
-    @staticmethod
-    def _stable_seed(sticky_key: str | None, targets: list[dict[str, Any]]) -> int:
-        basis = sticky_key or "|".join(str(item.get("model_name") or "") for item in targets)
-        digest = hashlib.sha256(basis.encode("utf-8")).hexdigest()
-        return int(digest[:16], 16)
 
     @staticmethod
     def _target_sticky_affinity(target: dict[str, Any], sticky_key: str | None) -> float:
@@ -490,8 +462,6 @@ class ModelMappingService:
             targets.append({
                 "model_name": model_name,
                 "enabled": bool(item.get("enabled", True)),
-                "priority": int(item.get("priority") or 100),
-                "weight": int(item.get("weight") or 100),
             })
         return targets
 

@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel-card section-shell provider-model-page-head">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">对象挂载</div>
+            <h1>提供商模型挂载矩阵</h1>
+        </div>
+        <div class="hero-actions">
+            <a class="btn btn-ghost interactive-btn" href="/providers" data-shell-link>返回提供商</a>
+        </div>
+    </div>
+</section>
+
+<section class="panel-card section-shell provider-model-panel" id="provider-model-section">
+    <div class="table-toolbar filter-toolbar provider-model-filter-toolbar">
+        <label>
+            <span>模型名称</span>
+            <input class="field-input search-input" id="provider-model-search" type="search" placeholder="搜索模型或提供商">
+        </label>
+        <label>
+            <span>提供商</span>
+            <select class="field-input" id="provider-model-provider-id">
+                <option value="">全部提供商</option>
+            </select>
+        </label>
+        <label>
+            <span>启用状态</span>
+            <select class="field-input" id="provider-model-enabled">
+                <option value="">全部状态</option>
+                <option value="true">已启用</option>
+                <option value="false">已停用</option>
+            </select>
+        </label>
+        <label>
+            <span>模型健康</span>
+            <select class="field-input" id="provider-model-health">
+                <option value="">全部健康状态</option>
+                <option value="healthy">健康</option>
+                <option value="abnormal">异常</option>
+                <option value="unknown">未检测</option>
+            </select>
+        </label>
+        <label>
+            <span>可信度</span>
+            <select class="field-input" id="provider-model-trust">
+                <option value="">全部可信度</option>
+                <option value="trusted">可信</option>
+                <option value="abnormal">异常</option>
+                <option value="unknown">未检测</option>
+            </select>
+        </label>
+        <label>
+            <span>每页数量</span>
+            <select class="field-input" id="provider-model-page-size">
+                <option value="10">10</option>
+                <option value="20" selected>20</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
+            </select>
+        </label>
+    </div>
+    <div class="table-shell provider-table-shell provider-model-matrix-shell">
+        <table class="data-table provider-data-table">
+            <thead>
+                <tr>
+                    <th>提供商</th>
+                    <th>模型</th>
+                    <th>模型健康</th>
+                    <th>可信度</th>
+                    <th>端点协议</th>
+                    <th>能力</th>
+                    <th>倍率 / 价格</th>
+                    <th>质量</th>
+                    <th>启用</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody id="provider-model-table-body"></tbody>
+        </table>
+    </div>
+    <div class="table-toolbar logs-pagination-bar provider-model-pagination-bar">
+        <div class="logs-page-meta" id="provider-model-page-meta">第 1 页，共 1 页 · 共 0 条</div>
+        <div class="logs-page-actions">
+            <button class="btn btn-ghost interactive-btn" id="provider-model-prev-page-btn" type="button">上一页</button>
+            <button class="btn btn-ghost interactive-btn" id="provider-model-next-page-btn" type="button">下一页</button>
+        </div>
+    </div>
+</section>
+
+<div class="modal-shell hidden" id="provider-test-result-modal" aria-hidden="true">
+    <div class="modal-card modal-lg provider-modal-card" role="dialog" aria-modal="true" aria-labelledby="provider-test-result-modal-title" tabindex="-1">
+        <div class="modal-head">
+            <div>
+                <div class="panel-kicker">测试回放</div>
+                <h2 id="provider-test-result-modal-title">测试结果</h2>
+            </div>
+            <button class="icon-btn interactive-btn" id="provider-test-result-modal-close" type="button" aria-label="关闭测试结果窗口">×</button>
+        </div>
+        <div id="provider-test-result-modal-content"></div>
+    </div>
+</div>
+{% endblock %}

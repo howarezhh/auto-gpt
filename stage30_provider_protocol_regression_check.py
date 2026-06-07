@@ -87,16 +87,16 @@ def _protocol_values_should_normalize_consistently() -> None:
 
 
 def _provider_dict_should_expose_protocol_label() -> None:
-    provider = _FakeProvider(provider_id=1, name="仅 Chat 中转", protocol_type="chat_completions")
+    provider = _FakeProvider(provider_id=1, name="仅 Chat 提供商", protocol_type="chat_completions")
     payload = ProviderService.provider_to_option_dict(provider)
     _assert(payload["protocol_type"] == "chat_completions", f"协议类型未输出: {payload}")
     _assert(payload["protocol_label"] == "Chat Completions API", f"协议展示值未输出: {payload}")
 
 
 def _router_should_filter_provider_by_request_protocol() -> None:
-    chat_provider = _FakeProvider(provider_id=1, name="仅 Chat 中转", protocol_type="chat_completions")
-    responses_provider = _FakeProvider(provider_id=2, name="仅 Responses 中转", protocol_type="responses", supports_responses=False)
-    both_provider = _FakeProvider(provider_id=3, name="双协议中转", protocol_type="both", supports_responses=False)
+    chat_provider = _FakeProvider(provider_id=1, name="仅 Chat 提供商", protocol_type="chat_completions")
+    responses_provider = _FakeProvider(provider_id=2, name="仅 Responses 提供商", protocol_type="responses", supports_chat_completions=False)
+    both_provider = _FakeProvider(provider_id=3, name="双协议提供商", protocol_type="both")
     providers = [chat_provider, responses_provider, both_provider]
 
     with (
@@ -133,11 +133,11 @@ def _router_should_filter_provider_by_request_protocol() -> None:
 
     chat_provider_ids = {item.provider.id for item in chat_candidates}
     responses_provider_ids = {item.provider.id for item in responses_candidates}
-    _assert(chat_provider_ids == {1, 3}, f"Chat 请求不应命中 Responses-only 中转站: {chat_provider_ids}")
-    _assert(responses_provider_ids == {2, 3}, f"Responses 请求不应命中 Chat-only 中转站: {responses_provider_ids}")
+    _assert(chat_provider_ids == {1, 3}, f"Chat 请求不应命中 Responses-only 提供商: {chat_provider_ids}")
+    _assert(responses_provider_ids == {2, 3}, f"Responses 请求不应命中 Chat-only 提供商: {responses_provider_ids}")
     _assert(
         diagnostics["reason_counts"].get("provider_responses_protocol_not_supported") == 1,
-        f"诊断应标记中转站协议不支持: {diagnostics}",
+        f"诊断应标记提供商协议不支持: {diagnostics}",
     )
 
 

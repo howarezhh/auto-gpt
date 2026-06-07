@@ -10,6 +10,75 @@ PROVIDER_PROTOCOL_TYPE_LABELS = {
     "responses": "Responses API",
 }
 
+PROVIDER_TRUST_LEVEL_LABELS = {
+    "official": "官方",
+    "trusted": "可信",
+    "standard": "标准",
+    "low": "低信任",
+    "blocked": "已阻断",
+}
+
+CONTENT_INTEGRITY_STATUS_LABELS = {
+    "unknown": "未探测",
+    "passed": "通过",
+    "degraded": "降级",
+    "blocked": "已隔离",
+}
+
+MODEL_TRUST_STATUS_LABELS = {
+    "trusted": "可信",
+    "abnormal": "异常",
+    "unknown": "未检测",
+}
+
+PROVIDER_TRUST_STATUS_LABELS = {
+    "trusted": "可信",
+    "partially_trusted": "部分可信",
+    "untrusted": "不可信",
+    "unknown": "未检测",
+}
+
+
+def normalize_provider_trust_level(value: str | None) -> str:
+    raw = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "": "standard",
+        "official": "official",
+        "trusted": "trusted",
+        "standard": "standard",
+        "low": "low",
+        "blocked": "blocked",
+        "官方": "official",
+        "可信": "trusted",
+        "标准": "standard",
+        "低信任": "low",
+        "已阻断": "blocked",
+        "阻断": "blocked",
+    }
+    if raw in aliases:
+        return aliases[raw]
+    raise ValueError("信任等级仅支持 官方、可信、标准、低信任、已阻断")
+
+
+def normalize_content_integrity_status(value: str | None) -> str:
+    raw = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "": "unknown",
+        "unknown": "unknown",
+        "passed": "passed",
+        "pass": "passed",
+        "degraded": "degraded",
+        "blocked": "blocked",
+        "未探测": "unknown",
+        "通过": "passed",
+        "降级": "degraded",
+        "已隔离": "blocked",
+        "隔离": "blocked",
+    }
+    if raw in aliases:
+        return aliases[raw]
+    raise ValueError("内容完整性状态仅支持 未探测、通过、降级、已隔离")
+
 
 def normalize_provider_protocol_type(value: str | None) -> str:
     raw = str(value or "").strip()
@@ -111,6 +180,15 @@ class ProviderModelConfigOut(ProviderModelConfigBase):
     failure_count: int
     success_count: int
     last_error: str | None
+    content_integrity_status: str = "unknown"
+    content_integrity_status_label: str = "未探测"
+    content_probe_last_passed_at: datetime | None = None
+    content_probe_last_failed_at: datetime | None = None
+    content_probe_failure_count: int = 0
+    content_probe_results: list[dict[str, Any]] = Field(default_factory=list)
+    trust_status: str = "unknown"
+    trust_status_label: str = "未检测"
+    trust_status_reason: str | None = None
     recent_request_count: int = 0
     success_rate: float | None = None
     avg_first_token_latency_ms: float | None = None
@@ -131,6 +209,9 @@ class ProviderModelMountProviderOut(BaseModel):
     region_tag: str | None = None
     enabled: bool
     health_status: str
+    trust_status: str = "unknown"
+    trust_status_label: str = "未检测"
+    trust_status_reason: str | None = None
 
 
 class ProviderModelMountOut(BaseModel):
@@ -163,6 +244,7 @@ class ProviderModelConfigUpdate(BaseModel):
     input_price_per_1k: float | None = Field(default=None, ge=0)
     output_price_per_1k: float | None = Field(default=None, ge=0)
     cache_price_per_1k: float | None = Field(default=None, ge=0)
+    content_integrity_status: str | None = None
 
     @field_validator("protocol_type")
     @classmethod
@@ -170,6 +252,13 @@ class ProviderModelConfigUpdate(BaseModel):
         if value is None:
             return None
         return normalize_provider_protocol_type(value)
+
+    @field_validator("content_integrity_status")
+    @classmethod
+    def normalize_integrity_status(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return normalize_content_integrity_status(value)
 
 
 class ProviderBatchConnectivityTestRequest(BaseModel):
@@ -222,7 +311,7 @@ class ProviderBase(BaseModel):
     priority: int = 100
     weight: int = 100
     timeout_ms: int = 30000
-    max_retries: int = 1
+    max_retries: int = 2
     max_active_requests: int | None = Field(default=20, ge=0)
     max_active_streams: int | None = Field(default=10, ge=0)
     max_qps: int | None = Field(default=20, ge=0)
@@ -235,6 +324,12 @@ class ProviderBase(BaseModel):
     auto_recover_enabled: bool = True
     circuit_breaker_threshold_override: int | None = Field(default=None, ge=0)
     recovery_probe_interval_sec_override: int | None = Field(default=None, ge=0)
+    trust_level: str = "standard"
+    content_integrity_status: str = "unknown"
+    content_integrity_score: int = Field(default=80, ge=0, le=100)
+    content_guard_enabled: bool = True
+    low_trust_route_enabled: bool = False
+    buffer_stream_for_guard: bool = True
     models: list[str] = Field(default_factory=list)
     model_configs: list[ProviderModelConfigInput] = Field(default_factory=list)
     remark: str | None = None
@@ -260,6 +355,16 @@ class ProviderBase(BaseModel):
     @classmethod
     def normalize_protocol_type(cls, value: str | None) -> str:
         return normalize_provider_protocol_type(value)
+
+    @field_validator("trust_level")
+    @classmethod
+    def normalize_trust_level(cls, value: str | None) -> str:
+        return normalize_provider_trust_level(value)
+
+    @field_validator("content_integrity_status")
+    @classmethod
+    def normalize_integrity_status(cls, value: str | None) -> str:
+        return normalize_content_integrity_status(value)
 
 
 class ProviderCreate(ProviderBase):
@@ -291,6 +396,12 @@ class ProviderUpdate(BaseModel):
     auto_recover_enabled: bool | None = None
     circuit_breaker_threshold_override: int | None = Field(default=None, ge=0)
     recovery_probe_interval_sec_override: int | None = Field(default=None, ge=0)
+    trust_level: str | None = None
+    content_integrity_status: str | None = None
+    content_integrity_score: int | None = Field(default=None, ge=0, le=100)
+    content_guard_enabled: bool | None = None
+    low_trust_route_enabled: bool | None = None
+    buffer_stream_for_guard: bool | None = None
     models: list[str] | None = None
     model_configs: list[ProviderModelConfigInput] | None = None
     remark: str | None = None
@@ -322,6 +433,20 @@ class ProviderUpdate(BaseModel):
         if value is None:
             return None
         return normalize_provider_protocol_type(value)
+
+    @field_validator("trust_level")
+    @classmethod
+    def normalize_trust_level(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return normalize_provider_trust_level(value)
+
+    @field_validator("content_integrity_status")
+    @classmethod
+    def normalize_integrity_status(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return normalize_content_integrity_status(value)
 
 
 class ProviderOut(BaseModel):
@@ -356,6 +481,20 @@ class ProviderOut(BaseModel):
     auto_recover_enabled: bool
     circuit_breaker_threshold_override: int | None
     recovery_probe_interval_sec_override: int | None
+    trust_level: str
+    trust_level_label: str = "标准"
+    content_integrity_status: str
+    content_integrity_status_label: str = "未探测"
+    content_integrity_score: int
+    computed_trust_status: str = "unknown"
+    computed_trust_status_label: str = "未检测"
+    computed_trust_status_reason: str | None = None
+    content_violation_count: int
+    last_content_violation_at: datetime | None
+    recent_content_guard_events: list[dict[str, Any]] = Field(default_factory=list)
+    content_guard_enabled: bool
+    low_trust_route_enabled: bool
+    buffer_stream_for_guard: bool
     models: list[str]
     model_configs: list[ProviderModelConfigOut]
     health_status: str

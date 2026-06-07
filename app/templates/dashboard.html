@@ -7,10 +7,10 @@
     <div class="cockpit-hero-copy">
         <div class="eyebrow">运行总览</div>
         <h1>概览</h1>
-        <p>统一查看中转状态、路由配置、健康巡检与最近代理使用概况。</p>
+        <p>统一查看提供商状态、路由配置、健康巡检与最近代理使用概况。</p>
         <div class="hero-actions">
-            <a class="btn btn-accent interactive-btn" href="/providers">管理中转站</a>
-            <button class="btn btn-ghost interactive-btn" id="check-all-btn" type="button">检查全部中转</button>
+            <a class="btn btn-accent interactive-btn" href="/providers">管理提供商</a>
+            <button class="btn btn-ghost interactive-btn" id="check-all-btn" type="button">检查全部提供商</button>
         </div>
     </div>
     <div class="cockpit-hero-aside" id="dashboard-signal-card">
@@ -80,13 +80,13 @@
             </div>
         </article>
         <article class="summary-list-card">
-            <div class="panel-kicker">中转站</div>
-            <h3>每个中转站总成本</h3>
+            <div class="panel-kicker">提供商</div>
+            <h3>每个提供商总成本</h3>
             <div class="table-responsive">
                 <table class="table align-middle">
                     <thead>
                         <tr>
-                            <th>中转站</th>
+                            <th>提供商</th>
                             <th>请求</th>
                             <th>Token</th>
                             <th>成本</th>
@@ -101,20 +101,20 @@
                             <td>{{ '%.6f'|format(item.total_cost or 0) }}</td>
                         </tr>
                         {% else %}
-                        <tr><td colspan="4"><div class="empty-state">暂无中转站成本数据</div></td></tr>
+                        <tr><td colspan="4"><div class="empty-state">暂无提供商成本数据</div></td></tr>
                         {% endfor %}
                     </tbody>
                 </table>
             </div>
         </article>
         <article class="summary-list-card dashboard-usage-wide">
-            <div class="panel-kicker">中转站 × 模型</div>
-            <h3>每个中转站的每个模型总成本</h3>
+            <div class="panel-kicker">提供商 × 模型</div>
+            <h3>每个提供商的每个模型总成本</h3>
             <div class="table-responsive">
                 <table class="table align-middle">
                     <thead>
                         <tr>
-                            <th>中转站</th>
+                            <th>提供商</th>
                             <th>模型</th>
                             <th>请求</th>
                             <th>Token</th>
@@ -131,7 +131,7 @@
                             <td>{{ '%.6f'|format(item.total_cost or 0) }}</td>
                         </tr>
                         {% else %}
-                        <tr><td colspan="5"><div class="empty-state">暂无中转站模型成本数据</div></td></tr>
+                        <tr><td colspan="5"><div class="empty-state">暂无提供商模型成本数据</div></td></tr>
                         {% endfor %}
                     </tbody>
                 </table>
@@ -201,7 +201,7 @@
         <article class="monitor-card monitor-card-wide">
             <div class="monitor-card-head">
                 <div>
-                    <span>中转健康</span>
+                    <span>提供商健康</span>
                     <strong id="dashboard-monitor-provider-value">-</strong>
                 </div>
                 <small>请求成功率与延迟</small>
@@ -235,7 +235,7 @@
             <div class="panel-kicker">稳定性补充</div>
             <h3>健康与退化补充</h3>
             <div class="detail-list">
-                <div><span>降级中转站</span><strong data-stat="degraded_count">{{ stats.degraded_count or 0 }}</strong></div>
+                <div><span>降级提供商</span><strong data-stat="degraded_count">{{ stats.degraded_count or 0 }}</strong></div>
                 <div><span>健康模型</span><strong>{{ stats.healthy_model_count or 0 }}</strong></div>
                 <div><span>降级模型</span><strong>{{ stats.degraded_model_count or 0 }}</strong></div>
                 <div><span>异常模型</span><strong>{{ stats.unhealthy_model_count or 0 }}</strong></div>
@@ -248,8 +248,8 @@
     <div class="panel-card dashboard-command-main">
         <div class="panel-head">
             <div>
-                <div class="panel-kicker">中转概览</div>
-                <h2>中转状态矩阵</h2>
+                <div class="panel-kicker">提供商概览</div>
+                <h2>提供商状态矩阵</h2>
             </div>
             <a class="btn btn-ghost btn-sm interactive-btn" href="/providers">查看全部</a>
         </div>
@@ -287,7 +287,7 @@
             </div>
             <div class="detail-list" id="dashboard-route-meta">
                 <div><span>模式</span><strong>{{ route_mode_labels.get(settings.route_mode, settings.route_mode) }}</strong></div>
-                <div><span>默认中转</span><strong>{{ stats.default_provider or '-' }}</strong></div>
+                <div><span>默认提供商</span><strong>{{ stats.default_provider or '-' }}</strong></div>
                 <div><span>自动巡检</span><strong>{{ '开启' if settings.auto_health_check else '关闭' }}</strong></div>
                 <div><span>检查间隔</span><strong>{{ settings.health_check_interval_sec }} 秒</strong></div>
                 <div><span>模型健康</span><strong>健康 {{ stats.healthy_model_count or 0 }} / 降级 {{ stats.degraded_model_count or 0 }} / 异常 {{ stats.unhealthy_model_count or 0 }}</strong></div>
@@ -325,7 +325,7 @@
         <table class="table align-middle">
             <thead>
                 <tr>
-                    <th>中转站</th>
+                    <th>提供商</th>
                     <th>模型</th>
                     <th>请求</th>
                     <th>成功</th>

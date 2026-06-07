@@ -22,9 +22,12 @@ class Settings(BaseSettings):
     app_host: str = "127.0.0.1"
     app_port: int = 8000
     database_url: str = "sqlite:///./data/app.db"
-    db_pool_size: int = 8
-    db_max_overflow: int = 4
-    db_pool_timeout: float = 5.0
+    # 数据库连接池优化：根据 worker 数量动态计算
+    # 公式：pool_size = web_concurrency * 每worker连接数
+    # 默认：4 workers * 10 connections = 40
+    db_pool_size: int = 40  # 从 8 增加到 40
+    db_max_overflow: int = 20  # 从 4 增加到 20，总共最多 60 个连接
+    db_pool_timeout: float = 30.0  # 从 5.0 增加到 30.0
     db_pool_recycle: int = 1800
     redis_url: str = "redis://127.0.0.1:6379/0"
     enable_startup_db_init: bool = True
@@ -33,6 +36,8 @@ class Settings(BaseSettings):
     request_log_queue_worker_count: int = 2
     request_log_queue_batch_size: int = 100
     request_log_ingress_queue_size: int = 20000
+    logging_event_queue_worker_count: int = 1
+    logging_event_queue_batch_size: int = 200
     cache_l1_ttl_cap_seconds: float = 5.0
     cache_l1_max_entries: int = 10000
     api_key_auth_cache_ttl_seconds: int = 60

@@ -12,7 +12,7 @@ def _assert(condition: bool, message: str) -> None:
 def main() -> None:
     provider = Provider(
         id=1,
-        name="失败切换测试中转站",
+        name="失败切换测试提供商",
         provider_type="openai_compatible",
         base_url="https://example.com/v1",
         api_key="upstream-secret",

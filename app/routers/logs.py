@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
@@ -14,7 +14,9 @@ from app.schemas.log import (
     RequestLogOut,
 )
 from app.services.log_service import LogService
+from app.services.admin_audit_service import AdminAuditService
 from app.services.request_log_queue_service import RequestLogQueueService
+from app.services.user_auth_service import UserAuthService
 
 
 router = APIRouter(prefix="/api/logs", tags=["logs"])
@@ -36,6 +38,7 @@ async def list_logs(
     page_size: int = Query(default=20, ge=1, le=200),
     log_type: str | None = None,
     provider_id: int | None = None,
+    provider_trust_level: str | None = None,
     model_name: str | None = None,
     model_query: str | None = None,
     conversation_key: str | None = None,
@@ -48,6 +51,8 @@ async def list_logs(
     app_name: str | None = None,
     environment_name: str | None = None,
     success: bool | None = None,
+    content_guard_result: str | None = None,
+    content_guard_risk_level: str | None = None,
     exclude_health_checks: bool = Query(default=True),
     wait_for_latest: bool = Query(default=False),
     wait_timeout_ms: int = Query(default=2000, ge=0, le=10000),
@@ -66,6 +71,7 @@ async def list_logs(
         log_type=log_type,
         log_types=None,
         provider_id=provider_id,
+        provider_trust_level=provider_trust_level,
         model_name=model_name,
         model_query=model_query,
         conversation_key=conversation_key,
@@ -79,6 +85,8 @@ async def list_logs(
         environment_name=environment_name,
         success=success,
         exclude_health_checks=exclude_health_checks,
+        content_guard_result=content_guard_result,
+        content_guard_risk_level=content_guard_risk_level,
     )
     return LogListResponse(
         total=total,
@@ -92,14 +100,25 @@ async def list_logs(
 
 
 @router.delete("")
-def clear_logs(db: Session = Depends(get_db)) -> dict:
-    return {"deleted": LogService.clear_logs(db)}
+def clear_logs(request: Request, db: Session = Depends(get_db)) -> dict:
+    deleted = LogService.clear_logs(db)
+    _record_log_admin_audit(
+        db,
+        request=request,
+        action="clear_logs",
+        summary=f"清空请求日志 {deleted} 条",
+        detail={"deleted": deleted},
+        risk_level="high",
+    )
+    return {"deleted": deleted}
 
 
 @router.get("/export")
 def export_logs(
+    request: Request,
     log_type: str | None = None,
     provider_id: int | None = None,
+    provider_trust_level: str | None = None,
     model_name: str | None = None,
     model_query: str | None = None,
     conversation_key: str | None = None,
@@ -112,6 +131,8 @@ def export_logs(
     app_name: str | None = None,
     environment_name: str | None = None,
     success: bool | None = None,
+    content_guard_result: str | None = None,
+    content_guard_risk_level: str | None = None,
     exclude_health_checks: bool = Query(default=True),
     limit: int = Query(default=5000, ge=1, le=10000),
     db: Session = Depends(get_db),
@@ -121,6 +142,7 @@ def export_logs(
         log_type=log_type,
         log_types=None,
         provider_id=provider_id,
+        provider_trust_level=provider_trust_level,
         model_name=model_name,
         model_query=model_query,
         conversation_key=conversation_key,
@@ -134,9 +156,19 @@ def export_logs(
         environment_name=environment_name,
         success=success,
         exclude_health_checks=exclude_health_checks,
+        content_guard_result=content_guard_result,
+        content_guard_risk_level=content_guard_risk_level,
         limit=limit,
     )
     filename = f"logs-export-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.csv"
+    _record_log_admin_audit(
+        db,
+        request=request,
+        action="export_logs",
+        summary=f"导出请求日志 {limit} 条以内",
+        detail={"limit": limit, "log_type": log_type, "success": success},
+        risk_level="medium",
+    )
     return Response(
         content=csv_text,
         media_type="text/csv; charset=utf-8",
@@ -151,3 +183,29 @@ def log_metrics(
 ) -> MetricListResponse:
     items = [MetricItem.model_validate(item) for item in LogService.metric_summary(db, window_minutes=window_minutes)]
     return MetricListResponse(window_minutes=window_minutes, items=items)
+
+
+def _record_log_admin_audit(
+    db: Session,
+    *,
+    request: Request,
+    action: str,
+    summary: str,
+    detail: dict,
+    risk_level: str,
+) -> None:
+    current_user = UserAuthService.get_current_user(request, db)
+    AdminAuditService.create_log(
+        db,
+        actor_user_id=getattr(current_user, "id", None),
+        actor_username=getattr(current_user, "username", None),
+        action=action,
+        entity_type="logs",
+        entity_id=None,
+        entity_name="日志中心",
+        summary=summary,
+        detail=detail,
+        request_trace_id=getattr(request.state, "trace_id", None),
+        source_ip=request.client.host if request.client else None,
+        risk_level=risk_level,
+    )

@@ -59,6 +59,35 @@ Use single-quoted regex patterns and single-quoted script blocks inside nested `
 - Related Files: none
 
 ---
+
+## [ERR-20260607-001] powershell-dollar-expansion-in-nested-pwsh
+
+**Logged**: 2026-06-07T00:00:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: infra
+
+### Summary
+Nested `pwsh -Command` scripts containing `$lines[...]` failed because the outer PowerShell expanded `$lines` before PowerShell 7 received the command.
+
+### Error
+```text
+ParserError: Missing type name after '['.
+```
+
+### Context
+- Command attempted: `pwsh -NoLogo -NoProfile -Command "$lines = Get-Content ...; $lines[7330..7778]"`
+- Environment: Codex shell running through PowerShell, with project rule requiring PowerShell 7.
+
+### Suggested Fix
+Wrap nested PowerShell scripts in `& { ... }` and escape `$` as `` `$ `` when the outer shell could parse it first.
+
+### Metadata
+- Reproducible: yes
+- Related Files: app/static/js/app.js
+- Tags: powershell, command-quoting
+
+---
 ## [ERR-20260531-001] powershell_nested_regex_escaping
 
 **Logged**: 2026-05-31T14:45:00+08:00
@@ -328,6 +357,8 @@ Avoid nested `pwsh -Command` for multiline Python. Prefer direct current-shell c
 ### Metadata
 - Reproducible: yes
 - Related Files: none
+- Recurrence-Count: 2
+- Last-Seen: 2026-06-07
 
 ---
 ## [ERR-20260502-001] ripgrep_pattern_starting_with_dash
@@ -498,6 +529,65 @@ Wrap nested PowerShell script blocks in single quotes, for example `pwsh -Comman
 - Reproducible: yes
 - Related Files: none
 - See Also: ERR-20260603-001 nested_pwsh_rg_pipe_pattern
+
+---
+
+## [ERR-20260606-003] powershell-double-quoted-variable-loss
+
+**Logged**: 2026-06-06T00:00:00+08:00
+**Priority**: medium
+**Status**: resolved
+**Area**: tooling
+
+### Summary
+PowerShell snippets containing `$i++` were wrapped in an outer double-quoted `pwsh -Command` string, so the outer shell consumed `$i` before PowerShell 7 executed the script.
+
+### Error
+```text
+ParserError: Missing expression after unary operator '++'.
+```
+
+### Context
+- Command attempted: line-numbered `Get-Content | ForEach-Object { $i++; ... }`
+- Files involved: code inspection commands
+
+### Suggested Fix
+Wrap complex PowerShell 7 scripts in an outer single-quoted `-Command '...'` string, or use a script block, whenever the command contains `$`, pipes, regex, JSON, or nested quotes.
+
+### Metadata
+- Reproducible: yes
+- Related Files: 项目全局规范.md
+- Tags: powershell, shell-quoting
+
+---
+
+## [ERR-20260606-003] changelog-anchor-drift
+
+**Logged**: 2026-06-06T21:43:25+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: docs
+
+### Summary
+Attempted to patch the project change log using an outdated anchor near the top of the file after the day section had already changed shape.
+
+### Error
+```text
+apply_patch verification failed: Failed to find expected lines in 项目全局规范-变更记录.md
+```
+
+### Context
+- Command attempted: patching `项目全局规范-变更记录.md`
+- Files involved: `项目全局规范-变更记录.md`
+- The file's top section had been reordered by earlier edits, so the expected header block no longer matched the patch anchor.
+
+### Suggested Fix
+Re-read the current file head before patching dated changelog sections, and anchor on the exact current entries rather than remembered line order.
+
+### Metadata
+- Reproducible: yes
+- Related Files: 项目全局规范-变更记录.md
+- Tags: docs, patching
 
 ---
 
@@ -711,6 +801,8 @@ Use `pwsh -NoLogo -NoProfile -Command '& { ... }'` for scripts containing `$`, `
 - Reproducible: yes
 - Related Files: 项目全局规范.md
 - Tags: powershell, tests
+- Recurrence-Count: 7
+- Last-Seen: 2026-06-07
 
 ---
 

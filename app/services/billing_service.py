@@ -13,6 +13,7 @@ from app.models.request_log import RequestLog
 from app.models.user_account import UserAccount
 from app.models.user_account_billing_record import UserAccountBillingRecord
 from app.schemas.api_key import ApiKeyBillingRecordOut, ApiKeyBillingSummaryOut
+from app.logging.adapters.billing_adapter import BillingLogRecorder
 from app.services.model_pricing_service import ModelPricingService
 from app.utils.decimal_utils import (
     MONEY_QUANT,
@@ -310,14 +311,67 @@ class BillingService:
         log.billing_event_id = log.billing_event_id or f"billing-{log.id}-{uuid4().hex}"
         try:
             billing_delta = BillingService.sync_request_billing(db, log)
+            existing_record = db.scalar(
+                select(ApiClientBillingRecord).where(ApiClientBillingRecord.request_log_id == log.id)
+            )
             if log.billing_status == "pending_tokens":
                 log.billing_error = "pending_tokens"
+                BillingLogRecorder.record_billing_process(
+                    db,
+                    request_log_id=log.id,
+                    api_client_key_id=log.api_client_key_id,
+                    user_account_id=log.user_account_id,
+                    pricing_source="provider_model" if log.resolved_provider_model_id is not None else None,
+                    cost_snapshot={
+                        "prompt_cost": BillingService.to_float(log.prompt_cost),
+                        "completion_cost": BillingService.to_float(log.completion_cost),
+                        "total_cost": BillingService.to_float(log.total_cost),
+                    },
+                    balance_after=BillingService.to_float(log.api_client_balance_after),
+                    billing_status="pending_tokens",
+                    error=log.billing_error,
+                    auto_commit=False,
+                )
                 return None
             log.billing_finalized_at = datetime.utcnow()
             log.billing_error = None
+            BillingLogRecorder.record_billing_process(
+                db,
+                request_log_id=log.id,
+                api_client_key_id=log.api_client_key_id,
+                user_account_id=log.user_account_id,
+                pricing_source="provider_model" if log.resolved_provider_model_id is not None else None,
+                pricing_snapshot={
+                    "billing_multiplier": BillingService.to_float(log.billing_multiplier),
+                    "channel_price_input_per_1k": BillingService.to_price_float(log.channel_price_input_per_1k),
+                    "channel_price_output_per_1k": BillingService.to_price_float(log.channel_price_output_per_1k),
+                    "channel_price_cache_per_1k": BillingService.to_price_float(log.channel_price_cache_per_1k),
+                    "channel_price_cache_write_per_1k": BillingService.to_price_float(log.channel_price_cache_write_per_1k),
+                },
+                cost_snapshot={
+                    "prompt_cost": BillingService.to_float(log.prompt_cost),
+                    "completion_cost": BillingService.to_float(log.completion_cost),
+                    "total_cost": BillingService.to_float(log.total_cost),
+                },
+                balance_delta=BillingService.to_float(billing_delta),
+                balance_after=BillingService.to_float(log.api_client_balance_after),
+                billing_status=log.billing_status or "billed",
+                billing_record_id=existing_record.id if existing_record is not None else None,
+                auto_commit=False,
+            )
             return billing_delta
         except Exception as exc:
             log.billing_error = str(exc)[:1000]
+            BillingLogRecorder.record_billing_process(
+                db,
+                request_log_id=log.id,
+                api_client_key_id=log.api_client_key_id,
+                user_account_id=log.user_account_id,
+                pricing_source="provider_model" if log.resolved_provider_model_id is not None else None,
+                billing_status="failed",
+                error=log.billing_error,
+                auto_commit=False,
+            )
             raise
 
     @staticmethod

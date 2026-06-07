@@ -10,6 +10,7 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
+from sqlalchemy import desc, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -37,7 +38,9 @@ from app.services.proxy_service import ProxyService
 from app.services.request_log_queue_service import RequestLogQueueService
 from app.services.user_auth_service import USER_ROLE_ADMIN, UserAuthService
 from app.services.user_portal_service import UserPortalService
-from app.utils.json_utils import safeJsonParse
+from app.logging.adapters.user_operation_adapter import UserOperationLogRecorder
+from app.models.logging_events import UserOperationAuditLog
+from app.utils.json_utils import safeJsonParse, to_jsonable
 
 
 router = APIRouter()
@@ -105,6 +108,10 @@ def _parse_optional_int_form(value: str | None, *, field_label: str) -> int | No
         raise ValueError(f"{field_label}必须为数字") from exc
 
 
+def _request_source_ip(request: Request) -> str | None:
+    return request.client.host if request.client is not None else None
+
+
 def _build_user_api_key_payload(
     *,
     current_user_id: int,
@@ -117,11 +124,14 @@ def _build_user_api_key_payload(
     default_provider_id: str | None,
     manual_allow_fallback: bool,
     route_exhausted_retry_infinite_enabled: bool,
+    trusted_providers_only: bool = False,
+    allow_low_trust_providers: bool = False,
+    content_guard_required: bool = True,
 ) -> dict:
-    parsed_default_provider_id = _parse_optional_int_form(default_provider_id, field_label="默认中转站")
+    parsed_default_provider_id = _parse_optional_int_form(default_provider_id, field_label="默认提供商")
     if parsed_default_provider_id is not None:
         if parsed_default_provider_id not in selectable_provider_ids:
-            raise ValueError("默认中转站未启用，当前不可选择")
+            raise ValueError("默认提供商未启用，当前不可选择")
     return {
         "name": name,
         "raw_api_key": raw_api_key,
@@ -132,6 +142,9 @@ def _build_user_api_key_payload(
         "owner_user_id": current_user_id,
         "manual_allow_fallback": manual_allow_fallback,
         "route_exhausted_retry_infinite_enabled": route_exhausted_retry_infinite_enabled,
+        "trusted_providers_only": trusted_providers_only,
+        "allow_low_trust_providers": allow_low_trust_providers,
+        "content_guard_required": content_guard_required,
         "auto_sync_provider_bindings": True,
         "allowed_provider_ids": [],
     }
@@ -594,7 +607,34 @@ def update_user_profile(
     try:
         UserAuthService.update_profile(db, current_user, username=username, email=email)
     except ValueError as exc:
+        UserOperationLogRecorder.record_user_action(
+            db,
+            user_account_id=current_user.id,
+            username=current_user.username,
+            action="update_profile",
+            entity_type="profile",
+            entity_id=current_user.id,
+            entity_name=current_user.username,
+            summary="更新个人资料失败",
+            detail={"username": username, "email": email, "error": str(exc)},
+            source_ip=_request_source_ip(request),
+            trace_id=getattr(request.state, "trace_id", None),
+            result="failed",
+        )
         return RedirectResponse(f"/user/profile?error={str(exc)}", status_code=303)
+    UserOperationLogRecorder.record_user_action(
+        db,
+        user_account_id=current_user.id,
+        username=current_user.username,
+        action="update_profile",
+        entity_type="profile",
+        entity_id=current_user.id,
+        entity_name=current_user.username,
+        summary="更新个人资料",
+        detail={"username": username, "email": email},
+        source_ip=_request_source_ip(request),
+        trace_id=getattr(request.state, "trace_id", None),
+    )
     return RedirectResponse("/user/profile?success=profile_updated", status_code=303)
 
 
@@ -610,13 +650,68 @@ def update_user_password(
     if isinstance(current_user, RedirectResponse):
         return current_user
     if not UserAuthService.verify_password(current_password, current_user.password_hash):
+        UserOperationLogRecorder.record_user_action(
+            db,
+            user_account_id=current_user.id,
+            username=current_user.username,
+            action="update_password",
+            entity_type="password",
+            entity_id=current_user.id,
+            entity_name=current_user.username,
+            summary="修改密码失败",
+            detail={"error": "current_password_invalid"},
+            source_ip=_request_source_ip(request),
+            trace_id=getattr(request.state, "trace_id", None),
+            result="failed",
+        )
         return RedirectResponse("/user/profile?error=current_password_invalid", status_code=303)
     if new_password != confirm_password:
+        UserOperationLogRecorder.record_user_action(
+            db,
+            user_account_id=current_user.id,
+            username=current_user.username,
+            action="update_password",
+            entity_type="password",
+            entity_id=current_user.id,
+            entity_name=current_user.username,
+            summary="修改密码失败",
+            detail={"error": "password_not_match"},
+            source_ip=_request_source_ip(request),
+            trace_id=getattr(request.state, "trace_id", None),
+            result="failed",
+        )
         return RedirectResponse("/user/profile?error=password_not_match", status_code=303)
     try:
         UserAuthService.update_password(db, current_user, password=new_password)
     except ValueError as exc:
+        UserOperationLogRecorder.record_user_action(
+            db,
+            user_account_id=current_user.id,
+            username=current_user.username,
+            action="update_password",
+            entity_type="password",
+            entity_id=current_user.id,
+            entity_name=current_user.username,
+            summary="修改密码失败",
+            detail={"error": str(exc)},
+            source_ip=_request_source_ip(request),
+            trace_id=getattr(request.state, "trace_id", None),
+            result="failed",
+        )
         return RedirectResponse(f"/user/profile?error={str(exc)}", status_code=303)
+    UserOperationLogRecorder.record_user_action(
+        db,
+        user_account_id=current_user.id,
+        username=current_user.username,
+        action="update_password",
+        entity_type="password",
+        entity_id=current_user.id,
+        entity_name=current_user.username,
+        summary="修改密码",
+        detail=None,
+        source_ip=_request_source_ip(request),
+        trace_id=getattr(request.state, "trace_id", None),
+    )
     return RedirectResponse("/user/profile?success=password_updated", status_code=303)
 
 
@@ -631,6 +726,9 @@ def create_user_api_key(
     default_provider_id: str | None = Form(default=None),
     manual_allow_fallback: str | None = Form(default=None),
     route_exhausted_retry_infinite_enabled: str | None = Form(default=None),
+    trusted_providers_only: str | None = Form(default="on"),
+    allow_low_trust_providers: str | None = Form(default=None),
+    content_guard_required: str | None = Form(default="on"),
     db: Session = Depends(get_db),
 ):
     current_user = require_user_html(request, db)
@@ -650,11 +748,38 @@ def create_user_api_key(
                 default_provider_id=default_provider_id,
                 manual_allow_fallback=manual_allow_fallback == "on",
                 route_exhausted_retry_infinite_enabled=route_exhausted_retry_infinite_enabled == "on",
+                trusted_providers_only=trusted_providers_only == "on",
+                allow_low_trust_providers=allow_low_trust_providers == "on",
+                content_guard_required=content_guard_required == "on",
             )
         )
         ApiKeyAdminService.create_api_key(db, payload)
     except (ValueError, TypeError) as exc:
+        UserOperationLogRecorder.record_user_action(
+            db,
+            user_account_id=current_user.id,
+            username=current_user.username,
+            action="create_api_key",
+            entity_type="api_key",
+            summary="创建用户 API Key 失败",
+            detail={"name": name, "error": str(exc)},
+            source_ip=_request_source_ip(request),
+            trace_id=getattr(request.state, "trace_id", None),
+            result="failed",
+        )
         return _redirect_user_api_keys(error=str(exc), edit="new")
+    UserOperationLogRecorder.record_user_action(
+        db,
+        user_account_id=current_user.id,
+        username=current_user.username,
+        action="create_api_key",
+        entity_type="api_key",
+        entity_name=name,
+        summary=f"创建用户 API Key {name}",
+        detail={"name": name},
+        source_ip=_request_source_ip(request),
+        trace_id=getattr(request.state, "trace_id", None),
+    )
     return _redirect_user_api_keys(success="api_key_created")
 
 
@@ -670,6 +795,9 @@ def update_user_api_key(
     default_provider_id: str | None = Form(default=None),
     manual_allow_fallback: str | None = Form(default=None),
     route_exhausted_retry_infinite_enabled: str | None = Form(default=None),
+    trusted_providers_only: str | None = Form(default="on"),
+    allow_low_trust_providers: str | None = Form(default=None),
+    content_guard_required: str | None = Form(default="on"),
     db: Session = Depends(get_db),
 ):
     current_user = require_user_html(request, db)
@@ -692,11 +820,41 @@ def update_user_api_key(
                 default_provider_id=default_provider_id,
                 manual_allow_fallback=manual_allow_fallback == "on",
                 route_exhausted_retry_infinite_enabled=route_exhausted_retry_infinite_enabled == "on",
+                trusted_providers_only=trusted_providers_only == "on",
+                allow_low_trust_providers=allow_low_trust_providers == "on",
+                content_guard_required=content_guard_required == "on",
             )
         )
         ApiKeyAdminService.update_api_key(db, api_key, payload)
     except (ValueError, TypeError) as exc:
+        UserOperationLogRecorder.record_user_action(
+            db,
+            user_account_id=current_user.id,
+            username=current_user.username,
+            action="update_api_key",
+            entity_type="api_key",
+            entity_id=api_key_id,
+            entity_name=api_key.name,
+            summary=f"更新用户 API Key {api_key.name} 失败",
+            detail={"name": name, "error": str(exc)},
+            source_ip=_request_source_ip(request),
+            trace_id=getattr(request.state, "trace_id", None),
+            result="failed",
+        )
         return _redirect_user_api_keys(error=str(exc), edit=api_key_id)
+    UserOperationLogRecorder.record_user_action(
+        db,
+        user_account_id=current_user.id,
+        username=current_user.username,
+        action="update_api_key",
+        entity_type="api_key",
+        entity_id=api_key_id,
+        entity_name=name,
+        summary=f"更新用户 API Key {name}",
+        detail={"name": name},
+        source_ip=_request_source_ip(request),
+        trace_id=getattr(request.state, "trace_id", None),
+    )
     return _redirect_user_api_keys(success="api_key_updated", edit=api_key_id)
 
 
@@ -712,7 +870,21 @@ def toggle_user_api_key(
     api_key = ApiKeyAdminService.get_api_key(db, api_key_id)
     if api_key is None or api_key.owner_user_id != current_user.id:
         return _redirect_user_api_keys(error="api_key_not_found")
-    ApiKeyAdminService.set_enabled(db, api_key, not api_key.enabled)
+    target_enabled = not bool(api_key.enabled)
+    ApiKeyAdminService.set_enabled(db, api_key, target_enabled)
+    UserOperationLogRecorder.record_user_action(
+        db,
+        user_account_id=current_user.id,
+        username=current_user.username,
+        action="toggle_api_key",
+        entity_type="api_key",
+        entity_id=api_key_id,
+        entity_name=api_key.name,
+        summary=f"{'启用' if target_enabled else '停用'}用户 API Key {api_key.name}",
+        detail={"enabled": target_enabled},
+        source_ip=_request_source_ip(request),
+        trace_id=getattr(request.state, "trace_id", None),
+    )
     return _redirect_user_api_keys(success="api_key_status_updated", edit=api_key_id)
 
 
@@ -728,7 +900,21 @@ def delete_user_api_key(
     api_key = ApiKeyAdminService.get_api_key(db, api_key_id)
     if api_key is None or api_key.owner_user_id != current_user.id:
         return _redirect_user_api_keys(error="api_key_not_found")
+    api_key_name = api_key.name
     ApiKeyAdminService.delete_api_key(db, api_key)
+    UserOperationLogRecorder.record_user_action(
+        db,
+        user_account_id=current_user.id,
+        username=current_user.username,
+        action="delete_api_key",
+        entity_type="api_key",
+        entity_id=api_key_id,
+        entity_name=api_key_name,
+        summary=f"删除用户 API Key {api_key_name}",
+        detail=None,
+        source_ip=_request_source_ip(request),
+        trace_id=getattr(request.state, "trace_id", None),
+    )
     return _redirect_user_api_keys(success="api_key_deleted")
 
 
@@ -772,6 +958,19 @@ def rotate_user_api_key(
     if api_key is None or api_key.owner_user_id != current_user.id:
         return _redirect_user_api_keys(error="api_key_not_found")
     ApiKeyAdminService.rotate_api_key(db, api_key)
+    UserOperationLogRecorder.record_user_action(
+        db,
+        user_account_id=current_user.id,
+        username=current_user.username,
+        action="rotate_api_key",
+        entity_type="api_key",
+        entity_id=api_key_id,
+        entity_name=api_key.name,
+        summary=f"轮换用户 API Key {api_key.name}",
+        detail=None,
+        source_ip=_request_source_ip(request),
+        trace_id=getattr(request.state, "trace_id", None),
+    )
     return RedirectResponse(f"/user/api-keys/{api_key_id}?success=api_key_rotated", status_code=303)
 
 
@@ -793,6 +992,77 @@ def user_logs_page(
             "current_user": current_user,
         },
     )
+
+
+@router.get("/user/operations", response_class=HTMLResponse)
+def user_operations_page(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    current_user = require_user_html(request, db)
+    if isinstance(current_user, RedirectResponse):
+        return current_user
+    return templates.TemplateResponse(
+        "user_operations.html",
+        {
+            "request": request,
+            "title": "我的操作记录",
+            "page_name": "user-operations",
+            "portal_type": "user",
+            "current_user": current_user,
+        },
+    )
+
+
+@router.get("/api/user/operations")
+def user_operations_api(
+    request: Request,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    keyword: str | None = None,
+    action: str | None = None,
+    result: str | None = None,
+    db: Session = Depends(get_db),
+) -> dict:
+    current_user = require_user_html(request, db)
+    if isinstance(current_user, RedirectResponse):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    query = select(UserOperationAuditLog).where(UserOperationAuditLog.user_account_id == current_user.id)
+    count_query = select(func.count()).select_from(UserOperationAuditLog).where(UserOperationAuditLog.user_account_id == current_user.id)
+    conditions = []
+    if keyword:
+        like = f"%{keyword.strip()}%"
+        conditions.append(
+            or_(
+                UserOperationAuditLog.action.like(like),
+                UserOperationAuditLog.entity_type.like(like),
+                UserOperationAuditLog.entity_name.like(like),
+                UserOperationAuditLog.summary.like(like),
+                UserOperationAuditLog.trace_id.like(like),
+            )
+        )
+    if action:
+        conditions.append(UserOperationAuditLog.action == action)
+    if result:
+        conditions.append(UserOperationAuditLog.result == result)
+    for condition in conditions:
+        query = query.where(condition)
+        count_query = count_query.where(condition)
+    total = int(db.scalar(count_query) or 0)
+    rows = db.scalars(
+        query.order_by(desc(UserOperationAuditLog.created_at))
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    return {
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "items": [
+            to_jsonable({column.name: getattr(item, column.name) for column in item.__table__.columns})
+            for item in rows
+        ],
+    }
 
 
 @router.get("/api/user/logs/filter-options", response_model=LogFilterOptionsResponse)
@@ -964,6 +1234,19 @@ def export_user_logs(
         limit=limit,
     )
     filename = f"user-logs-{current_user.username}-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.csv"
+    UserOperationLogRecorder.record_user_action(
+        db,
+        user_account_id=current_user.id,
+        username=current_user.username,
+        action="export_logs",
+        entity_type="log_export",
+        entity_id=None,
+        entity_name="用户日志导出",
+        summary=f"导出用户日志 {limit} 条以内",
+        detail={"limit": limit, "log_type": log_type, "success": success},
+        source_ip=_request_source_ip(request),
+        trace_id=getattr(request.state, "trace_id", None),
+    )
     return Response(
         content=csv_text,
         media_type="text/csv; charset=utf-8",
@@ -1046,6 +1329,19 @@ def export_user_billing(
         return current_user
     csv_text = UserPortalService.export_billing_csv(db, user=current_user, limit=limit)
     filename = f"user-billing-{current_user.username}.csv"
+    UserOperationLogRecorder.record_user_action(
+        db,
+        user_account_id=current_user.id,
+        username=current_user.username,
+        action="export_billing",
+        entity_type="billing_export",
+        entity_id=None,
+        entity_name="用户账单导出",
+        summary=f"导出用户账单 {limit} 条以内",
+        detail={"limit": limit},
+        source_ip=_request_source_ip(request),
+        trace_id=getattr(request.state, "trace_id", None),
+    )
     return Response(
         content=csv_text,
         media_type="text/csv; charset=utf-8",
@@ -1216,6 +1512,27 @@ async def run_user_self_test(
                 "content_type": image_input.get("content_type"),
                 "file_size_bytes": image_input.get("file_size_bytes"),
             }
+        UserOperationLogRecorder.record_user_action(
+            db,
+            user_account_id=current_user.id,
+            username=current_user.username,
+            action="run_self_test",
+            entity_type="self_test",
+            entity_id=api_key_id,
+            entity_name=api_key.name,
+            summary=f"运行接入自检 {normalized_model_name}，成功 {success_count} / {len(scenarios)}",
+            detail={
+                "model_name": normalized_model_name,
+                "api_key_id": api_key_id,
+                "total_scenarios": len(scenarios),
+                "success_scenarios": success_count,
+                "failed_scenarios": failed_count,
+                "image_mode": normalized_image_mode,
+            },
+            source_ip=_request_source_ip(request),
+            trace_id=getattr(request.state, "trace_id", None),
+            result="success" if overall_success else "failed",
+        )
         return JSONResponse(
             {
                 "success": overall_success,

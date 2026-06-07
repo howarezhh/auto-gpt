@@ -50,7 +50,7 @@ def metrics_period_report(
 @router.get("/system")
 def system_metrics(
     window_minutes: int = Query(default=5, ge=1, le=1440),
-    refresh_alerts: bool = Query(default=True),
+    refresh_alerts: bool = Query(default=False),
     db: Session = Depends(get_db),
 ) -> dict:
     return SystemMetricsService.collect(db, window_minutes=window_minutes, refresh_alerts=refresh_alerts)

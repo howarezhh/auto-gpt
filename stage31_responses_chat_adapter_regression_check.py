@@ -35,7 +35,7 @@ def _assert(condition: bool, message: str) -> None:
 def _provider() -> Provider:
     return Provider(
         id=1,
-        name="适配测试中转站",
+        name="适配测试提供商",
         provider_type="openai_compatible",
         base_url="https://example.com/v1",
         api_key="sk-test",

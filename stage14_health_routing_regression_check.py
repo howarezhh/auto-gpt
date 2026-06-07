@@ -17,7 +17,7 @@ def _assert(condition: bool, message: str) -> None:
 def _provider(**kwargs) -> Provider:
     return Provider(
         id=kwargs.get("id", 1),
-        name=kwargs.get("name", "健康路由测试中转站"),
+        name=kwargs.get("name", "健康路由测试提供商"),
         provider_type=kwargs.get("provider_type", "openai_compatible"),
         base_url="https://example.com/v1",
         api_key="upstream-secret",

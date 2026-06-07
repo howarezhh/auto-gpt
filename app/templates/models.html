@@ -4,7 +4,7 @@
     <div class="cockpit-hero-copy">
         <div class="eyebrow">模型管理</div>
         <h2>模型配置</h2>
-        <p>统一维护模型基础价格、速度标签、全局启用状态，并控制各个中转站对同一模型的可用性与价格倍率。</p>
+        <p>统一维护模型基础价格、速度标签、全局启用状态，并控制各个提供商对同一模型的可用性与价格倍率。</p>
         <div class="hero-actions">
             <button class="btn btn-accent interactive-btn" id="add-model-btn" type="button">新增模型</button>
             <button class="btn btn-ghost interactive-btn" id="models-test-all-btn" type="button">一键测试</button>
@@ -16,8 +16,8 @@
 <section class="stats-grid">
     <article class="metric-card"><span>模型总数</span><strong data-model-summary="total">0</strong></article>
     <article class="metric-card"><span>已启用模型</span><strong data-model-summary="enabled">0</strong></article>
-    <article class="metric-card"><span>已绑定中转站</span><strong data-model-summary="boundProviders">0</strong></article>
-    <article class="metric-card"><span>可用中转站</span><strong data-model-summary="availableProviders">0</strong></article>
+    <article class="metric-card"><span>已绑定提供商</span><strong data-model-summary="boundProviders">0</strong></article>
+    <article class="metric-card"><span>可用提供商</span><strong data-model-summary="availableProviders">0</strong></article>
 </section>
 
 <section class="dashboard-command-grid models-catalog-grid">
@@ -32,7 +32,7 @@
     <div class="filter-grid models-filter-grid">
         <label>
             <span>关键词</span>
-            <input class="field-input search-input" id="models-search" type="search" placeholder="模型名、展示名、速度标签、渠道名">
+            <input class="field-input search-input" id="models-search" type="search" placeholder="模型 ID、模型名、速度标签、渠道名">
         </label>
         <label>
             <span>健康</span>
@@ -51,9 +51,9 @@
             </select>
         </label>
         <label>
-            <span>归属中转站</span>
+            <span>归属提供商</span>
             <select class="field-input" id="models-provider-id">
-                <option value="">全部中转站</option>
+                <option value="">全部提供商</option>
             </select>
         </label>
         <label>
@@ -67,6 +67,10 @@
         </label>
     </div>
     <div class="models-batch-bar" id="models-batch-bar">
+        <label class="models-page-select">
+            <input id="models-select-page" type="checkbox" aria-label="选择当前页模型">
+            <span>选择本页</span>
+        </label>
         <div class="models-batch-meta" id="models-batch-meta">已选 0 个模型</div>
         <label class="models-batch-control">
             <span>批量上下文窗口</span>
@@ -74,38 +78,7 @@
         </label>
         <button class="btn btn-accent interactive-btn" id="models-batch-context-apply-btn" type="button" disabled>应用到选中模型</button>
     </div>
-    <div class="table-shell models-catalog-table-shell">
-        <table class="data-table models-catalog-table">
-            <colgroup>
-                <col class="models-col-select">
-                <col class="models-col-name">
-                <col class="models-col-status">
-                <col class="models-col-enabled">
-                <col class="models-col-ability">
-                <col class="models-col-context">
-                <col class="models-col-price">
-                <col class="models-col-speed">
-                <col class="models-col-providers">
-                <col class="models-col-multiplier">
-                <col class="models-col-actions">
-            </colgroup>
-            <thead>
-                <tr>
-                    <th><input id="models-select-page" type="checkbox" aria-label="选择当前页模型"></th>
-                    <th>模型</th>
-                    <th>状态</th>
-                    <th>启用</th>
-                    <th>能力</th>
-                    <th>上下文窗口</th>
-                    <th>基础价格</th>
-                    <th>速度</th>
-                    <th>可用中转站</th>
-                    <th title="按已绑定渠道的倍率取算术平均；可路由平均仅统计当前可实际路由的渠道。">绑定平均倍率</th>
-                    <th>操作</th>
-                </tr>
-            </thead>
-            <tbody id="models-table-body"></tbody>
-        </table>
+    <div class="models-catalog-card-list" id="models-table-body" aria-live="polite">
     </div>
     <div class="table-toolbar logs-pagination-bar models-pagination-bar">
         <div class="logs-page-meta" id="models-page-meta">第 1 页，共 1 页 · 共 0 条</div>
@@ -125,22 +98,36 @@
             <h3>模型别名与多目标择优</h3>
             <div class="table-muted">请求进入路由前按源模型解析目标模型；多目标仅在满足权限、能力、健康与容量约束后参与选择。</div>
         </div>
-        <button class="btn btn-ghost interactive-btn" id="model-mapping-reset-btn" type="button">新建映射</button>
+        <div class="model-mapping-toolbar">
+            <div class="model-mapping-summary" id="model-mapping-summary">共 0 条映射</div>
+            <button class="btn btn-accent interactive-btn" id="model-mapping-reset-btn" type="button">新建映射</button>
+        </div>
     </div>
-    <div class="model-mapping-layout">
+    <div class="model-mapping-list" id="model-mapping-table-body" aria-live="polite"></div>
+</section>
+
+<div class="modal-shell hidden mapping-drawer-shell" id="model-mapping-drawer" aria-hidden="true">
+    <div class="modal-card mapping-drawer-card" role="dialog" aria-modal="true" aria-labelledby="model-mapping-drawer-title" tabindex="-1">
+        <div class="modal-head mapping-drawer-head">
+            <div>
+                <div class="panel-kicker">模型映射</div>
+                <h3 id="model-mapping-drawer-title">新建映射</h3>
+                <div class="table-muted" id="model-mapping-drawer-intro">为一个源模型维护多个候选目标，按健康优先策略参与路由。</div>
+            </div>
+            <button class="icon-btn interactive-btn" id="model-mapping-drawer-close" type="button" aria-label="关闭模型映射编辑器">×</button>
+        </div>
         <form class="model-mapping-form" id="model-mapping-form">
+            <div class="mapping-drawer-body">
             <div class="model-mapping-form-grid">
                 <label>
                     <span>源模型</span>
                     <input class="field-input" id="model-mapping-source" list="model-name-options" required placeholder="例如 gpt-5.4">
                 </label>
-                <label>
-                    <span>选择策略</span>
-                    <select class="field-input" id="model-mapping-strategy">
-                        <option value="auto">健康优先</option>
-                    </select>
+                <label class="model-mapping-span-2">
+                    <span>备注</span>
+                    <input class="field-input" id="model-mapping-remark" placeholder="可选，用于帮助识别这条映射">
                 </label>
-                <label class="settings-switch-card model-mapping-enabled-card" for="model-mapping-enabled">
+                <label class="settings-switch-card model-mapping-enabled-card model-mapping-span-2" for="model-mapping-enabled">
                     <span class="settings-switch-copy">
                         <strong>启用映射</strong>
                         <small>关闭后源模型按普通模型路由。</small>
@@ -150,38 +137,26 @@
                         <span class="settings-switch-slider" aria-hidden="true"></span>
                     </span>
                 </label>
-                <label>
-                    <span>备注</span>
-                    <input class="field-input" id="model-mapping-remark" placeholder="可选">
-                </label>
             </div>
             <datalist id="model-name-options"></datalist>
-            <div class="model-mapping-target-head">
-                <span>目标模型</span>
-                <button class="btn btn-ghost interactive-btn" id="model-mapping-add-target-btn" type="button">添加目标</button>
+            <div class="model-mapping-target-section">
+                <div class="model-mapping-target-head">
+                    <div>
+                        <span>目标模型</span>
+                        <small>至少保留 1 个目标。系统会按健康、容量、负载和路由得分择优。</small>
+                    </div>
+                    <button class="btn btn-ghost interactive-btn" id="model-mapping-add-target-btn" type="button">添加目标</button>
+                </div>
+                <div class="model-mapping-target-list" id="model-mapping-target-list"></div>
             </div>
-            <div class="model-mapping-target-list" id="model-mapping-target-list"></div>
+            </div>
             <div class="form-actions model-mapping-actions">
-                <button class="btn btn-ghost interactive-btn" id="model-mapping-cancel-btn" type="button">取消编辑</button>
+                <button class="btn btn-ghost interactive-btn" id="model-mapping-cancel-btn" type="button">取消</button>
                 <button class="btn btn-accent interactive-btn" id="model-mapping-submit-btn" type="submit">保存映射</button>
             </div>
         </form>
-        <div class="table-shell model-mapping-table-shell">
-            <table class="data-table model-mapping-table">
-                <thead>
-                    <tr>
-                        <th>源模型</th>
-                        <th>策略</th>
-                        <th>目标</th>
-                        <th>启用</th>
-                        <th>操作</th>
-                    </tr>
-                </thead>
-                <tbody id="model-mapping-table-body"></tbody>
-            </table>
-        </div>
     </div>
-</section>
+</div>
 
 <div class="modal-shell hidden" id="model-modal">
     <div class="modal-card modal-lg">
@@ -191,12 +166,12 @@
         </div>
         <form class="form-grid" id="model-form">
             <label>
-                <span>模型名</span>
-                <input class="field-input" id="model-name" required>
+                <span>模型 ID</span>
+                <input class="field-input" id="model-name" required placeholder="例如 glm-5.1">
             </label>
             <label>
-                <span>展示名</span>
-                <input class="field-input" id="model-display-name" placeholder="留空则直接显示模型名">
+                <span>模型名</span>
+                <input class="field-input" id="model-display-name" placeholder="留空则直接显示模型 ID">
             </label>
             <label>
                 <span>最大上下文窗口 token</span>
@@ -264,26 +239,6 @@
                         </span>
                         <span class="settings-switch-control">
                             <input id="model-supports-tools" type="checkbox" checked>
-                            <span class="settings-switch-slider" aria-hidden="true"></span>
-                        </span>
-                    </label>
-                    <label class="settings-switch-card" for="model-supports-chat-completions">
-                        <span class="settings-switch-copy">
-                            <strong>原生支持 Chat</strong>
-                            <small>用于 /v1/chat/completions 原生路由过滤。</small>
-                        </span>
-                        <span class="settings-switch-control">
-                            <input id="model-supports-chat-completions" type="checkbox" checked>
-                            <span class="settings-switch-slider" aria-hidden="true"></span>
-                        </span>
-                    </label>
-                    <label class="settings-switch-card" for="model-supports-responses">
-                        <span class="settings-switch-copy">
-                            <strong>原生支持 Responses</strong>
-                            <small>用于 /v1/responses 原生路由过滤。</small>
-                        </span>
-                        <span class="settings-switch-control">
-                            <input id="model-supports-responses" type="checkbox" checked>
                             <span class="settings-switch-slider" aria-hidden="true"></span>
                         </span>
                     </label>

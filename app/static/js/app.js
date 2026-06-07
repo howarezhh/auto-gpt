@@ -6,9 +6,8 @@
         userRole: document.body.dataset.userRole || "",
     };
     const PUBLIC_ROUTE_PREFIXES = ["/login", "/register", "/setup-admin"];
-    const ADMIN_ROUTE_PREFIXES = ["/providers", "/models", "/settings", "/playground", "/benchmark", "/operations", "/docs", "/api-keys", "/logs", "/alerts", "/conversations", "/users", "/audit-logs"];
+    const ADMIN_ROUTE_PREFIXES = ["/providers", "/provider-models", "/models", "/settings", "/content-guard", "/playground", "/benchmark", "/operations", "/docs", "/api-keys", "/logs", "/alerts", "/conversations", "/users", "/audit-logs"];
     const FIXED_ROUTE_MODE = "failover";
-    const FIXED_MODEL_MAPPING_STRATEGY = "auto";
 
     const ROUTE_MODE_LABELS = {
         manual: "健康优先",
@@ -32,9 +31,10 @@
 
     const HEALTH_STATUS_LABELS = {
         healthy: "健康",
-        degraded: "降级",
+        degraded: "异常",
+        abnormal: "异常",
         unhealthy: "异常",
-        unknown: "未知",
+        unknown: "未检测",
         skipped: "已跳过",
     };
 
@@ -80,6 +80,47 @@
         cost_quota_exhausted: "余额耗尽",
         balance_exhausted: "余额耗尽",
         unbound: "未绑定渠道",
+    };
+    const PROVIDER_TRUST_LEVEL_LABELS = {
+        official: "官方",
+        trusted: "可信",
+        standard: "标准",
+        low: "低信任",
+        blocked: "已隔离",
+    };
+    const CONTENT_INTEGRITY_STATUS_LABELS = {
+        unknown: "未检测",
+        passed: "可信",
+        degraded: "异常",
+        blocked: "异常",
+    };
+    const MODEL_TRUST_STATUS_LABELS = {
+        trusted: "可信",
+        abnormal: "异常",
+        unknown: "未检测",
+    };
+    const PROVIDER_TRUST_STATUS_LABELS = {
+        trusted: "可信",
+        partially_trusted: "部分可信",
+        untrusted: "不可信",
+        unknown: "未检测",
+    };
+    const CONTENT_GUARD_RESULT_LABELS = {
+        pass: "通过",
+        review: "需复核",
+        block: "已拦截",
+    };
+    const CONTENT_GUARD_RISK_LABELS = {
+        low: "低",
+        medium: "中",
+        high: "高",
+    };
+    const CONTENT_PROBE_PHASE_LABELS = {
+        content_fixed_answer: "固定答案",
+        content_json: "JSON",
+        content_sse: "SSE",
+        content_refusal: "拒答",
+        content_tools: "工具",
     };
     const ENDPOINT_PROBE_LABELS = {
         "chat/completions": "Chat 调用检查",
@@ -938,7 +979,7 @@
             : formatProviderAvailabilityLabel(result?.health_status || "unknown");
         const summaryRows = [
             ["测试对象", titleName],
-            ["测试范围", scope === "model" ? "单模型测试" : "中转站测试"],
+            ["测试范围", scope === "model" ? "单模型测试" : "提供商测试"],
             ["结果", formatHealthCheckOutcomeLabel(result)],
             [healthLabel, healthValue],
             ["状态码", result?.status_code ?? "-"],
@@ -968,7 +1009,7 @@
                         <div class="provider-test-model-message">${renderEndpointProbeHtml(item.endpoint_results)}</div>
                     </article>
                 `).join("")
-                : '<div class="empty-state">当前中转站没有可展示的模型测试结果</div>')
+                : '<div class="empty-state">当前提供商没有可展示的模型测试结果</div>')
             : "";
         return `
             <div class="provider-test-result-shell">
@@ -1011,19 +1052,19 @@
     function applyHealthCheckStreamEvent(state, event) {
         if (event.event === "provider_started") {
             state.currentProviderName = event.provider_name || "";
-            state.currentStageLabel = `正在准备 ${event.provider_name || "当前中转站"} 的健康检查`;
+            state.currentStageLabel = `正在准备 ${event.provider_name || "当前提供商"} 的健康检查`;
             return;
         }
         if (event.event === "stage_started") {
             state.currentProviderName = event.provider_name || state.currentProviderName;
-            state.currentStageLabel = `${event.provider_name || "当前中转站"} · ${event.phase_label || event.phase_key || "检查中"}`;
+            state.currentStageLabel = `${event.provider_name || "当前提供商"} · ${event.phase_label || event.phase_key || "检查中"}`;
             return;
         }
         if (event.event === "stage_completed") {
             const successCount = Number(event.success_count || 0);
             const failureCount = Number(event.failure_count || 0);
             state.stages.push({
-                providerName: event.provider_name || state.currentProviderName || "当前中转站",
+                providerName: event.provider_name || state.currentProviderName || "当前提供商",
                 phaseLabel: event.phase_label || event.phase_key || "检查阶段",
                 skipped: event.skipped === true,
                 modelTotal: Number(event.model_total || 0),
@@ -1031,13 +1072,13 @@
                 failureCount,
             });
             state.currentStageLabel = event.skipped
-                ? `${event.provider_name || state.currentProviderName || "当前中转站"} · ${event.phase_label || "检查阶段"}已跳过`
-                : `${event.provider_name || state.currentProviderName || "当前中转站"} · ${event.phase_label || "检查阶段"}已完成`;
+                ? `${event.provider_name || state.currentProviderName || "当前提供商"} · ${event.phase_label || "检查阶段"}已跳过`
+                : `${event.provider_name || state.currentProviderName || "当前提供商"} · ${event.phase_label || "检查阶段"}已完成`;
             return;
         }
         if (event.event === "provider_completed") {
             state.providerSummaries.push({
-                providerName: event.provider_name || "当前中转站",
+                providerName: event.provider_name || "当前提供商",
                 success: event.success === true,
                 modelsTotal: Number(event.models_total || 0),
                 modelsSuccess: Number(event.models_success || 0),
@@ -1079,7 +1120,7 @@
 
     function renderHealthCheckProviderSummaryList(items = []) {
         if (!items.length) {
-            return '<div class="empty-state">当前还没有可展示的中转站结果。</div>';
+            return '<div class="empty-state">当前还没有可展示的提供商结果。</div>';
         }
         return items.map((item) => `
             <article class="provider-test-model-item">
@@ -1101,12 +1142,12 @@
         const successCount = providerResultItems.filter((item) => item.success).length;
         const totalCount = providerResultItems.length;
         const summaryRows = [
-            ["检查范围", state.scope === "all" ? "全部中转站" : "单中转站"],
+            ["检查范围", state.scope === "all" ? "全部提供商" : "单提供商"],
             ["执行状态", state.errorMessage ? "失败" : (state.running ? "执行中" : "已完成")],
             ["当前阶段", state.currentStageLabel || "准备开始"],
         ];
         if (state.scope === "all" && totalCount > 0) {
-            summaryRows.push(["中转站通过", `${formatNumber(successCount)}/${formatNumber(totalCount)}`]);
+            summaryRows.push(["提供商通过", `${formatNumber(successCount)}/${formatNumber(totalCount)}`]);
         }
         const summaryHtml = summaryRows.map(([label, value]) => `
             <div class="provider-test-summary-item">
@@ -1126,7 +1167,7 @@
                 </section>
                 ${state.scope === "all" ? `
                 <section class="provider-test-result-card">
-                    <div class="panel-kicker">中转站结果</div>
+                    <div class="panel-kicker">提供商结果</div>
                     <div class="provider-test-model-list">${renderHealthCheckProviderSummaryList(
                         state.providerSummaries.length ? state.providerSummaries : providerResultItems.map((item) => ({
                             providerName: item.provider_name || "-",
@@ -1349,7 +1390,7 @@
     }
 
     function getDefaultProviderLabel(providers = [], providerId) {
-        if (!providerId) return "未设置默认中转站";
+        if (!providerId) return "未设置默认提供商";
         const provider = providers.find((item) => item.id === Number(providerId));
         return provider ? provider.name : `ID ${providerId}`;
     }
@@ -1381,6 +1422,30 @@
 
     function formatApiKeyStatusLabel(value) {
         return formatMappedLabel(API_KEY_STATUS_LABELS, value);
+    }
+
+    function formatProviderTrustLevelLabel(value) {
+        return formatMappedLabel(PROVIDER_TRUST_LEVEL_LABELS, value, "标准");
+    }
+
+    function formatContentIntegrityStatusLabel(value) {
+        return formatMappedLabel(CONTENT_INTEGRITY_STATUS_LABELS, value, "未检测");
+    }
+
+    function formatModelTrustStatusLabel(value) {
+        return formatMappedLabel(MODEL_TRUST_STATUS_LABELS, value, "未检测");
+    }
+
+    function formatProviderTrustStatusLabel(value) {
+        return formatMappedLabel(PROVIDER_TRUST_STATUS_LABELS, value, "未检测");
+    }
+
+    function formatContentGuardResultLabel(value) {
+        return formatMappedLabel(CONTENT_GUARD_RESULT_LABELS, value, "-");
+    }
+
+    function formatContentGuardRiskLabel(value) {
+        return formatMappedLabel(CONTENT_GUARD_RISK_LABELS, value, "-");
     }
 
     function formatSwitchText(value, enabledLabel = "开启", disabledLabel = "关闭") {
@@ -1544,7 +1609,7 @@
                 ${originalPriceLines.map((line) => `<div>${escapeHtml(line)}</div>`).join("")}
             </div>
             <div class="log-billing-tooltip-group">
-                <strong>中转站价格</strong>
+                <strong>提供商价格</strong>
                 ${channelPriceLines.map((line) => `<div>${escapeHtml(line)}</div>`).join("")}
             </div>
             <div class="log-billing-tooltip-group">
@@ -1628,6 +1693,8 @@
         const message = String(log.message || "").trim();
         const errorCode = String(log.error_code || "").trim();
         const errorType = String(log.error_type || "").trim();
+        const contentGuardReason = String(log.content_guard_reason || "").trim();
+        const contentGuardExcerpt = String(log.content_guard_excerpt || "").trim();
         const responseText = String(log.response_text || "").trim();
         const billingError = String(log.billing_error || "").trim();
         const tokenFinalizeError = String(log.token_finalize_error || "").trim();
@@ -1640,6 +1707,8 @@
         if (message && (!log.success || /fail|error|timeout|exceed|invalid/i.test(message))) {
             detailLines.push(`主信息：${message}`);
         }
+        if (contentGuardReason) detailLines.push(`内容检测：${contentGuardReason}`);
+        if (contentGuardExcerpt) detailLines.push(`命中片段：${contentGuardExcerpt}`);
         if (!detailLines.length && !log.success && responseText) {
             detailLines.push(`响应内容：${responseText}`);
         }
@@ -1683,13 +1752,27 @@
         return parts.join(" · ");
     }
 
+    function buildContentGuardSummary(log = {}) {
+        if (!log.content_guard_result && !log.content_guard_risk_level) return "";
+        const parts = [
+            `检测 ${formatContentGuardResultLabel(log.content_guard_result)}`,
+            `风险 ${formatContentGuardRiskLabel(log.content_guard_risk_level)}`,
+        ];
+        if (log.content_guard_action) {
+            parts.push(`动作 ${log.content_guard_action}`);
+        }
+        return parts.filter(Boolean).join(" · ");
+    }
+
     function renderLogResultCell(log = {}) {
         const modeSummary = buildLogModeSummary(log);
+        const contentGuardSummary = buildContentGuardSummary(log);
         return `
             <div class="log-result-cell">
                 ${renderStatusWithErrorHint(log.success ? "healthy" : "unhealthy", buildLogExceptionReason(log))}
                 <div class="table-muted">HTTP ${log.status_code ?? "-"} · 尝试 ${formatLogCellMetricValue(log.attempt_count)}</div>
                 ${modeSummary ? `<div class="table-muted">${escapeHtml(modeSummary)}</div>` : ""}
+                ${contentGuardSummary ? `<div class="table-muted">${escapeHtml(contentGuardSummary)}</div>` : ""}
             </div>
         `;
     }
@@ -1698,270 +1781,245 @@
         const billing = buildBillingBreakdown(log);
         return [
             `原始价格：输入 ${formatUsdPer1M(billing.baseInputPrice)}，输出 ${formatUsdPer1M(billing.baseOutputPrice)}，缓存 ${formatUsdPer1M(billing.baseCachePrice)}`,
-            `中转站价格：输入 ${formatUsdPer1M(billing.inputPrice)}，输出 ${formatUsdPer1M(billing.outputPrice)}，缓存 ${formatUsdPer1M(billing.cachePrice)}`,
+            `提供商价格：输入 ${formatUsdPer1M(billing.inputPrice)}，输出 ${formatUsdPer1M(billing.outputPrice)}，缓存 ${formatUsdPer1M(billing.cachePrice)}`,
             `计算：输入 ${formatTokenDisplay(billing.regularPromptTokens)} -> ${formatUsdValue(billing.inputCost)}；缓存读 ${formatTokenDisplay(billing.cacheReadTokens)} -> ${formatUsdValue(billing.cacheReadCost)}；输出 ${formatTokenDisplay(billing.completionTokens)} -> ${formatUsdValue(billing.outputCost)}`,
             `总成本 ${formatUsdValue(billing.totalCost)}；倍率 ${formatMultiplier(billing.multiplier)}`,
         ].join("；");
     }
 
-    let billingTooltipLayer = null;
-    let billingTooltipOwner = null;
+    let helpTooltipLayer = null;
+    let helpTooltipOwner = null;
+    let helpTooltipConfig = null;
+    const HELP_TOOLTIP_VIEWPORT_PADDING = 12;
+    const HELP_TOOLTIP_GAP = 12;
+    const HELP_TOOLTIP_CONFIGS = [
+        {
+            name: "billing",
+            triggerSelector: "[data-billing-tooltip-trigger='true']",
+            wrapperSelector: ".log-billing-help",
+            contentSelector: ".log-billing-tooltip-content",
+        },
+        {
+            name: "provider-status",
+            triggerSelector: "[data-provider-status-tooltip-trigger='true']",
+            wrapperSelector: ".provider-status-help",
+            contentSelector: ".provider-status-tooltip-content",
+        },
+        {
+            name: "settings",
+            triggerSelector: "[data-settings-tooltip-trigger='true']",
+            wrapperSelector: ".settings-help",
+            contentSelector: ".settings-tooltip-content",
+            render(trigger, wrapper) {
+                const content = wrapper?.querySelector(".settings-tooltip-content");
+                if (content) return content.innerHTML;
+                const title = trigger.dataset.settingsTooltipTitle || "";
+                const copy = trigger.dataset.settingsTooltipCopy || "";
+                if (!copy) return "";
+                return `
+                    ${title ? `<div class="help-tooltip-title">${escapeHtml(title)}</div>` : ""}
+                    <div class="help-tooltip-copy">${escapeHtml(copy)}</div>
+                `;
+            },
+        },
+    ];
+
+    function ensureHelpTooltipLayer() {
+        if (helpTooltipLayer) return helpTooltipLayer;
+        helpTooltipLayer = document.createElement("div");
+        helpTooltipLayer.id = "help-floating-tooltip";
+        helpTooltipLayer.className = "help-tooltip help-tooltip-floating hidden";
+        helpTooltipLayer.setAttribute("role", "tooltip");
+        document.body.appendChild(helpTooltipLayer);
+        return helpTooltipLayer;
+    }
+
+    function prepareSettingsTooltipTriggers(scope = document) {
+        scope.querySelectorAll(".settings-help-btn[title]").forEach((trigger) => {
+            const copy = trigger.getAttribute("title") || "";
+            if (!copy) return;
+            trigger.dataset.settingsTooltipTrigger = "true";
+            trigger.dataset.settingsTooltipTitle = trigger.getAttribute("aria-label") || "说明";
+            trigger.dataset.settingsTooltipCopy = copy;
+            trigger.removeAttribute("title");
+        });
+    }
+
+    function findHelpTooltipConfig(trigger) {
+        return HELP_TOOLTIP_CONFIGS.find((config) => trigger.matches(config.triggerSelector)) || null;
+    }
+
+    function resolveHelpTooltipMarkup(trigger, config) {
+        if (!config) return "";
+        const wrapper = trigger.closest(config.wrapperSelector);
+        if (typeof config.render === "function") {
+            return config.render(trigger, wrapper);
+        }
+        const content = wrapper?.querySelector(config.contentSelector);
+        return content?.innerHTML || "";
+    }
+
+    function hideHelpTooltip() {
+        const tooltip = ensureHelpTooltipLayer();
+        tooltip.classList.add("hidden");
+        tooltip.innerHTML = "";
+        delete tooltip.dataset.placement;
+        delete tooltip.dataset.xPlacement;
+        helpTooltipOwner = null;
+        helpTooltipConfig = null;
+    }
+
+    function positionHelpTooltip(trigger) {
+        if (!trigger) return;
+        const tooltip = ensureHelpTooltipLayer();
+        const triggerRect = trigger.getBoundingClientRect();
+        const tooltipRect = tooltip.getBoundingClientRect();
+        let top = triggerRect.top - tooltipRect.height - HELP_TOOLTIP_GAP;
+        let placement = "top";
+        if (top < HELP_TOOLTIP_VIEWPORT_PADDING) {
+            top = Math.min(
+                window.innerHeight - tooltipRect.height - HELP_TOOLTIP_VIEWPORT_PADDING,
+                triggerRect.bottom + HELP_TOOLTIP_GAP
+            );
+            placement = "bottom";
+        }
+        let left = triggerRect.right + HELP_TOOLTIP_GAP;
+        let xPlacement = "right";
+        if (left + tooltipRect.width > window.innerWidth - HELP_TOOLTIP_VIEWPORT_PADDING) {
+            left = triggerRect.right - tooltipRect.width;
+            xPlacement = "left";
+        }
+        left = Math.max(
+            HELP_TOOLTIP_VIEWPORT_PADDING,
+            Math.min(left, window.innerWidth - tooltipRect.width - HELP_TOOLTIP_VIEWPORT_PADDING)
+        );
+        tooltip.style.top = `${top}px`;
+        tooltip.style.left = `${left}px`;
+        tooltip.dataset.placement = placement;
+        tooltip.dataset.xPlacement = xPlacement;
+    }
+
+    function showHelpTooltip(trigger) {
+        const config = findHelpTooltipConfig(trigger);
+        if (!config) return;
+        const markup = resolveHelpTooltipMarkup(trigger, config);
+        if (!markup) return;
+        const tooltip = ensureHelpTooltipLayer();
+        helpTooltipOwner = trigger;
+        helpTooltipConfig = config;
+        tooltip.innerHTML = markup;
+        tooltip.classList.remove("hidden");
+        positionHelpTooltip(trigger);
+    }
+
+    function getHelpTooltipScope(target) {
+        if (!(target instanceof Element)) return null;
+        for (const config of HELP_TOOLTIP_CONFIGS) {
+            const wrapper = target.closest(config.wrapperSelector);
+            if (wrapper) return wrapper;
+            const trigger = target.closest(config.triggerSelector);
+            if (trigger) return trigger;
+        }
+        return null;
+    }
+
+    function initHelpTooltipLayer() {
+        prepareSettingsTooltipTriggers(document);
+        if (document.body.dataset.helpTooltipBound === "true") return;
+        document.body.dataset.helpTooltipBound = "true";
+        document.addEventListener("mouseover", (event) => {
+            const trigger = event.target.closest(HELP_TOOLTIP_CONFIGS.map((config) => config.triggerSelector).join(", "));
+            if (!trigger) return;
+            if (helpTooltipOwner === trigger) return;
+            showHelpTooltip(trigger);
+        });
+        document.addEventListener("mouseout", (event) => {
+            const scope = getHelpTooltipScope(event.target);
+            if (!scope) return;
+            if (scope.contains(event.relatedTarget)) return;
+            hideHelpTooltip();
+        });
+        document.addEventListener("focusin", (event) => {
+            const trigger = event.target.closest(HELP_TOOLTIP_CONFIGS.map((config) => config.triggerSelector).join(", "));
+            if (!trigger) return;
+            showHelpTooltip(trigger);
+        });
+        document.addEventListener("focusout", (event) => {
+            const scope = getHelpTooltipScope(event.target);
+            if (!scope) return;
+            if (scope.contains(event.relatedTarget)) return;
+            hideHelpTooltip();
+        });
+        window.addEventListener("scroll", () => {
+            if (helpTooltipOwner) {
+                positionHelpTooltip(helpTooltipOwner);
+            }
+        }, true);
+        window.addEventListener("resize", () => {
+            if (helpTooltipOwner) {
+                positionHelpTooltip(helpTooltipOwner);
+            }
+        });
+    }
 
     function ensureBillingTooltipLayer() {
-        if (billingTooltipLayer) return billingTooltipLayer;
-        billingTooltipLayer = document.createElement("div");
-        billingTooltipLayer.id = "log-billing-floating-tooltip";
-        billingTooltipLayer.className = "log-billing-tooltip log-billing-tooltip-floating hidden";
-        billingTooltipLayer.setAttribute("role", "tooltip");
-        document.body.appendChild(billingTooltipLayer);
-        return billingTooltipLayer;
+        return ensureHelpTooltipLayer();
     }
 
     function hideBillingTooltip() {
-        const tooltip = ensureBillingTooltipLayer();
-        tooltip.classList.add("hidden");
-        tooltip.innerHTML = "";
-        billingTooltipOwner = null;
+        hideHelpTooltip();
     }
 
     function positionBillingTooltip(trigger) {
-        const tooltip = ensureBillingTooltipLayer();
-        const triggerRect = trigger.getBoundingClientRect();
-        const tooltipRect = tooltip.getBoundingClientRect();
-        const viewportPadding = 12;
-        let top = triggerRect.top - tooltipRect.height - 12;
-        let placement = "top";
-        if (top < viewportPadding) {
-            top = Math.min(window.innerHeight - tooltipRect.height - viewportPadding, triggerRect.bottom + 12);
-            placement = "bottom";
-        }
-        let left = triggerRect.right - tooltipRect.width;
-        left = Math.max(viewportPadding, Math.min(left, window.innerWidth - tooltipRect.width - viewportPadding));
-        tooltip.style.top = `${top}px`;
-        tooltip.style.left = `${left}px`;
-        tooltip.dataset.placement = placement;
+        positionHelpTooltip(trigger);
     }
 
     function showBillingTooltip(trigger) {
-        const wrapper = trigger.closest(".log-billing-help");
-        const content = wrapper?.querySelector(".log-billing-tooltip-content");
-        if (!content) return;
-        const tooltip = ensureBillingTooltipLayer();
-        billingTooltipOwner = trigger;
-        tooltip.innerHTML = content.innerHTML;
-        tooltip.classList.remove("hidden");
-        positionBillingTooltip(trigger);
+        showHelpTooltip(trigger);
     }
 
     function initBillingTooltipLayer() {
-        if (document.body.dataset.billingTooltipBound === "true") return;
-        document.body.dataset.billingTooltipBound = "true";
-        document.addEventListener("mouseover", (event) => {
-            const trigger = event.target.closest("[data-billing-tooltip-trigger='true']");
-            if (!trigger) return;
-            if (billingTooltipOwner === trigger) return;
-            showBillingTooltip(trigger);
-        });
-        document.addEventListener("mouseout", (event) => {
-            const wrapper = event.target.closest(".log-billing-help");
-            if (!wrapper) return;
-            if (wrapper.contains(event.relatedTarget)) return;
-            hideBillingTooltip();
-        });
-        document.addEventListener("focusin", (event) => {
-            const trigger = event.target.closest("[data-billing-tooltip-trigger='true']");
-            if (!trigger) return;
-            showBillingTooltip(trigger);
-        });
-        document.addEventListener("focusout", (event) => {
-            const wrapper = event.target.closest(".log-billing-help");
-            if (!wrapper) return;
-            if (wrapper.contains(event.relatedTarget)) return;
-            hideBillingTooltip();
-        });
-        window.addEventListener("scroll", () => {
-            if (billingTooltipOwner) {
-                positionBillingTooltip(billingTooltipOwner);
-            }
-        }, true);
-        window.addEventListener("resize", () => {
-            if (billingTooltipOwner) {
-                positionBillingTooltip(billingTooltipOwner);
-            }
-        });
+        initHelpTooltipLayer();
     }
 
-    let providerStatusTooltipLayer = null;
-    let providerStatusTooltipOwner = null;
-    let settingsTooltipLayer = null;
-    let settingsTooltipOwner = null;
-
     function ensureProviderStatusTooltipLayer() {
-        if (providerStatusTooltipLayer) return providerStatusTooltipLayer;
-        providerStatusTooltipLayer = document.createElement("div");
-        providerStatusTooltipLayer.id = "provider-status-floating-tooltip";
-        providerStatusTooltipLayer.className = "provider-status-tooltip provider-status-tooltip-floating hidden";
-        providerStatusTooltipLayer.setAttribute("role", "tooltip");
-        document.body.appendChild(providerStatusTooltipLayer);
-        return providerStatusTooltipLayer;
+        return ensureHelpTooltipLayer();
     }
 
     function hideProviderStatusTooltip() {
-        const tooltip = ensureProviderStatusTooltipLayer();
-        tooltip.classList.add("hidden");
-        tooltip.innerHTML = "";
-        providerStatusTooltipOwner = null;
+        hideHelpTooltip();
     }
 
     function positionProviderStatusTooltip(trigger) {
-        const tooltip = ensureProviderStatusTooltipLayer();
-        const triggerRect = trigger.getBoundingClientRect();
-        const tooltipRect = tooltip.getBoundingClientRect();
-        const viewportPadding = 12;
-        let top = triggerRect.top - tooltipRect.height - 12;
-        let placement = "top";
-        if (top < viewportPadding) {
-            top = Math.min(window.innerHeight - tooltipRect.height - viewportPadding, triggerRect.bottom + 12);
-            placement = "bottom";
-        }
-        let left = triggerRect.right - tooltipRect.width;
-        left = Math.max(viewportPadding, Math.min(left, window.innerWidth - tooltipRect.width - viewportPadding));
-        tooltip.style.top = `${top}px`;
-        tooltip.style.left = `${left}px`;
-        tooltip.dataset.placement = placement;
+        positionHelpTooltip(trigger);
     }
 
     function showProviderStatusTooltip(trigger) {
-        const wrapper = trigger.closest(".provider-status-help");
-        const content = wrapper?.querySelector(".provider-status-tooltip-content");
-        if (!content) return;
-        const tooltip = ensureProviderStatusTooltipLayer();
-        providerStatusTooltipOwner = trigger;
-        tooltip.innerHTML = content.innerHTML;
-        tooltip.classList.remove("hidden");
-        positionProviderStatusTooltip(trigger);
+        showHelpTooltip(trigger);
     }
 
     function initProviderStatusTooltipLayer() {
-        if (document.body.dataset.providerStatusTooltipBound === "true") return;
-        document.body.dataset.providerStatusTooltipBound = "true";
-        document.addEventListener("mouseover", (event) => {
-            const trigger = event.target.closest("[data-provider-status-tooltip-trigger='true']");
-            if (!trigger) return;
-            if (providerStatusTooltipOwner === trigger) return;
-            showProviderStatusTooltip(trigger);
-        });
-        document.addEventListener("mouseout", (event) => {
-            const wrapper = event.target.closest(".provider-status-help");
-            if (!wrapper) return;
-            if (wrapper.contains(event.relatedTarget)) return;
-            hideProviderStatusTooltip();
-        });
-        document.addEventListener("focusin", (event) => {
-            const trigger = event.target.closest("[data-provider-status-tooltip-trigger='true']");
-            if (!trigger) return;
-            showProviderStatusTooltip(trigger);
-        });
-        document.addEventListener("focusout", (event) => {
-            const wrapper = event.target.closest(".provider-status-help");
-            if (!wrapper) return;
-            if (wrapper.contains(event.relatedTarget)) return;
-            hideProviderStatusTooltip();
-        });
-        window.addEventListener("scroll", () => {
-            if (providerStatusTooltipOwner) {
-                positionProviderStatusTooltip(providerStatusTooltipOwner);
-            }
-        }, true);
-        window.addEventListener("resize", () => {
-            if (providerStatusTooltipOwner) {
-                positionProviderStatusTooltip(providerStatusTooltipOwner);
-            }
-        });
+        initHelpTooltipLayer();
     }
 
     function ensureSettingsTooltipLayer() {
-        if (settingsTooltipLayer) return settingsTooltipLayer;
-        settingsTooltipLayer = document.createElement("div");
-        settingsTooltipLayer.id = "settings-floating-tooltip";
-        settingsTooltipLayer.className = "settings-tooltip settings-tooltip-floating hidden";
-        settingsTooltipLayer.setAttribute("role", "tooltip");
-        document.body.appendChild(settingsTooltipLayer);
-        return settingsTooltipLayer;
+        return ensureHelpTooltipLayer();
     }
 
     function hideSettingsTooltip() {
-        const tooltip = ensureSettingsTooltipLayer();
-        tooltip.classList.add("hidden");
-        tooltip.innerHTML = "";
-        settingsTooltipOwner = null;
+        hideHelpTooltip();
     }
 
     function positionSettingsTooltip(trigger) {
-        const tooltip = ensureSettingsTooltipLayer();
-        const triggerRect = trigger.getBoundingClientRect();
-        const tooltipRect = tooltip.getBoundingClientRect();
-        const viewportPadding = 12;
-        let top = triggerRect.top - tooltipRect.height - 12;
-        let placement = "top";
-        if (top < viewportPadding) {
-            top = Math.min(window.innerHeight - tooltipRect.height - viewportPadding, triggerRect.bottom + 12);
-            placement = "bottom";
-        }
-        let left = triggerRect.right - tooltipRect.width;
-        left = Math.max(viewportPadding, Math.min(left, window.innerWidth - tooltipRect.width - viewportPadding));
-        tooltip.style.top = `${top}px`;
-        tooltip.style.left = `${left}px`;
-        tooltip.dataset.placement = placement;
+        positionHelpTooltip(trigger);
     }
 
     function showSettingsTooltip(trigger) {
-        const wrapper = trigger.closest(".settings-help");
-        const content = wrapper?.querySelector(".settings-tooltip-content");
-        if (!content) return;
-        const tooltip = ensureSettingsTooltipLayer();
-        settingsTooltipOwner = trigger;
-        tooltip.innerHTML = content.innerHTML;
-        tooltip.classList.remove("hidden");
-        positionSettingsTooltip(trigger);
+        showHelpTooltip(trigger);
     }
 
     function initSettingsTooltipLayer() {
-        if (document.body.dataset.settingsTooltipBound === "true") return;
-        document.body.dataset.settingsTooltipBound = "true";
-        document.addEventListener("mouseover", (event) => {
-            const trigger = event.target.closest("[data-settings-tooltip-trigger='true']");
-            if (!trigger) return;
-            if (settingsTooltipOwner === trigger) return;
-            showSettingsTooltip(trigger);
-        });
-        document.addEventListener("mouseout", (event) => {
-            const wrapper = event.target.closest(".settings-help");
-            if (!wrapper) return;
-            if (wrapper.contains(event.relatedTarget)) return;
-            hideSettingsTooltip();
-        });
-        document.addEventListener("focusin", (event) => {
-            const trigger = event.target.closest("[data-settings-tooltip-trigger='true']");
-            if (!trigger) return;
-            showSettingsTooltip(trigger);
-        });
-        document.addEventListener("focusout", (event) => {
-            const wrapper = event.target.closest(".settings-help");
-            if (!wrapper) return;
-            if (wrapper.contains(event.relatedTarget)) return;
-            hideSettingsTooltip();
-        });
-        window.addEventListener("scroll", () => {
-            if (settingsTooltipOwner) {
-                positionSettingsTooltip(settingsTooltipOwner);
-            }
-        }, true);
-        window.addEventListener("resize", () => {
-            if (settingsTooltipOwner) {
-                positionSettingsTooltip(settingsTooltipOwner);
-            }
-        });
+        initHelpTooltipLayer();
     }
 
     function formatPercent(value) {
@@ -1975,6 +2033,7 @@
     }
 
     function formatBytes(value) {
+        if (value == null) return "-";
         const number = Number(value);
         if (!Number.isFinite(number) || number < 0) return "-";
         const units = ["B", "KB", "MB", "GB", "TB"];
@@ -2012,7 +2071,7 @@
     }
 
     function formatHealthOverview(healthyCount, degradedCount, unhealthyCount) {
-        return `健康 ${healthyCount} / 降级 ${degradedCount} / 异常 ${unhealthyCount}`;
+        return `健康 ${healthyCount} / 异常 ${Number(degradedCount || 0) + Number(unhealthyCount || 0)}`;
     }
 
     function formatStatusBadgeLabel(value) {
@@ -2036,20 +2095,53 @@
         return `<span class="status-badge status-${normalized}">${escapeHtml(formatProviderAvailabilityLabel(normalized))}</span>`;
     }
 
+    function trustStatusBadge(value, label) {
+        const normalized = String(value || "unknown");
+        const tone = {
+            trusted: "healthy",
+            partially_trusted: "degraded",
+            untrusted: "unhealthy",
+            abnormal: "unhealthy",
+            unknown: "unknown",
+        }[normalized] || "unknown";
+        const text = label || (normalized in PROVIDER_TRUST_STATUS_LABELS
+            ? formatProviderTrustStatusLabel(normalized)
+            : formatModelTrustStatusLabel(normalized));
+        return `<span class="status-badge status-${tone}">${escapeHtml(text)}</span>`;
+    }
+
+    function renderTrustStatusWithHint(status, label, reason, title = "可信度说明") {
+        const normalizedReason = String(reason || "").trim();
+        return `
+            <span class="provider-status-cell">
+                ${trustStatusBadge(status, label)}
+                ${status !== "trusted" && normalizedReason ? `
+                    <span class="provider-status-help">
+                        <button class="provider-status-help-btn" type="button" aria-label="${escapeHtml(title)}" data-provider-status-tooltip-trigger="true">
+                            <i class="bi bi-question-circle" aria-hidden="true"></i>
+                        </button>
+                        <div class="provider-status-tooltip-content hidden">
+                            <div class="provider-status-tooltip-title">${escapeHtml(title)}</div>
+                            <div class="provider-status-tooltip-copy">${escapeHtml(normalizedReason)}</div>
+                        </div>
+                    </span>
+                ` : ""}
+            </span>
+        `;
+    }
+
     function summarizeEnabledModelHealth(modelConfigs = []) {
         const enabledModels = modelConfigs.filter((item) => item.enabled);
         return enabledModels.reduce((summary, item) => {
             const status = String(item.health_status || "unknown");
             summary.total += 1;
             if (status === "healthy") summary.healthy += 1;
-            else if (status === "degraded") summary.degraded += 1;
-            else if (status === "unhealthy") summary.unhealthy += 1;
+            else if (status === "degraded" || status === "unhealthy") summary.unhealthy += 1;
             else summary.unknown += 1;
             return summary;
         }, {
             total: 0,
             healthy: 0,
-            degraded: 0,
             unhealthy: 0,
             unknown: 0,
         });
@@ -2059,7 +2151,7 @@
         const modelConfigs = Array.isArray(provider.model_configs) ? provider.model_configs : [];
         const summary = summarizeEnabledModelHealth(modelConfigs);
         const detail = summary.total
-            ? `启用 ${formatNumber(summary.total)}：健康 ${formatNumber(summary.healthy)} / 降级 ${formatNumber(summary.degraded)} / 异常 ${formatNumber(summary.unhealthy)}${summary.unknown ? ` / 未检 ${formatNumber(summary.unknown)}` : ""}`
+            ? `启用 ${formatNumber(summary.total)}：健康 ${formatNumber(summary.healthy)} / 异常 ${formatNumber(summary.unhealthy)}${summary.unknown ? ` / 未检测 ${formatNumber(summary.unknown)}` : ""}`
             : (modelConfigs.length ? "无启用模型" : "未挂载模型");
         return `
             <div class="provider-availability-summary">
@@ -3209,7 +3301,7 @@
         return `
             <div class="playground-status-bar">
                 <span>接口: ${escapeHtml(context.endpointLabel || "chat/completions")}</span>
-                <span>命中中转: ${escapeHtml(context.providerName || "-")}</span>
+                <span>命中提供商: ${escapeHtml(context.providerName || "-")}</span>
                 <span>耗时: ${escapeHtml(context.latencyMs || "-")} ms</span>
                 <span>模式: ${escapeHtml(context.isStream ? "stream" : "json")}</span>
             </div>
@@ -3452,13 +3544,13 @@
         const checkAllBtn = document.getElementById("check-all-btn");
         if (checkAllBtn) {
             checkAllBtn.addEventListener("click", async () => {
-                const features = await openTestFeaturePicker({ title: "选择全部中转站测试功能" });
+                const features = await openTestFeaturePicker({ title: "选择全部提供商测试功能" });
                 if (!features) return;
                 try {
                     setButtonLoading(checkAllBtn, true);
                     await runHealthCheckStream({
                         url: "/api/providers/test-all-stream",
-                        title: "全部中转站健康检查",
+                        title: "全部提供商健康检查",
                         scope: "all",
                         trigger: checkAllBtn,
                         showModal: true,
@@ -3466,7 +3558,7 @@
                     });
                     setButtonLoading(checkAllBtn, false);
                     setButtonTransientFeedback(checkAllBtn, "success", { successText: "已完成" });
-                    showToast("已完成全部中转健康检查");
+                    showToast("已完成全部提供商健康检查");
                     await refreshDashboard();
                 } catch (error) {
                     setButtonLoading(checkAllBtn, false);
@@ -3558,7 +3650,7 @@
         if (!container) return;
         const grouped = new Map();
         (Array.isArray(metricItems) ? metricItems : []).forEach((item) => {
-            const key = item.provider_name || "未命名中转";
+            const key = item.provider_name || "未命名提供商";
             const current = grouped.get(key) || {
                 provider_name: key,
                 total_requests: 0,
@@ -3576,7 +3668,7 @@
         });
         const rows = Array.from(grouped.values()).sort((a, b) => b.total_requests - a.total_requests).slice(0, 8);
         if (!rows.length) {
-            container.innerHTML = '<div class="empty-state">暂无中转流量数据</div>';
+            container.innerHTML = '<div class="empty-state">暂无提供商流量数据</div>';
             return;
         }
         container.innerHTML = rows.map((item) => {
@@ -3635,7 +3727,7 @@
             providerBody.innerHTML = renderDashboardUsageRows(usageOverview.top_providers, {
                 showProvider: true,
                 colspan: 4,
-                emptyText: "暂无中转站成本数据",
+                emptyText: "暂无提供商成本数据",
             });
         }
         const providerModelBody = document.getElementById("dashboard-usage-provider-model-body");
@@ -3644,7 +3736,7 @@
                 showProvider: true,
                 showModel: true,
                 colspan: 5,
-                emptyText: "暂无中转站模型成本数据",
+                emptyText: "暂无提供商模型成本数据",
             });
         }
         const cacheNote = document.getElementById("dashboard-usage-cache-note");
@@ -3697,12 +3789,12 @@
                     <span>${escapeHtml(formatCircuitStateLabel(provider.circuit_state))}</span>
                 </div>
             </article>
-        `).join("") || '<div class="empty-state">暂无中转站数据</div>';
+        `).join("") || '<div class="empty-state">暂无提供商数据</div>';
 
         const defaultProvider = providers.find((item) => item.id === settings.default_provider_id);
         document.getElementById("dashboard-route-meta").innerHTML = `
             <div><span>模式</span><strong>${escapeHtml(formatRouteModeLabel(settings.route_mode))}</strong></div>
-            <div><span>默认中转</span><strong>${defaultProvider ? escapeHtml(defaultProvider.name) : "-"}</strong></div>
+            <div><span>默认提供商</span><strong>${defaultProvider ? escapeHtml(defaultProvider.name) : "-"}</strong></div>
             <div><span>自动巡检</span><strong>${formatSwitchText(settings.auto_health_check)}</strong></div>
             <div><span>检查间隔</span><strong>${settings.health_check_interval_sec} 秒</strong></div>
             <div><span>模型健康</span><strong>${formatHealthOverview(stats.healthy_model_count, stats.degraded_model_count, stats.unhealthy_model_count)}</strong></div>
@@ -3789,6 +3881,7 @@
         const availabilityRefreshBtn = document.getElementById("provider-availability-refresh-btn");
         const availabilityTableBody = document.getElementById("provider-availability-table-body");
         const searchInput = document.getElementById("provider-search");
+        const providerStatusFilterButtons = Array.from(document.querySelectorAll("[data-provider-status-filter]"));
         const providerModelSearchInput = document.getElementById("provider-model-search");
         const providerModelProviderSelect = document.getElementById("provider-model-provider-id");
         const providerModelEnabledSelect = document.getElementById("provider-model-enabled");
@@ -3836,6 +3929,12 @@
         const providerMaxRpmInput = document.getElementById("provider-max-rpm");
         const providerMaxErrorRateInput = document.getElementById("provider-max-error-rate");
         const providerFirstTokenTimeoutSecInput = document.getElementById("provider-first-token-timeout-sec");
+        const providerTrustLevelInput = document.getElementById("provider-trust-level");
+        const providerContentIntegrityStatusInput = document.getElementById("provider-content-integrity-status");
+        const providerContentIntegrityScoreInput = document.getElementById("provider-content-integrity-score");
+        const providerContentGuardEnabledInput = document.getElementById("provider-content-guard-enabled");
+        const providerLowTrustRouteEnabledInput = document.getElementById("provider-low-trust-route-enabled");
+        const providerBufferStreamForGuardInput = document.getElementById("provider-buffer-stream-for-guard");
         const providerMaintenanceWindowInput = document.getElementById("provider-maintenance-window");
         const providerMaintenanceModeEnabledInput = document.getElementById("provider-maintenance-mode-enabled");
         const providerAutoCircuitBreakEnabledInput = document.getElementById("provider-auto-circuit-break-enabled");
@@ -3874,14 +3973,17 @@
             total: 0,
             totalPages: 1,
         };
+        let providerStatusFilter = "all";
+        const openProviderDetailIds = new Set();
         let discoveredModels = [];
         let catalogModels = [];
         let providerFormSnapshot = "";
         let providerPresetModels = loadProviderPresetModels();
         let providerBatchImportTemplate = "";
         let providerBatchImportPreview = null;
+        let providerGlobalMaxRetries = 2;
 
-        if (!tableBody || !modelTableBody || !modal || !providerForm || !providerModelConfigList) return;
+        if (!tableBody || !modal || !providerForm || !providerModelConfigList) return;
 
         function serializeProviderFormState() {
             return JSON.stringify(
@@ -3961,7 +4063,7 @@
                     <span class="visually-hidden">模型名称</span>
                     <input class="field-input" id="${rowId}-name" data-model-config-field="model_name" value="${escapeHtml(item.model_name)}" placeholder="模型名称，必填" required>
                 </label>
-                <label class="provider-model-mini-switch settings-switch-control" title="控制该模型是否参与当前中转站路由">
+                <label class="provider-model-mini-switch settings-switch-control" title="控制该模型是否参与当前提供商路由">
                     <input type="checkbox" data-model-config-field="enabled" ${item.enabled ? "checked" : ""}>
                     <span class="settings-switch-slider" aria-hidden="true"></span>
                 </label>
@@ -3988,7 +4090,7 @@
                 providerModelConfigList.appendChild(createProviderModelConfigRow(config));
             });
             if (!configs.length) {
-                providerModelConfigList.innerHTML = '<div class="empty-state provider-model-config-empty">当前中转站尚未挂载模型，可从上游发现、预设模型或自定义模型添加。</div>';
+                providerModelConfigList.innerHTML = '<div class="empty-state provider-model-config-empty">当前提供商尚未挂载模型，可从上游发现、预设模型或自定义模型添加。</div>';
             }
             enhanceInteractiveButtons(providerModelConfigList);
         }
@@ -4334,7 +4436,7 @@
                 providerBatchImportPreview = result;
                 renderProviderBatchImportResult(result);
                 importCompleted = true;
-                showToast(`批量导入完成：新增 ${formatNumber(result.created_count || 0)} 个中转站`);
+                showToast(`批量导入完成：新增 ${formatNumber(result.created_count || 0)} 个提供商`);
                 await loadProviders();
             } catch (error) {
                 showToast(error.message, "error");
@@ -4355,13 +4457,13 @@
             syncCatalogCheckAllState();
         });
         checkAllBtn.addEventListener("click", async () => {
-            const features = await openTestFeaturePicker({ title: "选择全部中转站测试功能" });
+            const features = await openTestFeaturePicker({ title: "选择全部提供商测试功能" });
             if (!features) return;
             try {
                 setButtonLoading(checkAllBtn, true);
                 const results = await runHealthCheckStream({
                     url: "/api/providers/test-all-stream",
-                    title: "全部中转站健康检查",
+                    title: "全部提供商健康检查",
                     scope: "all",
                     trigger: checkAllBtn,
                     showModal: true,
@@ -4371,7 +4473,7 @@
                 const successCount = providerResults.filter((item) => item.success).length;
                 setButtonLoading(checkAllBtn, false);
                 setButtonTransientFeedback(checkAllBtn, "success", { successText: "已完成" });
-                showToast(`已完成全部健康检查：${successCount}/${providerResults.length} 个中转站通过`);
+                showToast(`已完成全部健康检查：${successCount}/${providerResults.length} 个提供商通过`);
                 await loadProviders();
             } catch (error) {
                 setButtonLoading(checkAllBtn, false);
@@ -4387,7 +4489,13 @@
             const id = providerIdInput.value;
             const apiKey = providerApiKeyInput.value.trim();
             if (!id && !apiKey) {
-                showToast("新增中转站时必须填写 API Key", "error");
+                showToast("新增提供商时必须填写 API Key", "error");
+                return;
+            }
+            const maxRetries = Number(providerMaxRetriesInput.value || 0);
+            if (maxRetries > providerGlobalMaxRetries) {
+                providerMaxRetriesInput.focus();
+                showToast(`提供商最大重试次数不能大于全局最大重试次数 ${providerGlobalMaxRetries}`, "error");
                 return;
             }
             const modelConfigs = collectProviderModelConfigs();
@@ -4402,13 +4510,19 @@
                 priority: Number(providerPriorityInput.value),
                 weight: Number(providerWeightInput.value),
                 timeout_ms: Number(providerTimeoutMsInput.value),
-                max_retries: Number(providerMaxRetriesInput.value),
+                max_retries: maxRetries,
                 max_active_requests: providerMaxActiveRequestsInput.value === "" ? null : Number(providerMaxActiveRequestsInput.value),
                 max_active_streams: providerMaxActiveStreamsInput.value === "" ? null : Number(providerMaxActiveStreamsInput.value),
                 max_qps: providerMaxQpsInput.value === "" ? null : Number(providerMaxQpsInput.value),
                 max_rpm: providerMaxRpmInput.value === "" ? null : Number(providerMaxRpmInput.value),
                 max_error_rate: providerMaxErrorRateInput.value === "" ? null : Number(providerMaxErrorRateInput.value),
                 first_token_timeout_sec: providerFirstTokenTimeoutSecInput.value === "" ? null : Number(providerFirstTokenTimeoutSecInput.value),
+                trust_level: providerTrustLevelInput.value || "standard",
+                content_integrity_status: providerContentIntegrityStatusInput.value || "unknown",
+                content_integrity_score: Number(providerContentIntegrityScoreInput.value || 80),
+                content_guard_enabled: providerContentGuardEnabledInput.checked,
+                low_trust_route_enabled: providerLowTrustRouteEnabledInput.checked,
+                buffer_stream_for_guard: providerBufferStreamForGuardInput.checked,
                 maintenance_window: providerMaintenanceWindowInput.value.trim() || null,
                 maintenance_mode_enabled: providerMaintenanceModeEnabledInput.checked,
                 auto_circuit_break_enabled: providerAutoCircuitBreakEnabledInput.checked,
@@ -4427,10 +4541,10 @@
                 setButtonLoading(submitBtn, true);
                 if (id) {
                     await api.put(`/api/providers/${id}`, payload);
-                    showToast("中转站已更新");
+                    showToast("提供商已更新");
                 } else {
                     await api.post("/api/providers", payload);
-                    showToast("中转站已创建");
+                    showToast("提供商已创建");
                 }
                 closeProviderModal({ force: true, reason: "submit" });
                 await loadProviders();
@@ -4452,7 +4566,7 @@
                     api_key: credentialApiKeyInput.value.trim(),
                     credential_hint: credentialHintInput.value.trim() || null,
                 });
-                showToast("中转站凭据已轮换");
+                showToast("提供商凭据已轮换");
                 closeCredentialModal();
                 await loadProviders();
             } catch (error) {
@@ -4464,7 +4578,15 @@
 
         searchInput.addEventListener("input", () => {
             renderProviders(searchInput.value);
-            renderProviderModels(searchInput.value);
+        });
+        providerStatusFilterButtons.forEach((button) => {
+            button.addEventListener("click", () => {
+                providerStatusFilter = button.dataset.providerStatusFilter || "all";
+                providerStatusFilterButtons.forEach((item) => {
+                    item.classList.toggle("is-active", item === button);
+                });
+                renderProviders(searchInput.value);
+            });
         });
         providerForm.addEventListener("input", updateProviderFormDirtyState);
         providerForm.addEventListener("change", updateProviderFormDirtyState);
@@ -4519,9 +4641,11 @@
             providers = Array.isArray(overview.providers) ? overview.providers : [];
             renderProviderTelemetry(overview.summary || {});
             renderProviders(searchInput.value);
-            renderProviderModelFilterOptions();
             populateAvailabilityProviderOptions();
-            await loadProviderModels({ silent: true });
+            if (modelTableBody) {
+                renderProviderModelFilterOptions();
+                await loadProviderModels({ silent: true });
+            }
             await loadAvailability({ manual: false });
             syncOpenModelsDetailModal();
         }
@@ -4545,7 +4669,7 @@
                 providersSummaryCard.innerHTML = `
                     <div class="cockpit-aside-label">渠道脉冲</div>
                     <div class="cockpit-aside-value">${enabledProviderCount}</div>
-                    <div class="cockpit-aside-copy">当前已启用中转站</div>
+                    <div class="cockpit-aside-copy">当前已启用提供商</div>
                     <div class="cockpit-health-bar"><span style="width:${healthyRatio}%"></span></div>
                     <div class="cockpit-aside-meta">
                         <span>挂载 ${Number(summary.model_count || 0)}</span>
@@ -4562,10 +4686,83 @@
             `;
         }
 
+        function renderProviderIdentity(provider) {
+            return `
+                <div class="provider-object-cell">
+                    <strong>${escapeHtml(provider.name)}</strong>
+                    <span>${escapeHtml(provider.group_name || "未分组")} · ${escapeHtml(provider.region_tag || "未标记地区")}</span>
+                    <div class="provider-key-row">
+                        <span class="table-muted">API Key ${escapeHtml(provider.api_key_masked || "-")}</span>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderProviderStatusSummary(provider) {
+            return `
+                <div class="provider-status-summary">
+                    ${providerAvailabilityBadge(provider.health_status)}
+                    ${renderTrustStatusWithHint(
+                        provider.computed_trust_status || provider.trust_status || "unknown",
+                        provider.computed_trust_status_label || provider.trust_status_label,
+                        provider.computed_trust_status_reason || provider.trust_status_reason,
+                        "提供商可信属性说明"
+                    )}
+                    ${statusBadge(provider.circuit_state)}
+                    ${provider.maintenance_mode_enabled ? '<span class="status-badge status-degraded">维护中</span>' : ""}
+                </div>
+            `;
+        }
+
+        function renderProviderCompactCapacity(provider) {
+            const activeRequests = provider.active_requests ?? 0;
+            const currentQps = provider.current_qps ?? 0;
+            const currentRpm = provider.current_rpm ?? 0;
+            return `
+                <div class="provider-compact-metrics">
+                    <span><strong>${formatNumber(activeRequests)}</strong> / ${formatCapacityLimit(provider.max_active_requests)} 请求</span>
+                    <span><strong>${formatNumber(currentQps)}</strong> / ${formatCapacityLimit(provider.max_qps)} QPS</span>
+                    <span><strong>${formatNumber(currentRpm)}</strong> / ${formatCapacityLimit(provider.max_rpm)} RPM</span>
+                </div>
+            `;
+        }
+
+        function renderProviderCompactQuality(provider) {
+            return `
+                <div class="provider-compact-metrics">
+                    <span>成功率 <strong>${escapeHtml(formatPercent(provider.success_rate))}</strong></span>
+                    <span>首 Token <strong>${escapeHtml(formatLatencyMs(provider.avg_first_token_latency_ms))}</strong></span>
+                    <span>样本 <strong>${formatNumber(provider.recent_request_count || 0)}</strong></span>
+                </div>
+            `;
+        }
+
+        function renderProviderPriority(provider) {
+            return `
+                <div class="provider-priority-cell">
+                    <span>优先 ${formatNumber(provider.priority)}</span>
+                    <span>权重 ${formatNumber(provider.weight)}</span>
+                </div>
+            `;
+        }
+
         function renderProviderStrategy(provider) {
             const maintenanceText = provider.maintenance_mode_enabled
                 ? `维护中 · ${provider.maintenance_window || "未填写维护窗口"}`
                 : (provider.maintenance_window || "未设置维护窗口");
+            const trustText = [
+                `信任 ${provider.trust_level_label || formatProviderTrustLevelLabel(provider.trust_level)}`,
+                `完整性 ${provider.content_integrity_status_label || formatContentIntegrityStatusLabel(provider.content_integrity_status)}`,
+                `评分 ${provider.content_integrity_score ?? "-"}`,
+            ].join(" · ");
+            const guardText = [
+                `检测 ${formatSwitchText(provider.content_guard_enabled)}`,
+                `低信任路由 ${formatSwitchText(provider.low_trust_route_enabled)}`,
+                `流式缓冲 ${formatSwitchText(provider.buffer_stream_for_guard)}`,
+            ].join(" · ");
+            const violationText = Number(provider.content_violation_count || 0) > 0
+                ? `命中 ${formatNumber(provider.content_violation_count)} 次 · 最近 ${formatDate(provider.last_content_violation_at)}`
+                : "暂无内容风险命中";
             const circuitText = [
                 `自动摘除 ${formatSwitchText(provider.auto_circuit_break_enabled)}`,
                 `自动恢复 ${formatSwitchText(provider.auto_recover_enabled)}`,
@@ -4579,9 +4776,69 @@
                 : "凭据未记录轮换";
             return `
                 <strong>${escapeHtml(maintenanceText)}</strong>
+                <div class="table-muted">${escapeHtml(trustText)}</div>
+                <div class="table-muted">${escapeHtml(guardText)}</div>
+                <div class="table-muted">${escapeHtml(violationText)}</div>
                 <div class="table-muted">${escapeHtml(circuitText)}</div>
                 <div class="table-muted">${escapeHtml(overrideText || credentialText)}</div>
                 ${provider.credential_hint ? `<div class="table-muted">${escapeHtml(provider.credential_hint)}</div>` : ""}
+            `;
+        }
+
+        function renderProviderDetailItem(label, content) {
+            return `
+                <div class="provider-detail-item">
+                    <span>${escapeHtml(label)}</span>
+                    <div class="provider-detail-value">${content}</div>
+                </div>
+            `;
+        }
+
+        function renderProviderDetailPanel(provider) {
+            const maintenanceText = provider.maintenance_mode_enabled
+                ? `维护中 · ${provider.maintenance_window || "未填写维护窗口"}`
+                : (provider.maintenance_window || "未设置维护窗口");
+            const trustText = [
+                `信任 ${provider.trust_level_label || formatProviderTrustLevelLabel(provider.trust_level)}`,
+                `完整性 ${provider.content_integrity_status_label || formatContentIntegrityStatusLabel(provider.content_integrity_status)}`,
+                `评分 ${provider.content_integrity_score ?? "-"}`,
+            ].join(" · ");
+            const guardText = [
+                `检测 ${formatSwitchText(provider.content_guard_enabled)}`,
+                `低信任路由 ${formatSwitchText(provider.low_trust_route_enabled)}`,
+                `流式缓冲 ${formatSwitchText(provider.buffer_stream_for_guard)}`,
+            ].join(" · ");
+            const credentialText = provider.credential_rotated_at
+                ? `凭据轮换 ${formatDate(provider.credential_rotated_at)}`
+                : "凭据未记录轮换";
+            return `
+                <div class="provider-detail-panel">
+                    <div class="provider-detail-grid">
+                        ${renderProviderDetailItem("Base URL", escapeHtml(provider.base_url || "-"))}
+                        ${renderProviderDetailItem("模型能力", renderProviderModelHealth(provider.model_configs, provider.id))}
+                        ${renderProviderDetailItem("维护策略", escapeHtml(maintenanceText))}
+                        ${renderProviderDetailItem("信任与完整性", escapeHtml(trustText))}
+                        ${renderProviderDetailItem("检测策略", escapeHtml(guardText))}
+                        ${renderProviderDetailItem("容量明细", renderProviderCapacity(provider))}
+                        ${renderProviderDetailItem("质量明细", renderQualitySummary(provider))}
+                        ${renderProviderDetailItem("凭据信息", escapeHtml(provider.credential_hint || credentialText))}
+                    </div>
+                    ${provider.remark ? `<div class="provider-detail-note">${escapeHtml(provider.remark)}</div>` : ""}
+                </div>
+            `;
+        }
+
+        function renderProviderActionMenu(provider) {
+            return `
+                <details class="provider-action-menu">
+                    <summary>更多</summary>
+                    <div class="provider-action-menu-panel">
+                        <button class="table-action-btn" data-action="rotate-credential" data-id="${provider.id}" type="button">轮换凭据</button>
+                        <button class="table-action-btn" data-action="default" data-id="${provider.id}" type="button">设为默认</button>
+                        <button class="table-action-btn" data-action="toggle" data-id="${provider.id}" type="button">${provider.enabled ? "禁用" : "启用"}</button>
+                        <button class="table-action-btn danger" data-action="delete" data-id="${provider.id}" type="button">删除</button>
+                    </div>
+                </details>
             `;
         }
 
@@ -4608,10 +4865,16 @@
             const modelConfigs = Array.isArray(provider?.model_configs) ? provider.model_configs : [];
             const enabledCount = modelConfigs.filter((item) => item.enabled).length;
             const healthyCount = modelConfigs.filter((item) => item.health_status === "healthy").length;
+            const recentContentEvents = Array.isArray(provider?.recent_content_guard_events) ? provider.recent_content_guard_events : [];
             const rows = modelConfigs.map((item) => `
                 <tr>
                     <td class="provider-model-name-cell">
                         <strong class="provider-model-detail-name">${escapeHtml(item.model_name)}</strong>
+                        <div class="table-muted">可信度 ${renderTrustStatusWithHint(item.trust_status || "unknown", item.trust_status_label, item.trust_status_reason, "可信度异常原因")}</div>
+                        <div class="table-muted">上次通过 ${escapeHtml(formatDate(item.content_probe_last_passed_at))}</div>
+                        <div class="table-muted">上次失败 ${escapeHtml(formatDate(item.content_probe_last_failed_at))}</div>
+                        <div class="table-muted">失败次数 ${formatNumber(item.content_probe_failure_count || 0)}</div>
+                        ${renderContentProbeSummary(item.content_probe_results)}
                     </td>
                     <td class="provider-model-status-cell">
                         <div class="provider-model-detail-badges">
@@ -4637,7 +4900,7 @@
                 <div class="provider-model-detail-shell">
                     <div class="provider-model-detail-provider">
                         <div>
-                            <span>中转站</span>
+                            <span>提供商</span>
                             <strong>${escapeHtml(provider.name)}</strong>
                         </div>
                         <div>
@@ -4651,12 +4914,13 @@
                         <div><span>状态正常</span><strong>${formatNumber(healthyCount)}</strong></div>
                         <div><span>模型能力</span><strong>${MODEL_MANAGEMENT_CAPABILITY_TEXT}</strong></div>
                     </div>
+                    ${renderRecentContentGuardEvents(recentContentEvents)}
                     <div class="table-shell provider-model-detail-table-shell">
                         <table class="data-table provider-model-detail-table">
                             <thead>
                                 <tr>
                                     <th>模型</th>
-                                    <th>状态</th>
+                                    <th>健康</th>
                                     <th>端点协议</th>
                                     <th>能力</th>
                                     <th>倍率 / 价格</th>
@@ -4665,9 +4929,71 @@
                                 </tr>
                             </thead>
                             <tbody>
-                                ${rows || '<tr><td colspan="7"><div class="empty-state">当前中转站尚未挂载模型。</div></td></tr>'}
+                                ${rows || '<tr><td colspan="7"><div class="empty-state">当前提供商尚未挂载模型。</div></td></tr>'}
                             </tbody>
                         </table>
+                    </div>
+                </div>
+            `;
+        }
+
+        function formatContentProbePhaseLabel(value) {
+            return formatMappedLabel(CONTENT_PROBE_PHASE_LABELS, value, value || "探针");
+        }
+
+        function normalizeContentProbeStatusClass(item = {}) {
+            if (item.success === true || item.content_guard_result === "pass") return "status-healthy";
+            if (item.content_guard_result === "block") return "status-unhealthy";
+            if (item.content_guard_result === "review") return "status-degraded";
+            return "status-unknown";
+        }
+
+        function renderContentProbeSummary(results) {
+            const items = Array.isArray(results) ? results : [];
+            if (!items.length) return '<div class="content-probe-chip-list"><span class="content-probe-empty">L3 探针未记录</span></div>';
+            return `
+                <div class="content-probe-chip-list">
+                    ${items.slice(0, 5).map((item) => {
+                        const label = formatContentProbePhaseLabel(item.phase_key);
+                        const statusLabel = item.content_guard_result
+                            ? formatContentGuardResultLabel(item.content_guard_result)
+                            : (item.success ? "通过" : "失败");
+                        const reason = item.content_guard_reason || item.message || item.support_label || "";
+                        return `
+                            <span class="content-probe-chip ${normalizeContentProbeStatusClass(item)}" title="${escapeHtml(reason)}">
+                                <strong>${escapeHtml(label)}</strong>
+                                <span>${escapeHtml(statusLabel)}</span>
+                            </span>
+                        `;
+                    }).join("")}
+                </div>
+            `;
+        }
+
+        function renderRecentContentGuardEvents(events = []) {
+            if (!events.length) {
+                return '<div class="content-guard-evidence content-guard-evidence-empty">最近命中规则：暂无记录</div>';
+            }
+            return `
+                <div class="content-guard-evidence">
+                    <div class="content-guard-evidence-title">最近命中规则</div>
+                    <div class="content-guard-evidence-list">
+                        ${events.slice(0, 3).map((item) => {
+                            const summary = [
+                                formatContentGuardResultLabel(item.content_guard_result),
+                                `风险 ${formatContentGuardRiskLabel(item.content_guard_risk_level)}`,
+                                item.content_guard_action ? `动作 ${item.content_guard_action}` : null,
+                            ].filter(Boolean).join(" · ");
+                            const reason = item.content_guard_reason || item.content_guard_categories_json || "未记录命中原因";
+                            const excerpt = item.content_guard_excerpt ? ` · ${item.content_guard_excerpt}` : "";
+                            return `
+                                <div class="content-guard-evidence-item">
+                                    <strong>${escapeHtml(summary)}</strong>
+                                    <span>${escapeHtml(formatDate(item.created_at))} · ${escapeHtml(item.model_name || "-")}</span>
+                                    <p>${escapeHtml(`${reason}${excerpt}`)}</p>
+                                </div>
+                            `;
+                        }).join("")}
                     </div>
                 </div>
             `;
@@ -4685,6 +5011,12 @@
                     <td>${item.avg_latency_ms ?? "-"} ms</td>
                 </tr>
             `).join("") : '<tr><td colspan="6"><div class="empty-state">当前时间窗口内暂无历史请求。</div></td></tr>';
+        }
+
+        function matchesProviderStatusFilter(provider) {
+            if (providerStatusFilter === "all") return true;
+            if (providerStatusFilter === "circuit_open") return provider.circuit_state === "open";
+            return normalizeProviderAvailability(provider.health_status) === providerStatusFilter;
         }
 
         function getCurrentConfiguredModelNames() {
@@ -4773,7 +5105,7 @@
             if (catalogModelMeta) {
                 catalogModelMeta.textContent = catalogModels.length
                     ? `模型库共 ${formatNumber(catalogModels.length)} 个，当前可添加 ${formatNumber(availableModels.length)} 个。`
-                    : "仅展示当前中转站尚未挂载的模型。";
+                    : "仅展示当前提供商尚未挂载的模型。";
             }
             catalogModelsBody.innerHTML = availableModels.length ? availableModels.map((item) => `
                 <tr>
@@ -4789,7 +5121,7 @@
                     </td>
                     <td>${item.enabled ? "模型库启用" : "模型库停用"}</td>
                 </tr>
-            `).join("") : '<tr><td colspan="5"><div class="empty-state">模型库中暂无当前中转站未挂载的模型。</div></td></tr>';
+            `).join("") : '<tr><td colspan="5"><div class="empty-state">模型库中暂无当前提供商未挂载的模型。</div></td></tr>';
             syncCatalogCheckAllState();
         }
 
@@ -4859,7 +5191,7 @@
             });
             renderDiscoveredModels(discoveredModels);
             if (addedCount > 0) {
-                showToast(`已添加 ${formatNumber(addedCount)} 个模型到当前中转站挂载列表`);
+                showToast(`已添加 ${formatNumber(addedCount)} 个模型到当前提供商挂载列表`);
             }
         }
 
@@ -4920,7 +5252,7 @@
 
         function populateAvailabilityProviderOptions(selectedProviderId = availabilityProviderSelect?.value || "") {
             if (!availabilityProviderSelect) return;
-            availabilityProviderSelect.innerHTML = '<option value="">请选择一个中转站</option>' + providers.map((provider) => `
+            availabilityProviderSelect.innerHTML = '<option value="">请选择一个提供商</option>' + providers.map((provider) => `
                 <option value="${provider.id}" ${String(provider.id) === String(selectedProviderId) ? "selected" : ""}>
                     ${escapeHtml(provider.name)}${provider.group_name ? ` · ${escapeHtml(provider.group_name)}` : ""}
                 </option>
@@ -4932,7 +5264,7 @@
 
         function renderProviderModelFilterOptions(selectedProviderId = providerModelProviderSelect?.value || "") {
             if (!providerModelProviderSelect) return;
-            providerModelProviderSelect.innerHTML = '<option value="">全部中转站</option>' + providers.map((provider) => `
+            providerModelProviderSelect.innerHTML = '<option value="">全部提供商</option>' + providers.map((provider) => `
                 <option value="${provider.id}" ${String(provider.id) === String(selectedProviderId) ? "selected" : ""}>
                     ${escapeHtml(provider.name)}${provider.group_name ? ` · ${escapeHtml(provider.group_name)}` : ""}
                 </option>
@@ -4968,6 +5300,7 @@
         }
 
         async function loadProviderModels({ silent = false } = {}) {
+            if (!modelTableBody) return;
             const result = await api.get(`/api/providers/models?${buildProviderModelListParams().toString()}`);
             providerModelItems = Array.isArray(result.items) ? result.items : [];
             providerModelState.total = Number(result.total || 0);
@@ -5003,50 +5336,49 @@
         function renderProviders(keyword = "") {
             const query = keyword.trim().toLowerCase();
             const filtered = providers.filter((provider) => {
+                if (!matchesProviderStatusFilter(provider)) return false;
                 if (!query) return true;
+                const modelNames = Array.isArray(provider.models)
+                    ? provider.models
+                    : (Array.isArray(provider.model_configs) ? provider.model_configs.map((item) => item.model_name) : []);
                 const text = [
                     provider.name,
                     provider.group_name || "",
                     provider.region_tag || "",
-            provider.base_url,
-            provider.models.join(", "),
+                    provider.base_url,
+                    modelNames.join(", "),
                     provider.maintenance_window || "",
                     provider.credential_hint || "",
                     provider.remark || "",
                 ].join(" ").toLowerCase();
                 return text.includes(query);
             });
-            tableBody.innerHTML = filtered.map((provider) => `
-                <tr>
-                    <td>
-                        <strong>${escapeHtml(provider.name)}</strong>
-                        <div class="provider-key-row">
-                            <span class="table-muted">API Key ${escapeHtml(provider.api_key_masked)}</span>
-                            <button class="table-action-btn provider-key-copy-btn" type="button" data-copy-text="${escapeHtml(provider.api_key || "")}" ${provider.api_key ? "" : "disabled"}>复制</button>
-                        </div>
-                    </td>
-                    <td>${renderProviderScope(provider)}</td>
-                    <td>${escapeHtml(provider.base_url)}</td>
+            tableBody.innerHTML = filtered.map((provider) => {
+                const isExpanded = openProviderDetailIds.has(Number(provider.id));
+                return `
+                <tr class="provider-main-row ${isExpanded ? "is-expanded" : ""}">
+                    <td>${renderProviderIdentity(provider)}</td>
+                    <td>${renderProviderStatusSummary(provider)}</td>
                     <td>${renderProviderModelHealth(provider.model_configs, provider.id)}</td>
-                    <td>${renderProviderAvailability(provider)}</td>
-                    <td>${statusBadge(provider.circuit_state)}</td>
-                    <td>${renderProviderStrategy(provider)}</td>
-                    <td>${renderProviderCapacity(provider)}</td>
-                    <td>${renderQualitySummary(provider)}</td>
-                    <td>${provider.priority}</td>
-                    <td>${provider.weight}</td>
+                    <td>${renderProviderCompactCapacity(provider)}</td>
+                    <td>${renderProviderCompactQuality(provider)}</td>
+                    <td>${renderProviderPriority(provider)}</td>
                     <td>
-                        <div class="table-actions">
-                            <button class="table-action-btn" data-action="edit" data-id="${provider.id}">编辑</button>
-                            <button class="table-action-btn" data-action="test" data-id="${provider.id}">测试</button>
-                            <button class="table-action-btn" data-action="rotate-credential" data-id="${provider.id}">轮换凭据</button>
-                            <button class="table-action-btn" data-action="default" data-id="${provider.id}">设为默认</button>
-                            <button class="table-action-btn" data-action="toggle" data-id="${provider.id}">${provider.enabled ? "禁用" : "启用"}</button>
-                            <button class="table-action-btn" data-action="delete" data-id="${provider.id}">删除</button>
+                        <div class="table-actions provider-row-actions">
+                            <button class="table-action-btn" data-action="edit" data-id="${provider.id}" type="button">编辑</button>
+                            <button class="table-action-btn" data-action="test" data-id="${provider.id}" type="button">测试</button>
+                            <button class="table-action-btn" data-action="toggle-detail" data-id="${provider.id}" type="button" aria-expanded="${isExpanded ? "true" : "false"}">${isExpanded ? "收起" : "详情"}</button>
+                            ${renderProviderActionMenu(provider)}
                         </div>
                     </td>
                 </tr>
-            `).join("") || '<tr><td colspan="12"><div class="empty-state">没有匹配的中转站</div></td></tr>';
+                ${isExpanded ? `
+                <tr class="provider-detail-row">
+                    <td colspan="7">${renderProviderDetailPanel(provider)}</td>
+                </tr>
+                ` : ""}
+            `;
+            }).join("") || '<tr><td colspan="7"><div class="empty-state">没有匹配的提供商</div></td></tr>';
             enhanceInteractiveButtons(tableBody);
         }
 
@@ -5085,7 +5417,7 @@
                 }
             });
             renderProviders(searchInput.value);
-            renderProviderModels(providerModelItems);
+            if (modelTableBody) renderProviderModels(providerModelItems);
             syncOpenModelsDetailModal();
         }
 
@@ -5094,7 +5426,7 @@
             if (!modelsDetailModalController?.isOpen?.() || !Number.isFinite(providerId)) return;
             const provider = providers.find((item) => item.id === providerId);
             if (!provider || !modelsDetailModalTitle || !modelsDetailModalContent) return;
-            modelsDetailModalTitle.textContent = `中转站模型 · ${provider.name}`;
+            modelsDetailModalTitle.textContent = `提供商模型 · ${provider.name}`;
             modelsDetailModalContent.innerHTML = renderProviderModelsDetail(provider);
             enhanceInteractiveButtons(modelsDetailModalContent);
         }
@@ -5214,13 +5546,22 @@
                     openModelsDetailModal(provider, button);
                     return;
                 }
+                if (action === "toggle-detail") {
+                    if (openProviderDetailIds.has(id)) {
+                        openProviderDetailIds.delete(id);
+                    } else {
+                        openProviderDetailIds.add(id);
+                    }
+                    renderProviders(searchInput.value);
+                    return;
+                }
                 if (action === "test") {
-                    const features = await openTestFeaturePicker({ title: `选择中转站测试功能 · ${provider.name}` });
+                    const features = await openTestFeaturePicker({ title: `选择提供商测试功能 · ${provider.name}` });
                     if (!features) return;
                     setButtonLoading(button, true);
                     const result = await runHealthCheckStream({
                         url: `/api/providers/${id}/test-stream`,
-                        title: `中转站测试结果 · ${provider.name}`,
+                        title: `提供商测试结果 · ${provider.name}`,
                         scope: "provider",
                         trigger: button,
                         showModal: true,
@@ -5251,7 +5592,7 @@
                     if (!window.confirm(`确认删除 ${provider.name} 吗？`)) return;
                     setButtonLoading(button, true);
                     await api.delete(`/api/providers/${id}`);
-                    showToast("已删除中转站");
+                    showToast("已删除提供商");
                     await loadProviders();
                     return;
                 }
@@ -5259,7 +5600,7 @@
                     setButtonLoading(button, true);
                     const settings = await api.get("/api/settings");
                     await api.put("/api/settings", { ...settings, default_provider_id: id });
-                    showToast(`默认中转已切换为 ${provider.name}`);
+                    showToast(`默认提供商已切换为 ${provider.name}`);
                     await loadProviders();
                 }
             } catch (error) {
@@ -5272,7 +5613,7 @@
             }
         });
 
-        modelTableBody.addEventListener("click", async (event) => {
+        modelTableBody?.addEventListener("click", async (event) => {
             const button = event.target.closest("button[data-action]");
             if (!button) return;
             const action = button.dataset.action;
@@ -5357,24 +5698,31 @@
         });
 
         function openProviderModal(provider, trigger = document.activeElement) {
-            document.getElementById("provider-modal-title").textContent = provider ? "编辑中转站" : "新增中转站";
+            document.getElementById("provider-modal-title").textContent = provider ? "编辑提供商" : "新增提供商";
             providerIdInput.value = provider?.id ?? "";
             providerNameInput.value = provider?.name ?? "";
             providerBaseUrlInput.value = provider?.base_url ?? "";
-            providerApiKeyInput.value = provider?.api_key ?? "";
+            providerApiKeyInput.value = "";
             providerTypeInput.value = provider?.provider_type ?? "openai_compatible";
             providerGroupNameInput.value = provider?.group_name ?? "";
             providerRegionTagInput.value = provider?.region_tag ?? "";
             providerPriorityInput.value = provider?.priority ?? 100;
             providerWeightInput.value = provider?.weight ?? 100;
             providerTimeoutMsInput.value = provider?.timeout_ms ?? 30000;
-            providerMaxRetriesInput.value = provider?.max_retries ?? 1;
+            providerMaxRetriesInput.max = String(providerGlobalMaxRetries);
+            providerMaxRetriesInput.value = provider?.max_retries ?? Math.min(2, providerGlobalMaxRetries);
             providerMaxActiveRequestsInput.value = provider?.max_active_requests ?? 20;
             providerMaxActiveStreamsInput.value = provider?.max_active_streams ?? 10;
             providerMaxQpsInput.value = provider?.max_qps ?? 20;
             providerMaxRpmInput.value = provider?.max_rpm ?? 20;
             providerMaxErrorRateInput.value = provider?.max_error_rate ?? 80;
             providerFirstTokenTimeoutSecInput.value = provider?.first_token_timeout_sec ?? 60;
+            providerTrustLevelInput.value = provider?.trust_level ?? "standard";
+            providerContentIntegrityStatusInput.value = provider?.content_integrity_status ?? "unknown";
+            providerContentIntegrityScoreInput.value = provider?.content_integrity_score ?? 80;
+            providerContentGuardEnabledInput.checked = provider?.content_guard_enabled ?? true;
+            providerLowTrustRouteEnabledInput.checked = provider?.low_trust_route_enabled ?? false;
+            providerBufferStreamForGuardInput.checked = provider?.buffer_stream_for_guard ?? true;
             providerMaintenanceWindowInput.value = provider?.maintenance_window ?? "";
             providerMaintenanceModeEnabledInput.checked = provider?.maintenance_mode_enabled ?? false;
             providerAutoCircuitBreakEnabledInput.checked = provider?.auto_circuit_break_enabled ?? true;
@@ -5444,7 +5792,7 @@
                         <thead>
                             <tr>
                                 <th>序号</th>
-                                <th>中转站</th>
+                                <th>提供商</th>
                                 <th>模型数</th>
                                 <th>状态</th>
                                 <th>校验结果</th>
@@ -5529,7 +5877,7 @@
         function openModelsDetailModal(provider, trigger = document.activeElement) {
             if (!modelsDetailModal || !modelsDetailModalTitle || !modelsDetailModalContent) return;
             modelsDetailModal.dataset.providerId = String(provider.id);
-            modelsDetailModalTitle.textContent = `中转站模型 · ${provider.name}`;
+            modelsDetailModalTitle.textContent = `提供商模型 · ${provider.name}`;
             modelsDetailModalContent.innerHTML = renderProviderModelsDetail(provider);
             enhanceInteractiveButtons(modelsDetailModalContent);
             modelsDetailModalController.open(trigger);
@@ -5567,7 +5915,287 @@
         }, 30000);
         window.addEventListener("beforeunload", () => window.clearInterval(providerPageTimer), { once: true });
 
+        try {
+            const settings = await api.get("/api/settings");
+            providerGlobalMaxRetries = Math.max(0, Number(settings.global_max_retries ?? 2));
+        } catch (error) {
+            providerGlobalMaxRetries = 2;
+        }
         await loadProviders();
+    }
+
+    async function initProviderModelsPage() {
+        const modelTableBody = document.getElementById("provider-model-table-body");
+        const providerModelSearchInput = document.getElementById("provider-model-search");
+        const providerModelProviderSelect = document.getElementById("provider-model-provider-id");
+        const providerModelEnabledSelect = document.getElementById("provider-model-enabled");
+        const providerModelHealthSelect = document.getElementById("provider-model-health");
+        const providerModelTrustSelect = document.getElementById("provider-model-trust");
+        const providerModelPageSizeSelect = document.getElementById("provider-model-page-size");
+        const providerModelPageMeta = document.getElementById("provider-model-page-meta");
+        const providerModelPrevPageBtn = document.getElementById("provider-model-prev-page-btn");
+        const providerModelNextPageBtn = document.getElementById("provider-model-next-page-btn");
+        if (!modelTableBody) return;
+
+        const state = {
+            providers: [],
+            items: [],
+            page: 1,
+            pageSize: 20,
+            total: 0,
+            totalPages: 1,
+        };
+
+        function normalizeProviderModelProtocolType(configOrValue = "responses") {
+            if (typeof configOrValue === "object" && configOrValue !== null) {
+                const rawProtocolType = String(configOrValue.protocol_type || "").trim();
+                if (["both", "chat_completions", "responses"].includes(rawProtocolType)) return rawProtocolType;
+                const supportsChat = configOrValue.supports_chat_completions === true;
+                const supportsResponses = configOrValue.supports_responses !== false;
+                if (supportsChat && supportsResponses) return "both";
+                if (supportsChat) return "chat_completions";
+                return "responses";
+            }
+            const normalized = String(configOrValue || "responses").trim();
+            return ["both", "chat_completions", "responses"].includes(normalized) ? normalized : "responses";
+        }
+
+        function formatProviderModelProtocolLabel(configOrValue) {
+            const protocolType = normalizeProviderModelProtocolType(configOrValue);
+            if (typeof configOrValue === "object" && configOrValue?.protocol_label) {
+                return configOrValue.protocol_label;
+            }
+            if (protocolType === "chat_completions") return "Chat Completions API";
+            if (protocolType === "both") return "双协议";
+            return "Responses API";
+        }
+
+        function renderProviderModelFilterOptions(selectedProviderId = providerModelProviderSelect?.value || "") {
+            if (!providerModelProviderSelect) return;
+            providerModelProviderSelect.innerHTML = '<option value="">全部提供商</option>' + state.providers.map((provider) => `
+                <option value="${provider.id}" ${String(provider.id) === String(selectedProviderId) ? "selected" : ""}>
+                    ${escapeHtml(provider.name)}${provider.group_name ? ` · ${escapeHtml(provider.group_name)}` : ""}
+                </option>
+            `).join("");
+        }
+
+        function buildProviderModelListParams() {
+            const params = new URLSearchParams({
+                page: String(state.page),
+                page_size: String(state.pageSize),
+            });
+            const keyword = providerModelSearchInput?.value.trim();
+            if (keyword) params.set("keyword", keyword);
+            if (providerModelProviderSelect?.value) params.set("provider_id", providerModelProviderSelect.value);
+            if (providerModelEnabledSelect?.value) params.set("enabled", providerModelEnabledSelect.value);
+            if (providerModelHealthSelect?.value) params.set("health_status", providerModelHealthSelect.value);
+            if (providerModelTrustSelect?.value) params.set("trust_status", providerModelTrustSelect.value);
+            return params;
+        }
+
+        function renderProviderModelPagination() {
+            state.totalPages = Math.max(1, Number(state.totalPages || Math.ceil((state.total || 0) / state.pageSize) || 1));
+            state.page = Math.min(Math.max(1, Number(state.page || 1)), state.totalPages);
+            if (providerModelPageMeta) {
+                providerModelPageMeta.textContent = `第 ${formatNumber(state.page)} 页，共 ${formatNumber(state.totalPages)} 页 · 共 ${formatNumber(state.total || 0)} 条`;
+            }
+            if (providerModelPrevPageBtn) providerModelPrevPageBtn.disabled = state.page <= 1;
+            if (providerModelNextPageBtn) providerModelNextPageBtn.disabled = state.page >= state.totalPages;
+        }
+
+        function getProviderModelContext(providerId, modelId) {
+            const item = state.items.find((entry) => entry.provider?.id === providerId && entry.model?.id === modelId);
+            return {
+                owner: item?.provider,
+                modelConfig: item?.model,
+            };
+        }
+
+        function renderProviderModels(items = []) {
+            modelTableBody.innerHTML = items.map((item) => {
+                const provider = item.provider || {};
+                const model = item.model || {};
+                return `
+                <tr>
+                    <td>
+                        <strong>${escapeHtml(provider.name)}</strong>
+                        <div class="table-muted">${escapeHtml(provider.group_name || provider.region_tag || "未分组")}</div>
+                        <div class="table-muted">${renderTrustStatusWithHint(provider.trust_status || "unknown", provider.trust_status_label, provider.trust_status_reason, "提供商可信属性说明")}</div>
+                    </td>
+                    <td class="provider-model-name-cell">
+                        <strong>${escapeHtml(model.model_name)}</strong>
+                    </td>
+                    <td class="provider-model-status-cell">${renderStatusWithErrorHint(model.health_status, model.last_error)}</td>
+                    <td>
+                        <div class="provider-model-trust-stack">
+                            ${renderTrustStatusWithHint(model.trust_status || "unknown", model.trust_status_label, model.trust_status_reason, "可信度异常原因")}
+                            <select class="field-input" data-model-field="content_integrity_status" data-provider-id="${provider.id}" data-model-id="${model.id}" aria-label="可信度">
+                                <option value="passed" ${model.content_integrity_status === "passed" ? "selected" : ""}>可信</option>
+                                <option value="degraded" ${model.content_integrity_status === "degraded" ? "selected" : ""}>异常</option>
+                                <option value="unknown" ${model.content_integrity_status === "unknown" ? "selected" : ""}>未检测</option>
+                            </select>
+                        </div>
+                    </td>
+                    <td>
+                        <select class="field-input" data-model-field="protocol_type" data-provider-id="${provider.id}" data-model-id="${model.id}" aria-label="端点协议">
+                            <option value="responses" ${normalizeProviderModelProtocolType(model) === "responses" ? "selected" : ""}>Responses</option>
+                            <option value="chat_completions" ${normalizeProviderModelProtocolType(model) === "chat_completions" ? "selected" : ""}>Chat</option>
+                            <option value="both" ${normalizeProviderModelProtocolType(model) === "both" ? "selected" : ""}>双协议</option>
+                        </select>
+                        <div class="table-muted">${escapeHtml(formatProviderModelProtocolLabel(model))}</div>
+                    </td>
+                    <td>${formatModelCapabilitySummary(model)}</td>
+                    <td>
+                        <input class="field-input" type="number" min="0.0001" step="0.0001" value="${model.price_multiplier ?? 1}" placeholder="渠道倍率" data-model-field="price_multiplier" data-provider-id="${provider.id}" data-model-id="${model.id}">
+                        <div class="table-muted">输入 ${escapeHtml(formatPrice(model.input_price_per_1k))}</div>
+                        <div class="table-muted">输出 ${escapeHtml(formatPrice(model.output_price_per_1k))}</div>
+                        <div class="table-muted">缓存 ${escapeHtml(formatPrice(model.cache_price_per_1k))}</div>
+                    </td>
+                    <td>${renderQualitySummary(model)}</td>
+                    <td>
+                        <label class="toggle-row">
+                            <input type="checkbox" ${model.enabled ? "checked" : ""} data-model-field="enabled" data-provider-id="${provider.id}" data-model-id="${model.id}">
+                            <span>${model.enabled ? "启用" : "停用"}</span>
+                        </label>
+                    </td>
+                    <td>
+                        <div class="table-actions">
+                            <button class="table-action-btn" data-action="save-model" data-provider-id="${provider.id}" data-model-id="${model.id}" type="button">保存</button>
+                            <button class="table-action-btn" data-action="test-model" data-provider-id="${provider.id}" data-model-id="${model.id}" type="button">测试</button>
+                            <button class="table-action-btn" data-action="toggle-model" data-provider-id="${provider.id}" data-model-id="${model.id}" type="button">${model.enabled ? "停用" : "启用"}</button>
+                        </div>
+                    </td>
+                </tr>
+            `;
+            }).join("") || '<tr><td colspan="10"><div class="empty-state">当前筛选条件下没有模型挂载记录</div></td></tr>';
+            enhanceInteractiveButtons(modelTableBody);
+            scheduleResponsiveTableSync(modelTableBody.closest(".table-shell") || document);
+        }
+
+        async function loadProvidersForFilter() {
+            const result = await api.get("/api/providers/options");
+            state.providers = Array.isArray(result) ? result : [];
+            renderProviderModelFilterOptions();
+        }
+
+        async function loadProviderModels({ silent = false } = {}) {
+            const result = await api.get(`/api/providers/models?${buildProviderModelListParams().toString()}`);
+            state.items = Array.isArray(result.items) ? result.items : [];
+            state.total = Number(result.total || 0);
+            state.page = Number(result.page || state.page || 1);
+            state.pageSize = Number(result.page_size || state.pageSize || 20);
+            state.totalPages = Number(result.total_pages || 1);
+            if (providerModelPageSizeSelect) providerModelPageSizeSelect.value = String(state.pageSize);
+            renderProviderModels(state.items);
+            renderProviderModelPagination();
+            if (!silent) showToast("模型挂载矩阵已刷新");
+        }
+
+        async function reloadFirstPage() {
+            state.page = 1;
+            await loadProviderModels({ silent: true });
+        }
+
+        async function testProviderModel(providerId, modelId, trigger) {
+            const { owner, modelConfig } = getProviderModelContext(providerId, modelId);
+            if (!owner || !modelConfig) return;
+            const features = await openTestFeaturePicker({
+                title: `选择模型测试功能 · ${modelConfig.model_name}`,
+                singleModel: true,
+            });
+            if (!features) return;
+            setButtonLoading(trigger, true);
+            try {
+                const result = await api.post(`/api/providers/${providerId}/models/${modelId}/test`, { features });
+                const resultUsable = isHealthCheckUsable(result);
+                setButtonLoading(trigger, false);
+                setButtonTransientFeedback(trigger, resultUsable ? "success" : "error", {
+                    successText: result.success ? "成功" : "可用",
+                    errorText: "失败",
+                });
+                showToast(
+                    formatTestResultLabel(result, `模型 ${modelConfig.model_name}`),
+                    resultUsable ? "success" : "error",
+                );
+                openHealthCheckResultModal(
+                    `模型测试结果 · ${modelConfig.model_name}`,
+                    renderProviderTestModalBody(result, { scope: "model", name: `${owner.name} / ${modelConfig.model_name}` }),
+                    trigger,
+                );
+                await wait(500);
+                await loadProviderModels({ silent: true });
+            } catch (error) {
+                setButtonTransientFeedback(trigger, "error", { errorText: "失败" });
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(trigger, false);
+            }
+        }
+
+        modelTableBody.addEventListener("click", async (event) => {
+            const button = event.target.closest("button[data-action]");
+            if (!button) return;
+            const action = button.dataset.action;
+            const providerId = Number(button.dataset.providerId);
+            const modelId = Number(button.dataset.modelId);
+            const { owner, modelConfig } = getProviderModelContext(providerId, modelId);
+            if (!owner || !modelConfig) return;
+            if (action === "test-model") {
+                await testProviderModel(providerId, modelId, button);
+                return;
+            }
+            if (action === "save-model" || action === "toggle-model") {
+                const selector = `[data-provider-id="${providerId}"][data-model-id="${modelId}"]`;
+                const enabledInput = modelTableBody.querySelector(`input[data-model-field="enabled"]${selector}`);
+                const protocolTypeInput = modelTableBody.querySelector(`select[data-model-field="protocol_type"]${selector}`);
+                const trustInput = modelTableBody.querySelector(`select[data-model-field="content_integrity_status"]${selector}`);
+                const priceMultiplierInput = modelTableBody.querySelector(`input[data-model-field="price_multiplier"]${selector}`);
+                const payload = {
+                    enabled: action === "toggle-model" ? !modelConfig.enabled : enabledInput.checked,
+                    protocol_type: normalizeProviderModelProtocolType(protocolTypeInput?.value),
+                    content_integrity_status: trustInput?.value || "unknown",
+                    price_multiplier: Number(priceMultiplierInput.value || 1),
+                };
+                try {
+                    setButtonLoading(button, true);
+                    await api.put(`/api/providers/${providerId}/models/${modelId}`, payload);
+                    setButtonTransientFeedback(button, "success", { successText: "已保存" });
+                    showToast(`已更新模型 ${modelConfig.model_name}`);
+                    await loadProviderModels({ silent: true });
+                } catch (error) {
+                    setButtonTransientFeedback(button, "error", { errorText: "失败" });
+                    showToast(error.message, "error");
+                } finally {
+                    setButtonLoading(button, false);
+                }
+            }
+        });
+
+        let searchTimer = 0;
+        providerModelSearchInput?.addEventListener("input", () => {
+            window.clearTimeout(searchTimer);
+            searchTimer = window.setTimeout(() => reloadFirstPage().catch((error) => showToast(error.message, "error")), 250);
+        });
+        [providerModelProviderSelect, providerModelEnabledSelect, providerModelHealthSelect, providerModelTrustSelect].forEach((field) => {
+            field?.addEventListener("change", () => reloadFirstPage().catch((error) => showToast(error.message, "error")));
+        });
+        providerModelPageSizeSelect?.addEventListener("change", async () => {
+            state.pageSize = Number.parseInt(providerModelPageSizeSelect.value || "20", 10) || 20;
+            await reloadFirstPage();
+        });
+        providerModelPrevPageBtn?.addEventListener("click", async () => {
+            if (state.page <= 1) return;
+            state.page -= 1;
+            await loadProviderModels({ silent: true });
+        });
+        providerModelNextPageBtn?.addEventListener("click", async () => {
+            if (state.page >= state.totalPages) return;
+            state.page += 1;
+            await loadProviderModels({ silent: true });
+        });
+
+        await loadProvidersForFilter();
+        await loadProviderModels({ silent: true });
     }
 
     async function initModels() {
@@ -5599,8 +6227,6 @@
         const supportsStreamInput = document.getElementById("model-supports-stream");
         const supportsVisionInput = document.getElementById("model-supports-vision");
         const supportsToolsInput = document.getElementById("model-supports-tools");
-        const supportsChatCompletionsInput = document.getElementById("model-supports-chat-completions");
-        const supportsResponsesInput = document.getElementById("model-supports-responses");
         const contextWindowInput = document.getElementById("model-context-window-tokens");
         const maxInputTokensInput = document.getElementById("model-max-input-tokens");
         const maxOutputTokensInput = document.getElementById("model-max-output-tokens");
@@ -5611,9 +6237,14 @@
         const speedLabelInput = document.getElementById("model-speed-label");
         const remarkInput = document.getElementById("model-remark");
         const bindingBody = document.getElementById("model-binding-body");
+        const mappingDrawer = document.getElementById("model-mapping-drawer");
+        const mappingDrawerCard = mappingDrawer?.querySelector(".mapping-drawer-card");
+        const mappingDrawerTitle = document.getElementById("model-mapping-drawer-title");
+        const mappingDrawerIntro = document.getElementById("model-mapping-drawer-intro");
+        const mappingDrawerCloseBtn = document.getElementById("model-mapping-drawer-close");
+        const mappingSummary = document.getElementById("model-mapping-summary");
         const mappingForm = document.getElementById("model-mapping-form");
         const mappingSourceInput = document.getElementById("model-mapping-source");
-        const mappingStrategySelect = document.getElementById("model-mapping-strategy");
         const mappingEnabledInput = document.getElementById("model-mapping-enabled");
         const mappingRemarkInput = document.getElementById("model-mapping-remark");
         const mappingTargetList = document.getElementById("model-mapping-target-list");
@@ -5625,11 +6256,12 @@
         const modelNameOptions = document.getElementById("model-name-options");
         if (
             !tableBody || !searchInput || !healthStatusSelect || !enabledSelect || !providerSelect || !pageSizeSelect || !cachePriceInput
-            || !supportsStreamInput || !supportsVisionInput || !supportsToolsInput || !supportsChatCompletionsInput
-            || !supportsResponsesInput || !contextWindowInput || !maxInputTokensInput || !maxOutputTokensInput
+            || !supportsStreamInput || !supportsVisionInput || !supportsToolsInput
+            || !contextWindowInput || !maxInputTokensInput || !maxOutputTokensInput
             || !selectPageInput || !batchMeta || !batchContextWindowInput || !batchContextApplyBtn
             || !pageMeta || !prevPageBtn || !nextPageBtn || !testAllBtn || !refreshBtn || !addBtn || !modal || !form || !bindingBody
-            || !mappingForm || !mappingSourceInput || !mappingStrategySelect || !mappingEnabledInput || !mappingRemarkInput
+            || !mappingDrawer || !mappingDrawerCard || !mappingDrawerTitle || !mappingDrawerIntro || !mappingDrawerCloseBtn || !mappingSummary
+            || !mappingForm || !mappingSourceInput || !mappingEnabledInput || !mappingRemarkInput
             || !mappingTargetList || !mappingTableBody || !mappingAddTargetBtn || !mappingSubmitBtn || !mappingCancelBtn
             || !mappingResetBtn || !modelNameOptions
         ) return;
@@ -5646,6 +6278,7 @@
             total: 0,
             totalPages: 1,
             selectedModelNames: new Set(),
+            expandedModelNames: new Set(),
         };
         let searchTimer = null;
 
@@ -5663,7 +6296,7 @@
 
         function renderProviderFilterOptions() {
             const currentValue = providerSelect.value;
-            providerSelect.innerHTML = '<option value="">全部中转站</option>' + state.providers.map((provider) => `
+            providerSelect.innerHTML = '<option value="">全部提供商</option>' + state.providers.map((provider) => `
                 <option value="${provider.id}">${escapeHtml(provider.name)}${provider.enabled ? "" : "（已停用）"}</option>
             `).join("");
             if (currentValue && Array.from(providerSelect.options).some((option) => option.value === currentValue)) {
@@ -5673,10 +6306,6 @@
 
         function formatMultiplier(value) {
             return value == null ? "-" : `${Number(value).toFixed(2)}x`;
-        }
-
-        function formatModelMappingStrategy(value) {
-            return value ? "健康优先" : "-";
         }
 
         function renderMultiplierCell(item) {
@@ -5707,12 +6336,23 @@
         }
 
         function renderModelAbilityCell(item) {
-            const endpointLabels = [];
-            if (item.supports_chat_completions) endpointLabels.push("Chat");
-            if (item.supports_responses) endpointLabels.push("Responses");
             return `
                 <div>${escapeHtml(MODEL_MANAGEMENT_CAPABILITY_TEXT)}</div>
-                <div class="table-muted">${escapeHtml(endpointLabels.join("、") || "未配置原生端点")}</div>
+                <div class="table-muted">端点协议按提供商挂载配置</div>
+            `;
+        }
+
+        function renderModelCapabilityChips(item) {
+            const chips = [
+                item.supports_stream ? "流式" : null,
+                item.supports_vision ? "图像" : null,
+                item.supports_tools ? "工具" : null,
+                item.supports_image_generation ? "生图" : null,
+            ].filter(Boolean);
+            return `
+                <div class="models-card-chip-list">
+                    ${(chips.length ? chips : ["未配置能力"]).map((label) => `<span class="models-card-chip">${escapeHtml(label)}</span>`).join("")}
+                </div>
             `;
         }
 
@@ -5723,6 +6363,100 @@
             return `
                 <div>${statusBadge(status)}</div>
                 <div class="table-muted">${escapeHtml(String(healthyCount))}/${escapeHtml(String(totalCount))}</div>
+            `;
+        }
+
+        function renderModelStatusSummary(item) {
+            const status = item.health_status === "healthy" ? "healthy" : "unhealthy";
+            return `
+                <div class="models-card-status">
+                    ${statusBadge(status)}
+                    ${item.enabled ? '<span class="status-badge status-healthy">已启用</span>' : '<span class="status-badge status-unknown">已停用</span>'}
+                </div>
+            `;
+        }
+
+        function renderModelPriceSummary(item) {
+            return `
+                <div class="models-card-metrics">
+                    <span>输入 <strong>${escapeHtml(formatPrice(item.input_price_per_1k ?? item.lowest_input_price_per_1k))}</strong></span>
+                    <span>输出 <strong>${escapeHtml(formatPrice(item.output_price_per_1k ?? item.lowest_output_price_per_1k))}</strong></span>
+                    <span>缓存 <strong>${escapeHtml(formatPrice(item.cache_price_per_1k ?? item.lowest_cache_price_per_1k))}</strong></span>
+                </div>
+            `;
+        }
+
+        function renderModelProviderSummary(item) {
+            const availableCount = Number(item.available_provider_count ?? item.enabled_provider_count ?? 0);
+            const boundCount = Number(item.bound_provider_count ?? item.provider_count ?? 0);
+            const names = Array.isArray(item.available_provider_names) ? item.available_provider_names : [];
+            return `
+                <div class="models-card-provider-summary">
+                    <strong>${formatNumber(availableCount)} / ${formatNumber(boundCount)}</strong>
+                    <span>${escapeHtml(names.slice(0, 3).join("、") || "未绑定可用提供商")}${names.length > 3 ? ` 等 ${formatNumber(names.length)} 个` : ""}</span>
+                </div>
+            `;
+        }
+
+        function renderModelBindingPreview(item) {
+            const bindings = Array.isArray(item.provider_bindings) ? item.provider_bindings.filter((binding) => binding.bound) : [];
+            if (!bindings.length) {
+                return '<div class="models-card-empty">暂无绑定渠道</div>';
+            }
+            return `
+                <div class="models-card-binding-list">
+                    ${bindings.slice(0, 6).map((binding) => {
+                        const routable = binding.enabled && binding.provider_enabled && !binding.provider_maintenance_mode_enabled && binding.provider_circuit_state !== "open" && binding.model_circuit_state !== "open" && binding.model_health_status !== "unhealthy";
+                        return `
+                            <div class="models-card-binding-item">
+                                <span>${escapeHtml(binding.provider_name || `提供商 ${binding.provider_id}`)}</span>
+                                <strong>${escapeHtml(formatMultiplier(binding.price_multiplier ?? 1))}</strong>
+                                <small>${routable ? "可路由" : "不可路由"}</small>
+                            </div>
+                        `;
+                    }).join("")}
+                </div>
+            `;
+        }
+
+        function renderModelDetailPanel(item) {
+            return `
+                <div class="models-card-detail">
+                    <div class="models-card-detail-grid">
+                        <div>
+                            <span>上下文窗口</span>
+                            <strong>${escapeHtml(formatContextWindow(item.context_window_tokens))}</strong>
+                            <small>输入 ${escapeHtml(formatContextWindow(item.max_input_tokens))} · 输出 ${escapeHtml(formatContextWindow(item.max_output_tokens))}</small>
+                        </div>
+                        <div>
+                            <span>价格形态</span>
+                            <strong>${escapeHtml(formatPricingSummary(item))}</strong>
+                            <small>基础价按 $/1M 展示</small>
+                        </div>
+                        <div>
+                            <span>绑定平均倍率</span>
+                            <strong>${escapeHtml(formatMultiplier(item.avg_bound_price_multiplier ?? item.avg_price_multiplier))}</strong>
+                            <small>可路由 ${escapeHtml(formatMultiplier(item.avg_routable_price_multiplier))}</small>
+                        </div>
+                        <div>
+                            <span>速度标签</span>
+                            <strong>${escapeHtml(item.speed_label || "-")}</strong>
+                            <small>${escapeHtml(item.remark || "无备注")}</small>
+                        </div>
+                    </div>
+                    ${renderModelBindingPreview(item)}
+                </div>
+            `;
+        }
+
+        function renderModelActionMenu(item, index) {
+            return `
+                <details class="provider-action-menu models-card-more">
+                    <summary>更多</summary>
+                    <div class="provider-action-menu-panel">
+                        <button class="table-action-btn danger" data-action="delete" data-model-index="${index}" type="button">删除</button>
+                    </div>
+                </details>
             `;
         }
 
@@ -5741,6 +6475,15 @@
                     `状态码 ${item.status_code ?? "-"}`,
                 ].join(" · ");
                 const message = item.message ? `<div class="provider-test-model-message">${escapeHtml(item.message)}</div>` : "";
+                const guard = item.content_guard || {};
+                const guardResult = guard.content_guard_result || "";
+                const guardHtml = guardResult ? `
+                    <div class="provider-test-model-message">
+                        内容防护：${escapeHtml(formatContentGuardResultLabel(guardResult))}
+                        ${guard.content_guard_risk_level ? ` · ${escapeHtml(formatContentGuardRiskLabel(guard.content_guard_risk_level))}` : ""}
+                        ${guard.content_guard_reason ? ` · ${escapeHtml(guard.content_guard_reason)}` : ""}
+                    </div>
+                ` : "";
                 return `
                     <article class="provider-test-model-item">
                         <div class="provider-test-model-top">
@@ -5749,6 +6492,7 @@
                         </div>
                         <div class="table-muted">${escapeHtml(meta)}</div>
                         ${message}
+                        ${guardHtml}
                     </article>
                 `;
             }).join("");
@@ -5773,6 +6517,7 @@
                     <section class="provider-test-result-card">
                         <div class="panel-kicker">摘要</div>
                         <div class="provider-test-summary-grid">${summaryHtml}</div>
+                        ${result?.message ? `<div class="provider-test-model-message">${escapeHtml(result.message)}</div>` : ""}
                     </section>
                     <section class="provider-test-result-card">
                         <div class="panel-kicker">渠道</div>
@@ -5953,38 +6698,45 @@
         }
 
         function renderTable() {
-            tableBody.innerHTML = state.models.map((item) => `
-                <tr>
-                    <td><input type="checkbox" data-model-select="${escapeHtml(item.model_name)}" aria-label="选择模型 ${escapeHtml(item.model_name)}" ${state.selectedModelNames.has(item.model_name) ? "checked" : ""}></td>
-                    <td>
-                        <strong>${escapeHtml(item.display_name || item.model_name)}</strong>
-                        <div class="table-muted">${escapeHtml(item.model_name)}</div>
-                    </td>
-                    <td>${renderModelHealthCell(item)}</td>
-                    <td>${item.enabled ? '<span class="status-badge status-healthy">已启用</span>' : '<span class="status-badge status-unknown">已停用</span>'}</td>
-                    <td>${renderModelAbilityCell(item)}</td>
-                    <td>${renderTokenLimitCell(item)}</td>
-                    <td>
-                        <div>输入 ${escapeHtml(formatPrice(item.input_price_per_1k ?? item.lowest_input_price_per_1k))}</div>
-                        <div class="table-muted">输出 ${escapeHtml(formatPrice(item.output_price_per_1k ?? item.lowest_output_price_per_1k))}</div>
-                        <div class="table-muted">缓存 ${escapeHtml(formatPrice(item.cache_price_per_1k ?? item.lowest_cache_price_per_1k))}</div>
-                        <div class="table-muted">${escapeHtml(formatPricingSummary(item))}</div>
-                    </td>
-                    <td>${escapeHtml(item.speed_label || "-")}</td>
-                    <td>
-                        <strong>${escapeHtml(String(item.available_provider_count ?? item.enabled_provider_count ?? 0))} / ${escapeHtml(String(item.bound_provider_count ?? item.provider_count ?? 0))}</strong>
-                        <div class="table-muted">${escapeHtml((item.available_provider_names || []).join("、") || "未绑定")}</div>
-                    </td>
-                    <td>${renderMultiplierCell(item)}</td>
-                    <td>
-                        <div class="table-actions">
-                            <button class="table-action-btn" data-action="test" data-model-name="${escapeHtml(item.model_name)}">测试</button>
-                            <button class="table-action-btn" data-action="edit" data-model-name="${escapeHtml(item.model_name)}">编辑</button>
-                            <button class="table-action-btn" data-action="delete" data-model-name="${escapeHtml(item.model_name)}">删除</button>
+            tableBody.innerHTML = state.models.map((item, index) => {
+                const expanded = state.expandedModelNames.has(item.model_name);
+                return `
+                    <article class="models-catalog-card ${expanded ? "is-expanded" : ""}">
+                        <div class="models-card-select">
+                            <input type="checkbox" data-model-select="${escapeHtml(item.model_name)}" aria-label="选择模型 ${escapeHtml(item.model_name)}" ${state.selectedModelNames.has(item.model_name) ? "checked" : ""}>
                         </div>
-                    </td>
-                </tr>
-            `).join("") || '<tr><td colspan="11"><div class="empty-state">暂无模型配置</div></td></tr>';
+                        <div class="models-card-main">
+                            <div class="models-card-title">
+                                <strong>${escapeHtml(item.display_name || item.model_name)}</strong>
+                                <span>${escapeHtml(item.model_name)}</span>
+                            </div>
+                            <div class="models-card-section">
+                                <span>状态</span>
+                                ${renderModelStatusSummary(item)}
+                            </div>
+                            <div class="models-card-section">
+                                <span>能力</span>
+                                ${renderModelCapabilityChips(item)}
+                            </div>
+                            <div class="models-card-section">
+                                <span>基础价格</span>
+                                ${renderModelPriceSummary(item)}
+                            </div>
+                            <div class="models-card-section">
+                                <span>可用提供商</span>
+                                ${renderModelProviderSummary(item)}
+                            </div>
+                            <div class="table-actions models-card-actions">
+                                <button class="table-action-btn" data-action="test" data-model-index="${index}" type="button">测试</button>
+                                <button class="table-action-btn" data-action="edit" data-model-index="${index}" type="button">编辑</button>
+                                <button class="table-action-btn" data-action="toggle-detail" data-model-index="${index}" type="button" aria-expanded="${expanded ? "true" : "false"}">${expanded ? "收起" : "详情"}</button>
+                                ${renderModelActionMenu(item, index)}
+                            </div>
+                        </div>
+                        ${expanded ? renderModelDetailPanel(item) : ""}
+                    </article>
+                `;
+            }).join("") || '<div class="empty-state">暂无模型配置</div>';
             enhanceInteractiveButtons(tableBody);
             updateBatchBar();
         }
@@ -6002,18 +6754,48 @@
             return `<option value="">选择目标模型</option>${options}`;
         }
 
+        const mappingDrawerController = modalManager.register({
+            modal: mappingDrawer,
+            dialog: mappingDrawerCard,
+            getInitialFocus: () => mappingSourceInput,
+            afterClose: () => {
+                resetMappingForm();
+            },
+        });
+
+        function updateMappingDrawerHeading() {
+            if (state.editingMappingSource) {
+                mappingDrawerTitle.textContent = `编辑映射 · ${state.editingMappingSource}`;
+                mappingDrawerIntro.textContent = "源模型会保持锁定，其它配置可以继续调整。";
+                return;
+            }
+            mappingDrawerTitle.textContent = "新建映射";
+            mappingDrawerIntro.textContent = "为一个源模型维护多个候选目标，按健康优先策略参与路由。";
+        }
+
         function addMappingTargetRow(target = {}) {
             const row = document.createElement("div");
             row.className = "model-mapping-target-row";
             row.innerHTML = `
-                <select class="field-input" data-mapping-target-field="model_name">${modelOptionHtml(target.model_name || "")}</select>
-                <input class="field-input" type="number" min="0" data-mapping-target-field="priority" value="${escapeHtml(String(target.priority ?? 100))}" aria-label="目标优先级">
-                <input class="field-input" type="number" min="0" data-mapping-target-field="weight" value="${escapeHtml(String(target.weight ?? 100))}" aria-label="目标权重">
-                <span class="settings-switch-control">
-                    <input type="checkbox" data-mapping-target-field="enabled" ${target.enabled === false ? "" : "checked"} aria-label="启用目标">
-                    <span class="settings-switch-slider" aria-hidden="true"></span>
-                </span>
-                <button class="table-action-btn" type="button" data-mapping-target-remove>移除</button>
+                <div class="model-mapping-target-top">
+                    <label class="model-mapping-target-model">
+                        <span>目标模型</span>
+                        <select class="field-input" data-mapping-target-field="model_name">${modelOptionHtml(target.model_name || "")}</select>
+                    </label>
+                    <label class="model-mapping-target-switch">
+                        <span class="settings-switch-copy">
+                            <strong>启用</strong>
+                            <small>参与候选</small>
+                        </span>
+                        <span class="settings-switch-control">
+                            <input type="checkbox" data-mapping-target-field="enabled" ${target.enabled === false ? "" : "checked"} aria-label="启用目标">
+                            <span class="settings-switch-slider" aria-hidden="true"></span>
+                        </span>
+                    </label>
+                    <div class="model-mapping-target-actions">
+                        <button class="table-action-btn danger" type="button" data-mapping-target-remove>移除</button>
+                    </div>
+                </div>
             `;
             mappingTargetList.appendChild(row);
         }
@@ -6023,28 +6805,35 @@
             mappingForm.reset();
             mappingSourceInput.disabled = false;
             mappingEnabledInput.checked = true;
-            mappingStrategySelect.value = FIXED_MODEL_MAPPING_STRATEGY;
+            mappingRemarkInput.value = "";
             mappingTargetList.innerHTML = "";
             addMappingTargetRow();
+            updateMappingDrawerHeading();
         }
 
-        function openMappingEditor(mapping) {
-            state.editingMappingSource = mapping.source_model_name;
-            mappingSourceInput.value = mapping.source_model_name || "";
-            mappingSourceInput.disabled = true;
-            mappingStrategySelect.value = FIXED_MODEL_MAPPING_STRATEGY;
-            mappingEnabledInput.checked = mapping.enabled !== false;
-            mappingRemarkInput.value = mapping.remark || "";
-            mappingTargetList.innerHTML = "";
-            (mapping.targets || []).forEach((target) => addMappingTargetRow(target));
-            if (!mappingTargetList.children.length) addMappingTargetRow();
+        function openMappingEditor(mapping = null, trigger = document.activeElement) {
+            resetMappingForm();
+            if (mapping) {
+                state.editingMappingSource = mapping.source_model_name;
+                mappingSourceInput.value = mapping.source_model_name || "";
+                mappingSourceInput.disabled = true;
+                mappingEnabledInput.checked = mapping.enabled !== false;
+                mappingRemarkInput.value = mapping.remark || "";
+                mappingTargetList.innerHTML = "";
+                (mapping.targets || []).forEach((target) => addMappingTargetRow(target));
+                if (!mappingTargetList.children.length) addMappingTargetRow();
+            }
+            updateMappingDrawerHeading();
+            mappingDrawerController.open(trigger);
+        }
+
+        function closeMappingDrawer(options = {}) {
+            mappingDrawerController.close(options);
         }
 
         function collectMappingTargets() {
             const targets = Array.from(mappingTargetList.querySelectorAll(".model-mapping-target-row")).map((row) => ({
                 model_name: row.querySelector('[data-mapping-target-field="model_name"]')?.value.trim() || "",
-                priority: Number(row.querySelector('[data-mapping-target-field="priority"]')?.value || 100),
-                weight: Number(row.querySelector('[data-mapping-target-field="weight"]')?.value || 100),
                 enabled: row.querySelector('[data-mapping-target-field="enabled"]')?.checked !== false,
             })).filter((item) => item.model_name);
             const seen = new Set();
@@ -6056,32 +6845,50 @@
         }
 
         function renderModelMappingTable() {
+            mappingSummary.textContent = `共 ${formatNumber(state.mappings.length)} 条映射`;
             mappingTableBody.innerHTML = state.mappings.map((mapping) => {
-                const targetChips = (mapping.targets || []).map((target) => `
+                const targets = Array.isArray(mapping.targets) ? mapping.targets : [];
+                const enabledTargets = targets.filter((target) => target.enabled !== false);
+                const previewTargets = targets.slice(0, 3).map((target) => `
                     <span class="model-mapping-target-chip" data-disabled="${target.enabled === false ? "true" : "false"}">
                         ${escapeHtml(target.model_name)}
-                        <small>P${escapeHtml(String(target.priority ?? 100))} · W${escapeHtml(String(target.weight ?? 100))}</small>
+                        ${target.enabled === false ? "<small>已停用</small>" : ""}
                     </span>
                 `).join("");
+                const remainingCount = Math.max(0, targets.length - 3);
                 return `
-                    <tr>
-                        <td>
-                            <strong>${escapeHtml(mapping.source_model_name)}</strong>
-                            <div class="table-muted">${escapeHtml(mapping.remark || "无备注")}</div>
-                        </td>
-                        <td>${escapeHtml(formatModelMappingStrategy(mapping.strategy))}</td>
-                        <td><div class="model-mapping-target-chips">${targetChips || '<span class="table-muted">未配置</span>'}</div></td>
-                        <td>${mapping.enabled ? '<span class="status-badge status-healthy">已启用</span>' : '<span class="status-badge status-unknown">已停用</span>'}</td>
-                        <td>
-                            <div class="table-actions">
+                    <article class="model-mapping-card">
+                        <div class="model-mapping-card-main">
+                            <div class="model-mapping-card-source">
+                                <strong>${escapeHtml(mapping.source_model_name)}</strong>
+                                <div class="table-muted">${escapeHtml(mapping.remark || "无备注")}</div>
+                            </div>
+                            <div class="model-mapping-target-summary">
+                                <div class="model-mapping-target-meta">共 ${escapeHtml(String(targets.length))} 个目标 · 已启用 ${escapeHtml(String(enabledTargets.length))} 个</div>
+                                <div class="model-mapping-target-chips">
+                                    ${previewTargets || '<span class="table-muted">未配置目标</span>'}
+                                    ${remainingCount > 0 ? `<span class="model-mapping-target-chip">另有 ${escapeHtml(String(remainingCount))} 个</span>` : ""}
+                                </div>
+                            </div>
+                            <div class="model-mapping-card-actions">
                                 <button class="table-action-btn" data-mapping-action="test" data-source-model="${escapeHtml(mapping.source_model_name)}">测试</button>
                                 <button class="table-action-btn" data-mapping-action="edit" data-source-model="${escapeHtml(mapping.source_model_name)}">编辑</button>
-                                <button class="table-action-btn" data-mapping-action="delete" data-source-model="${escapeHtml(mapping.source_model_name)}">删除</button>
+                                <button class="table-action-btn danger" data-mapping-action="delete" data-source-model="${escapeHtml(mapping.source_model_name)}">删除</button>
                             </div>
-                        </td>
-                    </tr>
+                        </div>
+                        <div class="model-mapping-card-foot">
+                            ${mapping.enabled ? '<span class="status-badge status-healthy">已启用</span>' : '<span class="status-badge status-unknown">已停用</span>'}
+                            <span class="model-mapping-card-note">${mapping.enabled ? "源模型命中后将按当前候选集合参与择优。" : "当前映射已停用，源模型会按普通模型继续路由。"}</span>
+                        </div>
+                    </article>
                 `;
-            }).join("") || '<tr><td colspan="5"><div class="empty-state">暂无模型映射</div></td></tr>';
+            }).join("") || `
+                <div class="model-mapping-empty-state empty-state">
+                    <strong>还没有模型映射</strong>
+                    <span>把一个源模型重写为多个候选目标后，就能在路由前按健康优先策略自动择优。</span>
+                    <button class="btn btn-accent interactive-btn" type="button" data-mapping-empty-create>创建第一条</button>
+                </div>
+            `;
             enhanceInteractiveButtons(mappingTableBody);
         }
 
@@ -6193,8 +7000,6 @@
             supportsStreamInput.checked = detail?.supports_stream ?? true;
             supportsVisionInput.checked = detail?.supports_vision ?? true;
             supportsToolsInput.checked = detail?.supports_tools ?? true;
-            supportsChatCompletionsInput.checked = detail?.supports_chat_completions ?? true;
-            supportsResponsesInput.checked = detail?.supports_responses ?? true;
             contextWindowInput.value = detail?.context_window_tokens == null ? "" : detail.context_window_tokens;
             maxInputTokensInput.value = detail?.max_input_tokens == null ? "" : detail.max_input_tokens;
             maxOutputTokensInput.value = detail?.max_output_tokens == null ? "" : detail.max_output_tokens;
@@ -6260,7 +7065,7 @@
         function collectValidatedBindings({ isEditing = false } = {}) {
             return Array.from(bindingBody.querySelectorAll("tr")).map((row) => {
                 const providerId = Number(row.dataset.providerId);
-                const providerName = row.querySelector("strong")?.textContent?.trim() || `中转站 ${providerId}`;
+                const providerName = row.querySelector("strong")?.textContent?.trim() || `提供商 ${providerId}`;
                 const initialBound = row.dataset.initialBound === "true";
                 const boundTouched = row.dataset.boundTouched === "true";
                 const requestedBound = row.querySelector('input[data-binding-field="bound"]').checked;
@@ -6274,7 +7079,7 @@
                 const weight = weightRaw ? Number(weightRaw) : 100;
 
                 if (!Number.isInteger(providerId) || providerId < 1) {
-                    throw new Error("模型绑定中存在无效的中转站，请刷新页面后重试");
+                    throw new Error("模型绑定中存在无效的提供商，请刷新页面后重试");
                 }
                 if (effectiveBound) {
                     if (!Number.isFinite(priceMultiplier) || priceMultiplier <= 0) {
@@ -6304,8 +7109,8 @@
             if (fallback.includes("模型已存在")) {
                 return "模型名已存在，请更换后再保存";
             }
-            if (fallback.includes("中转站不存在")) {
-                return "所选中转站不存在，请刷新页面后重试";
+            if (fallback.includes("提供商不存在")) {
+                return "所选提供商不存在，请刷新页面后重试";
             }
             if (!(fallback.startsWith("[") || fallback.startsWith("{"))) {
                 return fallback;
@@ -6326,10 +7131,10 @@
                 if (location.includes("output_price_per_1k")) return "输出单价格式不正确，请填写大于或等于 0 的数字";
                 if (location.includes("cache_price_per_1k")) return "缓存单价格式不正确，请填写大于或等于 0 的数字";
                 if (location.includes("provider_bindings")) {
-                    if (location.includes("price_multiplier")) return "中转站倍率必须大于 0";
-                    if (location.includes("priority")) return "中转站优先级格式不正确";
-                    if (location.includes("weight")) return "中转站权重格式不正确";
-                    if (location.includes("provider_id")) return "中转站绑定数据无效，请刷新页面后重试";
+                    if (location.includes("price_multiplier")) return "提供商倍率必须大于 0";
+                    if (location.includes("priority")) return "提供商优先级格式不正确";
+                    if (location.includes("weight")) return "提供商权重格式不正确";
+                    if (location.includes("provider_id")) return "提供商绑定数据无效，请刷新页面后重试";
                 }
                 if (message) return `模型保存失败：${message}`;
             } catch {
@@ -6379,7 +7184,6 @@
             renderTable();
             renderModelMappingTable();
             renderPagination();
-            if (!mappingTargetList.children.length) addMappingTargetRow();
             if (!silent) showToast("模型配置已刷新");
         }
 
@@ -6406,6 +7210,20 @@
                 await loadData({ silent: true, reloadProviders: true });
             } catch (error) {
                 setButtonTransientFeedback(trigger, "error", { errorText: "失败" });
+                openHealthCheckResultModal(
+                    `模型测试 · ${modelName}`,
+                    renderModelHealthTestResult({
+                        model_name: modelName,
+                        display_name: modelName,
+                        health_status: "unhealthy",
+                        healthy_channel_count: 0,
+                        total_channel_count: 0,
+                        latency_ms: "-",
+                        channel_results: [],
+                        message: error.message || "测试失败",
+                    }),
+                    trigger,
+                );
                 showToast(error.message, "error");
             } finally {
                 setButtonLoading(trigger, false);
@@ -6461,17 +7279,30 @@
         tableBody.addEventListener("click", async (event) => {
             const button = event.target.closest("[data-action]");
             if (!button) return;
+            const modelIndex = Number(button.dataset.modelIndex);
+            const modelItem = Number.isInteger(modelIndex) ? state.models[modelIndex] : null;
+            const modelName = modelItem?.model_name || "";
             if (button.dataset.action === "test") {
-                await testModelHealth(button.dataset.modelName, button);
+                await testModelHealth(modelName, button);
+                return;
+            }
+            if (button.dataset.action === "toggle-detail") {
+                if (!modelName) return;
+                if (state.expandedModelNames.has(modelName)) {
+                    state.expandedModelNames.delete(modelName);
+                } else {
+                    state.expandedModelNames.add(modelName);
+                }
+                renderTable();
                 return;
             }
             if (button.dataset.action === "delete") {
-                if (!window.confirm(`确认删除模型 ${button.dataset.modelName} 吗？相关渠道绑定也会一并移除。`)) {
+                if (!modelName || !window.confirm(`确认删除模型 ${modelName} 吗？相关渠道绑定也会一并移除。`)) {
                     return;
                 }
                 try {
                     setButtonLoading(button, true);
-                    await api.delete(`/api/models/${encodeURIComponent(button.dataset.modelName)}`);
+                    await api.delete(`/api/models/${encodeURIComponent(modelName)}`);
                     setButtonTransientFeedback(button, "success", { successText: "已删除" });
                     showToast("模型已删除");
                     await loadData({ silent: true, reloadProviders: true });
@@ -6484,7 +7315,8 @@
                 return;
             }
             try {
-                const detail = await api.get(`/api/models/${encodeURIComponent(button.dataset.modelName)}`);
+                if (!modelName) return;
+                const detail = await api.get(`/api/models/${encodeURIComponent(modelName)}`);
                 openModal(detail);
             } catch (error) {
                 showToast(error.message, "error");
@@ -6577,8 +7409,6 @@
                     supports_stream: supportsStreamInput.checked,
                     supports_vision: supportsVisionInput.checked,
                     supports_tools: supportsToolsInput.checked,
-                    supports_chat_completions: supportsChatCompletionsInput.checked,
-                    supports_responses: supportsResponsesInput.checked,
                     context_window_tokens: parseOptionalIntegerField(contextWindowInput, "最大上下文窗口 token"),
                     max_input_tokens: parseOptionalIntegerField(maxInputTokensInput, "最大输入 token"),
                     max_output_tokens: parseOptionalIntegerField(maxOutputTokensInput, "最大输出 token"),
@@ -6634,8 +7464,9 @@
         });
 
         mappingAddTargetBtn.addEventListener("click", () => addMappingTargetRow());
-        mappingCancelBtn.addEventListener("click", resetMappingForm);
-        mappingResetBtn.addEventListener("click", resetMappingForm);
+        mappingCancelBtn.addEventListener("click", () => closeMappingDrawer({ reason: "cancel" }));
+        mappingResetBtn.addEventListener("click", () => openMappingEditor(null, mappingResetBtn));
+        mappingDrawerCloseBtn.addEventListener("click", () => closeMappingDrawer({ reason: "close-button" }));
 
         mappingForm.addEventListener("submit", async (event) => {
             event.preventDefault();
@@ -6651,7 +7482,6 @@
             }
             const payload = {
                 enabled: mappingEnabledInput.checked,
-                strategy: FIXED_MODEL_MAPPING_STRATEGY,
                 targets,
                 remark: mappingRemarkInput.value.trim() || null,
             };
@@ -6671,7 +7501,8 @@
                     setButtonTransientFeedback(mappingSubmitBtn, "success", { successText: "已创建" });
                     showToast("模型映射已创建");
                 }
-                resetMappingForm();
+                await wait(120);
+                closeMappingDrawer({ reason: "save" });
                 await loadData({ silent: true });
             } catch (error) {
                 setButtonTransientFeedback(mappingSubmitBtn, "error", { errorText: "保存失败" });
@@ -6682,13 +7513,18 @@
         });
 
         mappingTableBody.addEventListener("click", async (event) => {
+            const createBtn = event.target.closest("[data-mapping-empty-create]");
+            if (createBtn) {
+                openMappingEditor(null, createBtn);
+                return;
+            }
             const button = event.target.closest("[data-mapping-action]");
             if (!button) return;
             const sourceModel = button.dataset.sourceModel;
             const mapping = state.mappings.find((item) => item.source_model_name === sourceModel);
             if (!sourceModel || !mapping) return;
             if (button.dataset.mappingAction === "edit") {
-                openMappingEditor(mapping);
+                openMappingEditor(mapping, button);
                 return;
             }
             if (button.dataset.mappingAction === "delete") {
@@ -6698,7 +7534,7 @@
                     await api.delete(`/api/model-mappings/${encodeURIComponent(sourceModel)}`);
                     setButtonTransientFeedback(button, "success", { successText: "已删除" });
                     showToast("模型映射已删除");
-                    if (state.editingMappingSource === sourceModel) resetMappingForm();
+                    if (state.editingMappingSource === sourceModel) closeMappingDrawer({ reason: "delete" });
                     await loadData({ silent: true });
                 } catch (error) {
                     setButtonTransientFeedback(button, "error", { errorText: "删除失败" });
@@ -6807,7 +7643,477 @@
             if (event.target === modal) closeModal();
         });
 
+        resetMappingForm();
         await loadData({ silent: true, reloadProviders: true });
+    }
+
+    async function initContentGuardPage() {
+        const refreshBtn = document.getElementById("content-guard-refresh-btn");
+        const settingsForm = document.getElementById("content-guard-settings-form");
+        const settingsSubmitBtn = document.getElementById("content-guard-settings-submit-btn");
+        const probeForm = document.getElementById("content-guard-probe-form");
+        const probeSubmitBtn = document.getElementById("content-guard-probe-submit-btn");
+        const providerSelect = document.getElementById("content-guard-provider-id");
+        const providerModelSelect = document.getElementById("content-guard-provider-model-id");
+        const internalFields = document.getElementById("content-guard-internal-fields");
+        const externalFields = document.getElementById("content-guard-external-fields");
+        const probeOptionsNode = document.getElementById("content-guard-probe-options");
+        const rulesBody = document.getElementById("content-guard-rules-body");
+        const addRuleBtn = document.getElementById("content-guard-add-rule-btn");
+        const resetRulesBtn = document.getElementById("content-guard-reset-rules-btn");
+        const saveRulesBtn = document.getElementById("content-guard-save-rules-btn");
+        const inspectForm = document.getElementById("content-guard-inspect-form");
+        const inspectSubmitBtn = document.getElementById("content-guard-inspect-submit-btn");
+        const inspectText = document.getElementById("content-guard-inspect-text");
+        const inspectResult = document.getElementById("content-guard-inspect-result");
+        const state = { overview: null, rules: [] };
+        const ruleMatchTypeLabels = {
+            keyword_any: "关键词",
+            regex: "正则",
+            unexpected_url: "异常外链",
+        };
+        const ruleRiskLabels = {
+            low: "低",
+            medium: "中",
+            high: "高",
+        };
+        const ruleActionLabels = {
+            allow: "放行",
+            record: "记录",
+            block: "拦截",
+        };
+        const ruleCategoryLabels = {
+            fraud_or_illegal_promotion: "违规推广",
+            qr_code_redirect: "二维码导流",
+            advertising_or_promotion: "广告推广",
+            contact_or_offplatform_redirect: "站外联系",
+            unexpected_link: "异常外链",
+            custom_content_guard: "自定义规则",
+        };
+
+        const setText = (id, value) => {
+            const node = document.getElementById(id);
+            if (node) node.textContent = value;
+        };
+
+        const renderRuleSelectOptions = (labels, selected, fallbackLabel = "自定义") => {
+            const baseOptions = Object.entries(labels)
+                .map(([value, label]) => `<option value="${escapeHtml(value)}" ${value === selected ? "selected" : ""}>${escapeHtml(label)}</option>`)
+                .join("");
+            if (!selected || Object.prototype.hasOwnProperty.call(labels, selected)) return baseOptions;
+            return `${baseOptions}<option value="${escapeHtml(selected)}" selected>${escapeHtml(fallbackLabel)}</option>`;
+        };
+
+        const normalizeRuleForView = (rule, index) => ({
+            id: rule?.id || `custom_rule_${Date.now()}_${index + 1}`,
+            name: rule?.name || "新规则",
+            category: rule?.category || "custom_content_guard",
+            enabled: rule?.enabled !== false,
+            match_type: rule?.match_type || "keyword_any",
+            patterns: Array.isArray(rule?.patterns) ? rule.patterns : [],
+            risk_level: rule?.risk_level || "medium",
+            action: rule?.action || "record",
+            score_delta: Number.isFinite(Number(rule?.score_delta)) ? Number(rule.score_delta) : -8,
+            confidence: Number.isFinite(Number(rule?.confidence)) ? Number(rule.confidence) : 0.7,
+            reason: rule?.reason || "",
+        });
+
+        const renderRules = () => {
+            if (!rulesBody) return;
+            const rules = Array.isArray(state.rules) ? state.rules.map(normalizeRuleForView) : [];
+            if (!rules.length) {
+                rulesBody.innerHTML = '<tr><td colspan="8" class="table-muted">暂无规则</td></tr>';
+                return;
+            }
+            rulesBody.innerHTML = rules.map((rule, index) => `
+                <tr data-rule-index="${index}">
+                    <td>
+                        <label class="settings-switch-control content-guard-rule-switch">
+                            <input type="checkbox" data-rule-field="enabled" ${rule.enabled ? "checked" : ""} aria-label="启用 ${escapeHtml(rule.name)}">
+                            <span class="settings-switch-slider"></span>
+                        </label>
+                    </td>
+                    <td>
+                        <input class="field-input content-guard-rule-input" data-rule-field="name" value="${escapeHtml(rule.name)}" aria-label="规则名称">
+                        <input type="hidden" data-rule-field="id" value="${escapeHtml(rule.id)}">
+                    </td>
+                    <td>
+                        <select class="field-input content-guard-rule-select" data-rule-field="category" aria-label="规则分类">
+                            ${renderRuleSelectOptions(ruleCategoryLabels, rule.category, "自定义分类")}
+                        </select>
+                    </td>
+                    <td>
+                        <select class="field-input content-guard-rule-select" data-rule-field="match_type" aria-label="匹配方式">
+                            ${renderRuleSelectOptions(ruleMatchTypeLabels, rule.match_type)}
+                        </select>
+                        <textarea class="field-input content-guard-rule-patterns" data-rule-field="patterns" rows="2" aria-label="匹配项">${escapeHtml((rule.patterns || []).join("\n"))}</textarea>
+                    </td>
+                    <td>
+                        <select class="field-input content-guard-rule-select" data-rule-field="risk_level" aria-label="风险等级">
+                            ${renderRuleSelectOptions(ruleRiskLabels, rule.risk_level)}
+                        </select>
+                    </td>
+                    <td>
+                        <select class="field-input content-guard-rule-select" data-rule-field="action" aria-label="命中动作">
+                            ${renderRuleSelectOptions(ruleActionLabels, rule.action)}
+                        </select>
+                        <input class="field-input content-guard-rule-score" data-rule-field="score_delta" type="number" min="-100" max="0" value="${escapeHtml(String(rule.score_delta))}" aria-label="扣分">
+                    </td>
+                    <td><input class="field-input content-guard-rule-score" data-rule-field="confidence" type="number" min="0" max="1" step="0.01" value="${escapeHtml(String(rule.confidence))}" aria-label="可信度"></td>
+                    <td>
+                        <button class="table-action-btn" type="button" data-content-guard-delete-rule="${index}" aria-label="删除 ${escapeHtml(rule.name)}">删除</button>
+                    </td>
+                </tr>
+            `).join("");
+        };
+
+        const collectRules = () => {
+            const rows = Array.from(rulesBody?.querySelectorAll("tr[data-rule-index]") || []);
+            return rows.map((row) => {
+                const read = (field) => row.querySelector(`[data-rule-field="${field}"]`);
+                const patterns = String(read("patterns")?.value || "")
+                    .split(/\r?\n/)
+                    .map((item) => item.trim())
+                    .filter(Boolean);
+                return {
+                    id: String(read("id")?.value || "").trim(),
+                    name: String(read("name")?.value || "").trim(),
+                    category: String(read("category")?.value || "").trim(),
+                    enabled: Boolean(read("enabled")?.checked),
+                    match_type: read("match_type")?.value || "keyword_any",
+                    patterns,
+                    risk_level: read("risk_level")?.value || "medium",
+                    action: read("action")?.value || "record",
+                    score_delta: Math.min(0, Math.max(-100, Number(read("score_delta")?.value || -8))),
+                    confidence: Math.min(1, Math.max(0, Number(read("confidence")?.value || 0.7))),
+                    reason: "",
+                };
+            });
+        };
+
+        const validateRules = (rules) => {
+            const ids = new Set();
+            rules.forEach((rule) => {
+                if (!rule.id || !rule.name || !rule.category) {
+                    throw new Error("规则标识、名称和分类不能为空");
+                }
+                if (ids.has(rule.id)) {
+                    throw new Error(`规则标识重复：${rule.id}`);
+                }
+                ids.add(rule.id);
+                if (!rule.patterns.length) {
+                    throw new Error(`${rule.name} 至少需要一个匹配项`);
+                }
+            });
+        };
+
+        const selectedTargetType = () => {
+            const checked = document.querySelector('input[name="content_guard_target_type"]:checked');
+            return checked?.value || "internal";
+        };
+
+        const getProviderModels = () => {
+            const providerId = Number(providerSelect.value || 0);
+            const providers = Array.isArray(state.overview?.providers) ? state.overview.providers : [];
+            return providers.find((item) => Number(item.id) === providerId)?.models || [];
+        };
+
+        const renderProviderOptions = () => {
+            const providers = Array.isArray(state.overview?.providers) ? state.overview.providers : [];
+            providerSelect.innerHTML = providers.map((provider) => `
+                <option value="${provider.id}">${escapeHtml(provider.name)} · ${escapeHtml(provider.content_integrity_status_label || formatContentIntegrityStatusLabel(provider.content_integrity_status))}</option>
+            `).join("");
+            renderProviderModelOptions();
+        };
+
+        const renderProviderModelOptions = () => {
+            const models = getProviderModels();
+            providerModelSelect.innerHTML = models.map((model) => `
+                <option value="${model.id}">${escapeHtml(model.model_name)} · ${escapeHtml(model.content_integrity_status_label || formatContentIntegrityStatusLabel(model.content_integrity_status))}</option>
+            `).join("");
+            if (!models.length) {
+                providerModelSelect.innerHTML = '<option value="">无可检测模型</option>';
+            }
+        };
+
+        const renderProbeOptions = () => {
+            const defaults = new Set(["fixed_answer", "json", "refusal"]);
+            const options = Array.isArray(state.overview?.probe_options) ? state.overview.probe_options : [];
+            probeOptionsNode.innerHTML = options.map((item) => `
+                <label class="content-guard-probe-option">
+                    <input type="checkbox" value="${escapeHtml(item.key)}" ${defaults.has(item.key) ? "checked" : ""}>
+                    <span>${escapeHtml(item.label)}</span>
+                </label>
+            `).join("");
+        };
+
+        const applySettings = (settings) => {
+            document.getElementById("content-guard-enabled").checked = settings.content_guard_enabled ?? true;
+            document.getElementById("content-guard-block-on-high-risk").checked = settings.content_guard_block_on_high_risk ?? true;
+            document.getElementById("content-guard-low-trust-requires-buffer").checked = settings.content_guard_low_trust_requires_buffer ?? true;
+            document.getElementById("content-guard-async-review-enabled").checked = settings.content_guard_async_review_enabled ?? true;
+            document.getElementById("content-guard-url-check-enabled").checked = settings.content_guard_url_check_enabled ?? true;
+            document.getElementById("content-guard-high-risk-strategy").value = settings.content_guard_high_risk_strategy || "switch_provider";
+            document.getElementById("content-guard-max-detection-delay-ms").value = settings.content_guard_max_detection_delay_ms ?? 300;
+            document.getElementById("content-guard-stream-mode").value = settings.content_guard_stream_mode || "buffer_300ms";
+            document.getElementById("content-guard-probe-interval-sec").value = settings.content_guard_probe_interval_sec ?? 3600;
+            document.getElementById("content-guard-max-scan-bytes").value = settings.content_guard_max_scan_bytes ?? 16384;
+            document.getElementById("content-guard-stream-buffer-max-bytes").value = settings.content_guard_stream_buffer_max_bytes ?? 16384;
+            document.getElementById("content-guard-high-risk-confidence-threshold").value = settings.content_guard_high_risk_confidence_threshold ?? 85;
+            document.getElementById("content-guard-url-allowlist-json").value = settings.content_guard_url_allowlist_json || "";
+        };
+
+        const renderOverview = (overview) => {
+            state.overview = overview || {};
+            const summary = state.overview.summary || {};
+            setText("content-guard-provider-count", formatNumber(summary.provider_count || 0));
+            setText("content-guard-blocked-provider-count", formatNumber(summary.blocked_provider_count || 0));
+            setText("content-guard-low-trust-provider-count", formatNumber(summary.low_trust_provider_count || 0));
+            setText("content-guard-review-provider-count", formatNumber(summary.review_provider_count || 0));
+            setText("content-guard-latency-p50", summary.latency_p50_ms == null ? "-" : `${formatNumber(summary.latency_p50_ms)} ms`);
+            setText("content-guard-latency-p95", summary.latency_p95_ms == null ? "-" : `${formatNumber(summary.latency_p95_ms)} ms`);
+            setText("content-guard-latency-p99", summary.latency_p99_ms == null ? "-" : `${formatNumber(summary.latency_p99_ms)} ms`);
+            applySettings(state.overview.settings || {});
+            state.rules = Array.isArray(state.overview.rules) ? state.overview.rules.map(normalizeRuleForView) : [];
+            renderRules();
+            renderProviderOptions();
+            renderProbeOptions();
+        };
+
+        const loadOverview = async ({ manual = false } = {}) => {
+            try {
+                if (manual) setButtonLoading(refreshBtn, true);
+                const overview = await api.get("/api/content-guard/overview");
+                renderOverview(overview);
+                if (manual) {
+                    setButtonTransientFeedback(refreshBtn, "success", { successText: "已刷新" });
+                    showToast("内容防护已刷新");
+                }
+            } catch (error) {
+                if (manual) setButtonTransientFeedback(refreshBtn, "error", { errorText: "失败" });
+                showToast(error.message, "error");
+            } finally {
+                if (manual) setButtonLoading(refreshBtn, false);
+            }
+        };
+
+        const buildSettingsPayload = () => ({
+            content_guard_enabled: document.getElementById("content-guard-enabled").checked,
+            content_guard_block_on_high_risk: document.getElementById("content-guard-block-on-high-risk").checked,
+            content_guard_low_trust_requires_buffer: document.getElementById("content-guard-low-trust-requires-buffer").checked,
+            content_guard_async_review_enabled: document.getElementById("content-guard-async-review-enabled").checked,
+            content_guard_url_check_enabled: document.getElementById("content-guard-url-check-enabled").checked,
+            content_guard_high_risk_strategy: document.getElementById("content-guard-high-risk-strategy").value,
+            content_guard_max_detection_delay_ms: Math.max(0, Math.min(3000, Number(document.getElementById("content-guard-max-detection-delay-ms").value || 300))),
+            content_guard_stream_mode: document.getElementById("content-guard-stream-mode").value,
+            content_guard_probe_interval_sec: Math.max(300, Number(document.getElementById("content-guard-probe-interval-sec").value || 3600)),
+            content_guard_max_scan_bytes: Math.max(1024, Number(document.getElementById("content-guard-max-scan-bytes").value || 16384)),
+            content_guard_stream_buffer_max_bytes: Math.max(1024, Number(document.getElementById("content-guard-stream-buffer-max-bytes").value || 16384)),
+            content_guard_high_risk_confidence_threshold: Math.max(0, Math.min(100, Number(document.getElementById("content-guard-high-risk-confidence-threshold").value || 85))),
+            content_guard_url_allowlist_json: document.getElementById("content-guard-url-allowlist-json").value.trim(),
+        });
+
+        const buildProbePayload = () => {
+            const probeKeys = Array.from(probeOptionsNode.querySelectorAll("input[type='checkbox']:checked")).map((item) => item.value);
+            if (!probeKeys.length) {
+                throw new Error("请至少选择一个探针");
+            }
+            if (selectedTargetType() === "external") {
+                const baseUrl = document.getElementById("content-guard-external-base-url").value.trim();
+                const apiKey = document.getElementById("content-guard-external-api-key").value.trim();
+                const modelName = document.getElementById("content-guard-external-model-name").value.trim();
+                if (!baseUrl || !apiKey || !modelName) {
+                    throw new Error("请填写外部渠道接口地址、密钥和模型名");
+                }
+                return {
+                    target_type: "external",
+                    probe_keys: probeKeys,
+                    persist_internal_result: false,
+                    external: {
+                        base_url: baseUrl,
+                        api_key: apiKey,
+                        model_name: modelName,
+                        endpoint_path: document.getElementById("content-guard-external-endpoint-path").value,
+                    },
+                };
+            }
+            if (!providerSelect.value || !providerModelSelect.value) {
+                throw new Error("请选择提供商和模型");
+            }
+            return {
+                target_type: "internal",
+                provider_id: Number(providerSelect.value),
+                provider_model_id: Number(providerModelSelect.value),
+                probe_keys: probeKeys,
+                persist_internal_result: true,
+            };
+        };
+
+        const resultStatusClass = (statusValue) => {
+            if (statusValue === "passed" || statusValue === "pass") return "status-healthy";
+            if (statusValue === "blocked" || statusValue === "block") return "status-unhealthy";
+            if (statusValue === "review") return "status-degraded";
+            return "status-unknown";
+        };
+
+        const renderProbeResult = (result) => {
+            const summary = result?.summary || {};
+            const statusNode = document.getElementById("content-guard-result-status");
+            const resultLabel = formatContentGuardResultLabel(summary.content_guard_result || summary.status);
+            statusNode.className = `status-badge ${resultStatusClass(summary.content_guard_result || summary.status)}`;
+            statusNode.textContent = resultLabel;
+            document.getElementById("content-guard-result-summary").innerHTML = `
+                <strong>${formatNumber(summary.passed || 0)} / ${formatNumber(summary.total || 0)}</strong>
+                <span>${escapeHtml(result?.target?.provider_name || result?.target?.name || "检测目标")} · ${escapeHtml(result?.target?.model_name || "-")}</span>
+            `;
+            const rows = Array.isArray(result?.probe_results) ? result.probe_results : [];
+            document.getElementById("content-guard-result-body").innerHTML = rows.length ? rows.map((item) => {
+                const guard = item.content_guard || {};
+                const guardResult = guard.content_guard_result || (item.success ? "pass" : "review");
+                const reason = guard.content_guard_reason || item.message || item.support_label || "-";
+                return `
+                    <tr>
+                        <td>${escapeHtml(item.probe_label || item.endpoint_label || item.probe_key || "-")}</td>
+                        <td><span class="status-badge ${resultStatusClass(guardResult)}">${escapeHtml(formatContentGuardResultLabel(guardResult))}</span></td>
+                        <td>${escapeHtml(formatContentGuardRiskLabel(guard.content_guard_risk_level))}</td>
+                        <td>${escapeHtml(String(item.latency_ms ?? 0))} ms</td>
+                        <td class="content-guard-reason-cell">${escapeHtml(reason)}</td>
+                    </tr>
+                `;
+            }).join("") : '<tr><td colspan="5" class="table-muted">未返回检测结果</td></tr>';
+            scheduleResponsiveTableSync(document.querySelector(".content-guard-result-panel"));
+        };
+
+        document.querySelectorAll('input[name="content_guard_target_type"]').forEach((input) => {
+            input.addEventListener("change", () => {
+                const external = selectedTargetType() === "external";
+                internalFields.classList.toggle("hidden", external);
+                externalFields.classList.toggle("hidden", !external);
+            });
+        });
+        providerSelect.addEventListener("change", renderProviderModelOptions);
+        refreshBtn?.addEventListener("click", () => loadOverview({ manual: true }));
+        addRuleBtn?.addEventListener("click", () => {
+            state.rules = collectRules();
+            state.rules.push(normalizeRuleForView({
+                id: `custom_rule_${Date.now()}`,
+                name: "新规则",
+                category: "custom_content_guard",
+                enabled: true,
+                match_type: "keyword_any",
+                patterns: ["待填写"],
+                risk_level: "medium",
+                action: "record",
+                score_delta: -8,
+                confidence: 0.7,
+            }, state.rules.length));
+            renderRules();
+            setButtonTransientFeedback(addRuleBtn, "success", { successText: "已新增" });
+        });
+        rulesBody?.addEventListener("click", (event) => {
+            const button = event.target.closest("[data-content-guard-delete-rule]");
+            if (!button) return;
+            const index = Number(button.dataset.contentGuardDeleteRule);
+            state.rules = collectRules().filter((_rule, ruleIndex) => ruleIndex !== index);
+            renderRules();
+        });
+        saveRulesBtn?.addEventListener("click", async () => {
+            try {
+                const rules = collectRules();
+                validateRules(rules);
+                setButtonLoading(saveRulesBtn, true);
+                const response = await api.put("/api/content-guard/rules", { rules });
+                state.rules = Array.isArray(response.rules) ? response.rules.map(normalizeRuleForView) : rules;
+                renderRules();
+                setButtonTransientFeedback(saveRulesBtn, "success", { successText: "已保存" });
+                showToast("内容防护规则已保存");
+            } catch (error) {
+                setButtonTransientFeedback(saveRulesBtn, "error", { errorText: "失败" });
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(saveRulesBtn, false);
+            }
+        });
+        resetRulesBtn?.addEventListener("click", async () => {
+            if (!window.confirm("恢复默认规则？")) return;
+            try {
+                setButtonLoading(resetRulesBtn, true);
+                const response = await api.post("/api/content-guard/rules/reset", {});
+                state.rules = Array.isArray(response.rules) ? response.rules.map(normalizeRuleForView) : [];
+                renderRules();
+                setButtonTransientFeedback(resetRulesBtn, "success", { successText: "已恢复" });
+                showToast("默认规则已恢复");
+            } catch (error) {
+                setButtonTransientFeedback(resetRulesBtn, "error", { errorText: "失败" });
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(resetRulesBtn, false);
+            }
+        });
+        inspectForm?.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            try {
+                const text = inspectText.value.trim();
+                if (!text) throw new Error("请输入检测文本");
+                setButtonLoading(inspectSubmitBtn, true);
+                const result = await api.post("/api/content-guard/inspect-text", { text });
+                const guard = result.result || {};
+                const guardResult = guard.content_guard_result || "pass";
+                const matchedRules = Array.isArray(result.matched_rules) ? result.matched_rules : [];
+                inspectResult.innerHTML = `
+                    <span class="status-badge ${resultStatusClass(guardResult)}">${escapeHtml(formatContentGuardResultLabel(guardResult))}</span>
+                    <strong>${escapeHtml(formatContentGuardRiskLabel(result.risk_level || guard.content_guard_risk_level))}</strong>
+                    <span>${escapeHtml(String(Math.round(Number(result.confidence || 0) * 100)))}%</span>
+                    <span>${escapeHtml(matchedRules.map((rule) => rule.name).join("、") || "未命中")}</span>
+                `;
+                setButtonTransientFeedback(inspectSubmitBtn, guardResult === "pass" ? "success" : "error", {
+                    successText: "已通过",
+                    errorText: "命中",
+                });
+            } catch (error) {
+                setButtonTransientFeedback(inspectSubmitBtn, "error", { errorText: "失败" });
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(inspectSubmitBtn, false);
+            }
+        });
+        settingsForm?.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            try {
+                setButtonLoading(settingsSubmitBtn, true);
+                const response = await api.put("/api/content-guard/settings", buildSettingsPayload());
+                applySettings(response.settings || {});
+                setButtonTransientFeedback(settingsSubmitBtn, "success", { successText: "已保存" });
+                showToast("内容防护设置已保存");
+                await loadOverview();
+            } catch (error) {
+                setButtonTransientFeedback(settingsSubmitBtn, "error", { errorText: "失败" });
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(settingsSubmitBtn, false);
+            }
+        });
+        probeForm?.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            try {
+                setButtonLoading(probeSubmitBtn, true);
+                const result = await api.post("/api/content-guard/probe", buildProbePayload());
+                renderProbeResult(result);
+                setButtonTransientFeedback(probeSubmitBtn, result?.summary?.status === "passed" ? "success" : "error", {
+                    successText: "已通过",
+                    errorText: "需复核",
+                });
+                showToast(`检测完成：${formatContentGuardResultLabel(result?.summary?.content_guard_result)}`);
+                await loadOverview();
+            } catch (error) {
+                setButtonTransientFeedback(probeSubmitBtn, "error", { errorText: "失败" });
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(probeSubmitBtn, false);
+            }
+        });
+
+        await loadOverview();
     }
 
     async function initSettings() {
@@ -6817,6 +8123,81 @@
         const routeModeSelect = document.getElementById("setting-route-mode");
         const manualAllowFallbackInput = document.getElementById("setting-manual-allow-fallback");
         const healthCheckIntervalInput = document.getElementById("setting-health-check-interval-sec");
+        const settingsHelpCopy = {
+            "setting-route-mode": ["路由主策略说明", "当前统一使用健康优先：先排除权限、能力、健康和容量不满足的候选，再按近期会话、负载、权重和得分分发。推荐保持默认值。"],
+            "setting-default-provider-id": ["默认提供商说明", "指定全局默认提供商。适合希望默认走某条稳定线路的场景；不确定时留空，由健康优先策略自动选择。"],
+            "setting-global-timeout-ms": ["全局超时说明", "单次非流式上游请求的默认等待时间。推荐 30000 ms；上游慢或长任务较多可适当增大。"],
+            "setting-global-max-retries": ["全局最大重试次数说明", "可恢复错误下最多换候选重试几次。推荐 2；过大可能放大延迟和上游消耗。"],
+            "setting-global-max-request-tokens": ["全局最大请求说明", "进入上游前允许的最大请求 token 估算值。0 表示不限制；生产环境建议结合模型上下文设置。"],
+            "setting-long-output-stream-threshold-tokens": ["长输出非流式阈值说明", "当预期输出超过该阈值时可引导使用流式链路。0 表示不强制；推荐 8192 tok。"],
+            "setting-max-v1-request-body-bytes": ["/v1 请求体最大字节数说明", "所有 /v1 入口请求体的全局上限。0 表示不限制；推荐保持默认 20971520 B。"],
+            "setting-max-v1-chat-request-body-bytes": ["Chat 请求体最大字节数说明", "仅限制 /v1/chat/completions 请求体。0 表示沿用 /v1 全局上限。"],
+            "setting-max-v1-responses-request-body-bytes": ["Responses 请求体最大字节数说明", "仅限制 /v1/responses 请求体。0 表示沿用 /v1 全局上限。"],
+            "setting-max-non-stream-response-body-bytes": ["非流式响应最大字节数说明", "限制上游非流式响应体读取大小，防止异常大响应占满内存。推荐保持默认 20971520 B。"],
+            "setting-stream-token-capture-max-bytes": ["流式统计缓存字节数说明", "流式响应用于日志和 token 补全的最大文本缓存。推荐 1048576 B；0 表示不缓存输出文本。"],
+            "setting-max-logged-metadata-bytes": ["日志 metadata 最大字节数说明", "限制日志 metadata 字段大小，避免绕过正文日志开关保存大上下文。推荐 1024 B。"],
+            "setting-max-logged-body-bytes": ["日志正文最大字节数说明", "请求和响应正文允许落库时的最大保存字节数。推荐 16384 B。"],
+            "setting-circuit-breaker-threshold": ["熔断阈值说明", "同一提供商或模型连续失败达到该次数后进入熔断。推荐 3；不稳定上游可适当调高。"],
+            "setting-request-log-retention-days": ["请求日志保留说明", "请求日志保留天数。推荐 90 d；合规或排障要求更高时再增大。"],
+            "setting-admin-audit-log-retention-days": ["审计日志保留说明", "管理员操作审计日志保留天数。推荐 180 d，便于追踪配置变更。"],
+            "setting-global-max-active-requests": ["全局最大活跃请求说明", "全站同时处理的最大请求数。推荐 20；高并发环境需结合 Redis 和机器资源调整。"],
+            "setting-global-max-active-streams": ["全局最大流式请求说明", "全站同时处理的最大流式请求数。推荐 10；流式连接占用时间长，建议保守。"],
+            "setting-api-key-max-active-requests": ["单密钥最大活跃请求说明", "单个 API Key 同时请求上限。推荐 20，用于限制单密钥挤占全局容量。"],
+            "setting-api-key-max-active-streams": ["单密钥最大流式请求说明", "单个 API Key 同时流式请求上限。推荐 10。"],
+            "setting-account-max-active-requests": ["单账户最大活跃请求说明", "单个用户账户同时请求上限。推荐 20。"],
+            "setting-account-max-active-streams": ["单账户最大流式请求说明", "单个用户账户同时流式请求上限。推荐 10。"],
+            "setting-provider-max-active-requests": ["单提供商最大活跃请求说明", "单个提供商同时承接请求上限。推荐 20，按上游容量调整。"],
+            "setting-provider-max-active-streams": ["单提供商最大流式请求说明", "单个提供商同时承接流式请求上限。推荐 10。"],
+            "setting-concurrency-lease-ttl-seconds": ["并发租约 TTL 说明", "请求异常退出时并发计数的兜底过期时间。推荐 900 s，需大于常规请求最长持续时间。"],
+            "setting-responses-chat-adapter-enabled": ["启用单向适配说明", "允许将 /v1/responses 转发到只支持 Chat 的上游。默认关闭；仅在确有 Chat-only 上游时开启。"],
+            "setting-responses-chat-adapter-web-search-enabled": ["启用搜索代理说明", "允许 Responses→Chat 适配链路代理 web_search。默认关闭；开启前需配置搜索代理地址。"],
+            "setting-responses-chat-adapter-storage-type": ["会话存储说明", "Responses→Chat 适配会话的存储方式。单机可用内存；多 worker 或生产推荐 Redis。"],
+            "setting-responses-chat-adapter-ttl-seconds": ["会话 TTL 说明", "适配会话保留时长。推荐 86400 s；越长占用存储越多。"],
+            "setting-responses-chat-adapter-max-tool-rounds": ["最大工具轮次说明", "单次适配请求允许的工具调用轮数。推荐 10；过大可能导致长时间循环。"],
+            "setting-responses-chat-adapter-context-window-tokens": ["上下文窗口说明", "适配器构造上下文时参考的最大 token 窗口。推荐按目标上游模型上下文设置。"],
+            "setting-responses-chat-adapter-snapshot-max-bytes": ["单快照上限说明", "单个适配会话快照最大字节数。推荐 1048576 B，防止会话状态过大。"],
+            "setting-responses-chat-adapter-db-cleanup-interval-seconds": ["数据库清理间隔说明", "数据库会话存储模式下清理过期快照的间隔。推荐 21600 s。"],
+            "setting-responses-chat-adapter-upstream-base-url": ["单上游地址说明", "适配器默认 Chat-only 上游地址。仅在启用单上游适配时填写。"],
+            "setting-responses-chat-adapter-upstream-api-key": ["单上游密钥说明", "适配器默认上游密钥。仅在启用单上游适配时填写，注意妥善保管。"],
+            "setting-responses-chat-adapter-search-proxy-url": ["搜索代理地址说明", "web_search 代理服务地址。仅在启用搜索代理时填写。"],
+            "setting-responses-chat-adapter-model-map-json": ["模型映射 JSON 说明", "Responses 模型到 Chat 上游模型的映射表。推荐使用对象 JSON，例如 {\"gpt-4o\":\"deepseek-chat\"}。"],
+            "setting-responses-chat-adapter-upstreams-json": ["多上游 JSON 说明", "为不同模型配置不同上游地址、密钥和模型名。生产多渠道适配时推荐使用对象 JSON。"],
+            "setting-manual-allow-fallback": ["默认提供商不可用时允许回退说明", "默认提供商失败后是否允许选择其它候选。推荐开启，避免单线路故障导致请求直接失败。"],
+            "setting-enable-token-logging": ["记录 token 使用量说明", "开启后记录上游 usage 中的 token 数据，用于统计和计费。推荐开启。"],
+            "setting-enable-payload-logging": ["记录请求与响应正文说明", "开启后可保存截断正文用于排障。生产默认关闭，避免敏感内容和存储压力。"],
+            "setting-enable-stream-response-persist": ["记录流式最终回复文本说明", "开启后保存流式输出文本。生产默认关闭；仅排障时短期开启。"],
+            "setting-mask-sensitive-fields": ["日志中脱敏敏感字段说明", "开启后日志保存前脱敏密钥、Authorization 等敏感字段。推荐始终开启。"],
+            "setting-allow-public-user-registration": ["允许公开注册普通用户说明", "开启后未登录访客可自行注册普通账户。默认关闭；公开运营前需确认风控和额度策略。"],
+        };
+        const ensureSettingsHelp = () => {
+            Object.entries(settingsHelpCopy).forEach(([id, [title, copy]]) => {
+                const input = document.getElementById(id);
+                const label = input?.closest("label");
+                if (!input || !label || label.querySelector(".settings-help")) return;
+                const help = document.createElement("span");
+                help.className = "settings-help";
+                help.innerHTML = `
+                    <button class="settings-help-btn" type="button" aria-label="查看${escapeHtml(title)}" data-settings-tooltip-trigger="true" data-settings-tooltip-title="${escapeHtml(title)}" data-settings-tooltip-copy="${escapeHtml(copy)}">
+                        <i class="bi bi-question-circle" aria-hidden="true"></i>
+                    </button>
+                `;
+                const switchTitle = label.querySelector(".settings-switch-copy > strong");
+                if (switchTitle) {
+                    const row = document.createElement("span");
+                    row.className = "settings-switch-title-row";
+                    switchTitle.replaceWith(row);
+                    row.appendChild(switchTitle);
+                    row.appendChild(help);
+                    return;
+                }
+                const labelSpan = label.querySelector(":scope > span");
+                if (labelSpan) {
+                    labelSpan.classList.add("settings-field-label");
+                    labelSpan.appendChild(help);
+                }
+            });
+        };
+        ensureSettingsHelp();
         initSettingsTooltipLayer();
         const [providers, settings] = await Promise.all([getProviderOptions(), api.get("/api/settings")]);
 
@@ -7214,8 +8595,8 @@
                 if (requireStream) requirementLabels.push("stream");
                 const requirementText = requirementLabels.length ? `（需支持 ${requirementLabels.join(" + ")}）` : "";
                 const message = selectedProvider
-                    ? `中转站 ${selectedProvider.name} 当前没有可用于测试的已启用模型${requirementText}`
-                    : `当前没有可用于测试的已启用模型${requirementText}，请先到模型配置中启用模型并绑定可用中转站`;
+                    ? `提供商 ${selectedProvider.name} 当前没有可用于测试的已启用模型${requirementText}`
+                    : `当前没有可用于测试的已启用模型${requirementText}，请先到模型配置中启用模型并绑定可用提供商`;
                 showToast(message, "error");
             }
         }
@@ -7736,6 +9117,8 @@
         const projectNameInput = document.getElementById("logs-project-name");
         const appNameInput = document.getElementById("logs-app-name");
         const environmentNameInput = document.getElementById("logs-environment-name");
+        const contentGuardResultInput = document.getElementById("logs-content-guard-result");
+        const contentGuardRiskLevelInput = document.getElementById("logs-content-guard-risk-level");
         const excludeHealthChecksInput = document.getElementById("logs-exclude-health-checks");
         const pageSizeSelect = document.getElementById("logs-page-size");
         const pageMeta = document.getElementById("logs-page-meta");
@@ -7743,6 +9126,22 @@
         const nextPageBtn = document.getElementById("logs-next-page-btn");
         const traceModal = document.getElementById("log-trace-modal");
         const traceContent = document.getElementById("log-trace-content");
+        const detailCards = document.getElementById("log-detail-cards");
+        const loggingTabButtons = Array.from(document.querySelectorAll("[data-logging-tab]"));
+        const requestPanels = Array.from(document.querySelectorAll('[data-logging-panel="request"]'));
+        const typedPanel = document.querySelector('[data-logging-panel="typed"]');
+        const typedLogsTitle = document.getElementById("typed-logs-title");
+        const typedLogsKicker = document.getElementById("typed-logs-kicker");
+        const typedLogsRefreshBtn = document.getElementById("typed-logs-refresh-btn");
+        const typedLogsLastRefresh = document.getElementById("typed-logs-last-refresh");
+        const typedLogsKeywordInput = document.getElementById("typed-logs-keyword");
+        const typedLogsResultSelect = document.getElementById("typed-logs-result");
+        const typedLogsPageSizeSelect = document.getElementById("typed-logs-page-size");
+        const typedLogsTableHead = document.getElementById("typed-logs-table-head");
+        const typedLogsTableBody = document.getElementById("typed-logs-table-body");
+        const typedLogsPageMeta = document.getElementById("typed-logs-page-meta");
+        const typedLogsPrevBtn = document.getElementById("typed-logs-prev-page-btn");
+        const typedLogsNextBtn = document.getElementById("typed-logs-next-page-btn");
         const closeBtn = document.getElementById("log-trace-close");
         const immediateFilterIds = [
             "logs-log-type",
@@ -7755,6 +9154,8 @@
             "logs-project-name",
             "logs-app-name",
             "logs-environment-name",
+            "logs-content-guard-result",
+            "logs-content-guard-risk-level",
         ];
         const debouncedFilterIds = [
             "logs-model-query",
@@ -7836,6 +9237,8 @@
             const apiClientKeyId = apiClientKeyIdSelect.value;
             const apiClientKeyQuery = apiClientKeyQueryManualInput.value.trim() || apiClientKeyQuerySelect.value;
             const success = document.getElementById("logs-success").value;
+            const contentGuardResult = contentGuardResultInput.value;
+            const contentGuardRiskLevel = contentGuardRiskLevelInput.value;
             const conversationKey = document.getElementById("logs-conversation-key").value.trim();
             const tenantName = tenantNameInput.value.trim();
             const projectName = projectNameInput.value.trim();
@@ -7854,6 +9257,8 @@
             if (projectName) params.set("project_name", projectName);
             if (appName) params.set("app_name", appName);
             if (environmentName) params.set("environment_name", environmentName);
+            if (contentGuardResult) params.set("content_guard_result", contentGuardResult);
+            if (contentGuardRiskLevel) params.set("content_guard_risk_level", contentGuardRiskLevel);
             params.set("exclude_health_checks", excludeHealthChecksInput.checked ? "true" : "false");
             params.set("limit", "5000");
             setButtonTransientFeedback(exportBtn, "success", { successText: "准备导出" });
@@ -7930,6 +9335,9 @@
             if (!initialFilterValuesApplied && currentParams.get("provider_id")) {
                 providerSelect.value = currentParams.get("provider_id");
             }
+            if (!initialFilterValuesApplied && currentParams.get("provider_trust_level")) {
+                providerTrustLevelSelect.value = currentParams.get("provider_trust_level");
+            }
             if (!initialFilterValuesApplied && currentParams.get("model_name")) {
                 modelSelect.value = currentParams.get("model_name");
             }
@@ -7971,6 +9379,698 @@
             nextPageBtn.disabled = state.page >= totalPages;
         }
 
+        const typedLogConfigs = {
+            exceptions: {
+                title: "异常事件",
+                endpoint: "/api/logging/exceptions",
+                keywordLabel: "关键词",
+                keywordPlaceholder: "trace、异常类型、错误码或摘要",
+                filters: [
+                    {
+                        key: "severity",
+                        label: "异常级别",
+                        type: "select",
+                        options: [
+                            { value: "", label: "全部" },
+                            { value: "critical", label: "严重" },
+                            { value: "danger", label: "危险" },
+                            { value: "warning", label: "警告" },
+                            { value: "info", label: "信息" },
+                        ],
+                    },
+                    { key: "error_code", label: "错误码", type: "text", placeholder: "例如 rate_limit_exceeded" },
+                    { key: "path", label: "请求路径", type: "text", placeholder: "例如 /v1/responses" },
+                ],
+                columns: [
+                    ["时间", (item) => formatDate(item.occurred_at || item.created_at)],
+                    ["异常", (item) => renderTypedPrimary(item.exception_type, item.message || item.error_code)],
+                    ["路径", (item) => `${escapeHtml(item.method || "-")} ${escapeHtml(item.request_path || "-")}`],
+                    ["级别", (item) => escapeHtml(formatLogStatusLabel(item.severity || item.result))],
+                    ["错误码", (item) => escapeHtml(item.error_code || "-")],
+                ],
+            },
+            "health-runs": {
+                title: "健康检查日志",
+                endpoint: "/api/logging/health-runs",
+                keywordLabel: "关键词",
+                keywordPlaceholder: "run_id、范围类型或对象标识",
+                filters: [
+                    {
+                        key: "trigger_type",
+                        label: "触发方式",
+                        type: "select",
+                        options: [
+                            { value: "", label: "全部" },
+                            { value: "manual_single", label: "手动单项" },
+                            { value: "manual_batch", label: "手动批量" },
+                            { value: "scheduled_l0", label: "定时 L0" },
+                            { value: "scheduled_l1", label: "定时 L1" },
+                            { value: "scheduled_l2", label: "定时 L2" },
+                            { value: "scheduled_l3", label: "定时 L3" },
+                        ],
+                    },
+                    {
+                        key: "overall_result",
+                        label: "检查结果",
+                        type: "select",
+                        options: [
+                            { value: "", label: "全部" },
+                            { value: "healthy", label: "健康" },
+                            { value: "degraded", label: "降级" },
+                            { value: "unhealthy", label: "异常" },
+                            { value: "running", label: "运行中" },
+                            { value: "failed", label: "失败" },
+                            { value: "skipped", label: "跳过" },
+                        ],
+                    },
+                ],
+                columns: [
+                    ["开始时间", (item) => formatDate(item.started_at || item.created_at)],
+                    ["批次", (item) => renderTypedPrimary(item.run_id, `${formatLogStatusLabel(item.trigger_type)} · ${formatLogStatusLabel(item.scope_type)}`)],
+                    ["结果", (item) => escapeHtml(formatLogStatusLabel(item.overall_result))],
+                    ["探针", (item) => `${formatNumber(item.success_probes || 0)} / ${formatNumber(item.total_probes || 0)}`],
+                    ["耗时", (item) => formatMetricValue(item.duration_ms, " ms")],
+                ],
+            },
+            "billing-events": {
+                title: "计费日志",
+                endpoint: "/api/logging/billing-events",
+                keywordLabel: "关键词",
+                keywordPlaceholder: "队列来源、价格来源、错误摘要",
+                filters: [
+                    {
+                        key: "event_family",
+                        label: "事件类型",
+                        type: "select",
+                        options: [
+                            { value: "", label: "全部" },
+                            { value: "token_finalize", label: "Token 回填" },
+                            { value: "billing_process", label: "计费过程" },
+                        ],
+                    },
+                    {
+                        key: "result",
+                        label: "结果状态",
+                        type: "select",
+                        options: [
+                            { value: "", label: "全部" },
+                            { value: "filled", label: "已补全" },
+                            { value: "pending_tokens", label: "等待 Token" },
+                            { value: "billed", label: "已计费" },
+                            { value: "no_charge", label: "不扣费" },
+                            { value: "retry", label: "重试" },
+                            { value: "failed", label: "失败" },
+                        ],
+                    },
+                    { key: "request_log_id", label: "请求日志 ID", type: "number", placeholder: "例如 1024" },
+                ],
+                columns: [
+                    ["时间", (item) => formatDate(item.created_at)],
+                    ["类型", (item) => renderTypedPrimary(item.event_family === "token_finalize" ? "Token 回填" : "计费过程", item.billing_status || item.result || item.token_source)],
+                    ["请求日志", (item) => escapeHtml(item.request_log_id || "-")],
+                    ["金额", (item) => escapeHtml(item.balance_delta ?? item.balance_after ?? "-")],
+                    ["错误", (item) => escapeHtml(item.error || "-")],
+                ],
+            },
+            "background-jobs": {
+                title: "后台任务日志",
+                endpoint: "/api/logging/background-jobs",
+                keywordLabel: "关键词",
+                keywordPlaceholder: "任务名、运行批次、锁键或错误摘要",
+                filters: [
+                    {
+                        key: "status",
+                        label: "任务状态",
+                        type: "select",
+                        options: [
+                            { value: "", label: "全部" },
+                            { value: "running", label: "运行中" },
+                            { value: "success", label: "成功" },
+                            { value: "failed", label: "失败" },
+                            { value: "skipped", label: "跳过" },
+                            { value: "cancelled", label: "已取消" },
+                        ],
+                    },
+                    { key: "job_name", label: "任务名称", type: "text", placeholder: "例如 token_finalize_backfill" },
+                ],
+                columns: [
+                    ["时间", (item) => formatDate(item.started_at || item.created_at)],
+                    ["任务", (item) => renderTypedPrimary(item.job_name, item.job_run_id)],
+                    ["锁", (item) => escapeHtml(formatLogStatusLabel(item.lock_status || "-"))],
+                    ["状态", (item) => escapeHtml(formatLogStatusLabel(item.status))],
+                    ["处理", (item) => `${formatNumber(item.success_count || 0)} / ${formatNumber(item.processed_count || 0)}`],
+                ],
+            },
+            "asset-events": {
+                title: "素材日志",
+                endpoint: "/api/logging/asset-events",
+                keywordLabel: "关键词",
+                keywordPlaceholder: "文件名、哈希前缀、Trace 或错误摘要",
+                filters: [
+                    {
+                        key: "actor_type",
+                        label: "操作来源",
+                        type: "select",
+                        options: [
+                            { value: "", label: "全部" },
+                            { value: "admin_user", label: "管理员" },
+                            { value: "user", label: "用户" },
+                            { value: "api_client", label: "API Key" },
+                            { value: "system", label: "系统" },
+                        ],
+                    },
+                    { key: "storage_scope", label: "存储范围", type: "text", placeholder: "例如 user_asset" },
+                    {
+                        key: "result",
+                        label: "处理结果",
+                        type: "select",
+                        options: [
+                            { value: "", label: "全部" },
+                            { value: "success", label: "成功" },
+                            { value: "failed", label: "失败" },
+                            { value: "warning", label: "警告" },
+                        ],
+                    },
+                ],
+                columns: [
+                    ["时间", (item) => formatDate(item.created_at)],
+                    ["文件", (item) => renderTypedPrimary(item.filename || "-", item.content_type || item.storage_scope)],
+                    ["来源", (item) => escapeHtml(formatLogStatusLabel(item.actor_type))],
+                    ["大小", (item) => formatBytes(item.file_size_bytes || 0)],
+                    ["结果", (item) => escapeHtml(formatLogStatusLabel(item.result))],
+                ],
+            },
+        };
+
+        function getTypedFilterNode(key) {
+            return document.getElementById(`typed-logs-filter-${key}`);
+        }
+
+        function readTypedFilterValue(node) {
+            if (!node) return "";
+            return typeof node.value === "string" ? node.value.trim() : "";
+        }
+
+        function snapshotCurrentTypedFilters(tab = state.activeTab) {
+            const config = typedLogConfigs[tab];
+            if (!config) return;
+            const snapshot = { keyword: typedLogsKeywordInput.value.trim() };
+            (config.filters || []).forEach((filter) => {
+                snapshot[filter.key] = readTypedFilterValue(getTypedFilterNode(filter.key));
+            });
+            typedFilterState[tab] = snapshot;
+        }
+
+        function renderTypedFilterField(filter, value) {
+            const filterId = `typed-logs-filter-${filter.key}`;
+            if (filter.type === "select") {
+                const options = (filter.options || []).map((option) => (
+                    `<option value="${escapeHtml(option.value)}"${option.value === value ? " selected" : ""}>${escapeHtml(option.label)}</option>`
+                )).join("");
+                return `
+                    <label class="typed-log-filter-field" data-typed-filter-field="true">
+                        <span>${escapeHtml(filter.label)}</span>
+                        <select class="field-input" id="${filterId}">${options}</select>
+                    </label>
+                `;
+            }
+            return `
+                <label class="typed-log-filter-field" data-typed-filter-field="true">
+                    <span>${escapeHtml(filter.label)}</span>
+                    <input
+                        class="field-input"
+                        id="${filterId}"
+                        type="${escapeHtml(filter.type || "text")}"
+                        value="${escapeHtml(value || "")}"
+                        placeholder="${escapeHtml(filter.placeholder || "")}"
+                    >
+                </label>
+            `;
+        }
+
+        function renderTypedFilterControls(tab) {
+            const config = typedLogConfigs[tab];
+            if (!config) return;
+            const snapshot = typedFilterState[tab] || {};
+            typedLogsKeywordLabel.textContent = config.keywordLabel || "关键词";
+            typedLogsKeywordInput.placeholder = config.keywordPlaceholder || "输入关键词";
+            typedLogsKeywordInput.value = snapshot.keyword || "";
+            document.querySelectorAll("[data-typed-filter-field]").forEach((node) => node.remove());
+            const pageSizeField = typedLogsPageSizeSelect.closest("label");
+            (config.filters || []).forEach((filter) => {
+                pageSizeField?.insertAdjacentHTML("beforebegin", renderTypedFilterField(filter, snapshot[filter.key] || ""));
+            });
+            (config.filters || []).forEach((filter) => {
+                const node = getTypedFilterNode(filter.key);
+                if (!node) return;
+                if (filter.type === "select") {
+                    node.addEventListener("change", () => {
+                        snapshotCurrentTypedFilters(tab);
+                        typedState.page = 1;
+                        loadTypedLogs();
+                    });
+                    return;
+                }
+                node.addEventListener("input", debouncedLoadTypedLogs);
+            });
+        }
+
+        function renderTypedPrimary(primary, secondary) {
+            return `
+                <span class="typed-log-primary">
+                    <strong>${escapeHtml(primary || "-")}</strong>
+                    <span class="table-muted">${escapeHtml(secondary || "-")}</span>
+                </span>
+            `;
+        }
+
+        function formatLogStatusLabel(value) {
+            const labels = {
+                success: "成功",
+                failed: "失败",
+                warning: "警告",
+                danger: "危险",
+                critical: "严重",
+                healthy: "健康",
+                degraded: "降级",
+                unhealthy: "异常",
+                running: "运行中",
+                skipped: "跳过",
+                skipped_locked: "锁定跳过",
+                cancelled: "已取消",
+                info: "信息",
+                manual_single: "手动单项",
+                manual_batch: "手动批量",
+                scheduled_l0: "定时 L0",
+                scheduled_l1: "定时 L1",
+                scheduled_l2: "定时 L2",
+                scheduled_l3: "定时 L3",
+                provider: "提供商",
+                model: "模型",
+                all: "全部",
+                admin_user: "管理员",
+                user: "用户",
+                api_client: "API Key",
+                system: "系统",
+                scheduler: "调度器",
+                token_finalize: "Token 回填",
+                billing_process: "计费过程",
+                request_log_queue: "请求日志队列",
+                backfill_job: "回填任务",
+                retry: "重试",
+                pending_tokens: "等待 Token",
+                billed: "已计费",
+                no_charge: "不扣费",
+                filled: "已补全",
+                upload: "上传",
+                reuse_existing: "复用已有",
+                delete: "删除",
+                external_file_upload: "外部文件上传",
+                external_file_read: "外部文件读取",
+                playground: "Playground",
+                user_self_test: "用户自测",
+                external_v1_file: "外部文件",
+            };
+            return labels[value] || value || "-";
+        }
+
+        function setActiveLoggingTab(tab) {
+            const previousTab = state.activeTab;
+            if (typedLogConfigs[previousTab]) {
+                snapshotCurrentTypedFilters(previousTab);
+            }
+            const normalizedTab = tab === "request" || typedLogConfigs[tab] ? tab : "request";
+            state.activeTab = normalizedTab;
+            loggingTabButtons.forEach((button) => {
+                button.classList.toggle("active", button.dataset.loggingTab === normalizedTab);
+            });
+            const isRequestTab = normalizedTab === "request";
+            requestPanels.forEach((panel) => panel.classList.toggle("hidden", !isRequestTab));
+            typedPanel?.classList.toggle("hidden", isRequestTab);
+            if (isRequestTab) {
+                loadLogs();
+                return;
+            }
+            typedState.page = 1;
+            renderTypedFilterControls(normalizedTab);
+            loadTypedLogs();
+        }
+
+        function renderTypedPagination(total) {
+            typedState.total = Number(total || 0);
+            const totalPages = Math.max(1, Math.ceil(typedState.total / typedState.pageSize));
+            if (typedState.page > totalPages) typedState.page = totalPages;
+            typedLogsPageMeta.textContent = `第 ${formatNumber(typedState.page)} 页，共 ${formatNumber(totalPages)} 页 · 共 ${formatNumber(typedState.total)} 条`;
+            typedLogsPrevBtn.disabled = typedState.page <= 1;
+            typedLogsNextBtn.disabled = typedState.page >= totalPages;
+        }
+
+        async function loadTypedLogs({ manual = false } = {}) {
+            const config = typedLogConfigs[state.activeTab];
+            if (!config) return;
+            const params = new URLSearchParams({
+                page: String(typedState.page),
+                page_size: String(typedState.pageSize),
+                _ts: Date.now().toString(),
+            });
+            const keyword = typedLogsKeywordInput.value.trim();
+            if (keyword) params.set("keyword", keyword);
+            (config.filters || []).forEach((filter) => {
+                const value = readTypedFilterValue(getTypedFilterNode(filter.key));
+                if (value) {
+                    params.set(filter.param || filter.key, value);
+                }
+            });
+            snapshotCurrentTypedFilters();
+            typedLogsTitle.textContent = config.title;
+            typedLogsKicker.textContent = "类型化日志";
+            setButtonLoading(typedLogsRefreshBtn, true);
+            try {
+                const data = await api.get(`${config.endpoint}?${params.toString()}`);
+                typedLogsTableHead.innerHTML = config.columns.map(([label]) => `<th>${escapeHtml(label)}</th>`).join("") + "<th>详情</th>";
+                typedLogsTableBody.innerHTML = (data.items || []).map((item, index) => `
+                    <tr>
+                        ${config.columns.map(([, render]) => `<td>${render(item)}</td>`).join("")}
+                        <td><button class="table-action-btn" data-action="show-typed-log" data-index="${index}">详情</button></td>
+                    </tr>
+                `).join("") || `<tr><td colspan="${config.columns.length + 1}"><div class="empty-state">没有匹配的日志</div></td></tr>`;
+                typedLogsTableBody.querySelectorAll("[data-action='show-typed-log']").forEach((button, index) => {
+                    button.dataset.item = JSON.stringify((data.items || [])[index] || {});
+                });
+                renderTypedPagination(data.total ?? 0);
+                updateLogRefreshResultLabel(typedLogsLastRefresh, "success", new Date());
+                if (manual) showToast(`${config.title}已刷新`);
+                enhanceInteractiveButtons(typedLogsTableBody);
+            } catch (error) {
+                updateLogRefreshResultLabel(typedLogsLastRefresh, "error", new Date());
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(typedLogsRefreshBtn, false);
+            }
+        }
+
+        function renderDetailCards(groups, timelineItems = []) {
+            detailCards.innerHTML = groups.map((group) => `
+                <article class="log-detail-card">
+                    <h4>${escapeHtml(group.title)}</h4>
+                    ${group.html || `
+                        <dl>
+                            ${(group.items || []).map(([label, value]) => `
+                                <dt>${escapeHtml(label)}</dt>
+                                <dd>${escapeHtml(formatLogDetailValue(value))}</dd>
+                            `).join("")}
+                        </dl>
+                    `}
+                </article>
+            `).join("");
+            if (timelineItems.length) {
+                detailCards.insertAdjacentHTML("beforeend", `
+                    <article class="log-detail-card log-detail-timeline">
+                        <h4>链路时间线</h4>
+                        <div class="log-detail-timeline-list">
+                            ${timelineItems.map((item) => `
+                                <div class="log-detail-timeline-item">
+                                    <strong>${escapeHtml(item.label || item.event_type || "-")}</strong>
+                                    <span class="table-muted">${escapeHtml(item.created_at || "-")}</span>
+                                    <span>${escapeHtml(compactDetailSummary(item.payload || {}))}</span>
+                                </div>
+                            `).join("")}
+                        </div>
+                    </article>
+                `);
+            }
+        }
+
+        function compactDetailSummary(payload) {
+            const keys = ["auth_result", "validation_stage", "permission_result", "result", "status_code", "error_code", "billing_stage", "guard_result", "stream_result"];
+            return keys
+                .filter((key) => payload[key] !== undefined && payload[key] !== null && payload[key] !== "")
+                .map((key) => `${key}: ${payload[key]}`)
+                .join(" · ") || "已记录结构化详情";
+        }
+
+        function formatLogDetailValue(value) {
+            if (value === null || value === undefined || value === "") return "-";
+            if (typeof value === "boolean") return value ? "是" : "否";
+            if (typeof value === "object") return JSON.stringify(value);
+            return String(value);
+        }
+
+        function renderTypedFieldList(items) {
+            return `
+                <dl>
+                    ${items.map(([label, value]) => `
+                        <dt>${escapeHtml(label)}</dt>
+                        <dd>${escapeHtml(formatLogDetailValue(value))}</dd>
+                    `).join("")}
+                </dl>
+            `;
+        }
+
+        function renderMiniTable(headers, rows) {
+            if (!rows.length) return '<div class="empty-state compact-empty">暂无结构化明细</div>';
+            return `
+                <div class="typed-log-mini-table-wrap">
+                    <table class="typed-log-mini-table">
+                        <thead>
+                            <tr>${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join("")}</tr>
+                        </thead>
+                        <tbody>
+                            ${rows.map((row) => `
+                                <tr>${row.map((cell) => `<td>${escapeHtml(formatLogDetailValue(cell))}</td>`).join("")}</tr>
+                            `).join("")}
+                        </tbody>
+                    </table>
+                </div>
+            `;
+        }
+
+        function normalizeJsonObject(value) {
+            if (!value) return {};
+            if (typeof value === "object") return value;
+            return safeJsonParse(String(value)) || {};
+        }
+
+        function renderExceptionDetail(item) {
+            renderDetailCards([
+                {
+                    title: "错误目录",
+                    items: [
+                        ["异常类型", item.exception_type],
+                        ["错误码", item.error_code],
+                        ["状态码", item.status_code],
+                        ["严重级别", formatLogStatusLabel(item.severity)],
+                    ],
+                },
+                {
+                    title: "请求上下文",
+                    items: [
+                        ["Trace", item.trace_id],
+                        ["路径", `${item.method || "-"} ${item.request_path || "-"}`],
+                        ["处理器", item.handler_name],
+                        ["对外入口", item.is_external_v1],
+                    ],
+                },
+                {
+                    title: "堆栈摘要",
+                    items: [
+                        ["堆栈哈希", item.stack_hash],
+                        ["安全消息", item.message],
+                        ["摘要", item.stack_excerpt],
+                    ],
+                },
+            ]);
+            traceContent.textContent = JSON.stringify(item, null, 2);
+        }
+
+        async function renderHealthRunDetail(item) {
+            let detail = { run: item, probes: [] };
+            if (item.run_id) {
+                detail = await api.get(`/api/logging/health-runs/${encodeURIComponent(item.run_id)}?_ts=${Date.now()}`);
+            }
+            const run = detail.run || item;
+            const probes = detail.probes || [];
+            const phaseKeys = normalizeJsonObject(run.phase_keys_json);
+            renderDetailCards([
+                {
+                    title: "批次进度",
+                    items: [
+                        ["批次", run.run_id],
+                        ["触发方式", formatLogStatusLabel(run.trigger_type)],
+                        ["范围", `${formatLogStatusLabel(run.scope_type)} ${run.scope_id || ""}`.trim()],
+                        ["结果", formatLogStatusLabel(run.overall_result)],
+                        ["开始", formatDate(run.started_at)],
+                        ["结束", formatDate(run.finished_at)],
+                        ["耗时", run.duration_ms == null ? "-" : `${formatNumber(run.duration_ms)} ms`],
+                    ],
+                },
+                {
+                    title: "探针汇总",
+                    items: [
+                        ["总探针", run.total_probes],
+                        ["成功", run.success_probes],
+                        ["失败", run.failed_probes],
+                        ["阶段", Array.isArray(phaseKeys) ? phaseKeys.join(" / ") : JSON.stringify(phaseKeys)],
+                    ],
+                },
+                {
+                    title: "探针矩阵",
+                    html: renderMiniTable(
+                        ["时间", "提供商", "模型", "探针", "协议", "结果", "耗时", "错误"],
+                        probes.map((probe) => [
+                            formatDate(probe.created_at),
+                            probe.provider_id || "-",
+                            probe.model_name || probe.provider_model_id || "-",
+                            probe.probe_type,
+                            probe.protocol_type || probe.endpoint_path,
+                            probe.success ? "成功" : "失败",
+                            probe.latency_ms == null ? "-" : `${probe.latency_ms} ms`,
+                            probe.error_code || "-",
+                        ])
+                    ),
+                },
+            ]);
+            traceContent.textContent = JSON.stringify(detail, null, 2);
+        }
+
+        function renderBillingEventDetail(item) {
+            const pricingSnapshot = normalizeJsonObject(item.pricing_snapshot_json);
+            const costSnapshot = normalizeJsonObject(item.cost_snapshot_json);
+            const usageBefore = normalizeJsonObject(item.usage_before_json);
+            const usageAfter = normalizeJsonObject(item.usage_after_json);
+            const isTokenFinalize = item.event_family === "token_finalize";
+            renderDetailCards([
+                {
+                    title: isTokenFinalize ? "Token 回填" : "计费状态",
+                    items: [
+                        ["请求日志", item.request_log_id],
+                        ["来源", item.queue_source || item.pricing_source],
+                        ["状态", formatLogStatusLabel(item.result || item.billing_status)],
+                        ["尝试次数", item.attempt_count],
+                        ["错误", item.error],
+                    ],
+                },
+                {
+                    title: "Token 变化",
+                    items: [
+                        ["来源", item.token_source || "-"],
+                        ["允许补全", item.enable_usage_fill],
+                        ["补全前", Object.keys(usageBefore).length ? JSON.stringify(usageBefore) : "-"],
+                        ["补全后", Object.keys(usageAfter).length ? JSON.stringify(usageAfter) : "-"],
+                    ],
+                },
+                {
+                    title: "价格快照",
+                    items: [
+                        ["价格来源", item.pricing_source],
+                        ["价格", Object.keys(pricingSnapshot).length ? JSON.stringify(pricingSnapshot) : "-"],
+                        ["成本", Object.keys(costSnapshot).length ? JSON.stringify(costSnapshot) : "-"],
+                    ],
+                },
+                {
+                    title: "扣费过程",
+                    items: [
+                        ["API Key", item.api_client_key_id],
+                        ["用户", item.user_account_id],
+                        ["余额变化", item.balance_delta == null ? "-" : formatMoney(item.balance_delta)],
+                        ["扣后余额", item.balance_after == null ? "-" : formatMoney(item.balance_after)],
+                        ["账单流水", item.billing_record_id],
+                    ],
+                },
+            ]);
+            traceContent.textContent = JSON.stringify(item, null, 2);
+        }
+
+        function renderBackgroundJobDetail(item) {
+            renderDetailCards([
+                {
+                    title: "分布式锁",
+                    items: [
+                        ["任务", item.job_name],
+                        ["运行 ID", item.job_run_id],
+                        ["锁键", item.lock_key],
+                        ["锁状态", formatLogStatusLabel(item.lock_status)],
+                    ],
+                },
+                {
+                    title: "执行结果",
+                    items: [
+                        ["触发方式", formatLogStatusLabel(item.trigger_type)],
+                        ["状态", formatLogStatusLabel(item.status)],
+                        ["开始", formatDate(item.started_at)],
+                        ["结束", formatDate(item.finished_at)],
+                        ["耗时", item.duration_ms == null ? "-" : `${formatNumber(item.duration_ms)} ms`],
+                    ],
+                },
+                {
+                    title: "处理数量",
+                    items: [
+                        ["处理总数", item.processed_count],
+                        ["成功数", item.success_count],
+                        ["失败数", item.failed_count],
+                        ["结果摘要", normalizeJsonObject(item.result_summary_json)],
+                    ],
+                },
+                {
+                    title: "错误",
+                    items: [["错误内容", item.error]],
+                },
+            ]);
+            traceContent.textContent = JSON.stringify(item, null, 2);
+        }
+
+        function renderAssetEventDetail(item) {
+            renderDetailCards([
+                {
+                    title: "文件元数据",
+                    items: [
+                        ["文件名", item.filename],
+                        ["类型", item.content_type],
+                        ["大小", item.file_size_bytes == null ? "-" : formatBytes(item.file_size_bytes)],
+                        ["哈希前缀", item.sha256_prefix],
+                    ],
+                },
+                {
+                    title: "存储与来源",
+                    items: [
+                        ["事件", formatLogStatusLabel(item.asset_event_type)],
+                        ["存储域", formatLogStatusLabel(item.storage_scope)],
+                        ["操作者", formatLogStatusLabel(item.actor_type)],
+                        ["操作者 ID", item.actor_id],
+                    ],
+                },
+                {
+                    title: "关联链路",
+                    items: [
+                        ["Trace", item.trace_id],
+                        ["关联 ID", item.correlation_id],
+                        ["结果", formatLogStatusLabel(item.result)],
+                        ["错误", item.error],
+                    ],
+                },
+            ]);
+            traceContent.textContent = JSON.stringify(item, null, 2);
+        }
+
+        async function renderTypedLogDetail(item) {
+            const tab = state.activeTab;
+            if (tab === "exceptions") {
+                renderExceptionDetail(item);
+            } else if (tab === "health-runs") {
+                await renderHealthRunDetail(item);
+            } else if (tab === "billing-events") {
+                renderBillingEventDetail(item);
+            } else if (tab === "background-jobs") {
+                renderBackgroundJobDetail(item);
+            } else if (tab === "asset-events") {
+                renderAssetEventDetail(item);
+            } else {
+                renderDetailCards([{ title: typedLogConfigs[tab]?.title || "日志详情", html: renderTypedFieldList(Object.entries(item).slice(0, 16)) }]);
+                traceContent.textContent = JSON.stringify(item, null, 2);
+            }
+            traceModal.classList.remove("hidden");
+        }
+
         async function loadLogs({ manual = false, feedbackSource = "auto" } = {}) {
             setButtonLoading(refreshBtn, true);
             let refreshFeedbackStatus = null;
@@ -7980,11 +10080,14 @@
             });
             const logType = document.getElementById("logs-log-type").value;
             const providerId = providerSelect.value;
+            const providerTrustLevel = providerTrustLevelSelect.value;
             const modelName = modelSelect.value;
             const modelQuery = modelQueryInput.value.trim();
             const apiClientKeyId = apiClientKeyIdSelect.value;
             const apiClientKeyQuery = apiClientKeyQueryManualInput.value.trim() || apiClientKeyQuerySelect.value;
             const success = document.getElementById("logs-success").value;
+            const contentGuardResult = contentGuardResultInput.value;
+            const contentGuardRiskLevel = contentGuardRiskLevelInput.value;
             const conversationKey = document.getElementById("logs-conversation-key").value.trim();
             const tenantName = tenantNameInput.value.trim();
             const projectName = projectNameInput.value.trim();
@@ -7993,6 +10096,7 @@
             const excludeHealthChecks = excludeHealthChecksInput.checked;
             if (logType) params.set("log_type", logType);
             if (providerId) params.set("provider_id", providerId);
+            if (providerTrustLevel) params.set("provider_trust_level", providerTrustLevel);
             if (modelName) params.set("model_name", modelName);
             if (modelQuery) params.set("model_query", modelQuery);
             if (apiClientKeyId) params.set("api_client_key_id", apiClientKeyId);
@@ -8003,6 +10107,8 @@
             if (projectName) params.set("project_name", projectName);
             if (appName) params.set("app_name", appName);
             if (environmentName) params.set("environment_name", environmentName);
+            if (contentGuardResult) params.set("content_guard_result", contentGuardResult);
+            if (contentGuardRiskLevel) params.set("content_guard_risk_level", contentGuardRiskLevel);
             params.set("exclude_health_checks", excludeHealthChecks ? "true" : "false");
             params.set("_ts", Date.now().toString());
             try {
@@ -8080,7 +10186,7 @@
             await loadLogs();
         });
 
-        tableBody.addEventListener("click", (event) => {
+        tableBody.addEventListener("click", async (event) => {
             const button = event.target.closest('button[data-action]');
             if (!button) return;
             if (button.dataset.action === "open-conversation") {
@@ -8111,6 +10217,12 @@
                 api_client_auth_result: log.api_client_auth_result,
                 api_client_remaining_tokens: log.api_client_remaining_tokens,
                 http_method: log.http_method,
+                content_guard_result: log.content_guard_result,
+                content_guard_risk_level: log.content_guard_risk_level,
+                content_guard_action: log.content_guard_action,
+                content_guard_reason: log.content_guard_reason,
+                content_guard_excerpt: log.content_guard_excerpt,
+                content_guard_categories_json: safeJsonParse(log.content_guard_categories_json || "") ?? log.content_guard_categories_json,
                 has_image_input: log.has_image_input,
                 uses_image_generation: log.uses_image_generation,
                 request_modality: log.request_modality,
@@ -8151,12 +10263,165 @@
                 trace: safeJsonParse(log.trace_json || "") ?? log.trace_json,
                 created_at: log.created_at,
             };
+            renderDetailCards([
+                {
+                    title: "鉴权",
+                    items: [
+                        ["结果", log.api_client_auth_result || (log.api_client_key_id ? "authenticated" : "-")],
+                        ["API Key", log.api_client_key_name || log.api_client_key_prefix || "-"],
+                        ["用户", log.user_account_name || log.user_account_id || "-"],
+                        ["剩余 Token", log.api_client_remaining_tokens ?? "-"],
+                    ],
+                },
+                {
+                    title: "校验",
+                    items: [
+                        ["方法", log.http_method || "-"],
+                        ["路径", log.request_path || "-"],
+                        ["状态码", log.status_code ?? "-"],
+                        ["请求形态", log.request_modality || (log.has_image ? "多模态" : "文本")],
+                    ],
+                },
+                {
+                    title: "模型能力",
+                    items: [
+                        ["请求模型", log.requested_model || "-"],
+                        ["实际模型", log.model_name || "-"],
+                        ["思维等级", log.reasoning_level || "无"],
+                        ["图片输入", log.has_image_input ? "是" : "否"],
+                    ],
+                },
+                {
+                    title: "路由",
+                    items: [
+                        ["提供商", log.provider_name || log.provider_id || "-"],
+                        ["挂载 ID", log.resolved_provider_model_id || "-"],
+                        ["尝试次数", log.attempt_count ?? "-"],
+                        ["上游请求", log.upstream_request_id || "-"],
+                    ],
+                },
+                {
+                    title: "流式",
+                    items: [
+                        ["是否流式", log.is_stream ? "是" : "否"],
+                        ["TTFB", log.ttfb_ms == null ? "-" : `${log.ttfb_ms} ms`],
+                        ["持续时间", log.duration_ms == null ? "-" : `${log.duration_ms} ms`],
+                        ["TPS", log.tps == null ? "-" : Number(log.tps).toFixed(2)],
+                    ],
+                },
+                {
+                    title: "错误响应",
+                    items: [
+                        ["成功", log.success ? "是" : "否"],
+                        ["错误类型", log.error_type || "-"],
+                        ["错误码", log.error_code || "-"],
+                        ["可重试", log.retryable == null ? "-" : (log.retryable ? "是" : "否")],
+                    ],
+                },
+                {
+                    title: "内容防护",
+                    items: [
+                        ["结果", formatLogStatusLabel(log.content_guard_result || "-")],
+                        ["风险", formatLogStatusLabel(log.content_guard_risk_level || "-")],
+                        ["动作", formatLogStatusLabel(log.content_guard_action || "-")],
+                        ["耗时", log.content_guard_latency_ms == null ? "-" : `${log.content_guard_latency_ms} ms`],
+                    ],
+                },
+                {
+                    title: "计费",
+                    items: [
+                        ["输入 Token", log.prompt_tokens ?? "-"],
+                        ["输出 Token", log.completion_tokens ?? "-"],
+                        ["总费用", log.total_cost ?? "-"],
+                        ["状态", formatLogStatusLabel(log.billing_status || "-")],
+                    ],
+                },
+            ]);
+            try {
+                const timeline = await api.get(`/api/logging/request-logs/${encodeURIComponent(log.id)}/timeline?_ts=${Date.now()}`);
+                renderDetailCards([
+                    {
+                        title: "鉴权",
+                        items: [
+                            ["结果", log.api_client_auth_result || (log.api_client_key_id ? "authenticated" : "-")],
+                            ["API Key", log.api_client_key_name || log.api_client_key_prefix || "-"],
+                            ["用户", log.user_account_name || log.user_account_id || "-"],
+                            ["剩余 Token", log.api_client_remaining_tokens ?? "-"],
+                        ],
+                    },
+                    {
+                        title: "校验",
+                        items: [
+                            ["方法", log.http_method || "-"],
+                            ["路径", log.request_path || "-"],
+                            ["状态码", log.status_code ?? "-"],
+                            ["请求形态", log.request_modality || (log.has_image ? "多模态" : "文本")],
+                        ],
+                    },
+                    {
+                        title: "模型能力",
+                        items: [
+                            ["请求模型", log.requested_model || "-"],
+                            ["实际模型", log.model_name || "-"],
+                            ["思维等级", log.reasoning_level || "无"],
+                            ["图片输入", log.has_image_input ? "是" : "否"],
+                        ],
+                    },
+                    {
+                        title: "Provider 尝试",
+                        items: [
+                            ["提供商", log.provider_name || log.provider_id || "-"],
+                            ["尝试次数", log.attempt_count ?? "-"],
+                            ["上游请求", log.upstream_request_id || "-"],
+                            ["完成原因", log.finish_reason || "-"],
+                        ],
+                    },
+                    {
+                        title: "流式",
+                        items: [
+                            ["是否流式", log.is_stream ? "是" : "否"],
+                            ["TTFB", log.ttfb_ms == null ? "-" : `${log.ttfb_ms} ms`],
+                            ["持续时间", log.duration_ms == null ? "-" : `${log.duration_ms} ms`],
+                            ["TPS", log.tps == null ? "-" : Number(log.tps).toFixed(2)],
+                        ],
+                    },
+                    {
+                        title: "错误响应",
+                        items: [
+                            ["成功", log.success ? "是" : "否"],
+                            ["错误类型", log.error_type || "-"],
+                            ["错误码", log.error_code || "-"],
+                            ["可重试", log.retryable == null ? "-" : (log.retryable ? "是" : "否")],
+                        ],
+                    },
+                    {
+                        title: "内容防护",
+                        items: [
+                            ["结果", formatLogStatusLabel(log.content_guard_result || "-")],
+                            ["风险", formatLogStatusLabel(log.content_guard_risk_level || "-")],
+                            ["动作", formatLogStatusLabel(log.content_guard_action || "-")],
+                            ["耗时", log.content_guard_latency_ms == null ? "-" : `${log.content_guard_latency_ms} ms`],
+                        ],
+                    },
+                    {
+                        title: "计费",
+                        items: [
+                            ["输入 Token", log.prompt_tokens ?? "-"],
+                            ["输出 Token", log.completion_tokens ?? "-"],
+                            ["总费用", log.total_cost ?? "-"],
+                            ["状态", formatLogStatusLabel(log.billing_status || "-")],
+                        ],
+                    },
+                ], timeline.events || []);
+            } catch (error) {
+                showToast(error.message, "error");
+            }
             traceContent.textContent = JSON.stringify(detail, null, 2);
             traceModal.classList.remove("hidden");
         });
 
         await loadFilterOptions();
-        await loadLogs();
+        setActiveLoggingTab(state.activeTab);
     }
 
     async function initUserConversations() {
@@ -8446,7 +10711,7 @@
                     { label: "摘要", value: "当前密钥命中的授权范围里没有这个模型，或者所选模型暂不可用。" },
                 ],
                 fixes: [
-                    { label: "修复建议", value: "去可用模型页确认模型名是否存在，再检查这把密钥的授权中转站是否覆盖该模型。" },
+                    { label: "修复建议", value: "去可用模型页确认模型名是否存在，再检查这把密钥的授权提供商是否覆盖该模型。" },
                     { label: "补充检查", value: "若模型名是手工输入或从别处复制的，优先改成站内模型页展示的标准名称。" },
                 ],
                 next: [
@@ -8455,15 +10720,15 @@
             };
         }
 
-        if (normalized.includes("unbound") || normalized.includes("中转") || normalized.includes("provider") || normalized.includes("route")) {
+        if (normalized.includes("unbound") || normalized.includes("提供商") || normalized.includes("provider") || normalized.includes("route")) {
             return {
                 failure: [
                     { label: "状态", value: "授权线路不可用" },
-                    { label: "摘要", value: "当前密钥没有可命中的中转站，或默认路由和授权集合无法组成候选线路。" },
+                    { label: "摘要", value: "当前密钥没有可命中的提供商，或默认路由和授权集合无法组成候选线路。" },
                 ],
                 fixes: [
-                    { label: "修复建议", value: "回到 API Key 管理页，检查授权中转站、默认中转站和路由主策略是否配置正确。" },
-                    { label: "补充检查", value: "若指定了默认中转站，确认是否需要开启回退，避免单线路失败后没有候选线路。" },
+                    { label: "修复建议", value: "回到 API Key 管理页，检查授权提供商、默认提供商和路由主策略是否配置正确。" },
+                    { label: "补充检查", value: "若指定了默认提供商，确认是否需要开启回退，避免单线路失败后没有候选线路。" },
                 ],
                 next: [
                     { label: "下一步", value: "修正密钥授权后，重新查看候选线路预览并再跑一次真实测试。" },
@@ -8509,7 +10774,7 @@
                 { label: "摘要", value: message || "当前请求未通过，请结合调度链路和原始返回继续排查。" },
             ],
             fixes: [
-                { label: "修复建议", value: "优先检查密钥状态、模型名、授权中转站和余额，再查看调度链路里的具体报错。" },
+                { label: "修复建议", value: "优先检查密钥状态、模型名、授权提供商和余额，再查看调度链路里的具体报错。" },
             ],
             next: [
                 { label: "下一步", value: "若无法直接判断原因，去“我的日志”或“会话回放”定位完整上下文。" },
@@ -8842,6 +11107,13 @@
                 api_key: "API 密钥异常",
                 account: "账户预警",
                 failure_rate: "失败率异常",
+                redis: "Redis 异常",
+                database: "数据库异常",
+                concurrency: "并发容量",
+                queue: "队列积压",
+                traffic: "流量异常",
+                content_risk: "内容风险",
+                billing: "计费异常",
             };
             return labels[type] || type || "-";
         }
@@ -8856,10 +11128,59 @@
         }
 
         function renderAlertSuggestion(type) {
-            if (type === "provider") return "先检查中转站健康、熔断和最近延迟，再决定是否临时下线。";
+            if (type === "provider") return "先检查提供商健康、熔断和最近延迟，再决定是否临时下线。";
             if (type === "api_key") return "优先核对密钥状态、余额和授权渠道，再决定是否轮换或恢复。";
             if (type === "account") return "先确认账户额度、冻结金额和最近消费，再决定调账或提升配额。";
             return "结合失败率、消息内容和相关日志，优先处理影响正式流量的问题。";
+        }
+
+        function renderAlertDetailCard(item) {
+            const payload = item && typeof item.payload === "object" && item.payload !== null ? item.payload : {};
+            const cells = [];
+            const add = (label, value, suffix = "") => {
+                const display = value === undefined || value === null || value === "" ? "-" : `${value}${suffix}`;
+                cells.push(`<span><b>${escapeHtml(label)}</b>${escapeHtml(String(display))}</span>`);
+            };
+            if (item.alert_type === "redis") {
+                add("状态", payload.redis_status);
+                add("延迟", payload.latency_ms, " ms");
+                add("错误", payload.error);
+            } else if (item.alert_type === "database") {
+                add("状态", payload.database_status);
+                add("连接池", payload.pool_status);
+                add("错误", payload.error);
+            } else if (item.alert_type === "queue") {
+                add("队列", payload.queue_name);
+                add("待处理", payload.queued);
+                add("失败", payload.failed);
+            } else if (item.alert_type === "provider") {
+                add("渠道", payload.provider_name);
+                add("失败率", payload.failure_rate, "%");
+                add("请求", payload.total_requests);
+            } else if (item.alert_type === "content_risk") {
+                add("渠道", payload.provider_name);
+                add("高风险", payload.high_risk_count);
+                add("处置", payload.auto_isolated ? "已隔离" : "待处理");
+            } else if (item.alert_type === "billing") {
+                add("失败数", payload.failed_count);
+                add("请求", payload.request_log_id);
+                add("错误", payload.error);
+            } else if (item.alert_type === "traffic" || item.alert_type === "failure_rate") {
+                add("窗口", payload.window_minutes, " min");
+                add("错误", payload.error_count);
+                add("错误率", payload.error_rate, "%");
+            } else if (item.alert_type === "api_key") {
+                add("密钥", payload.api_client_key_name);
+                add("状态", payload.status);
+                add("归属", payload.owner_user_name);
+            } else if (item.alert_type === "account") {
+                add("用户", payload.username);
+                add("余额", payload.available_balance);
+                add("预警", Array.isArray(payload.warnings) && payload.warnings[0] ? payload.warnings[0].message : item.message);
+            } else {
+                add("摘要", item.message || renderAlertSuggestion(item.alert_type));
+            }
+            return `<div class="alert-detail-card">${cells.join("")}</div>`;
         }
 
         function renderSystemMetrics(metrics) {
@@ -8885,6 +11206,13 @@
                 provider: '<a class="table-action-btn" href="/providers" data-shell-link>查渠道</a>',
                 api_key: '<a class="table-action-btn" href="/api-keys" data-shell-link>查密钥</a>',
                 account: '<a class="table-action-btn" href="/users" data-shell-link>查账户</a>',
+                redis: '<a class="table-action-btn" href="/operations" data-shell-link>查运维</a>',
+                database: '<a class="table-action-btn" href="/operations" data-shell-link>查运维</a>',
+                concurrency: '<a class="table-action-btn" href="/operations" data-shell-link>查容量</a>',
+                queue: '<a class="table-action-btn" href="/operations" data-shell-link>查队列</a>',
+                traffic: '<a class="table-action-btn" href="/logs" data-shell-link>查日志</a>',
+                content_risk: '<a class="table-action-btn" href="/content-guard" data-shell-link>查防护</a>',
+                billing: '<a class="table-action-btn" href="/logs" data-shell-link>查计费</a>',
             };
             return `
                 <div class="table-actions">
@@ -8901,7 +11229,7 @@
                         <td>${escapeHtml(formatAlertTypeLabel(item.alert_type))}</td>
                         <td>${escapeHtml(formatAlertSeverityLabel(item.severity))}</td>
                         <td>${escapeHtml(item.title || "-")}</td>
-                        <td>${escapeHtml(renderAlertSuggestion(item.alert_type))}</td>
+                        <td>${renderAlertDetailCard(item)}</td>
                         <td>${escapeHtml(item.last_seen_at || "-")}</td>
                         <td>${renderAlertActions(item)}</td>
                     </tr>
@@ -8997,6 +11325,7 @@
         const checkAll = document.getElementById("users-check-all-visible");
         const hiddenInput = document.getElementById("users-batch-user-ids");
         const previewInput = document.getElementById("users-batch-user-ids-preview");
+        const selectedCountNode = document.getElementById("users-batch-selected-count");
         const form = document.getElementById("users-batch-quota-form");
         const submitBtn = document.getElementById("users-batch-apply-btn");
         const quotaFieldNodes = Array.from(document.querySelectorAll("[data-batch-quota-field]"));
@@ -9097,6 +11426,7 @@
             try {
                 const query = selectedIds.map((id) => `user_ids=${encodeURIComponent(id)}`).join("&");
                 const data = await api.get(`/api/users/quota-preview?${query}`);
+                const singleAccountSelected = selectedIds.length === 1;
                 Object.entries(data?.fields || {}).forEach(([fieldName, item]) => {
                     quotaPreviewState.set(fieldName, {
                         rawValue: item.raw_value == null ? "" : String(item.raw_value),
@@ -9106,6 +11436,11 @@
                     const input = quotaInputsByField.get(fieldName);
                     if (currentNode) {
                         currentNode.textContent = `当前值：${item.display_value || "未知"}`;
+                    }
+                    if (input && singleAccountSelected) {
+                        input.value = item.raw_value == null ? "" : String(item.raw_value);
+                    } else if (input && selectedIds.length > 1) {
+                        input.value = "";
                     }
                     if (input && !input.value.trim()) {
                         input.placeholder = item.is_mixed
@@ -9126,6 +11461,9 @@
                 .filter(Boolean);
             hiddenInput.value = selectedIds.join(",");
             previewInput.value = selectedIds.join(", ");
+            if (selectedCountNode) {
+                selectedCountNode.textContent = `已选 ${formatNumber(selectedIds.length)} 个账号`;
+            }
             const checkboxes = Array.from(document.querySelectorAll("[data-user-batch-id]"));
             checkAll.checked = checkboxes.length > 0 && selectedIds.length === checkboxes.length;
             checkAll.indeterminate = selectedIds.length > 0 && selectedIds.length < checkboxes.length;
@@ -9253,7 +11591,7 @@
     function renderApiKeyProviderSelector(container, providers = [], selectedIds = []) {
         if (!container) return;
         if (!providers.length) {
-            container.innerHTML = '<div class="playground-provider-list-empty">当前还没有可绑定的中转站</div>';
+            container.innerHTML = '<div class="playground-provider-list-empty">当前还没有可绑定的提供商</div>';
             return;
         }
         const selectedIdSet = new Set(selectedIds.map((item) => Number(item)));
@@ -9308,6 +11646,9 @@
         const routeModeInput = document.getElementById("api-key-route-mode");
         const manualFallbackInput = document.getElementById("api-key-manual-allow-fallback");
         const routeInfiniteRetryInput = document.getElementById("api-key-route-exhausted-retry-infinite-enabled");
+        const trustedProvidersOnlyInput = document.getElementById("api-key-trusted-providers-only");
+        const allowLowTrustProvidersInput = document.getElementById("api-key-allow-low-trust-providers");
+        const contentGuardRequiredInput = document.getElementById("api-key-content-guard-required");
         const enabledInput = document.getElementById("api-key-enabled");
         const ownerUserSelect = document.getElementById("api-key-owner-user-id");
         const expiresAtInput = document.getElementById("api-key-expires-at");
@@ -9504,7 +11845,9 @@
                         </td>
                         <td>
                             <strong>${escapeHtml(formatRouteModeLabel(item.route_mode))}</strong>
-                            <div class="table-muted">默认中转 ${escapeHtml(defaultProvider?.name || (item.default_provider_id ? String(item.default_provider_id) : "-"))} · 失败后回退 ${formatSwitchText(item.manual_allow_fallback)}</div>
+                            <div class="table-muted">默认提供商 ${escapeHtml(defaultProvider?.name || (item.default_provider_id ? String(item.default_provider_id) : "-"))} · 失败后回退 ${formatSwitchText(item.manual_allow_fallback)}</div>
+                            <div class="table-muted">可信限定 ${formatSwitchText(item.trusted_providers_only)} · 低信任 ${formatSwitchText(item.allow_low_trust_providers, "允许", "禁止")}</div>
+                            <div class="table-muted">内容检测 ${formatSwitchText(item.content_guard_required, "要求", "可选")}</div>
                         </td>
                         <td>
                             <strong>${escapeHtml(providerSummary.countText)}</strong>
@@ -9656,16 +11999,16 @@
             }
             container.innerHTML = models.map((model) => {
                 const modelName = model.model_name || "";
-                const title = model.display_name || modelName;
                 const providerCount = (model.provider_bindings || []).filter((binding) => binding.bound && binding.enabled && binding.provider_enabled).length;
+                const healthStatus = model.health_status === "healthy" ? "healthy" : "unhealthy";
                 return `
                     <label class="playground-provider-option api-key-provider-option">
                         <input type="checkbox" data-api-key-model-name="${escapeHtml(modelName)}" ${selectedSet.has(modelName) ? "checked" : ""}>
                         <div class="playground-provider-option-copy">
-                            <strong>${escapeHtml(title)}</strong>
-                            <span>${escapeHtml(modelName)} · ${model.enabled ? "已启用" : "已禁用"} · 可用渠道 ${formatNumber(providerCount)}</span>
+                            <strong>${escapeHtml(modelName)}</strong>
+                            <span>${model.enabled ? "已启用" : "已禁用"} · 可用渠道 ${formatNumber(providerCount)}</span>
                         </div>
-                        <div>${statusBadge(model.enabled ? "healthy" : "disabled")}</div>
+                        <div>${statusBadge(healthStatus)}</div>
                     </label>
                 `;
             }).join("");
@@ -9758,7 +12101,7 @@
                         </td>
                         <td>
                             <strong>${escapeHtml(formatRouteModeLabel(item.route_mode))}</strong>
-                            <div class="table-muted">默认中转 ${escapeHtml(defaultProvider?.name || (item.default_provider_id ? String(item.default_provider_id) : "-"))} · 回退 ${formatSwitchText(item.manual_allow_fallback)}</div>
+                            <div class="table-muted">默认提供商 ${escapeHtml(defaultProvider?.name || (item.default_provider_id ? String(item.default_provider_id) : "-"))} · 回退 ${formatSwitchText(item.manual_allow_fallback)}</div>
                         </td>
                         <td>
                             <strong>${isAllProvidersTemplate ? "全部渠道" : `${formatNumber(templateProviderIds.length)} 个`}</strong>
@@ -9899,6 +12242,9 @@
             enabledInput.checked = apiKey?.enabled ?? true;
             manualFallbackInput.checked = apiKey?.manual_allow_fallback ?? true;
             routeInfiniteRetryInput.checked = apiKey?.route_exhausted_retry_infinite_enabled ?? false;
+            trustedProvidersOnlyInput.checked = apiKey?.trusted_providers_only ?? true;
+            allowLowTrustProvidersInput.checked = apiKey?.allow_low_trust_providers ?? false;
+            contentGuardRequiredInput.checked = apiKey?.content_guard_required ?? true;
             populateOwnerUserOptions(apiKey?.owner_user_id || null);
             expiresAtInput.value = toDatetimeLocalInputValue(apiKey?.expires_at);
             tokenLimitInput.value = apiKey?.token_limit_total ?? "";
@@ -9928,6 +12274,9 @@
             if (templateSelect) templateSelect.value = "";
             generationModeInput.value = "auto";
             rawApiKeyInput.value = "";
+            trustedProvidersOnlyInput.checked = true;
+            allowLowTrustProvidersInput.checked = false;
+            contentGuardRequiredInput.checked = true;
             balanceAmountInput.disabled = false;
             balanceAmountInput.placeholder = "留空表示不限制";
             renderApiKeyProviderSelector(providerSelector, state.providers, getAllProviderIds());
@@ -10101,7 +12450,7 @@
             const allowedProviderIds = getSelectedProviderIds();
             const defaultProviderId = defaultProviderSelect.value ? Number(defaultProviderSelect.value) : null;
             if (defaultProviderId && !allowedProviderIds.includes(defaultProviderId)) {
-                showToast("默认中转站必须包含在授权中转站里", "error");
+                showToast("默认提供商必须包含在授权提供商里", "error");
                 return;
             }
             const providerAuthorizationPayload = buildProviderAuthorizationPayload(allowedProviderIds);
@@ -10121,6 +12470,9 @@
                 owner_user_id: ownerUserSelect.value === "" ? null : Number(ownerUserSelect.value),
                 manual_allow_fallback: manualFallbackInput.checked,
                 route_exhausted_retry_infinite_enabled: routeInfiniteRetryInput.checked,
+                trusted_providers_only: trustedProvidersOnlyInput.checked,
+                allow_low_trust_providers: allowLowTrustProvidersInput.checked,
+                content_guard_required: contentGuardRequiredInput.checked,
                 auto_sync_provider_bindings: providerAuthorizationPayload.auto_sync_provider_bindings,
                 allowed_provider_ids: providerAuthorizationPayload.allowed_provider_ids,
                 allowed_model_names: getSelectedModelNames(),
@@ -10376,7 +12728,7 @@
             const allowedProviderIds = getBatchSelectedProviderIds();
             const defaultProviderId = batchProviderDefault.value ? Number(batchProviderDefault.value) : null;
             if (defaultProviderId && !allowedProviderIds.includes(defaultProviderId)) {
-                showToast("默认中转站必须包含在授权中转站里", "error");
+                showToast("默认提供商必须包含在授权提供商里", "error");
                 return;
             }
             const providerAuthorizationPayload = buildProviderAuthorizationPayload(allowedProviderIds);
@@ -10406,7 +12758,7 @@
             const allowedProviderIds = getTemplateSelectedProviderIds();
             const defaultProviderId = templateDefaultProviderSelect.value ? Number(templateDefaultProviderSelect.value) : null;
             if (defaultProviderId && !allowedProviderIds.includes(defaultProviderId)) {
-                showToast("默认中转站必须包含在授权中转站里", "error");
+                showToast("默认提供商必须包含在授权提供商里", "error");
                 return;
             }
             const providerAuthorizationPayload = buildProviderAuthorizationPayload(allowedProviderIds);
@@ -10619,7 +12971,7 @@
                 <div><span>状态</span><strong>${escapeHtml(renderApiKeyStatusText(detail.status))}</strong></div>
                 <div><span>前缀</span><strong>${escapeHtml(detail.key_masked)}</strong></div>
                 <div><span>密钥明文</span><strong>${detail.raw_api_key ? `${escapeHtml(detail.raw_api_key)} <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="${escapeHtml(detail.raw_api_key)}">复制</button>` : "历史密钥未存明文，可在编辑时替换为新密钥"}</strong></div>
-                <div><span>默认中转</span><strong>${escapeHtml(detail.default_provider_name || (detail.default_provider_id ? String(detail.default_provider_id) : "-"))}</strong></div>
+                <div><span>默认提供商</span><strong>${escapeHtml(detail.default_provider_name || (detail.default_provider_id ? String(detail.default_provider_id) : "-"))}</strong></div>
                 <div><span>过期时间</span><strong>${formatDate(detail.expires_at)}</strong></div>
                 <div><span>每日请求上限</span><strong>${formatLimitSetting(detail.request_limit_daily)}</strong></div>
                 <div><span>QPS / RPM / TPM</span><strong>${formatLimitSetting(detail.qps_limit)} / ${formatLimitSetting(detail.rpm_limit)} / ${formatLimitSetting(detail.tpm_limit)}</strong></div>
@@ -10646,7 +12998,7 @@
                         <div>${providerAvailabilityBadge(provider.health_status)}</div>
                     </article>
                 `).join("")
-                : '<div class="empty-state">当前没有授权中转站</div>';
+                : '<div class="empty-state">当前没有授权提供商</div>';
             document.getElementById("api-key-detail-model-distribution").innerHTML = analytics.model_distribution.length
                 ? analytics.model_distribution.map((item) => `
                     <article class="api-key-telemetry-card">
@@ -10777,6 +13129,7 @@
         const lastRefreshLabel = document.getElementById("logs-last-refresh");
         const clearBtn = document.getElementById("logs-clear-btn");
         const providerSelect = document.getElementById("logs-provider-id");
+        const providerTrustLevelSelect = document.getElementById("logs-provider-trust-level");
         const modelSelect = document.getElementById("logs-model-name");
         const modelQueryInput = document.getElementById("logs-model-query");
         const userAccountSelect = document.getElementById("logs-user-account-id");
@@ -10788,6 +13141,8 @@
         const projectNameInput = document.getElementById("logs-project-name");
         const appNameInput = document.getElementById("logs-app-name");
         const environmentNameInput = document.getElementById("logs-environment-name");
+        const contentGuardResultInput = document.getElementById("logs-content-guard-result");
+        const contentGuardRiskLevelInput = document.getElementById("logs-content-guard-risk-level");
         const excludeHealthChecksInput = document.getElementById("logs-exclude-health-checks");
         const pageSizeSelect = document.getElementById("logs-page-size");
         const pageMeta = document.getElementById("logs-page-meta");
@@ -10795,14 +13150,48 @@
         const nextPageBtn = document.getElementById("logs-next-page-btn");
         const traceModal = document.getElementById("log-trace-modal");
         const traceContent = document.getElementById("log-trace-content");
+        const detailCards = document.getElementById("log-detail-cards");
+        const loggingTabButtons = Array.from(document.querySelectorAll("[data-logging-tab]"));
+        const requestPanels = Array.from(document.querySelectorAll('[data-logging-panel="request"]'));
+        const typedPanel = document.querySelector('[data-logging-panel="typed"]');
+        const typedLogsTitle = document.getElementById("typed-logs-title");
+        const typedLogsKicker = document.getElementById("typed-logs-kicker");
+        const typedLogsRefreshBtn = document.getElementById("typed-logs-refresh-btn");
+        const typedLogsLastRefresh = document.getElementById("typed-logs-last-refresh");
+        const typedLogsKeywordLabel = document.getElementById("typed-logs-keyword-label");
+        const typedLogsKeywordInput = document.getElementById("typed-logs-keyword");
+        const typedLogsPageSizeSelect = document.getElementById("typed-logs-page-size");
+        const typedLogsTableHead = document.getElementById("typed-logs-table-head");
+        const typedLogsTableBody = document.getElementById("typed-logs-table-body");
+        const typedLogsPageMeta = document.getElementById("typed-logs-page-meta");
+        const typedLogsPrevBtn = document.getElementById("typed-logs-prev-page-btn");
+        const typedLogsNextBtn = document.getElementById("typed-logs-next-page-btn");
+        const closeBtn = document.getElementById("log-trace-close");
+        if (
+            !tableBody || !refreshBtn || !exportBtn || !lastRefreshLabel || !clearBtn
+            || !providerSelect || !providerTrustLevelSelect || !modelSelect || !modelQueryInput
+            || !userAccountSelect || !userAccountQueryInput || !apiClientKeyIdSelect || !apiClientKeyQuerySelect
+            || !apiClientKeyQueryManualInput || !tenantNameInput || !projectNameInput || !appNameInput
+            || !environmentNameInput || !contentGuardResultInput || !contentGuardRiskLevelInput
+            || !excludeHealthChecksInput || !pageSizeSelect || !pageMeta || !prevPageBtn || !nextPageBtn
+            || !traceModal || !traceContent || !detailCards || !typedPanel || !typedLogsTitle
+            || !typedLogsKicker || !typedLogsRefreshBtn || !typedLogsLastRefresh || !typedLogsKeywordLabel
+            || !typedLogsKeywordInput || !typedLogsPageSizeSelect || !typedLogsTableHead || !typedLogsTableBody
+            || !typedLogsPageMeta || !typedLogsPrevBtn || !typedLogsNextBtn || !closeBtn || !loggingTabButtons.length
+        ) {
+            return;
+        }
         const immediateFilterIds = [
             "logs-log-type",
             "logs-provider-id",
+            "logs-provider-trust-level",
             "logs-model-name",
             "logs-user-account-id",
             "logs-api-client-key-id",
             "logs-api-client-key-query",
             "logs-success",
+            "logs-content-guard-result",
+            "logs-content-guard-risk-level",
             "logs-tenant-name",
             "logs-project-name",
             "logs-app-name",
@@ -10821,13 +13210,23 @@
                 ? Number.parseInt(currentParams.get("page_size") || "50", 10)
                 : 50,
             total: 0,
+            activeTab: currentParams.get("tab") || "request",
         };
+        const typedState = {
+            page: 1,
+            pageSize: 20,
+            total: 0,
+        };
+        const typedFilterState = {};
         let initialFilterValuesApplied = false;
         if (currentParams.get("conversation_key")) {
             document.getElementById("logs-conversation-key").value = currentParams.get("conversation_key");
         }
         if (currentParams.get("model_query")) {
             modelQueryInput.value = currentParams.get("model_query");
+        }
+        if (currentParams.get("provider_trust_level")) {
+            providerTrustLevelSelect.value = currentParams.get("provider_trust_level");
         }
         if (currentParams.get("user_account_query")) {
             userAccountQueryInput.value = currentParams.get("user_account_query");
@@ -10876,6 +13275,7 @@
             const params = new URLSearchParams();
             const logType = document.getElementById("logs-log-type").value;
             const providerId = providerSelect.value;
+            const providerTrustLevel = providerTrustLevelSelect.value;
             const modelName = modelSelect.value;
             const modelQuery = modelQueryInput.value.trim();
             const userAccountId = userAccountSelect.value;
@@ -10883,6 +13283,8 @@
             const apiClientKeyId = apiClientKeyIdSelect.value;
             const apiClientKeyQuery = apiClientKeyQueryManualInput.value.trim() || apiClientKeyQuerySelect.value;
             const success = document.getElementById("logs-success").value;
+            const contentGuardResult = contentGuardResultInput.value;
+            const contentGuardRiskLevel = contentGuardRiskLevelInput.value;
             const conversationKey = document.getElementById("logs-conversation-key").value.trim();
             const tenantName = tenantNameInput.value.trim();
             const projectName = projectNameInput.value.trim();
@@ -10890,6 +13292,7 @@
             const environmentName = environmentNameInput.value.trim();
             if (logType) params.set("log_type", logType);
             if (providerId) params.set("provider_id", providerId);
+            if (providerTrustLevel) params.set("provider_trust_level", providerTrustLevel);
             if (modelName) params.set("model_name", modelName);
             if (modelQuery) params.set("model_query", modelQuery);
             if (userAccountId) params.set("user_account_id", userAccountId);
@@ -10898,6 +13301,8 @@
             if (apiClientKeyQuery) params.set("api_client_key_query", apiClientKeyQuery);
             if (apiClientKeyQueryManualInput.value.trim()) params.set("api_client_key_query_text", apiClientKeyQueryManualInput.value.trim());
             if (success) params.set("success", success);
+            if (contentGuardResult) params.set("content_guard_result", contentGuardResult);
+            if (contentGuardRiskLevel) params.set("content_guard_risk_level", contentGuardRiskLevel);
             if (conversationKey) params.set("conversation_key", conversationKey);
             if (tenantName) params.set("tenant_name", tenantName);
             if (projectName) params.set("project_name", projectName);
@@ -10922,7 +13327,7 @@
                 setButtonTransientFeedback(refreshBtn, "error", { errorText: "刷新失败" });
             }
         });
-        document.getElementById("log-trace-close").addEventListener("click", () => traceModal.classList.add("hidden"));
+        closeBtn.addEventListener("click", () => traceModal.classList.add("hidden"));
         traceModal.addEventListener("click", (event) => {
             if (event.target === traceModal) traceModal.classList.add("hidden");
         });
@@ -10938,6 +13343,45 @@
                 showToast(error.message, "error");
             } finally {
                 setButtonLoading(clearBtn, false);
+            }
+        });
+        loggingTabButtons.forEach((button) => {
+            button.addEventListener("click", () => setActiveLoggingTab(button.dataset.loggingTab));
+        });
+        const debouncedLoadTypedLogs = debounce(() => {
+            snapshotCurrentTypedFilters();
+            typedState.page = 1;
+            loadTypedLogs();
+        });
+        typedLogsKeywordInput.addEventListener("input", debouncedLoadTypedLogs);
+        typedLogsPageSizeSelect.addEventListener("change", () => {
+            typedState.pageSize = Number.parseInt(typedLogsPageSizeSelect.value || "20", 10) || 20;
+            typedState.page = 1;
+            loadTypedLogs();
+        });
+        typedLogsPrevBtn.addEventListener("click", () => {
+            if (typedState.page <= 1) return;
+            typedState.page -= 1;
+            loadTypedLogs();
+        });
+        typedLogsNextBtn.addEventListener("click", () => {
+            const totalPages = Math.max(1, Math.ceil((typedState.total || 0) / typedState.pageSize));
+            if (typedState.page >= totalPages) return;
+            typedState.page += 1;
+            loadTypedLogs();
+        });
+        typedLogsRefreshBtn.addEventListener("click", () => loadTypedLogs({ manual: true }));
+        typedLogsTableBody.addEventListener("click", async (event) => {
+            const button = event.target.closest('[data-action="show-typed-log"]');
+            if (!button) return;
+            const item = safeJsonParse(button.dataset.item || "") || {};
+            setButtonLoading(button, true);
+            try {
+                await renderTypedLogDetail(item);
+            } catch (error) {
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(button, false);
             }
         });
 
@@ -11024,6 +13468,12 @@
             if (!initialFilterValuesApplied && currentParams.get("success")) {
                 document.getElementById("logs-success").value = currentParams.get("success");
             }
+            if (!initialFilterValuesApplied && currentParams.get("content_guard_result")) {
+                contentGuardResultInput.value = currentParams.get("content_guard_result");
+            }
+            if (!initialFilterValuesApplied && currentParams.get("content_guard_risk_level")) {
+                contentGuardRiskLevelInput.value = currentParams.get("content_guard_risk_level");
+            }
             initialFilterValuesApplied = true;
         }
 
@@ -11037,6 +13487,426 @@
             prevPageBtn.disabled = state.page <= 1;
             nextPageBtn.disabled = state.page >= totalPages;
         }
+
+        const typedLogConfigs = {
+            exceptions: {
+                title: "异常事件",
+                endpoint: "/api/logging/exceptions",
+                keywordLabel: "关键词",
+                keywordPlaceholder: "trace、异常类型、错误码或摘要",
+                filters: [
+                    {
+                        key: "severity",
+                        label: "异常级别",
+                        type: "select",
+                        options: [
+                            { value: "", label: "全部" },
+                            { value: "critical", label: "严重" },
+                            { value: "danger", label: "危险" },
+                            { value: "warning", label: "警告" },
+                            { value: "info", label: "信息" },
+                        ],
+                    },
+                    { key: "error_code", label: "错误码", type: "text", placeholder: "例如 rate_limit_exceeded" },
+                    { key: "path", label: "请求路径", type: "text", placeholder: "例如 /v1/responses" },
+                ],
+                columns: [
+                    ["时间", (item) => formatDate(item.occurred_at || item.created_at)],
+                    ["异常", (item) => renderTypedPrimary(item.exception_type, item.message || item.error_code)],
+                    ["路径", (item) => `${escapeHtml(item.method || "-")} ${escapeHtml(item.request_path || "-")}`],
+                    ["级别", (item) => escapeHtml(formatLogStatusLabel(item.severity || item.result))],
+                    ["错误码", (item) => escapeHtml(item.error_code || "-")],
+                ],
+            },
+            "health-runs": {
+                title: "健康检查日志",
+                endpoint: "/api/logging/health-runs",
+                keywordLabel: "关键词",
+                keywordPlaceholder: "run_id、范围类型或对象标识",
+                filters: [
+                    {
+                        key: "trigger_type",
+                        label: "触发方式",
+                        type: "select",
+                        options: [
+                            { value: "", label: "全部" },
+                            { value: "manual_single", label: "手动单项" },
+                            { value: "manual_batch", label: "手动批量" },
+                            { value: "scheduled_l0", label: "定时 L0" },
+                            { value: "scheduled_l1", label: "定时 L1" },
+                            { value: "scheduled_l2", label: "定时 L2" },
+                            { value: "scheduled_l3", label: "定时 L3" },
+                        ],
+                    },
+                    {
+                        key: "overall_result",
+                        label: "检查结果",
+                        type: "select",
+                        options: [
+                            { value: "", label: "全部" },
+                            { value: "healthy", label: "健康" },
+                            { value: "degraded", label: "降级" },
+                            { value: "unhealthy", label: "异常" },
+                            { value: "running", label: "运行中" },
+                            { value: "failed", label: "失败" },
+                            { value: "skipped", label: "跳过" },
+                        ],
+                    },
+                ],
+                columns: [
+                    ["开始时间", (item) => formatDate(item.started_at || item.created_at)],
+                    ["批次", (item) => renderTypedPrimary(item.run_id, `${formatLogStatusLabel(item.trigger_type)} · ${formatLogStatusLabel(item.scope_type)}`)],
+                    ["结果", (item) => escapeHtml(formatLogStatusLabel(item.overall_result))],
+                    ["探针", (item) => `${formatNumber(item.success_probes || 0)} / ${formatNumber(item.total_probes || 0)}`],
+                    ["耗时", (item) => formatMetricValue(item.duration_ms, " ms")],
+                ],
+            },
+            "billing-events": {
+                title: "计费日志",
+                endpoint: "/api/logging/billing-events",
+                keywordLabel: "关键词",
+                keywordPlaceholder: "队列来源、价格来源、错误摘要",
+                filters: [
+                    {
+                        key: "event_family",
+                        label: "事件类型",
+                        type: "select",
+                        options: [
+                            { value: "", label: "全部" },
+                            { value: "token_finalize", label: "Token 回填" },
+                            { value: "billing_process", label: "计费过程" },
+                        ],
+                    },
+                    {
+                        key: "result",
+                        label: "结果状态",
+                        type: "select",
+                        options: [
+                            { value: "", label: "全部" },
+                            { value: "filled", label: "已补全" },
+                            { value: "pending_tokens", label: "等待 Token" },
+                            { value: "billed", label: "已计费" },
+                            { value: "no_charge", label: "不扣费" },
+                            { value: "retry", label: "重试" },
+                            { value: "failed", label: "失败" },
+                        ],
+                    },
+                    { key: "request_log_id", label: "请求日志 ID", type: "number", placeholder: "例如 1024" },
+                ],
+                columns: [
+                    ["时间", (item) => formatDate(item.created_at)],
+                    ["类型", (item) => renderTypedPrimary(item.event_family === "token_finalize" ? "Token 回填" : "计费过程", item.billing_status || item.result || item.token_source)],
+                    ["请求日志", (item) => escapeHtml(item.request_log_id || "-")],
+                    ["金额", (item) => escapeHtml(item.balance_delta ?? item.balance_after ?? "-")],
+                    ["错误", (item) => escapeHtml(item.error || "-")],
+                ],
+            },
+            "background-jobs": {
+                title: "后台任务日志",
+                endpoint: "/api/logging/background-jobs",
+                keywordLabel: "关键词",
+                keywordPlaceholder: "任务名、运行批次、锁键或错误摘要",
+                filters: [
+                    {
+                        key: "status",
+                        label: "任务状态",
+                        type: "select",
+                        options: [
+                            { value: "", label: "全部" },
+                            { value: "running", label: "运行中" },
+                            { value: "success", label: "成功" },
+                            { value: "failed", label: "失败" },
+                            { value: "skipped", label: "跳过" },
+                            { value: "cancelled", label: "已取消" },
+                        ],
+                    },
+                    { key: "job_name", label: "任务名称", type: "text", placeholder: "例如 token_finalize_backfill" },
+                ],
+                columns: [
+                    ["时间", (item) => formatDate(item.started_at || item.created_at)],
+                    ["任务", (item) => renderTypedPrimary(item.job_name, item.job_run_id)],
+                    ["锁", (item) => escapeHtml(formatLogStatusLabel(item.lock_status || "-"))],
+                    ["状态", (item) => escapeHtml(formatLogStatusLabel(item.status))],
+                    ["处理", (item) => `${formatNumber(item.success_count || 0)} / ${formatNumber(item.processed_count || 0)}`],
+                ],
+            },
+            "asset-events": {
+                title: "素材日志",
+                endpoint: "/api/logging/asset-events",
+                keywordLabel: "关键词",
+                keywordPlaceholder: "文件名、哈希前缀、Trace 或错误摘要",
+                filters: [
+                    {
+                        key: "actor_type",
+                        label: "操作来源",
+                        type: "select",
+                        options: [
+                            { value: "", label: "全部" },
+                            { value: "admin_user", label: "管理员" },
+                            { value: "user", label: "用户" },
+                            { value: "api_client", label: "API Key" },
+                            { value: "system", label: "系统" },
+                        ],
+                    },
+                    { key: "storage_scope", label: "存储范围", type: "text", placeholder: "例如 user_asset" },
+                    {
+                        key: "result",
+                        label: "处理结果",
+                        type: "select",
+                        options: [
+                            { value: "", label: "全部" },
+                            { value: "success", label: "成功" },
+                            { value: "failed", label: "失败" },
+                            { value: "warning", label: "警告" },
+                        ],
+                    },
+                ],
+                columns: [
+                    ["时间", (item) => formatDate(item.created_at)],
+                    ["文件", (item) => renderTypedPrimary(item.filename || "-", item.content_type || item.storage_scope)],
+                    ["来源", (item) => escapeHtml(formatLogStatusLabel(item.actor_type))],
+                    ["大小", (item) => formatBytes(item.file_size_bytes || 0)],
+                    ["结果", (item) => escapeHtml(formatLogStatusLabel(item.result))],
+                ],
+            },
+        };
+
+        function getTypedFilterNode(key) {
+            return document.getElementById(`typed-logs-filter-${key}`);
+        }
+
+        function readTypedFilterValue(node) {
+            if (!node) return "";
+            return typeof node.value === "string" ? node.value.trim() : "";
+        }
+
+        function snapshotCurrentTypedFilters(tab = state.activeTab) {
+            const config = typedLogConfigs[tab];
+            if (!config) return;
+            const snapshot = { keyword: typedLogsKeywordInput.value.trim() };
+            (config.filters || []).forEach((filter) => {
+                snapshot[filter.key] = readTypedFilterValue(getTypedFilterNode(filter.key));
+            });
+            typedFilterState[tab] = snapshot;
+        }
+
+        function renderTypedFilterField(filter, value) {
+            const filterId = `typed-logs-filter-${filter.key}`;
+            if (filter.type === "select") {
+                const options = (filter.options || []).map((option) => (
+                    `<option value="${escapeHtml(option.value)}"${option.value === value ? " selected" : ""}>${escapeHtml(option.label)}</option>`
+                )).join("");
+                return `
+                    <label class="typed-log-filter-field" data-typed-filter-field="true">
+                        <span>${escapeHtml(filter.label)}</span>
+                        <select class="field-input" id="${filterId}">${options}</select>
+                    </label>
+                `;
+            }
+            return `
+                <label class="typed-log-filter-field" data-typed-filter-field="true">
+                    <span>${escapeHtml(filter.label)}</span>
+                    <input
+                        class="field-input"
+                        id="${filterId}"
+                        type="${escapeHtml(filter.type || "text")}"
+                        value="${escapeHtml(value || "")}"
+                        placeholder="${escapeHtml(filter.placeholder || "")}"
+                    >
+                </label>
+            `;
+        }
+
+        function renderTypedFilterControls(tab) {
+            const config = typedLogConfigs[tab];
+            if (!config) return;
+            const snapshot = typedFilterState[tab] || {};
+            typedLogsKeywordLabel.textContent = config.keywordLabel || "关键词";
+            typedLogsKeywordInput.placeholder = config.keywordPlaceholder || "输入关键词";
+            typedLogsKeywordInput.value = snapshot.keyword || "";
+            document.querySelectorAll("[data-typed-filter-field]").forEach((node) => node.remove());
+            const pageSizeField = typedLogsPageSizeSelect.closest("label");
+            (config.filters || []).forEach((filter) => {
+                pageSizeField?.insertAdjacentHTML("beforebegin", renderTypedFilterField(filter, snapshot[filter.key] || ""));
+            });
+            (config.filters || []).forEach((filter) => {
+                const node = getTypedFilterNode(filter.key);
+                if (!node) return;
+                if (filter.type === "select") {
+                    node.addEventListener("change", () => {
+                        snapshotCurrentTypedFilters(tab);
+                        typedState.page = 1;
+                        loadTypedLogs();
+                    });
+                    return;
+                }
+                node.addEventListener("input", debouncedLoadTypedLogs);
+            });
+        }
+
+        function renderTypedPrimary(primary, secondary) {
+            return `
+                <span class="typed-log-primary">
+                    <strong>${escapeHtml(primary || "-")}</strong>
+                    <span class="table-muted">${escapeHtml(secondary || "-")}</span>
+                </span>
+            `;
+        }
+
+        function formatLogStatusLabel(value) {
+            const labels = {
+                success: "成功",
+                failed: "失败",
+                warning: "警告",
+                danger: "危险",
+                critical: "严重",
+                healthy: "健康",
+                degraded: "降级",
+                unhealthy: "异常",
+                running: "运行中",
+                skipped: "跳过",
+                skipped_locked: "锁定跳过",
+                cancelled: "已取消",
+                info: "信息",
+                manual_single: "手动单项",
+                manual_batch: "手动批量",
+                scheduled_l0: "定时 L0",
+                scheduled_l1: "定时 L1",
+                scheduled_l2: "定时 L2",
+                scheduled_l3: "定时 L3",
+                provider: "提供商",
+                model: "模型",
+                all: "全部",
+                admin_user: "管理员",
+                user: "用户",
+                api_client: "API Key",
+                system: "系统",
+                scheduler: "调度器",
+                token_finalize: "Token 回填",
+                billing_process: "计费过程",
+                request_log_queue: "请求日志队列",
+                backfill_job: "回填任务",
+                retry: "重试",
+                pending_tokens: "等待 Token",
+                billed: "已计费",
+                no_charge: "不扣费",
+                filled: "已补全",
+                upload: "上传",
+                reuse_existing: "复用已有",
+                delete: "删除",
+                external_file_upload: "外部文件上传",
+                external_file_read: "外部文件读取",
+                playground: "Playground",
+                user_self_test: "用户自测",
+                external_v1_file: "外部文件",
+            };
+            return labels[value] || value || "-";
+        }
+
+        function setActiveLoggingTab(tab) {
+            const previousTab = state.activeTab;
+            if (typedLogConfigs[previousTab]) {
+                snapshotCurrentTypedFilters(previousTab);
+            }
+            const normalizedTab = tab === "request" || typedLogConfigs[tab] ? tab : "request";
+            state.activeTab = normalizedTab;
+            loggingTabButtons.forEach((button) => {
+                button.classList.toggle("active", button.dataset.loggingTab === normalizedTab);
+            });
+            const isRequestTab = normalizedTab === "request";
+            requestPanels.forEach((panel) => panel.classList.toggle("hidden", !isRequestTab));
+            typedPanel.classList.toggle("hidden", isRequestTab);
+            if (isRequestTab) {
+                loadLogs();
+                return;
+            }
+            typedState.page = 1;
+            renderTypedFilterControls(normalizedTab);
+            loadTypedLogs();
+        }
+
+        function renderTypedPagination(total) {
+            typedState.total = Number(total || 0);
+            const totalPages = Math.max(1, Math.ceil(typedState.total / typedState.pageSize));
+            if (typedState.page > totalPages) typedState.page = totalPages;
+            typedLogsPageMeta.textContent = `第 ${formatNumber(typedState.page)} 页，共 ${formatNumber(totalPages)} 页 · 共 ${formatNumber(typedState.total)} 条`;
+            typedLogsPrevBtn.disabled = typedState.page <= 1;
+            typedLogsNextBtn.disabled = typedState.page >= totalPages;
+        }
+
+        async function loadTypedLogs({ manual = false } = {}) {
+            const config = typedLogConfigs[state.activeTab];
+            if (!config) return;
+            const params = new URLSearchParams({
+                page: String(typedState.page),
+                page_size: String(typedState.pageSize),
+                _ts: Date.now().toString(),
+            });
+            const keyword = typedLogsKeywordInput.value.trim();
+            if (keyword) params.set("keyword", keyword);
+            (config.filters || []).forEach((filter) => {
+                const value = readTypedFilterValue(getTypedFilterNode(filter.key));
+                if (value) params.set(filter.param || filter.key, value);
+            });
+            snapshotCurrentTypedFilters();
+            typedLogsTitle.textContent = config.title;
+            typedLogsKicker.textContent = "类型化日志";
+            setButtonLoading(typedLogsRefreshBtn, true);
+            try {
+                const data = await api.get(`${config.endpoint}?${params.toString()}`);
+                typedLogsTableHead.innerHTML = config.columns.map(([label]) => `<th>${escapeHtml(label)}</th>`).join("") + "<th>详情</th>";
+                typedLogsTableBody.innerHTML = (data.items || []).map((item, index) => `
+                    <tr>
+                        ${config.columns.map(([, render]) => `<td>${render(item)}</td>`).join("")}
+                        <td><button class="table-action-btn" data-action="show-typed-log" data-index="${index}">详情</button></td>
+                    </tr>
+                `).join("") || `<tr><td colspan="${config.columns.length + 1}"><div class="empty-state">没有匹配的日志</div></td></tr>`;
+                typedLogsTableBody.querySelectorAll("[data-action='show-typed-log']").forEach((button, index) => {
+                    button.dataset.item = JSON.stringify((data.items || [])[index] || {});
+                });
+                renderTypedPagination(data.total ?? 0);
+                updateLogRefreshResultLabel(typedLogsLastRefresh, "success", new Date());
+                if (manual) showToast(`${config.title}已刷新`);
+                enhanceInteractiveButtons(typedLogsTableBody);
+            } catch (error) {
+                updateLogRefreshResultLabel(typedLogsLastRefresh, "error", new Date());
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(typedLogsRefreshBtn, false);
+            }
+        }
+
+        function renderTypedFieldList(entries) {
+            return `
+                <dl>
+                    ${entries.map(([label, value]) => `
+                        <dt>${escapeHtml(String(label))}</dt>
+                        <dd>${escapeHtml(value == null ? "-" : typeof value === "object" ? JSON.stringify(value) : String(value))}</dd>
+                    `).join("")}
+                </dl>
+            `;
+        }
+
+        function renderDetailCards(groups) {
+            detailCards.innerHTML = groups.map((group) => `
+                <article class="log-detail-card">
+                    <h4>${escapeHtml(group.title)}</h4>
+                    ${group.html || ""}
+                </article>
+            `).join("");
+        }
+
+        async function renderTypedLogDetail(item) {
+            const tab = state.activeTab;
+            renderDetailCards([
+                {
+                    title: typedLogConfigs[tab]?.title || "日志详情",
+                    html: renderTypedFieldList(Object.entries(item || {}).slice(0, 24)),
+                },
+            ]);
+            traceContent.textContent = JSON.stringify(item || {}, null, 2);
+            traceModal.classList.remove("hidden");
+        }
         
         async function loadLogs({ manual = false, feedbackSource = "auto" } = {}) {
             setButtonLoading(refreshBtn, true);
@@ -11047,6 +13917,7 @@
             });
             const logType = document.getElementById("logs-log-type").value;
             const providerId = providerSelect.value;
+            const providerTrustLevel = providerTrustLevelSelect.value;
             const modelName = modelSelect.value;
             const modelQuery = modelQueryInput.value.trim();
             const userAccountId = userAccountSelect.value;
@@ -11054,6 +13925,8 @@
             const apiClientKeyId = apiClientKeyIdSelect.value;
             const apiClientKeyQuery = apiClientKeyQueryManualInput.value.trim() || apiClientKeyQuerySelect.value;
             const success = document.getElementById("logs-success").value;
+            const contentGuardResult = contentGuardResultInput.value;
+            const contentGuardRiskLevel = contentGuardRiskLevelInput.value;
             const conversationKey = document.getElementById("logs-conversation-key").value.trim();
             const tenantName = tenantNameInput.value.trim();
             const projectName = projectNameInput.value.trim();
@@ -11062,6 +13935,7 @@
             const excludeHealthChecks = excludeHealthChecksInput.checked;
             if (logType) params.set("log_type", logType);
             if (providerId) params.set("provider_id", providerId);
+            if (providerTrustLevel) params.set("provider_trust_level", providerTrustLevel);
             if (modelName) params.set("model_name", modelName);
             if (modelQuery) params.set("model_query", modelQuery);
             if (userAccountId) params.set("user_account_id", userAccountId);
@@ -11069,6 +13943,8 @@
             if (apiClientKeyId) params.set("api_client_key_id", apiClientKeyId);
             if (apiClientKeyQuery) params.set("api_client_key_query", apiClientKeyQuery);
             if (success) params.set("success", success);
+            if (contentGuardResult) params.set("content_guard_result", contentGuardResult);
+            if (contentGuardRiskLevel) params.set("content_guard_risk_level", contentGuardRiskLevel);
             if (conversationKey) params.set("conversation_key", conversationKey);
             if (tenantName) params.set("tenant_name", tenantName);
             if (projectName) params.set("project_name", projectName);
@@ -11228,7 +14104,102 @@
         });
 
         await loadFilterOptions();
-        await loadLogs();
+        setActiveLoggingTab(state.activeTab);
+    }
+
+    async function initUserOperations() {
+        const tableBody = document.getElementById("user-operations-table-body");
+        const refreshBtn = document.getElementById("user-operations-refresh-btn");
+        const lastRefreshLabel = document.getElementById("user-operations-last-refresh");
+        const keywordInput = document.getElementById("user-operations-keyword");
+        const actionSelect = document.getElementById("user-operations-action");
+        const resultSelect = document.getElementById("user-operations-result");
+        const pageMeta = document.getElementById("user-operations-page-meta");
+        const prevBtn = document.getElementById("user-operations-prev-page-btn");
+        const nextBtn = document.getElementById("user-operations-next-page-btn");
+        if (!tableBody || !refreshBtn || !keywordInput || !actionSelect || !resultSelect || !pageMeta || !prevBtn || !nextBtn) return;
+        const state = { page: 1, pageSize: 20, total: 0 };
+        const actionLabels = {
+            update_profile: "资料更新",
+            update_password: "密码修改",
+            create_api_key: "创建 API Key",
+            update_api_key: "更新 API Key",
+            toggle_api_key: "启停 API Key",
+            delete_api_key: "删除 API Key",
+            rotate_api_key: "轮换 API Key",
+            export_logs: "日志导出",
+            export_billing: "账单导出",
+            run_self_test: "接入自检",
+        };
+        const resultLabels = { success: "成功", failed: "失败" };
+
+        function renderPagination(total) {
+            state.total = Number(total || 0);
+            const totalPages = Math.max(1, Math.ceil(state.total / state.pageSize));
+            if (state.page > totalPages) state.page = totalPages;
+            pageMeta.textContent = `第 ${formatNumber(state.page)} 页，共 ${formatNumber(totalPages)} 页 · 共 ${formatNumber(state.total)} 条`;
+            prevBtn.disabled = state.page <= 1;
+            nextBtn.disabled = state.page >= totalPages;
+        }
+
+        async function loadOperations({ manual = false } = {}) {
+            const params = new URLSearchParams({
+                page: String(state.page),
+                page_size: String(state.pageSize),
+                _ts: Date.now().toString(),
+            });
+            const keyword = keywordInput.value.trim();
+            if (keyword) params.set("keyword", keyword);
+            if (actionSelect.value) params.set("action", actionSelect.value);
+            if (resultSelect.value) params.set("result", resultSelect.value);
+            setButtonLoading(refreshBtn, true);
+            try {
+                const data = await api.get(`/api/user/operations?${params.toString()}`);
+                tableBody.innerHTML = (data.items || []).map((item) => `
+                    <tr>
+                        <td>${formatDate(item.created_at)}</td>
+                        <td>${escapeHtml(actionLabels[item.action] || item.action || "-")}</td>
+                        <td>
+                            <strong>${escapeHtml(item.entity_name || item.entity_id || "-")}</strong>
+                            <div class="table-muted">${escapeHtml(item.entity_type || "-")}</div>
+                        </td>
+                        <td>${escapeHtml(resultLabels[item.result] || item.result || "-")}</td>
+                        <td>${escapeHtml(item.source_ip || "-")}</td>
+                        <td>${escapeHtml(item.summary || "-")}</td>
+                    </tr>
+                `).join("") || '<tr><td colspan="6"><div class="empty-state">没有匹配的操作记录</div></td></tr>';
+                renderPagination(data.total ?? 0);
+                updateLogRefreshResultLabel(lastRefreshLabel, "success", new Date());
+                if (manual) showToast("操作记录已刷新");
+            } catch (error) {
+                updateLogRefreshResultLabel(lastRefreshLabel, "error", new Date());
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(refreshBtn, false);
+            }
+        }
+
+        keywordInput.addEventListener("input", debounce(() => {
+            state.page = 1;
+            loadOperations();
+        }));
+        [actionSelect, resultSelect].forEach((node) => node.addEventListener("change", () => {
+            state.page = 1;
+            loadOperations();
+        }));
+        prevBtn.addEventListener("click", () => {
+            if (state.page <= 1) return;
+            state.page -= 1;
+            loadOperations();
+        });
+        nextBtn.addEventListener("click", () => {
+            const totalPages = Math.max(1, Math.ceil((state.total || 0) / state.pageSize));
+            if (state.page >= totalPages) return;
+            state.page += 1;
+            loadOperations();
+        });
+        refreshBtn.addEventListener("click", () => loadOperations({ manual: true }));
+        await loadOperations();
     }
 
     async function initConversations() {
@@ -11949,6 +14920,10 @@
             const normalized = Number(value) || 0;
             card.dataset.tone = normalized >= 90 ? "danger" : normalized >= 75 ? "warn" : "ok";
         };
+        const setRingCardTone = (id, tone) => {
+            const card = document.getElementById(id)?.closest(".operations-ring-card");
+            if (card) card.dataset.tone = tone;
+        };
         const capacityPercent = (current, max) => {
             const limit = Number(max || 0);
             if (limit <= 0) return 0;
@@ -11971,7 +14946,7 @@
             if (!body) return;
             const rows = Array.isArray(providers) ? providers : [];
             if (!rows.length) {
-                body.innerHTML = '<tr><td colspan="8"><div class="empty-state">暂无中转站数据</div></td></tr>';
+                body.innerHTML = '<tr><td colspan="8"><div class="empty-state">暂无提供商数据</div></td></tr>';
                 return;
             }
             body.innerHTML = rows.map((item) => {
@@ -12002,25 +14977,39 @@
         function renderMetrics(metrics) {
             const host = metrics.host || {};
             const process = host.process || {};
+            const projectProcess = host.project_process || {};
             const memory = host.memory || {};
-            const disk = host.disk || {};
-            const projectDisk = host.project_disk || {};
             const redis = metrics.redis || {};
             const runtime = metrics.runtime || {};
             const traffic = metrics.traffic || {};
             const background = metrics.background || {};
+            const contentGuard = metrics.content_guard || {};
             const alerts = Array.isArray(metrics.alerts) ? metrics.alerts : [];
             const timeseries = Array.isArray(metrics.timeseries) ? metrics.timeseries : [];
             const requestLogQueue = redis.request_log_queue || {};
+            const loggingEventQueue = redis.logging_event_queue || {};
+            const providerViolationRates = Array.isArray(contentGuard.provider_content_violation_rate)
+                ? contentGuard.provider_content_violation_rate
+                : [];
+            const maxContentViolationRate = providerViolationRates.reduce(
+                (max, item) => Math.max(max, Number(item?.violation_rate || 0)),
+                0,
+            );
             const statusLabel = metrics.status === "ready" ? "正常" : "降级";
             const cpuPercent = host.cpu_percent;
             const memoryPercent = memory.percent;
-            const processPercent = process.memory_percent;
-            const diskPercent = projectDisk.percent ?? disk.percent;
+            const projectCpuPercent = projectProcess.cpu_percent;
+            const projectProcessPercent = projectCpuPercent ?? 0;
+            const projectProcessValue = projectCpuPercent == null ? "采样中" : formatPercent(projectCpuPercent);
+            const projectProcessSub = [
+                formatBytes(projectProcess.memory_rss_bytes ?? process.memory_rss_bytes),
+                `${formatNumber(projectProcess.process_count ?? 1)} 个进程`,
+            ].filter((item) => item && item !== "-").join(" · ");
             const totalRequests = Number(traffic.total_requests || 0);
             const maxActiveRequests = Number(redis.max_active_requests || 0);
             const maxActiveStreams = Number(redis.max_active_streams || 0);
             const queueBacklog = Number(requestLogQueue.total ?? 0);
+            const loggingQueueBacklog = Number(loggingEventQueue.total ?? 0);
             const tokenBacklog = Number(redis.token_finalize_backlog ?? 0);
 
             setText("operations-hero-status", statusLabel);
@@ -12028,22 +15017,18 @@
             setText("operations-hero-p95", formatLatencyMs(traffic.p95_latency_ms));
             setText("operations-hero-qps", Number(traffic.qps || 0).toFixed(2));
             setText("operations-ring-cpu-value", formatPercent(cpuPercent));
-            setText("operations-ring-cpu-sub", `${formatNumber(host.cpu_count || 0)} 核`);
+            setText("operations-ring-cpu-sub", `${formatNumber(host.cpu_count || 0)} 核 · 宿主机`);
             setText("operations-ring-memory-value", formatPercent(memoryPercent));
-            setText("operations-ring-memory-sub", formatBytes(memory.used_bytes));
-            setText("operations-ring-process-value", formatPercent(processPercent));
-            setText("operations-ring-process-sub", formatBytes(process.memory_rss_bytes));
-            setText("operations-ring-disk-value", formatPercent(diskPercent));
-            setText("operations-ring-disk-sub", formatBytes(projectDisk.used_bytes ?? disk.used_bytes));
+            setText("operations-ring-memory-sub", `${formatBytes(memory.used_bytes)} / ${formatBytes(memory.total_bytes)}`);
+            setText("operations-ring-process-value", projectProcessValue);
+            setText("operations-ring-process-sub", projectProcessSub || "-");
 
             setRing("operations-ring-cpu", cpuPercent);
             setRing("operations-ring-memory", memoryPercent);
-            setRing("operations-ring-process", processPercent);
-            setRing("operations-ring-disk", diskPercent);
+            setRing("operations-ring-process", projectProcessPercent);
             setRingTone("operations-ring-cpu", cpuPercent);
             setRingTone("operations-ring-memory", memoryPercent);
-            setRingTone("operations-ring-process", processPercent);
-            setRingTone("operations-ring-disk", diskPercent);
+            setRingTone("operations-ring-process", projectProcessPercent);
 
             setText("operations-total-requests", formatNumber(totalRequests));
             setText("operations-success-requests", formatNumber(traffic.success_requests || 0));
@@ -12053,6 +15038,12 @@
             setText("operations-stream-requests", formatNumber(traffic.stream_requests || 0));
             setText("operations-image-requests", formatNumber(traffic.image_requests || 0));
             setText("operations-backlog", formatNumber(background.pending_finalize_logs || 0));
+            setText("operations-content-block-count", contentGuard.enabled === false ? "关闭" : formatNumber(contentGuard.block_count || 0));
+            setText("operations-content-review-count", contentGuard.enabled === false ? "关闭" : formatNumber(contentGuard.review_count || 0));
+            setText("operations-content-high-risk-count", contentGuard.enabled === false ? "关闭" : formatNumber(contentGuard.high_risk_count || 0));
+            setText("operations-content-blocked-provider-count", contentGuard.enabled === false ? "关闭" : formatNumber(contentGuard.blocked_provider_count || 0));
+            setText("operations-content-low-trust-ratio", contentGuard.enabled === false ? "关闭" : formatPercent(contentGuard.low_trust_traffic_ratio || 0));
+            setText("operations-content-violation-rate", contentGuard.enabled === false ? "关闭" : formatPercent(maxContentViolationRate));
             setWidth("operations-total-bar", totalRequests ? 100 : 0);
             setWidth("operations-success-bar", totalRequests ? (Number(traffic.success_requests || 0) / totalRequests) * 100 : 0);
             setWidth("operations-failed-bar", traffic.failure_rate || 0);
@@ -12061,10 +15052,16 @@
             setWidth("operations-stream-bar", totalRequests ? (Number(traffic.stream_requests || 0) / totalRequests) * 100 : 0);
             setWidth("operations-image-bar", totalRequests ? (Number(traffic.image_requests || 0) / totalRequests) * 100 : 0);
             setWidth("operations-backlog-bar", Math.min(100, (Number(background.pending_finalize_logs || 0) / 1000) * 100));
+            setWidth("operations-content-block-bar", totalRequests ? (Number(contentGuard.block_count || 0) / totalRequests) * 100 : 0);
+            setWidth("operations-content-review-bar", totalRequests ? (Number(contentGuard.review_count || 0) / totalRequests) * 100 : 0);
+            setWidth("operations-content-high-risk-bar", totalRequests ? (Number(contentGuard.high_risk_count || 0) / totalRequests) * 100 : 0);
+            setWidth("operations-content-blocked-provider-bar", Math.min(100, Number(contentGuard.blocked_provider_count || 0) * 20));
+            setWidth("operations-content-low-trust-bar", contentGuard.low_trust_traffic_ratio || 0);
+            setWidth("operations-content-violation-rate-bar", maxContentViolationRate);
 
             setText("operations-active-requests", formatNumber(redis.active_requests || 0));
             setText("operations-active-streams", formatNumber(redis.active_streams || 0));
-            setText("operations-worker-active", formatNumber(runtime.worker_active_requests || 0));
+            setText("operations-worker-active", `${formatNumber(runtime.worker_active_requests || 0)} / ${formatNumber(projectProcess.process_count || 0)} 进程`);
             setDot("operations-redis-dot", redis.ok);
             setDot("operations-latency-dot", Number(traffic.status_5xx_rate || 0) < 1 && Number(traffic.failure_rate || 0) < 5);
             setText("operations-p50-latency", formatLatencyMs(traffic.p50_latency_ms));
@@ -12078,9 +15075,11 @@
                     renderMiniBar("活跃", capacityLabel(redis.active_requests, maxActiveRequests), capacityPercent(redis.active_requests, maxActiveRequests)),
                     renderMiniBar("流式", capacityLabel(redis.active_streams, maxActiveStreams), capacityPercent(redis.active_streams, maxActiveStreams)),
                     renderMiniBar("日志队列", formatNumber(queueBacklog), Math.min(100, (queueBacklog / 1000) * 100), queueBacklog >= 1000 ? "warn" : "ok"),
+                    renderMiniBar("事件队列", formatNumber(loggingQueueBacklog), Math.min(100, (loggingQueueBacklog / 1000) * 100), loggingQueueBacklog >= 1000 ? "warn" : "ok"),
                     renderMiniBar("计费锁", formatNumber(tokenBacklog), Math.min(100, (tokenBacklog / 1000) * 100), tokenBacklog >= 1000 ? "warn" : "ok"),
                 ].join("");
             }
+            renderOperationsFailedJobs(background.recent_failed_jobs || []);
             const latencyBars = document.getElementById("operations-latency-bars");
             if (latencyBars) {
                 latencyBars.innerHTML = [
@@ -12108,13 +15107,47 @@
             renderProviders(metrics.providers || []);
         }
 
+        function formatOperationsStatusLabel(value) {
+            const labels = {
+                success: "成功",
+                failed: "失败",
+                cancelled: "已取消",
+                skipped: "跳过",
+                skipped_locked: "锁定跳过",
+                acquired: "已获取",
+                unavailable: "不可用",
+                running: "运行中",
+            };
+            return labels[value] || value || "-";
+        }
+
+        function renderOperationsFailedJobs(items) {
+            const body = document.getElementById("operations-failed-jobs-body");
+            if (!body) return;
+            body.innerHTML = (items || []).map((item) => `
+                <tr>
+                    <td>${formatDate(item.created_at)}</td>
+                    <td>
+                        <strong>${escapeHtml(item.job_name || "-")}</strong>
+                        <div class="table-muted">${escapeHtml(item.job_run_id || "-")}</div>
+                    </td>
+                    <td>${escapeHtml(formatOperationsStatusLabel(item.status || "-"))}</td>
+                    <td>${escapeHtml(formatOperationsStatusLabel(item.lock_status || "-"))}</td>
+                    <td>${item.duration_ms == null ? "-" : `${formatNumber(item.duration_ms)} ms`}</td>
+                    <td>${escapeHtml(item.error || "-")}</td>
+                </tr>
+            `).join("") || '<tr><td colspan="6"><div class="empty-state">没有失败任务</div></td></tr>';
+        }
+
         async function loadOperationsMetrics(manual = false) {
             if (loading) return;
             loading = true;
             try {
                 setButtonLoading(refreshBtn, manual);
                 const windowMinutes = Number(windowSelect?.value || 5);
-                const metrics = await api.get(`/api/metrics/system?window_minutes=${encodeURIComponent(windowMinutes)}&refresh_alerts=true`);
+                // 性能优化：仅手动刷新时写入告警表，自动轮询时不写入
+                const refreshAlerts = manual ? "true" : "false";
+                const metrics = await api.get(`/api/metrics/system?window_minutes=${encodeURIComponent(windowMinutes)}&refresh_alerts=${refreshAlerts}`);
                 renderMetrics(metrics);
                 if (manual) {
                     setButtonTransientFeedback(refreshBtn, "success", { successText: "已刷新" });
@@ -12132,9 +15165,10 @@
         }
 
         refreshBtn?.addEventListener("click", () => loadOperationsMetrics(true));
-        windowSelect?.addEventListener("change", () => loadOperationsMetrics(true));
+        windowSelect?.addEventListener("change", () => loadOperationsMetrics(false));
         await loadOperationsMetrics(false);
-        const timer = window.setInterval(() => loadOperationsMetrics(false), 5000);
+        // 性能优化：从5秒改为15秒轮询，减少66%的请求
+        const timer = window.setInterval(() => loadOperationsMetrics(false), 15000);
         registerPageCleanup(() => window.clearInterval(timer));
     }
 
@@ -12149,8 +15183,10 @@
             scheduleResponsiveTableSync(document);
             if (page === "dashboard") await initDashboard();
             if (page === "providers") await initProviders();
+            if (page === "provider-models") await initProviderModelsPage();
             if (page === "models") await initModels();
             if (page === "settings") await initSettings();
+            if (page === "content-guard") await initContentGuardPage();
             if (page === "playground") await initPlayground();
             if (page === "benchmark") await initBenchmark();
             if (page === "operations") await initOperationsPage();
@@ -12160,6 +15196,7 @@
             if (page === "user-api-keys") await initUserApiKeys();
             if (page === "user-billing") await initUserBilling();
             if (page === "user-logs") await initUserLogs();
+            if (page === "user-operations") await initUserOperations();
             if (page === "user-conversations") await initUserConversations();
             if (page === "user-self-test") await initUserSelfTest();
             if (page === "user-models") await initUserModels();
@@ -12269,4 +15306,3 @@
         await initializePage();
     });
 })();
-

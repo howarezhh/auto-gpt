@@ -1,23 +1,38 @@
 {% extends "base.html" %}
 {% block content %}
 <section class="hero-panel hero-panel-compact cockpit-hero benchmark-hero">
-    <div class="cockpit-hero-copy">
+    <div class="cockpit-hero-copy benchmark-hero-copy">
         <div class="eyebrow">性能探测</div>
         <h2>真实流式并发探测</h2>
         <p>仅走项目对外流式文本接口，使用真实外部 API Key 和所选模型逐个压测，不指定渠道，让项目按自身分发策略真实响应。</p>
-        <div class="hero-actions">
+        <div class="hero-actions benchmark-hero-actions">
             <a class="btn btn-accent interactive-btn" href="#benchmark-runner">启动探测</a>
             <a class="btn btn-ghost interactive-btn" href="#benchmark-result">查看结果</a>
         </div>
+        <div class="benchmark-hero-strip" aria-label="探测特征">
+            <article>
+                <span>执行链路</span>
+                <strong>真实外部 API Key</strong>
+            </article>
+            <article>
+                <span>探测方式</span>
+                <strong>逐模型流式并发扩探</strong>
+            </article>
+            <article>
+                <span>结果产物</span>
+                <strong>HTML / JSON 报告</strong>
+            </article>
+        </div>
     </div>
-    <div class="cockpit-hero-aside">
+    <div class="cockpit-hero-aside benchmark-hero-aside">
         <div class="cockpit-aside-label">探测边界</div>
         <div class="cockpit-aside-value">流式文本</div>
-        <div class="cockpit-aside-copy">默认只探测外部流式文本链路。结果报告会保存到 <code>data/benchmark-reports</code>，并按模型展示吞吐、P95 与首事件延迟。</div>
+        <div class="cockpit-aside-copy">默认只探测外部流式文本链路，报告会落盘到 <code>data/benchmark-reports</code>，并按模型保存稳定并发、吞吐和延迟表现。</div>
         <div class="cockpit-health-bar"><span class="cockpit-health-fill-full"></span></div>
-        <div class="cockpit-aside-meta">
-            <span>真实 API Key</span>
-            <span>多模型</span>
+        <div class="benchmark-hero-aside-list">
+            <span>自动按入口过滤可测模型</span>
+            <span>压测过程中持续回刷阶段进度</span>
+            <span>结果页直接汇总最高稳定并发</span>
         </div>
     </div>
 </section>
@@ -29,41 +44,66 @@
 </nav>
 
 <section class="benchmark-layout anchor-section-offset" id="benchmark-runner">
-    <div class="panel-card section-shell">
+    <div class="panel-card section-shell benchmark-config-panel">
         <div class="section-subhead">
             <div>
                 <div class="panel-kicker">任务配置</div>
                 <h3>压测参数</h3>
+                <p class="section-subcopy">先确定调用入口和并发目标，再选择模型范围；低频阈值与采样参数默认收在高级区。</p>
             </div>
         </div>
         <form id="benchmark-form" class="form-grid">
-            <label class="form-span-2">
-                <span>项目代理地址</span>
-                <input class="field-input" id="benchmark-proxy-base-url" type="url" value="http://127.0.0.1:8000" required>
-            </label>
-            <label class="form-span-2">
-                <span>外部 API Key</span>
-                <input class="field-input" id="benchmark-raw-api-key" type="password" autocomplete="off" placeholder="填写外部用户实际调用项目时使用的 API Key" required>
-            </label>
-            <label>
-                <span>流式入口</span>
-                <select class="field-input" id="benchmark-endpoint">
-                    <option value="chat">/v1/chat/completions</option>
-                    <option value="responses">/v1/responses</option>
-                </select>
-            </label>
-            <label>
-                <span>输出上限 tok</span>
-                <input class="field-input" id="benchmark-max-output-tokens" type="number" min="1" max="8192" value="128">
-            </label>
-            <label>
-                <span>基准并发</span>
-                <input class="field-input" id="benchmark-concurrency" type="number" min="1" max="5000" value="100" required>
-            </label>
-            <label>
-                <span>最大探测并发</span>
-                <input class="field-input" id="benchmark-probe-max-concurrency" type="number" min="0" max="20000" value="0">
-            </label>
+            <section class="benchmark-form-band form-span-2" aria-labelledby="benchmark-connection-title">
+                <div class="benchmark-form-band-head">
+                    <div>
+                        <h4 id="benchmark-connection-title">连接与入口</h4>
+                        <p>这里只放启动任务必填项，避免把全部参数挤在同一层。</p>
+                    </div>
+                </div>
+                <div class="benchmark-form-band-grid">
+                    <label class="form-span-2">
+                        <span>项目代理地址</span>
+                        <input class="field-input" id="benchmark-proxy-base-url" type="url" value="http://127.0.0.1:8000" required>
+                    </label>
+                    <label class="form-span-2">
+                        <span>外部 API Key</span>
+                        <input class="field-input" id="benchmark-raw-api-key" type="password" autocomplete="off" placeholder="填写外部用户实际调用项目时使用的 API Key" required>
+                    </label>
+                    <label>
+                        <span>流式入口</span>
+                        <select class="field-input" id="benchmark-endpoint">
+                            <option value="chat">/v1/chat/completions</option>
+                            <option value="responses">/v1/responses</option>
+                        </select>
+                    </label>
+                    <label>
+                        <span>输出上限 tok</span>
+                        <input class="field-input" id="benchmark-max-output-tokens" type="number" min="1" max="8192" value="128">
+                    </label>
+                </div>
+            </section>
+            <section class="benchmark-form-band form-span-2" aria-labelledby="benchmark-scale-title">
+                <div class="benchmark-form-band-head">
+                    <div>
+                        <h4 id="benchmark-scale-title">规模与样本</h4>
+                        <p>基准并发决定目标档位，最大探测并发用于封顶；提示词保留在同区，方便一起调整样本口径。</p>
+                    </div>
+                </div>
+                <div class="benchmark-form-band-grid">
+                    <label>
+                        <span>基准并发</span>
+                        <input class="field-input" id="benchmark-concurrency" type="number" min="1" max="5000" value="100" required>
+                    </label>
+                    <label>
+                        <span>最大探测并发</span>
+                        <input class="field-input" id="benchmark-probe-max-concurrency" type="number" min="0" max="20000" value="0">
+                    </label>
+                    <label class="form-span-2">
+                        <span>文本提示词</span>
+                        <textarea class="field-input" id="benchmark-prompt" rows="3">请用两句话简洁回答：并发压测探针。</textarea>
+                    </label>
+                </div>
+            </section>
             <section class="benchmark-model-picker form-span-2" aria-labelledby="benchmark-model-picker-title">
                 <div class="benchmark-model-picker-head">
                     <div>
@@ -313,10 +353,6 @@
                         </span>
                         <input class="field-input" id="benchmark-busy-error-threshold" type="number" min="0" max="100000" value="0">
                     </label>
-                    <label class="form-span-2">
-                        <span>文本提示词</span>
-                        <textarea class="field-input" id="benchmark-prompt" rows="3">请用两句话简洁回答：并发压测探针。</textarea>
-                    </label>
                 </div>
             </details>
             <div class="form-actions form-span-2">
@@ -327,12 +363,16 @@
     </div>
 
     <div class="panel-card section-shell benchmark-live-panel" id="benchmark-progress">
-        <div class="section-subhead">
+        <div class="section-subhead benchmark-live-head">
             <div>
                 <div class="panel-kicker">实时过程</div>
                 <h3>当前任务</h3>
+                <p class="section-subcopy">右侧固定展示当前模型、并发阶段和事件日志，方便边调参边观察。</p>
             </div>
-            <span class="benchmark-status-pill" id="benchmark-status-pill">未开始</span>
+            <div class="benchmark-live-status">
+                <span class="benchmark-status-pill" id="benchmark-status-pill">未开始</span>
+                <small>仅展示最新执行状态</small>
+            </div>
         </div>
         <div class="benchmark-progress-shell">
             <div class="benchmark-progress-meta" id="benchmark-progress-meta">等待启动...</div>
@@ -340,15 +380,29 @@
                 <span id="benchmark-progress-bar"></span>
             </div>
         </div>
-        <div class="benchmark-live-grid" id="benchmark-live-grid">
-            <article><span>模型</span><strong>-</strong></article>
-            <article><span>入口</span><strong>-</strong></article>
-            <article><span>模式</span><strong>-</strong></article>
-            <article><span>并发</span><strong>-</strong></article>
-            <article><span>进度</span><strong>-</strong></article>
-            <article><span>RPS</span><strong>-</strong></article>
+        <div class="benchmark-live-stack">
+            <section class="benchmark-live-block">
+                <div class="benchmark-block-head">
+                    <h4>即时指标</h4>
+                    <span>随任务自动刷新</span>
+                </div>
+                <div class="benchmark-live-grid" id="benchmark-live-grid">
+                    <article><span>模型</span><strong>-</strong></article>
+                    <article><span>入口</span><strong>-</strong></article>
+                    <article><span>模式</span><strong>-</strong></article>
+                    <article><span>并发</span><strong>-</strong></article>
+                    <article><span>进度</span><strong>-</strong></article>
+                    <article><span>RPS</span><strong>-</strong></article>
+                </div>
+            </section>
+            <section class="benchmark-live-block benchmark-log-block">
+                <div class="benchmark-block-head">
+                    <h4>事件日志</h4>
+                    <span>自动滚动到最新</span>
+                </div>
+                <div class="benchmark-log-window" id="benchmark-log-window">等待任务日志...</div>
+            </section>
         </div>
-        <div class="benchmark-log-window" id="benchmark-log-window">等待任务日志...</div>
     </div>
 </section>
 
@@ -357,16 +411,19 @@
         <div>
             <div class="panel-kicker">探测结果</div>
             <h3>阶段指标与报告</h3>
+            <p class="section-subcopy">完成后先看汇总结论，再按模型下钻到每个并发档位的阶段明细。</p>
         </div>
         <div class="benchmark-report-actions">
             <a class="btn btn-ghost interactive-btn disabled" id="benchmark-json-report-link" href="#" target="_blank" rel="noopener">JSON 报告</a>
             <a class="btn btn-accent interactive-btn disabled" id="benchmark-html-report-link" href="#" target="_blank" rel="noopener">HTML 报告</a>
         </div>
     </div>
-    <div class="playground-output-empty" id="benchmark-result-empty">任务完成后会在这里展示最高稳定并发、首次不稳定并发和阶段数据。</div>
-    <div class="benchmark-result-view hidden" id="benchmark-result-view">
-        <div class="benchmark-summary-list" id="benchmark-summary-list"></div>
-        <div class="benchmark-stage-table" id="benchmark-stage-table"></div>
+    <div class="benchmark-result-frame">
+        <div class="playground-output-empty" id="benchmark-result-empty">任务完成后会在这里展示最高稳定并发、首次不稳定并发和各阶段数据。</div>
+        <div class="benchmark-result-view hidden" id="benchmark-result-view">
+            <div class="benchmark-summary-list" id="benchmark-summary-list"></div>
+            <div class="benchmark-stage-table" id="benchmark-stage-table"></div>
+        </div>
     </div>
 </section>
 {% endblock %}

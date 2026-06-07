@@ -16,6 +16,7 @@ from app.models.provider_model import ProviderModel
 from app.models.user_account import UserAccount
 from app.schemas.model_catalog import ModelCatalogCreate, ModelCatalogUpdate, ModelProviderBindingIn
 from app.services.cache_service import CacheService
+from app.services.content_guard_probe_service import ContentGuardProbeService
 from app.services.model_pricing_service import ModelPricingService
 from app.services.provider_service import ProviderService
 from app.utils.decimal_utils import (
@@ -250,8 +251,6 @@ class ModelCatalogService:
             "supports_stream",
             "supports_vision",
             "supports_tools",
-            "supports_chat_completions",
-            "supports_responses",
             "context_window_tokens",
             "max_input_tokens",
             "max_output_tokens",
@@ -748,7 +747,7 @@ class ModelCatalogService:
         for binding in bindings:
             provider = provider_map.get(binding.provider_id)
             if provider is None:
-                raise ValueError(f"中转站不存在: {binding.provider_id}")
+                raise ValueError(f"提供商不存在: {binding.provider_id}")
             processed_provider_ids.add(provider.id)
             provider_model = existing_map.get(provider.id)
             if not binding.bound:
@@ -826,8 +825,6 @@ class ModelCatalogService:
             provider_model.supports_tools = catalog.supports_tools
             changed = True
         for field in (
-            "supports_chat_completions",
-            "supports_responses",
             "context_window_tokens",
             "max_input_tokens",
             "max_output_tokens",
@@ -1045,6 +1042,11 @@ class ModelCatalogService:
         message = str(model_result.get("message") or "")
         if len(message) > 180:
             message = f"{message[:177]}..."
+        endpoint_results = [
+            ModelCatalogService._serialize_endpoint_test_result(item)
+            for item in (model_result.get("endpoint_results") or [])
+            if isinstance(item, dict)
+        ]
         return {
             "provider_id": provider.id,
             "provider_name": provider.name,
@@ -1059,6 +1061,24 @@ class ModelCatalogService:
             "status_code": model_result.get("status_code"),
             "latency_ms": int(model_result.get("latency_ms") or 0),
             "message": message,
+            "endpoint_results": endpoint_results,
+            "content_guard": ContentGuardProbeService.first_content_guard_result(model_result.get("endpoint_results") or []),
+        }
+
+    @staticmethod
+    def _serialize_endpoint_test_result(endpoint_result: dict[str, Any]) -> dict[str, Any]:
+        message = str(endpoint_result.get("message") or endpoint_result.get("support_label") or "")
+        if len(message) > 180:
+            message = f"{message[:177]}..."
+        return {
+            "endpoint_path": endpoint_result.get("endpoint_path"),
+            "endpoint_label": endpoint_result.get("endpoint_label"),
+            "success": bool(endpoint_result.get("success")),
+            "support_label": endpoint_result.get("support_label"),
+            "latency_ms": int(endpoint_result.get("latency_ms") or 0),
+            "status_code": endpoint_result.get("status_code"),
+            "message": message,
+            "content_guard": endpoint_result.get("content_guard") if isinstance(endpoint_result.get("content_guard"), dict) else None,
         }
 
     @staticmethod

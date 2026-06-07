@@ -34,6 +34,9 @@ class ApiKeyBase(BaseModel):
     manual_allow_fallback: bool = True
     route_exhausted_retry_infinite_enabled: bool = False
     auto_sync_provider_bindings: bool = True
+    trusted_providers_only: bool = False
+    allow_low_trust_providers: bool = False
+    content_guard_required: bool = True
     allowed_provider_ids: list[int] = Field(default_factory=list)
     allowed_model_names: list[str] = Field(default_factory=list)
     allowed_endpoint_paths: list[str] = Field(default_factory=list)
@@ -137,6 +140,9 @@ class ApiKeyUpdate(BaseModel):
     manual_allow_fallback: bool | None = None
     route_exhausted_retry_infinite_enabled: bool | None = None
     auto_sync_provider_bindings: bool | None = None
+    trusted_providers_only: bool | None = None
+    allow_low_trust_providers: bool | None = None
+    content_guard_required: bool | None = None
     allowed_provider_ids: list[int] | None = None
     allowed_model_names: list[str] | None = None
     allowed_endpoint_paths: list[str] | None = None
@@ -233,6 +239,9 @@ class ApiKeyOut(BaseModel):
     manual_allow_fallback: bool
     route_exhausted_retry_infinite_enabled: bool
     auto_sync_provider_bindings: bool
+    trusted_providers_only: bool
+    allow_low_trust_providers: bool
+    content_guard_required: bool
     allowed_provider_ids: list[int]
     allowed_model_names: list[str]
     allowed_endpoint_paths: list[str]

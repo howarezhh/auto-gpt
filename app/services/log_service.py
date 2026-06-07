@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import Text, case, cast, delete, func, not_, or_, select
 from sqlalchemy.orm import Session
 
+from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
 from app.models.request_log import RequestLog
 from app.services.cache_service import CacheService
@@ -72,6 +73,16 @@ class LogService:
         error_type: str | None = None,
         error_code: str | None = None,
         retryable: bool | None = None,
+        content_guard_result: str | None = None,
+        content_guard_risk_level: str | None = None,
+        content_guard_categories_json: str | None = None,
+        content_guard_reason: str | None = None,
+        content_guard_action: str | None = None,
+        content_guard_excerpt: str | None = None,
+        content_guard_latency_ms: int | None = None,
+        content_guard_buffer_wait_ms: int | None = None,
+        content_guard_retry_provider_count: int | None = None,
+        content_guard_final_strategy: str | None = None,
         api_client_key_id: int | None = None,
         api_client_key_name: str | None = None,
         api_client_key_prefix: str | None = None,
@@ -188,6 +199,16 @@ class LogService:
             error_type=error_type,
             error_code=error_code,
             retryable=retryable,
+            content_guard_result=content_guard_result,
+            content_guard_risk_level=content_guard_risk_level,
+            content_guard_categories_json=content_guard_categories_json,
+            content_guard_reason=content_guard_reason,
+            content_guard_action=content_guard_action,
+            content_guard_excerpt=content_guard_excerpt,
+            content_guard_latency_ms=content_guard_latency_ms,
+            content_guard_buffer_wait_ms=content_guard_buffer_wait_ms,
+            content_guard_retry_provider_count=content_guard_retry_provider_count,
+            content_guard_final_strategy=content_guard_final_strategy,
             api_client_key_id=api_client_key_id,
             api_client_key_name=api_client_key_name,
             api_client_key_prefix=api_client_key_prefix,
@@ -238,6 +259,12 @@ class LogService:
             db.commit()
         if refresh_after_create:
             db.refresh(log)
+        if log.id is not None:
+            from app.logging.adapters.request_adapter import RequestLogRecorder
+
+            RequestLogRecorder.record_events_from_summary(db, log, auto_commit=False)
+            if auto_commit:
+                db.commit()
         if enqueue_finalize:
             if log.id is None:
                 db.flush()
@@ -555,7 +582,10 @@ class LogService:
         app_name: str | None,
         environment_name: str | None,
         success: bool | None,
+        provider_trust_level: str | None = None,
         exclude_health_checks: bool = False,
+        content_guard_result: str | None = None,
+        content_guard_risk_level: str | None = None,
         api_client_key_ids: list[int] | None = None,
     ) -> tuple[int, list[RequestLog], dict[str, int]]:
         stmt = select(RequestLog)
@@ -575,6 +605,7 @@ class LogService:
             log_type=log_type,
             log_types=log_types,
             provider_id=provider_id,
+            provider_trust_level=provider_trust_level,
             model_name=model_name,
             model_query=model_query,
             conversation_key=conversation_key,
@@ -588,6 +619,8 @@ class LogService:
             environment_name=environment_name,
             success=success,
             exclude_health_checks=exclude_health_checks,
+            content_guard_result=content_guard_result,
+            content_guard_risk_level=content_guard_risk_level,
             api_client_key_ids=api_client_key_ids,
         )
         count_stmt = LogService._apply_log_filters(
@@ -595,6 +628,7 @@ class LogService:
             log_type=log_type,
             log_types=log_types,
             provider_id=provider_id,
+            provider_trust_level=provider_trust_level,
             model_name=model_name,
             model_query=model_query,
             conversation_key=conversation_key,
@@ -608,6 +642,8 @@ class LogService:
             environment_name=environment_name,
             success=success,
             exclude_health_checks=exclude_health_checks,
+            content_guard_result=content_guard_result,
+            content_guard_risk_level=content_guard_risk_level,
             api_client_key_ids=api_client_key_ids,
         )
         summary_stmt = LogService._apply_log_filters(
@@ -615,6 +651,7 @@ class LogService:
             log_type=log_type,
             log_types=log_types,
             provider_id=provider_id,
+            provider_trust_level=provider_trust_level,
             model_name=model_name,
             model_query=model_query,
             conversation_key=conversation_key,
@@ -628,6 +665,8 @@ class LogService:
             environment_name=environment_name,
             success=success,
             exclude_health_checks=exclude_health_checks,
+            content_guard_result=content_guard_result,
+            content_guard_risk_level=content_guard_risk_level,
             api_client_key_ids=api_client_key_ids,
         )
         total = db.scalar(count_stmt) or 0
@@ -669,6 +708,9 @@ class LogService:
         environment_name: str | None,
         success: bool | None,
         exclude_health_checks: bool,
+        provider_trust_level: str | None = None,
+        content_guard_result: str | None = None,
+        content_guard_risk_level: str | None = None,
         api_client_key_ids: list[int] | None = None,
     ):
         if exclude_health_checks:
@@ -686,6 +728,14 @@ class LogService:
             stmt = stmt.where(RequestLog.log_type.in_(log_types))
         if provider_id:
             stmt = stmt.where(RequestLog.provider_id == provider_id)
+        if provider_trust_level:
+            provider_trust_level = provider_trust_level.strip()
+        if provider_trust_level:
+            stmt = stmt.where(
+                RequestLog.provider_id.in_(
+                    select(Provider.id).where(Provider.trust_level == provider_trust_level)
+                )
+            )
         if model_name:
             stmt = stmt.where(
                 or_(
@@ -742,6 +792,10 @@ class LogService:
             stmt = stmt.where(RequestLog.environment_name == environment_name.strip())
         if success is not None:
             stmt = stmt.where(RequestLog.success == success)
+        if content_guard_result:
+            stmt = stmt.where(RequestLog.content_guard_result == content_guard_result.strip())
+        if content_guard_risk_level:
+            stmt = stmt.where(RequestLog.content_guard_risk_level == content_guard_risk_level.strip())
         return stmt
 
     @staticmethod
@@ -772,6 +826,7 @@ class LogService:
                 log_type=None,
                 log_types=None,
                 provider_id=None,
+                provider_trust_level=None,
                 model_name=None,
                 model_query=None,
                 conversation_key=None,
@@ -809,6 +864,7 @@ class LogService:
             log_type=None,
             log_types=None,
             provider_id=None,
+            provider_trust_level=None,
             model_name=None,
             model_query=None,
             conversation_key=None,
@@ -829,6 +885,7 @@ class LogService:
             log_type=None,
             log_types=None,
             provider_id=None,
+            provider_trust_level=None,
             model_name=None,
             model_query=None,
             conversation_key=None,
@@ -849,6 +906,7 @@ class LogService:
             log_type=None,
             log_types=None,
             provider_id=None,
+            provider_trust_level=None,
             model_name=None,
             model_query=None,
             conversation_key=None,
@@ -869,6 +927,7 @@ class LogService:
             log_type=None,
             log_types=None,
             provider_id=None,
+            provider_trust_level=None,
             model_name=None,
             model_query=None,
             conversation_key=None,
@@ -1382,6 +1441,7 @@ class LogService:
             sample_logs = sample_groups.get((row.provider_id, row.provider_name, row.requested_model), [])
             latency_values = LogService._metric_values(sample_logs, "latency_ms")
             ttfb_values = LogService._metric_values(sample_logs, "ttfb_ms")
+            content_guard_latency_values = LogService._metric_values(sample_logs, "content_guard_latency_ms")
             results.append(
                 {
                     "provider_id": row.provider_id,
@@ -1394,10 +1454,15 @@ class LogService:
                     "avg_latency_ms": LogService._round_float(row.avg_latency_ms),
                     "avg_ttfb_ms": LogService._round_float(row.avg_ttfb_ms),
                     "avg_duration_ms": LogService._round_float(row.avg_duration_ms),
+                    "p50_latency_ms": LogService._percentile(latency_values, 50),
                     "p95_latency_ms": LogService._percentile(latency_values, 95),
                     "p99_latency_ms": LogService._percentile(latency_values, 99),
+                    "p50_ttfb_ms": LogService._percentile(ttfb_values, 50),
                     "p95_ttfb_ms": LogService._percentile(ttfb_values, 95),
                     "p99_ttfb_ms": LogService._percentile(ttfb_values, 99),
+                    "content_guard_p50_latency_ms": LogService._percentile(content_guard_latency_values, 50),
+                    "content_guard_p95_latency_ms": LogService._percentile(content_guard_latency_values, 95),
+                    "content_guard_p99_latency_ms": LogService._percentile(content_guard_latency_values, 99),
                     "qps": round(total_requests / window_seconds, 4),
                     "peak_active_requests": LogService._compute_peak_active_requests(sample_logs),
                     "stream_requests": int(row.stream_requests or 0),
@@ -1490,6 +1555,9 @@ class LogService:
         environment_name: str | None,
         success: bool | None,
         exclude_health_checks: bool,
+        provider_trust_level: str | None = None,
+        content_guard_result: str | None = None,
+        content_guard_risk_level: str | None = None,
         api_client_key_ids: list[int] | None = None,
         limit: int = 5000,
     ) -> str:
@@ -1499,6 +1567,7 @@ class LogService:
             log_type=log_type,
             log_types=log_types,
             provider_id=provider_id,
+            provider_trust_level=provider_trust_level,
             model_name=model_name,
             model_query=model_query,
             conversation_key=conversation_key,
@@ -1512,6 +1581,8 @@ class LogService:
             environment_name=environment_name,
             success=success,
             exclude_health_checks=exclude_health_checks,
+            content_guard_result=content_guard_result,
+            content_guard_risk_level=content_guard_risk_level,
             api_client_key_ids=api_client_key_ids,
         )
         rows = list(
@@ -1554,6 +1625,11 @@ class LogService:
             "generated_image_result_truncated",
             "image_response_mode",
             "upstream_usage_missing",
+            "content_guard_result",
+            "content_guard_risk_level",
+            "content_guard_action",
+            "content_guard_reason",
+            "content_guard_excerpt",
             "latency_ms",
             "ttfb_ms",
             "duration_ms",
@@ -1611,6 +1687,11 @@ class LogService:
                 "" if serialized.get("generated_image_result_truncated") is None else ("true" if serialized.get("generated_image_result_truncated") else "false"),
                 serialized.get("image_response_mode") or "",
                 "" if serialized.get("upstream_usage_missing") is None else ("true" if serialized.get("upstream_usage_missing") else "false"),
+                item.content_guard_result or "",
+                item.content_guard_risk_level or "",
+                item.content_guard_action or "",
+                item.content_guard_reason or "",
+                item.content_guard_excerpt or "",
                 item.latency_ms if item.latency_ms is not None else "",
                 item.ttfb_ms if item.ttfb_ms is not None else "",
                 item.duration_ms if item.duration_ms is not None else "",
@@ -1746,6 +1827,7 @@ class LogService:
                     "image_requests": sum(1 for item in bucket_logs if item.has_image),
                     "avg_latency_ms": LogService._average(latency_values),
                     "avg_ttfb_ms": LogService._average(ttfb_values),
+                    "p50_latency_ms": LogService._percentile(latency_values, 50),
                     "p95_latency_ms": LogService._percentile(latency_values, 95),
                     "p99_latency_ms": LogService._percentile(latency_values, 99),
                     "qps": round(total_requests / bucket_window_seconds, 4),
@@ -1834,6 +1916,7 @@ class LogService:
                 RequestLog.latency_ms,
                 RequestLog.ttfb_ms,
                 RequestLog.duration_ms,
+                RequestLog.content_guard_latency_ms,
             )
             .where(
                 RequestLog.created_at >= since,

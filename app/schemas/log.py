@@ -65,6 +65,16 @@ class RequestLogOut(BaseModel):
     error_type: str | None
     error_code: str | None
     retryable: bool | None
+    content_guard_result: str | None = None
+    content_guard_risk_level: str | None = None
+    content_guard_categories_json: str | None = None
+    content_guard_reason: str | None = None
+    content_guard_action: str | None = None
+    content_guard_excerpt: str | None = None
+    content_guard_latency_ms: int | None = None
+    content_guard_buffer_wait_ms: int | None = None
+    content_guard_retry_provider_count: int | None = None
+    content_guard_final_strategy: str | None = None
     api_client_key_id: int | None
     api_client_key_name: str | None
     api_client_key_prefix: str | None
@@ -140,10 +150,15 @@ class MetricItem(BaseModel):
     avg_latency_ms: float | None
     avg_ttfb_ms: float | None = None
     avg_duration_ms: float | None = None
+    p50_latency_ms: float | None = None
     p95_latency_ms: float | None = None
     p99_latency_ms: float | None = None
+    p50_ttfb_ms: float | None = None
     p95_ttfb_ms: float | None = None
     p99_ttfb_ms: float | None = None
+    content_guard_p50_latency_ms: float | None = None
+    content_guard_p95_latency_ms: float | None = None
+    content_guard_p99_latency_ms: float | None = None
     qps: float | None = None
     peak_active_requests: int = 0
     stream_requests: int = 0
@@ -169,6 +184,7 @@ class MetricTimeSeriesItem(BaseModel):
     image_requests: int = 0
     avg_latency_ms: float | None = None
     avg_ttfb_ms: float | None = None
+    p50_latency_ms: float | None = None
     p95_latency_ms: float | None = None
     p99_latency_ms: float | None = None
     qps: float | None = None

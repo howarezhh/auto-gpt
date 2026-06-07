@@ -250,6 +250,10 @@ class RequestLogQueueService:
                 finalize_jobs.append((log, kwargs))
             if finalize_jobs:
                 db.flush()
+                from app.logging.adapters.request_adapter import RequestLogRecorder
+
+                for log, _ in finalize_jobs:
+                    RequestLogRecorder.record_events_from_summary(db, log, auto_commit=False)
             db.commit()
             RequestLogQueueService._enqueue_finalize_jobs(finalize_jobs)
         except Exception:
@@ -281,6 +285,10 @@ class RequestLogQueueService:
                 finalize_jobs.append((log, kwargs))
             if finalize_jobs:
                 db.flush()
+                from app.logging.adapters.request_adapter import RequestLogRecorder
+
+                for log, _ in finalize_jobs:
+                    RequestLogRecorder.record_events_from_summary(db, log, auto_commit=False)
             db.commit()
             RequestLogQueueService._enqueue_finalize_jobs(finalize_jobs)
         except Exception:

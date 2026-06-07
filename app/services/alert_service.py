@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from typing import Any
 
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
@@ -153,7 +154,7 @@ class AlertService:
                 "alert_key": alert_key,
                 "alert_type": "provider",
                 "severity": "danger" if item["circuit_state"] == "open" or item["health_status"] == "unhealthy" else "warning",
-                "title": f"中转站可用性异常 · {item['name']}",
+                "title": f"提供商可用性异常 · {item['name']}",
                 "message": f"整体可用性 {availability_label}，熔断状态 {circuit_label}",
                 "payload": item,
             }
@@ -195,6 +196,11 @@ class AlertService:
         for item in system_metrics.get("alerts", []):
             active_events[item["alert_key"]] = item
 
+        active_events = {
+            key: AlertService._normalize_alert_event_payload(value)
+            for key, value in active_events.items()
+        }
+        SystemMetricsService.apply_monitoring_alert_actions(db, active_events, auto_commit=False)
         AlertService._upsert_events(db, active_events)
         return {
             "unhealthy_providers": unhealthy_providers[:20],
@@ -401,6 +407,120 @@ class AlertService:
             changed = True
         if changed:
             db.commit()
+
+    @staticmethod
+    def _normalize_alert_event_payload(event: dict) -> dict:
+        alert_key = str(event.get("alert_key") or "")
+        alert_type = str(event.get("alert_type") or "")
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        normalized_type = alert_type
+        typed_payload: dict[str, Any] = {"raw": payload}
+        if alert_key == "monitoring:redis_unavailable":
+            normalized_type = "redis"
+            typed_payload.update({
+                "redis_status": payload.get("status") or ("ok" if payload.get("ok") else "unavailable"),
+                "latency_ms": payload.get("latency_ms"),
+                "active_requests": payload.get("active_requests"),
+                "active_streams": payload.get("active_streams"),
+                "error": payload.get("error"),
+            })
+        elif alert_key == "monitoring:database_unavailable":
+            normalized_type = "database"
+            typed_payload.update({
+                "database_status": payload.get("status") or ("ok" if payload.get("ok") else "unavailable"),
+                "dialect": payload.get("dialect"),
+                "pool_status": payload.get("pool"),
+                "latency_ms": payload.get("latency_ms"),
+                "error": payload.get("error"),
+            })
+        elif alert_key in {"monitoring:global_active_requests", "monitoring:global_active_streams"}:
+            normalized_type = "concurrency"
+            active = payload.get("active_requests") if "requests" in alert_key else payload.get("active_streams")
+            typed_payload.update({
+                "scope": "active_requests" if "requests" in alert_key else "active_streams",
+                "active": active,
+                "limit": payload.get("limit") or payload.get("max_active_requests") or payload.get("max_active_streams"),
+                "threshold": payload.get("threshold"),
+            })
+        elif alert_key == "monitoring:background_backlog":
+            normalized_type = "queue"
+            typed_payload.update({
+                "queue_name": "token_finalize",
+                "queued": payload.get("pending_finalize_logs"),
+                "processing": payload.get("processing_finalize_logs"),
+                "threshold": SystemMetricsService.BACKGROUND_BACKLOG_WARNING_THRESHOLD,
+            })
+        elif alert_key in {"monitoring:status_5xx_rate", "monitoring:status_429_spike", "failure_rate:24h"}:
+            normalized_type = "traffic"
+            typed_payload.update({
+                "window_minutes": payload.get("window_minutes") or 1440,
+                "total_requests": payload.get("total_requests") or payload.get("request_count"),
+                "error_count": payload.get("status_5xx") or payload.get("status_429") or payload.get("failure_count"),
+                "error_rate": payload.get("status_5xx_rate") or payload.get("status_429_rate") or payload.get("failure_rate"),
+            })
+        elif alert_key.startswith("monitoring:provider_failure_rate"):
+            normalized_type = "provider"
+            typed_payload.update({
+                "provider_id": payload.get("provider_id"),
+                "provider_name": payload.get("provider_name"),
+                "failure_rate": payload.get("failure_rate"),
+                "total_requests": payload.get("total_requests"),
+            })
+        elif alert_key.startswith("monitoring:content_guard_high_risk_provider"):
+            normalized_type = "content_risk"
+            typed_payload.update({
+                "provider_id": payload.get("provider_id"),
+                "provider_name": payload.get("provider_name"),
+                "high_risk_count": payload.get("high_risk_count"),
+                "window_minutes": payload.get("window_minutes"),
+                "auto_isolated": payload.get("auto_isolated"),
+                "isolation_status": payload.get("isolation_status"),
+            })
+        elif alert_key == "monitoring:billing_failed":
+            normalized_type = "billing"
+            typed_payload.update({
+                "request_log_id": payload.get("request_log_id"),
+                "trace_id": payload.get("trace_id"),
+                "attempt_count": payload.get("billing_attempt_count"),
+                "error": payload.get("billing_error") or payload.get("error"),
+                "failed_count": payload.get("billing_failed_logs"),
+            })
+        elif alert_key == "monitoring:token_finalize_failed":
+            normalized_type = "queue"
+            typed_payload.update({
+                "queue_name": "token_finalize",
+                "queued": payload.get("pending_finalize_logs"),
+                "failed": payload.get("token_failed_logs"),
+                "threshold": SystemMetricsService.TOKEN_FAILURE_WARNING_THRESHOLD,
+            })
+        elif alert_type == "provider":
+            typed_payload.update({
+                "provider_id": payload.get("id") or payload.get("provider_id"),
+                "provider_name": payload.get("name") or payload.get("provider_name"),
+                "failure_rate": payload.get("failure_rate"),
+                "total_requests": payload.get("total_requests"),
+                "health_status": payload.get("health_status"),
+                "circuit_state": payload.get("circuit_state"),
+            })
+        elif alert_type == "api_key":
+            typed_payload.update({
+                "api_client_key_id": payload.get("id"),
+                "api_client_key_name": payload.get("name"),
+                "status": payload.get("status"),
+                "owner_user_name": payload.get("owner_user_name"),
+                "balance_amount": payload.get("balance_amount"),
+            })
+        elif alert_type == "account":
+            typed_payload.update({
+                "user_account_id": payload.get("id"),
+                "username": payload.get("username"),
+                "warnings": payload.get("warnings"),
+                "available_balance": payload.get("available_balance"),
+            })
+        normalized = dict(event)
+        normalized["alert_type"] = normalized_type
+        normalized["payload"] = typed_payload
+        return normalized
 
     @staticmethod
     def list_events(db: Session, *, status: str = "active", limit: int = 50) -> list[dict]:

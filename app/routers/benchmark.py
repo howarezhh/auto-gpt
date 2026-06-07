@@ -11,10 +11,14 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
+from sqlalchemy.orm import Session
 
+from app.database import get_db
+from app.services.admin_audit_service import AdminAuditService
+from app.services.user_auth_service import UserAuthService
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 REPORT_ROOT = PROJECT_ROOT / "data" / "benchmark-reports"
@@ -406,8 +410,39 @@ def _resolve_report_path(job: BenchmarkJob, report_type: str) -> Path:
     return path
 
 
+def _record_benchmark_audit(
+    db: Session,
+    *,
+    request: Request,
+    action: str,
+    job_id: str | None,
+    summary: str,
+    detail: dict | None = None,
+    risk_level: str = "medium",
+) -> None:
+    current_user = UserAuthService.get_current_user(request, db)
+    AdminAuditService.create_log(
+        db,
+        actor_user_id=getattr(current_user, "id", None),
+        actor_username=getattr(current_user, "username", None),
+        action=action,
+        entity_type="benchmark",
+        entity_id=job_id,
+        entity_name=job_id,
+        summary=summary,
+        detail=detail,
+        request_trace_id=getattr(request.state, "trace_id", None),
+        source_ip=request.client.host if request.client else None,
+        risk_level=risk_level,
+    )
+
+
 @router.post("/real-concurrency/start")
-def start_real_concurrency_benchmark(payload: RealConcurrencyBenchmarkRequest) -> dict[str, Any]:
+def start_real_concurrency_benchmark(
+    payload: RealConcurrencyBenchmarkRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
     if not SCRIPT_PATH.is_file():
         raise HTTPException(status_code=500, detail="真实并发测试脚本不存在")
     with _jobs_lock:
@@ -443,6 +478,15 @@ def start_real_concurrency_benchmark(payload: RealConcurrencyBenchmarkRequest) -
     with _jobs_lock:
         _jobs[job_id] = job
     threading.Thread(target=_read_process_output, args=(job_id, process), daemon=True).start()
+    _record_benchmark_audit(
+        db,
+        request=request,
+        action="benchmark_start",
+        job_id=job_id,
+        summary=f"启动真实并发压测：{', '.join(payload.model_names)}",
+        detail=_sanitize_config(payload),
+        risk_level="high",
+    )
     return _job_to_response(job)
 
 
@@ -454,16 +498,34 @@ def list_real_concurrency_jobs() -> list[dict[str, Any]]:
 
 
 @router.get("/real-concurrency/jobs/{job_id}")
-def get_real_concurrency_job(job_id: str) -> dict[str, Any]:
+def get_real_concurrency_job(
+    job_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
     with _jobs_lock:
         job = _jobs.get(job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="压测任务不存在")
-        return _job_to_response(job)
+        response = _job_to_response(job)
+    _record_benchmark_audit(
+        db,
+        request=request,
+        action="benchmark_report_access",
+        job_id=job_id,
+        summary=f"查看压测任务报告：{job_id}",
+        detail={"status": response.get("status")},
+        risk_level="low",
+    )
+    return response
 
 
 @router.post("/real-concurrency/jobs/{job_id}/stop")
-def stop_real_concurrency_job(job_id: str) -> dict[str, Any]:
+def stop_real_concurrency_job(
+    job_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
     with _jobs_lock:
         job = _jobs.get(job_id)
         if job is None:
@@ -474,11 +536,25 @@ def stop_real_concurrency_job(job_id: str) -> dict[str, Any]:
         job.status = "stopped"
         job.finished_at = _now_text()
     process.terminate()
+    _record_benchmark_audit(
+        db,
+        request=request,
+        action="benchmark_stop",
+        job_id=job_id,
+        summary=f"停止真实并发压测：{job_id}",
+        detail={"status": "stopped"},
+        risk_level="high",
+    )
     return _job_to_response(job)
 
 
 @router.get("/real-concurrency/jobs/{job_id}/report/{report_type}")
-def get_real_concurrency_report(job_id: str, report_type: str) -> FileResponse:
+def get_real_concurrency_report(
+    job_id: str,
+    report_type: str,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> FileResponse:
     if report_type not in {"html", "json"}:
         raise HTTPException(status_code=404, detail="报告类型不存在")
     with _jobs_lock:
@@ -486,5 +562,14 @@ def get_real_concurrency_report(job_id: str, report_type: str) -> FileResponse:
         if job is None:
             raise HTTPException(status_code=404, detail="压测任务不存在")
         path = _resolve_report_path(job, report_type)
+    _record_benchmark_audit(
+        db,
+        request=request,
+        action="benchmark_report_export",
+        job_id=job_id,
+        summary=f"导出压测报告：{job_id} / {report_type}",
+        detail={"report_type": report_type, "filename": path.name},
+        risk_level="medium",
+    )
     media_type = "text/html" if report_type == "html" else "application/json"
     return FileResponse(path, media_type=media_type, filename=path.name)

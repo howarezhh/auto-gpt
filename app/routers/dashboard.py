@@ -42,7 +42,7 @@ def _dashboard_usage_row_to_dict(row, *, include_provider: bool, include_model: 
         item.update(
             {
                 "provider_id": row.provider_id,
-                "provider_name": row.provider_name or "未命名中转站",
+                "provider_name": row.provider_name or "未命名提供商",
             }
         )
     if include_model:

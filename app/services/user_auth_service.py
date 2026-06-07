@@ -27,15 +27,20 @@ USER_ROLE_USER = "user"
 class UserAuthService:
     ADMIN_PORTAL_PREFIXES = (
         "/providers",
+        "/provider-models",
         "/models",
         "/settings",
+        "/content-guard",
         "/playground",
         "/benchmark",
+        "/operations",
         "/docs",
         "/api-keys",
         "/logs",
+        "/alerts",
         "/conversations",
         "/users",
+        "/audit-logs",
     )
 
     @staticmethod

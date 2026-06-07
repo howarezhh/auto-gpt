@@ -23,7 +23,7 @@
             </select>
         </label>
         <label>
-            <span>默认中转站</span>
+            <span>默认提供商</span>
             <select class="field-input" id="setting-default-provider-id"></select>
         </label>
         <label>
@@ -43,7 +43,7 @@
                     </button>
                     <div class="settings-tooltip-content hidden">
                         <div class="settings-tooltip-title">候选耗尽等待重试说明</div>
-                        <div class="settings-tooltip-copy">外部用户调用 /v1 接口时，如果当前模型的可用中转站全部被容量、失败率、熔断或临时上游故障耗尽，系统会在这里设置的时间内等待并重新按路由策略选择候选。0 表示立即返回错误；最大 600 s，超过后停止内部重试并向调用方返回清晰错误。</div>
+                        <div class="settings-tooltip-copy">外部用户调用 /v1 接口时，如果当前模型的可用提供商全部被容量、失败率、熔断或临时上游故障耗尽，系统会在这里设置的时间内等待并重新按路由策略选择候选。0 表示立即返回错误；最大 600 s，超过后停止内部重试并向调用方返回清晰错误。</div>
                     </div>
                 </span>
             </span>
@@ -75,7 +75,7 @@
                                 </button>
                                 <div class="settings-tooltip-content hidden">
                                     <div class="settings-tooltip-title">自动健康检查说明</div>
-                                    <div class="settings-tooltip-copy">开启后，后台定时任务会按设定间隔主动巡检已启用中转站及其模型可用性，并同步更新健康状态、最近检查时间与相关健康检查日志。默认关闭，建议仅在你需要后台持续巡检并接受额外上游探测流量时启用。</div>
+                                    <div class="settings-tooltip-copy">开启后，后台定时任务会按设定间隔主动巡检已启用提供商及其模型可用性，并同步更新健康状态、最近检查时间与相关健康检查日志。默认关闭，建议仅在你需要后台持续巡检并接受额外上游探测流量时启用。</div>
                                 </div>
                             </span>
                         </span>
@@ -110,7 +110,7 @@
                             </button>
                             <div class="settings-tooltip-content hidden">
                                 <div class="settings-tooltip-title">恢复探测间隔说明</div>
-                                <div class="settings-tooltip-copy">当中转站或模型因失败被标记为不可用后，系统会按这里的间隔安排恢复性探测，判断它是否可以重新回到候选路由。这个值越短，恢复更积极；越长则更保守，适合波动较大的上游。</div>
+                                <div class="settings-tooltip-copy">当提供商或模型因失败被标记为不可用后，系统会按这里的间隔安排恢复性探测，判断它是否可以重新回到候选路由。这个值越短，恢复更积极；越长则更保守，适合波动较大的上游。</div>
                             </div>
                         </span>
                     </span>
@@ -137,7 +137,7 @@
                             </button>
                             <div class="settings-tooltip-content hidden">
                                 <div class="settings-tooltip-title">最大候选数说明</div>
-                                <div class="settings-tooltip-copy">每次路由在完成权限、能力、健康、容量筛选和健康优先排序后，最多保留多少个候选中转站参与后续尝试。默认 10；API Key 单独配置候选数时会覆盖这里的全局值。</div>
+                                <div class="settings-tooltip-copy">每次路由在完成权限、能力、健康、容量筛选和健康优先排序后，最多保留多少个候选提供商参与后续尝试。默认 10；API Key 单独配置候选数时会覆盖这里的全局值。</div>
                             </div>
                         </span>
                     </span>
@@ -222,11 +222,11 @@
             <input class="field-input" id="setting-account-max-active-streams" type="number" min="0" value="10">
         </label>
         <label>
-            <span>单中转最大活跃请求</span>
+            <span>单提供商最大活跃请求</span>
             <input class="field-input" id="setting-provider-max-active-requests" type="number" min="0" value="20">
         </label>
         <label>
-            <span>单中转最大流式请求</span>
+            <span>单提供商最大流式请求</span>
             <input class="field-input" id="setting-provider-max-active-streams" type="number" min="0" value="10">
         </label>
         <label>
@@ -314,7 +314,7 @@
         <div class="form-span-2 settings-switch-grid">
             <label class="settings-switch-card">
                 <span class="settings-switch-copy">
-                    <strong>默认中转不可用时允许回退</strong>
+                    <strong>默认提供商不可用时允许回退</strong>
                 </span>
                 <span class="settings-switch-control">
                     <input id="setting-manual-allow-fallback" type="checkbox">

@@ -31,14 +31,14 @@
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
     <link rel="icon" type="image/png" href="{{ url_for('static', path='images/logo.png') }}?v=20260503-06">
-    <link href="{{ url_for('static', path='css/app.css') }}?v=20260606-05" rel="stylesheet">
+    <link href="{{ url_for('static', path='css/app.css') }}?v=20260607-16" rel="stylesheet">
 </head>
 {% set page_role = (
     'overview' if page_name in ['dashboard', 'user-home']
     else 'docs' if page_name in ['docs', 'user-docs']
-    else 'config' if page_name in ['settings', 'playground', 'benchmark', 'operations']
+    else 'config' if page_name in ['settings', 'content-guard', 'playground', 'benchmark', 'operations']
     else 'detail' if page_name in ['api-key-detail', 'user-detail', 'user-api-key-detail', 'user-log-detail', 'user-profile']
-    else 'list' if page_name in ['providers', 'models', 'api-keys', 'logs', 'conversations', 'alerts', 'audit-logs', 'users', 'user-api-keys', 'user-models', 'user-logs', 'user-billing', 'user-conversations', 'user-self-test']
+    else 'list' if page_name in ['providers', 'provider-models', 'models', 'api-keys', 'logs', 'conversations', 'alerts', 'audit-logs', 'users', 'user-api-keys', 'user-models', 'user-logs', 'user-operations', 'user-billing', 'user-conversations', 'user-self-test']
     else 'workspace'
 ) %}
 {% set is_user_portal = portal_type == 'user' %}
@@ -94,14 +94,17 @@
                             <a class="nav-link {% if request.url.path.startswith('/user/models') %}active{% endif %}" href="/user/models" data-shell-link><i class="bi bi-boxes" aria-hidden="true"></i><span>可用模型</span></a>
                             <a class="nav-link {% if request.url.path.startswith('/user/docs') %}active{% endif %}" href="/user/docs" data-shell-link><i class="bi bi-file-text" aria-hidden="true"></i><span>使用文档</span></a>
                             <a class="nav-link {% if request.url.path.startswith('/user/logs') %}active{% endif %}" href="/user/logs" data-shell-link><i class="bi bi-journal-text" aria-hidden="true"></i><span>我的日志</span></a>
+                            <a class="nav-link {% if request.url.path.startswith('/user/operations') %}active{% endif %}" href="/user/operations" data-shell-link><i class="bi bi-list-check" aria-hidden="true"></i><span>我的操作记录</span></a>
                             <a class="nav-link {% if request.url.path.startswith('/user/billing') %}active{% endif %}" href="/user/billing" data-shell-link><i class="bi bi-wallet2" aria-hidden="true"></i><span>我的账单</span></a>
                             <a class="nav-link {% if request.url.path.startswith('/user/conversations') %}active{% endif %}" href="/user/conversations" data-shell-link><i class="bi bi-chat-square-text" aria-hidden="true"></i><span>会话回放</span></a>
                             <a class="nav-link {% if request.url.path.startswith('/user/self-test') %}active{% endif %}" href="/user/self-test" data-shell-link><i class="bi bi-activity" aria-hidden="true"></i><span>接入自检</span></a>
                             {% else %}
                             <a class="nav-link {% if request.url.path == '/' %}active{% endif %}" href="/" data-shell-link><i class="bi bi-speedometer2" aria-hidden="true"></i><span>概览</span></a>
-                            <a class="nav-link {% if request.url.path == '/providers' %}active{% endif %}" href="/providers" data-shell-link><i class="bi bi-hdd-network" aria-hidden="true"></i><span>中转站管理</span></a>
+                            <a class="nav-link {% if request.url.path == '/providers' %}active{% endif %}" href="/providers" data-shell-link><i class="bi bi-hdd-network" aria-hidden="true"></i><span>提供商管理</span></a>
+                            <a class="nav-link {% if request.url.path == '/provider-models' %}active{% endif %}" href="/provider-models" data-shell-link><i class="bi bi-diagram-3" aria-hidden="true"></i><span>挂载矩阵</span></a>
                             <a class="nav-link {% if request.url.path == '/models' %}active{% endif %}" href="/models" data-shell-link><i class="bi bi-boxes" aria-hidden="true"></i><span>模型配置</span></a>
                             <a class="nav-link {% if request.url.path == '/settings' %}active{% endif %}" href="/settings" data-shell-link><i class="bi bi-sliders" aria-hidden="true"></i><span>路由设置</span></a>
+                            <a class="nav-link {% if request.url.path == '/content-guard' %}active{% endif %}" href="/content-guard" data-shell-link><i class="bi bi-shield-check" aria-hidden="true"></i><span>内容防护</span></a>
                             <a class="nav-link {% if request.url.path == '/playground' %}active{% endif %}" href="/playground" data-shell-link><i class="bi bi-send" aria-hidden="true"></i><span>调用测试</span></a>
                             <a class="nav-link {% if request.url.path == '/benchmark' %}active{% endif %}" href="/benchmark" data-shell-link><i class="bi bi-cpu" aria-hidden="true"></i><span>并发探测</span></a>
                             <a class="nav-link {% if request.url.path == '/operations' %}active{% endif %}" href="/operations" data-shell-link><i class="bi bi-activity" aria-hidden="true"></i><span>运维监控</span></a>
@@ -193,6 +196,6 @@
         </div>
     </div>
     <div class="toast-stack" id="toast-stack" role="status" aria-live="polite" aria-atomic="false"></div>
-    <script src="{{ url_for('static', path='js/app.js') }}?v=20260606-05"></script>
+    <script src="{{ url_for('static', path='js/app.js') }}?v=20260607-14"></script>
 </body>
 </html>

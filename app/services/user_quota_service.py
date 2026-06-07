@@ -153,6 +153,15 @@ class UserQuotaService:
             "day_tokens": snapshot.day_tokens,
             "month_tokens": snapshot.month_tokens,
             "has_balance_limit": snapshot.has_balance_limit,
+            "request_limit_total": user.request_limit_total,
+            "request_limit_daily": user.request_limit_daily,
+            "request_limit_monthly": user.request_limit_monthly,
+            "token_limit_total": user.token_limit_total,
+            "token_limit_daily": user.token_limit_daily,
+            "token_limit_monthly": user.token_limit_monthly,
+            "cost_limit_total": BillingService.to_float(user.cost_limit_total),
+            "cost_limit_daily": BillingService.to_float(user.cost_limit_daily),
+            "cost_limit_monthly": BillingService.to_float(user.cost_limit_monthly),
         }
 
     @staticmethod

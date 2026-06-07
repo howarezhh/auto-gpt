@@ -322,116 +322,153 @@
     <form class="users-batch-form" method="post" action="/users/batch/quota-policy" id="users-batch-quota-form">
         <input type="hidden" name="user_ids_text" id="users-batch-user-ids">
         <div class="users-batch-selection-bar">
-            <label class="users-batch-selection">
-                <span>已选用户 ID</span>
-                <input class="field-input users-batch-selection-input" id="users-batch-user-ids-preview" value="" placeholder="在上方账号目录勾选后自动填充" disabled>
-            </label>
+            <div class="users-batch-selection-main">
+                <div class="users-batch-selection-meta">
+                    <strong id="users-batch-selected-count">已选 0 个账号</strong>
+                    <small class="table-muted">只会提交已填写且与当前值不同的字段；留空表示不修改。</small>
+                </div>
+                <label class="users-batch-selection">
+                    <span>已选用户 ID</span>
+                    <input class="field-input users-batch-selection-input" id="users-batch-user-ids-preview" value="" placeholder="在上方账号目录勾选后自动填充" disabled>
+                </label>
+            </div>
             <div class="users-batch-submit-wrap">
-                <small class="table-muted">只会提交已填写且与当前值不同的字段；留空表示不修改。</small>
                 <button class="btn btn-accent interactive-btn" id="users-batch-apply-btn" type="submit">批量应用额度</button>
             </div>
         </div>
-        <div class="users-batch-list" role="list" aria-label="批量额度字段列表">
-            <label class="batch-quota-field users-batch-row" data-batch-quota-field="frozen_amount">
-                <span class="users-batch-row-main">
-                    <span class="users-batch-title">冻结金额</span>
-                    <small class="table-muted" data-batch-quota-current="frozen_amount">当前值：未选择用户</small>
-                </span>
-                <span class="users-batch-row-input">
-                    <span class="users-batch-row-hint">留空则不修改</span>
-                    <input class="field-input" name="frozen_amount" type="number" step="0.000001" min="0" data-batch-quota-input="frozen_amount" data-batch-quota-kind="decimal" placeholder="输入新的冻结金额">
-                </span>
-            </label>
-            <label class="batch-quota-field users-batch-row" data-batch-quota-field="request_limit_total">
-                <span class="users-batch-row-main">
-                    <span class="users-batch-title">总调用次数上限</span>
-                    <small class="table-muted" data-batch-quota-current="request_limit_total">当前值：未选择用户</small>
-                </span>
-                <span class="users-batch-row-input">
-                    <span class="users-batch-row-hint">留空则不修改</span>
-                    <input class="field-input" name="request_limit_total" type="number" min="0" data-batch-quota-input="request_limit_total" data-batch-quota-kind="int" placeholder="输入新的总调用次数上限">
-                </span>
-            </label>
-            <label class="batch-quota-field users-batch-row" data-batch-quota-field="request_limit_daily">
-                <span class="users-batch-row-main">
-                    <span class="users-batch-title">日调用次数上限</span>
-                    <small class="table-muted" data-batch-quota-current="request_limit_daily">当前值：未选择用户</small>
-                </span>
-                <span class="users-batch-row-input">
-                    <span class="users-batch-row-hint">留空则不修改</span>
-                    <input class="field-input" name="request_limit_daily" type="number" min="0" data-batch-quota-input="request_limit_daily" data-batch-quota-kind="int" placeholder="输入新的日调用次数上限">
-                </span>
-            </label>
-            <label class="batch-quota-field users-batch-row" data-batch-quota-field="request_limit_monthly">
-                <span class="users-batch-row-main">
-                    <span class="users-batch-title">月调用次数上限</span>
-                    <small class="table-muted" data-batch-quota-current="request_limit_monthly">当前值：未选择用户</small>
-                </span>
-                <span class="users-batch-row-input">
-                    <span class="users-batch-row-hint">留空则不修改</span>
-                    <input class="field-input" name="request_limit_monthly" type="number" min="0" data-batch-quota-input="request_limit_monthly" data-batch-quota-kind="int" placeholder="输入新的月调用次数上限">
-                </span>
-            </label>
-            <label class="batch-quota-field users-batch-row" data-batch-quota-field="token_limit_total">
-                <span class="users-batch-row-main">
-                    <span class="users-batch-title">总 Token 上限</span>
-                    <small class="table-muted" data-batch-quota-current="token_limit_total">当前值：未选择用户</small>
-                </span>
-                <span class="users-batch-row-input">
-                    <span class="users-batch-row-hint">留空则不修改</span>
-                    <input class="field-input" name="token_limit_total" type="number" min="0" data-batch-quota-input="token_limit_total" data-batch-quota-kind="int" placeholder="输入新的总 Token 上限">
-                </span>
-            </label>
-            <label class="batch-quota-field users-batch-row" data-batch-quota-field="token_limit_daily">
-                <span class="users-batch-row-main">
-                    <span class="users-batch-title">日 Token 上限</span>
-                    <small class="table-muted" data-batch-quota-current="token_limit_daily">当前值：未选择用户</small>
-                </span>
-                <span class="users-batch-row-input">
-                    <span class="users-batch-row-hint">留空则不修改</span>
-                    <input class="field-input" name="token_limit_daily" type="number" min="0" data-batch-quota-input="token_limit_daily" data-batch-quota-kind="int" placeholder="输入新的日 Token 上限">
-                </span>
-            </label>
-            <label class="batch-quota-field users-batch-row" data-batch-quota-field="token_limit_monthly">
-                <span class="users-batch-row-main">
-                    <span class="users-batch-title">月 Token 上限</span>
-                    <small class="table-muted" data-batch-quota-current="token_limit_monthly">当前值：未选择用户</small>
-                </span>
-                <span class="users-batch-row-input">
-                    <span class="users-batch-row-hint">留空则不修改</span>
-                    <input class="field-input" name="token_limit_monthly" type="number" min="0" data-batch-quota-input="token_limit_monthly" data-batch-quota-kind="int" placeholder="输入新的月 Token 上限">
-                </span>
-            </label>
-            <label class="batch-quota-field users-batch-row" data-batch-quota-field="cost_limit_total">
-                <span class="users-batch-row-main">
-                    <span class="users-batch-title">总金额上限</span>
-                    <small class="table-muted" data-batch-quota-current="cost_limit_total">当前值：未选择用户</small>
-                </span>
-                <span class="users-batch-row-input">
-                    <span class="users-batch-row-hint">留空则不修改</span>
-                    <input class="field-input" name="cost_limit_total" type="number" step="0.000001" min="0" data-batch-quota-input="cost_limit_total" data-batch-quota-kind="decimal" placeholder="输入新的总金额上限">
-                </span>
-            </label>
-            <label class="batch-quota-field users-batch-row" data-batch-quota-field="cost_limit_daily">
-                <span class="users-batch-row-main">
-                    <span class="users-batch-title">日金额上限</span>
-                    <small class="table-muted" data-batch-quota-current="cost_limit_daily">当前值：未选择用户</small>
-                </span>
-                <span class="users-batch-row-input">
-                    <span class="users-batch-row-hint">留空则不修改</span>
-                    <input class="field-input" name="cost_limit_daily" type="number" step="0.000001" min="0" data-batch-quota-input="cost_limit_daily" data-batch-quota-kind="decimal" placeholder="输入新的日金额上限">
-                </span>
-            </label>
-            <label class="batch-quota-field users-batch-row" data-batch-quota-field="cost_limit_monthly">
-                <span class="users-batch-row-main">
-                    <span class="users-batch-title">月金额上限</span>
-                    <small class="table-muted" data-batch-quota-current="cost_limit_monthly">当前值：未选择用户</small>
-                </span>
-                <span class="users-batch-row-input">
-                    <span class="users-batch-row-hint">留空则不修改</span>
-                    <input class="field-input" name="cost_limit_monthly" type="number" step="0.000001" min="0" data-batch-quota-input="cost_limit_monthly" data-batch-quota-kind="decimal" placeholder="输入新的月金额上限">
-                </span>
-            </label>
+        <div class="users-batch-groups">
+            <section class="users-batch-group">
+                <div class="users-batch-group-head">
+                    <strong>账户控制</strong>
+                    <span>先统一冻结金额，再决定是否同步放开消费或调用能力。</span>
+                </div>
+                <div class="users-batch-grid users-batch-grid-single" role="list" aria-label="账户控制字段列表">
+                    <article class="batch-quota-field users-batch-card" data-batch-quota-field="frozen_amount" role="listitem">
+                        <div class="users-batch-card-head">
+                            <span class="users-batch-title">冻结金额</span>
+                            <small class="table-muted" data-batch-quota-current="frozen_amount">当前值：未选择用户</small>
+                        </div>
+                        <label class="users-batch-card-input" for="users-batch-frozen-amount">
+                            <span>新值</span>
+                            <input class="field-input" id="users-batch-frozen-amount" name="frozen_amount" type="number" step="0.000001" min="0" data-batch-quota-input="frozen_amount" data-batch-quota-kind="decimal" placeholder="输入新的冻结金额">
+                        </label>
+                    </article>
+                </div>
+            </section>
+            <section class="users-batch-group">
+                <div class="users-batch-group-head">
+                    <strong>调用次数</strong>
+                    <span>适合控制总量、日配额和月配额三种节奏。</span>
+                </div>
+                <div class="users-batch-grid" role="list" aria-label="调用次数字段列表">
+                    <article class="batch-quota-field users-batch-card" data-batch-quota-field="request_limit_total" role="listitem">
+                        <div class="users-batch-card-head">
+                            <span class="users-batch-title">总调用次数上限</span>
+                            <small class="table-muted" data-batch-quota-current="request_limit_total">当前值：未选择用户</small>
+                        </div>
+                        <label class="users-batch-card-input" for="users-batch-request-total">
+                            <span>新值</span>
+                            <input class="field-input" id="users-batch-request-total" name="request_limit_total" type="number" min="0" data-batch-quota-input="request_limit_total" data-batch-quota-kind="int" placeholder="输入新的总调用次数上限">
+                        </label>
+                    </article>
+                    <article class="batch-quota-field users-batch-card" data-batch-quota-field="request_limit_daily" role="listitem">
+                        <div class="users-batch-card-head">
+                            <span class="users-batch-title">日调用次数上限</span>
+                            <small class="table-muted" data-batch-quota-current="request_limit_daily">当前值：未选择用户</small>
+                        </div>
+                        <label class="users-batch-card-input" for="users-batch-request-daily">
+                            <span>新值</span>
+                            <input class="field-input" id="users-batch-request-daily" name="request_limit_daily" type="number" min="0" data-batch-quota-input="request_limit_daily" data-batch-quota-kind="int" placeholder="输入新的日调用次数上限">
+                        </label>
+                    </article>
+                    <article class="batch-quota-field users-batch-card" data-batch-quota-field="request_limit_monthly" role="listitem">
+                        <div class="users-batch-card-head">
+                            <span class="users-batch-title">月调用次数上限</span>
+                            <small class="table-muted" data-batch-quota-current="request_limit_monthly">当前值：未选择用户</small>
+                        </div>
+                        <label class="users-batch-card-input" for="users-batch-request-monthly">
+                            <span>新值</span>
+                            <input class="field-input" id="users-batch-request-monthly" name="request_limit_monthly" type="number" min="0" data-batch-quota-input="request_limit_monthly" data-batch-quota-kind="int" placeholder="输入新的月调用次数上限">
+                        </label>
+                    </article>
+                </div>
+            </section>
+            <section class="users-batch-group">
+                <div class="users-batch-group-head">
+                    <strong>Token 配额</strong>
+                    <span>适合按 Token 使用量统一控制模型调用规模。</span>
+                </div>
+                <div class="users-batch-grid" role="list" aria-label="Token 配额字段列表">
+                    <article class="batch-quota-field users-batch-card" data-batch-quota-field="token_limit_total" role="listitem">
+                        <div class="users-batch-card-head">
+                            <span class="users-batch-title">总 Token 上限</span>
+                            <small class="table-muted" data-batch-quota-current="token_limit_total">当前值：未选择用户</small>
+                        </div>
+                        <label class="users-batch-card-input" for="users-batch-token-total">
+                            <span>新值</span>
+                            <input class="field-input" id="users-batch-token-total" name="token_limit_total" type="number" min="0" data-batch-quota-input="token_limit_total" data-batch-quota-kind="int" placeholder="输入新的总 Token 上限">
+                        </label>
+                    </article>
+                    <article class="batch-quota-field users-batch-card" data-batch-quota-field="token_limit_daily" role="listitem">
+                        <div class="users-batch-card-head">
+                            <span class="users-batch-title">日 Token 上限</span>
+                            <small class="table-muted" data-batch-quota-current="token_limit_daily">当前值：未选择用户</small>
+                        </div>
+                        <label class="users-batch-card-input" for="users-batch-token-daily">
+                            <span>新值</span>
+                            <input class="field-input" id="users-batch-token-daily" name="token_limit_daily" type="number" min="0" data-batch-quota-input="token_limit_daily" data-batch-quota-kind="int" placeholder="输入新的日 Token 上限">
+                        </label>
+                    </article>
+                    <article class="batch-quota-field users-batch-card" data-batch-quota-field="token_limit_monthly" role="listitem">
+                        <div class="users-batch-card-head">
+                            <span class="users-batch-title">月 Token 上限</span>
+                            <small class="table-muted" data-batch-quota-current="token_limit_monthly">当前值：未选择用户</small>
+                        </div>
+                        <label class="users-batch-card-input" for="users-batch-token-monthly">
+                            <span>新值</span>
+                            <input class="field-input" id="users-batch-token-monthly" name="token_limit_monthly" type="number" min="0" data-batch-quota-input="token_limit_monthly" data-batch-quota-kind="int" placeholder="输入新的月 Token 上限">
+                        </label>
+                    </article>
+                </div>
+            </section>
+            <section class="users-batch-group">
+                <div class="users-batch-group-head">
+                    <strong>金额配额</strong>
+                    <span>适合按总额、日额和月额统一控制消费边界。</span>
+                </div>
+                <div class="users-batch-grid" role="list" aria-label="金额配额字段列表">
+                    <article class="batch-quota-field users-batch-card" data-batch-quota-field="cost_limit_total" role="listitem">
+                        <div class="users-batch-card-head">
+                            <span class="users-batch-title">总金额上限</span>
+                            <small class="table-muted" data-batch-quota-current="cost_limit_total">当前值：未选择用户</small>
+                        </div>
+                        <label class="users-batch-card-input" for="users-batch-cost-total">
+                            <span>新值</span>
+                            <input class="field-input" id="users-batch-cost-total" name="cost_limit_total" type="number" step="0.000001" min="0" data-batch-quota-input="cost_limit_total" data-batch-quota-kind="decimal" placeholder="输入新的总金额上限">
+                        </label>
+                    </article>
+                    <article class="batch-quota-field users-batch-card" data-batch-quota-field="cost_limit_daily" role="listitem">
+                        <div class="users-batch-card-head">
+                            <span class="users-batch-title">日金额上限</span>
+                            <small class="table-muted" data-batch-quota-current="cost_limit_daily">当前值：未选择用户</small>
+                        </div>
+                        <label class="users-batch-card-input" for="users-batch-cost-daily">
+                            <span>新值</span>
+                            <input class="field-input" id="users-batch-cost-daily" name="cost_limit_daily" type="number" step="0.000001" min="0" data-batch-quota-input="cost_limit_daily" data-batch-quota-kind="decimal" placeholder="输入新的日金额上限">
+                        </label>
+                    </article>
+                    <article class="batch-quota-field users-batch-card" data-batch-quota-field="cost_limit_monthly" role="listitem">
+                        <div class="users-batch-card-head">
+                            <span class="users-batch-title">月金额上限</span>
+                            <small class="table-muted" data-batch-quota-current="cost_limit_monthly">当前值：未选择用户</small>
+                        </div>
+                        <label class="users-batch-card-input" for="users-batch-cost-monthly">
+                            <span>新值</span>
+                            <input class="field-input" id="users-batch-cost-monthly" name="cost_limit_monthly" type="number" step="0.000001" min="0" data-batch-quota-input="cost_limit_monthly" data-batch-quota-kind="decimal" placeholder="输入新的月金额上限">
+                        </label>
+                    </article>
+                </div>
+            </section>
         </div>
     </form>
 </section>

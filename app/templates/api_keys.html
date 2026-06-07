@@ -271,7 +271,7 @@
                 </select>
             </label>
             <label>
-                <span>默认中转站</span>
+                <span>默认提供商</span>
                 <select class="field-input" id="api-key-default-provider-id">
                     <option value="">未设置</option>
                 </select>
@@ -333,28 +333,60 @@
                 </label>
                 <label class="toggle-row">
                     <input id="api-key-manual-allow-fallback" type="checkbox" checked>
-                    <span>默认中转不可用时允许回退</span>
+                    <span>默认提供商不可用时允许回退</span>
                 </label>
                 <label class="toggle-row">
                     <input id="api-key-route-exhausted-retry-infinite-enabled" type="checkbox">
                     <span>候选耗尽时无限重试</span>
                 </label>
             </div>
+            <div class="form-span-2 settings-switch-grid">
+                <label class="settings-switch-card" for="api-key-trusted-providers-only">
+                    <span class="settings-switch-copy">
+                        <strong>只走可信提供商</strong>
+                        <small>正式流量仅允许官方或可信等级提供商。</small>
+                    </span>
+                    <span class="settings-switch-control">
+                        <input id="api-key-trusted-providers-only" type="checkbox" checked>
+                        <span class="settings-switch-slider"></span>
+                    </span>
+                </label>
+                <label class="settings-switch-card" for="api-key-allow-low-trust-providers">
+                    <span class="settings-switch-copy">
+                        <strong>允许低信任提供商</strong>
+                        <small>仅与提供商自身低信任路由开关同时开启时生效。</small>
+                    </span>
+                    <span class="settings-switch-control">
+                        <input id="api-key-allow-low-trust-providers" type="checkbox">
+                        <span class="settings-switch-slider"></span>
+                    </span>
+                </label>
+                <label class="settings-switch-card" for="api-key-content-guard-required">
+                    <span class="settings-switch-copy">
+                        <strong>要求内容检测</strong>
+                        <small>该密钥的调用默认进入内容完整性检测链路。</small>
+                    </span>
+                    <span class="settings-switch-control">
+                        <input id="api-key-content-guard-required" type="checkbox" checked>
+                        <span class="settings-switch-slider"></span>
+                    </span>
+                </label>
+            </div>
             <label class="form-span-2">
-                <span>授权中转站</span>
+                <span>授权提供商</span>
                 <div class="settings-note">
                     <strong>授权规则</strong>
                     <span>默认全选。保持全选时，该 API Key 会自动跟随后续渠道增删；只有取消部分勾选时，才会切换成单密钥自定义授权。</span>
                 </div>
                 <div class="api-key-provider-selector" id="api-key-provider-selector">
-                    <div class="playground-provider-list-empty">正在加载中转站...</div>
+                    <div class="playground-provider-list-empty">正在加载提供商...</div>
                 </div>
             </label>
             <label class="form-span-2">
                 <span>模型白名单</span>
                 <div class="settings-note">
                     <strong>白名单规则</strong>
-                    <span>不勾选表示不限制模型；勾选后该 API Key 只能访问所选模型，仍需同时满足中转站授权和路由可用条件。</span>
+                    <span>不勾选表示不限制模型；勾选后该 API Key 只能访问所选模型，仍需同时满足提供商授权和路由可用条件。</span>
                 </div>
                 <div class="api-key-provider-selector" id="api-key-model-selector">
                     <div class="playground-provider-list-empty">正在加载模型...</div>
@@ -392,21 +424,21 @@
                 </select>
             </label>
             <label>
-                <span>默认中转站</span>
+                <span>默认提供商</span>
                 <select class="field-input" id="api-key-batch-provider-default">
                     <option value="">未设置</option>
                 </select>
             </label>
             <label class="toggle-row">
                 <input id="api-key-batch-provider-fallback" type="checkbox" checked>
-                <span>默认中转不可用时允许回退</span>
+                <span>默认提供商不可用时允许回退</span>
             </label>
             <label class="toggle-row">
                 <input id="api-key-batch-provider-infinite-retry" type="checkbox">
                 <span>候选耗尽时无限重试</span>
             </label>
             <div class="form-span-2">
-                <span>授权中转站</span>
+                <span>授权提供商</span>
                 <div class="settings-note">
                     <strong>批量规则</strong>
                     <span>默认全选。若保持全选，所选 API Key 会统一恢复为自动同步全部渠道授权。</span>
@@ -440,7 +472,7 @@
                 </select>
             </label>
             <label>
-                <span>默认中转站</span>
+                <span>默认提供商</span>
                 <select class="field-input" id="api-key-template-default-provider-id">
                     <option value="">未设置</option>
                 </select>
@@ -463,14 +495,14 @@
             </label>
             <label class="toggle-row">
                 <input id="api-key-template-manual-allow-fallback" type="checkbox" checked>
-                <span>默认中转不可用时允许回退</span>
+                <span>默认提供商不可用时允许回退</span>
             </label>
             <label class="form-span-2">
                 <span>备注</span>
                 <input class="field-input" id="api-key-template-remark" maxlength="200">
             </label>
             <div class="form-span-2">
-                <span>授权中转站</span>
+                <span>授权提供商</span>
                 <div class="api-key-provider-selector" id="api-key-template-provider-selector"></div>
             </div>
             <div class="form-span-2">

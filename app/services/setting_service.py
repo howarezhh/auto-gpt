@@ -32,6 +32,20 @@ DEFAULT_SETTING = {
     "max_non_stream_response_body_bytes": 20971520,
     "stream_token_capture_max_bytes": 1048576,
     "max_logged_metadata_bytes": 1024,
+    "content_guard_enabled": True,
+    "content_guard_block_on_high_risk": True,
+    "content_guard_probe_interval_sec": 3600,
+    "content_guard_max_scan_bytes": 16384,
+    "content_guard_stream_buffer_max_bytes": 16384,
+    "content_guard_low_trust_requires_buffer": True,
+    "content_guard_rules_json": "",
+    "content_guard_high_risk_strategy": "switch_provider",
+    "content_guard_max_detection_delay_ms": 300,
+    "content_guard_stream_mode": "buffer_300ms",
+    "content_guard_url_check_enabled": True,
+    "content_guard_url_allowlist_json": "",
+    "content_guard_async_review_enabled": True,
+    "content_guard_high_risk_confidence_threshold": 85,
     "circuit_breaker_threshold": 3,
     "auto_health_check": False,
     "health_check_interval_sec": 300,
@@ -44,6 +58,13 @@ DEFAULT_SETTING = {
     "allow_public_user_registration": False,
     "request_log_retention_days": 90,
     "admin_audit_log_retention_days": 180,
+    "request_child_log_retention_days": 90,
+    "exception_log_retention_days": 180,
+    "health_log_retention_days": 7,
+    "billing_log_retention_days": 365,
+    "background_job_log_retention_days": 90,
+    "user_operation_log_retention_days": 180,
+    "asset_log_retention_days": 180,
     "route_candidate_cache_ttl_sec": 10,
     "model_list_cache_ttl_sec": 15,
     "provider_status_cache_ttl_sec": 10,
@@ -131,8 +152,7 @@ class SettingService:
             default_provider_id=payload.default_provider_id,
         )
         SettingService._validate_retention_configuration(
-            request_log_retention_days=payload.request_log_retention_days,
-            admin_audit_log_retention_days=payload.admin_audit_log_retention_days,
+            payload=payload,
         )
         SettingService._validate_stream_timeout_configuration(
             first_token_timeout_seconds=payload.stream_first_token_timeout_seconds,
@@ -140,11 +160,17 @@ class SettingService:
             max_duration_seconds=payload.stream_max_duration_seconds,
         )
         SettingService._validate_responses_chat_adapter_configuration(payload)
+        explicit_fields = payload.model_fields_set
         for field, value in payload.model_dump().items():
+            if field.startswith("content_guard_") and field not in explicit_fields:
+                continue
             setattr(setting, field, value)
+        SettingService._clamp_provider_retry_limits(db, max_retries=setting.global_max_retries)
         db.commit()
         db.refresh(setting)
         SettingService.invalidate_runtime_cache()
+        CacheService.invalidate_prefix("providers-runtime")
+        CacheService.invalidate_prefix("route-candidates")
         return setting
 
     @staticmethod
@@ -180,14 +206,23 @@ class SettingService:
     @staticmethod
     def _validate_retention_configuration(
         *,
-        request_log_retention_days: int,
-        admin_audit_log_retention_days: int,
+        payload: SettingUpdate,
     ) -> None:
         """校验日志保留时间不能为负数。"""
-        if request_log_retention_days < 0:
-            raise ValueError("request_log_retention_days must be >= 0")
-        if admin_audit_log_retention_days < 0:
-            raise ValueError("admin_audit_log_retention_days must be >= 0")
+        retention_fields = [
+            "request_log_retention_days",
+            "admin_audit_log_retention_days",
+            "request_child_log_retention_days",
+            "exception_log_retention_days",
+            "health_log_retention_days",
+            "billing_log_retention_days",
+            "background_job_log_retention_days",
+            "user_operation_log_retention_days",
+            "asset_log_retention_days",
+        ]
+        for field_name in retention_fields:
+            if int(getattr(payload, field_name, 0) or 0) < 0:
+                raise ValueError(f"{field_name} must be >= 0")
 
     @staticmethod
     def _validate_stream_timeout_configuration(
@@ -222,3 +257,12 @@ class SettingService:
                 raise ValueError(f"{field_name} must be valid JSON") from exc
             if not isinstance(parsed, expected_types):
                 raise ValueError(f"{field_name} must be a JSON object" if expected_types == (dict,) else f"{field_name} must be a JSON object or array")
+
+    @staticmethod
+    def _clamp_provider_retry_limits(db: Session, *, max_retries: int) -> None:
+        """提供商重试次数不得超过全局最大重试次数。"""
+        normalized_max = max(0, int(max_retries or 0))
+        db.query(Provider).filter(Provider.max_retries > normalized_max).update(
+            {Provider.max_retries: normalized_max},
+            synchronize_session=False,
+        )

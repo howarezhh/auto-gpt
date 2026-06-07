@@ -1,0 +1,21 @@
+{
+  "name": "aotu-gpt",
+  "version": "1.0.0",
+  "description": "基于 FastAPI 的个人多提供商统一管理与代理系统。",
+  "main": "index.js",
+  "devDependencies": {},
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/howarezhh/auto-gpt.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/howarezhh/auto-gpt/issues"
+  },
+  "homepage": "https://github.com/howarezhh/auto-gpt#readme"
+}

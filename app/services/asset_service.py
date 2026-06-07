@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.models.uploaded_asset import UploadedAsset
+from app.logging.adapters.asset_adapter import AssetLogRecorder
 
 
 class AssetService:
@@ -19,6 +20,10 @@ class AssetService:
         db: Session,
         *,
         upload_file: UploadFile,
+        actor_type: str = "system",
+        actor_id: int | str | None = None,
+        storage_scope: str = "playground",
+        trace_id: str | None = None,
     ) -> UploadedAsset:
         content_type = (upload_file.content_type or "").strip().lower()
         if content_type not in AssetService.IMAGE_CONTENT_TYPES:
@@ -33,6 +38,19 @@ class AssetService:
         sha256_hex = hashlib.sha256(content).hexdigest()
         existing = db.scalar(select(UploadedAsset).where(UploadedAsset.sha256_hex == sha256_hex))
         if existing is not None:
+            AssetLogRecorder.record_asset_event(
+                db,
+                asset_id=existing.id,
+                asset_event_type="reuse_existing",
+                actor_type=actor_type,
+                actor_id=actor_id,
+                filename=existing.filename,
+                content_type=existing.content_type,
+                file_size_bytes=existing.file_size_bytes,
+                sha256_hex=existing.sha256_hex,
+                storage_scope=storage_scope,
+                trace_id=trace_id,
+            )
             return existing
 
         uploads_dir = Path(get_settings().uploads_dir)
@@ -55,4 +73,17 @@ class AssetService:
         db.add(asset)
         db.commit()
         db.refresh(asset)
+        AssetLogRecorder.record_asset_event(
+            db,
+            asset_id=asset.id,
+            asset_event_type="upload",
+            actor_type=actor_type,
+            actor_id=actor_id,
+            filename=asset.filename,
+            content_type=asset.content_type,
+            file_size_bytes=asset.file_size_bytes,
+            sha256_hex=asset.sha256_hex,
+            storage_scope=storage_scope,
+            trace_id=trace_id,
+        )
         return asset

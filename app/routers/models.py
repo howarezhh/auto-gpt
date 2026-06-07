@@ -311,7 +311,6 @@ async def select_model_mapping_target(payload: ModelMappingSelectionProbe) -> Mo
         mapped=resolution.selected_model_name != resolution.source_model_name,
         source_model_name=resolution.source_model_name,
         selected_model_name=resolution.selected_model_name,
-        strategy=resolution.strategy,
         trace=resolution.trace,
     )
 
@@ -337,4 +336,3 @@ def upload_user_asset(
         "public_path": asset.public_path,
         "asset_url": str(request.base_url).rstrip("/") + asset.public_path,
     }
-

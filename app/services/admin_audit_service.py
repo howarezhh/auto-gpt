@@ -21,11 +21,20 @@ class AdminAuditService:
         summary: str,
         detail: dict | list | str | None = None,
         target_user_id: int | None = None,
+        request_trace_id: str | None = None,
+        source_ip: str | None = None,
+        before: dict | list | str | None = None,
+        after: dict | list | str | None = None,
+        changed_fields: dict | list | str | None = None,
+        risk_level: str = "low",
         auto_commit: bool = True,
     ) -> AdminAuditLog:
         payload = None
         if detail is not None:
             payload = detail if isinstance(detail, str) else dumps_json(detail)
+        before_json = before if isinstance(before, str) else dumps_json(before) if before is not None else None
+        after_json = after if isinstance(after, str) else dumps_json(after) if after is not None else None
+        changed_fields_json = changed_fields if isinstance(changed_fields, str) else dumps_json(changed_fields) if changed_fields is not None else None
         item = AdminAuditLog(
             actor_user_id=actor_user_id,
             actor_username=actor_username,
@@ -34,7 +43,13 @@ class AdminAuditService:
             entity_id=str(entity_id) if entity_id is not None else None,
             entity_name=(entity_name or "").strip() or None,
             target_user_id=target_user_id,
+            request_trace_id=request_trace_id,
+            source_ip=source_ip,
             summary=summary.strip(),
+            before_json=before_json,
+            after_json=after_json,
+            changed_fields_json=changed_fields_json,
+            risk_level=(risk_level or "low").strip() or "low",
             detail_json=payload,
         )
         db.add(item)

@@ -21,9 +21,9 @@ templates = Jinja2Templates(directory="app/templates")
 
 def _build_dashboard_stat_cards(stats: dict) -> list[dict]:
     return [
-        {"id": "provider_count", "label": "总中转站数", "value": stats["provider_count"]},
-        {"id": "healthy_count", "label": "全部可用中转站", "value": stats["healthy_count"]},
-        {"id": "unhealthy_count", "label": "全部不可用中转站", "value": stats["unhealthy_count"]},
+        {"id": "provider_count", "label": "总提供商数", "value": stats["provider_count"]},
+        {"id": "healthy_count", "label": "全部可用提供商", "value": stats["healthy_count"]},
+        {"id": "unhealthy_count", "label": "全部不可用提供商", "value": stats["unhealthy_count"]},
         {"id": "model_count", "label": "模型总数", "value": stats["model_count"]},
         {"id": "recent_requests", "label": "24h 请求量", "value": stats["recent_requests"]},
         {"id": "recent_tokens", "label": "24h Token 用量", "value": stats["recent_tokens"]},
@@ -100,9 +100,26 @@ def providers_page(request: Request, db: Session = Depends(get_db)) -> HTMLRespo
             "page_name": "providers",
             "portal_type": "admin",
             "current_user": current_user,
-            "title": "中转站管理",
+            "title": "提供商管理",
             "provider_telemetry_cards": provider_page_content["telemetry_cards"],
             "provider_summary": provider_page_content["summary"],
+        },
+    )
+
+
+@router.get("/provider-models", response_class=HTMLResponse)
+def provider_models_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
+    current_user = require_admin_html(request, db)
+    if isinstance(current_user, RedirectResponse):
+        return current_user
+    return templates.TemplateResponse(
+        "provider_models.html",
+        {
+            "request": request,
+            "page_name": "provider-models",
+            "portal_type": "admin",
+            "current_user": current_user,
+            "title": "挂载矩阵",
         },
     )
 
@@ -130,6 +147,23 @@ def settings_page(request: Request, db: Session = Depends(get_db)) -> HTMLRespon
     if isinstance(current_user, RedirectResponse):
         return current_user
     return templates.TemplateResponse("settings.html", {"request": request, "settings": SettingService.get_or_create(db), "page_name": "settings", "portal_type": "admin", "current_user": current_user})
+
+
+@router.get("/content-guard", response_class=HTMLResponse)
+def content_guard_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
+    current_user = require_admin_html(request, db)
+    if isinstance(current_user, RedirectResponse):
+        return current_user
+    return templates.TemplateResponse(
+        "content_guard.html",
+        {
+            "request": request,
+            "page_name": "content-guard",
+            "title": "内容防护",
+            "portal_type": "admin",
+            "current_user": current_user,
+        },
+    )
 
 
 @router.get("/playground", response_class=HTMLResponse)

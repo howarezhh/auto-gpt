@@ -34,7 +34,7 @@ def main() -> None:
         db.add(
             Provider(
                 id=1,
-                name="观测中转站",
+                name="观测提供商",
                 base_url="https://example.com/v1",
                 api_key="upstream-secret",
                 provider_type="openai_compatible",
@@ -61,7 +61,7 @@ def main() -> None:
                 RequestLog(
                     log_type="chat",
                     provider_id=1,
-                    provider_name="观测中转站",
+                    provider_name="观测提供商",
                     requested_model="stage16-model",
                     request_path="/v1/chat/completions",
                     is_stream=True,
@@ -80,7 +80,7 @@ def main() -> None:
                 RequestLog(
                     log_type="responses",
                     provider_id=1,
-                    provider_name="观测中转站",
+                    provider_name="观测提供商",
                     requested_model="stage16-model",
                     request_path="/v1/responses",
                     is_stream=False,

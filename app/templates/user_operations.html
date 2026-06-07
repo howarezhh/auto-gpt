@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="page-heading">
+    <div>
+        <div class="eyebrow">用户中心</div>
+        <h2>我的操作记录</h2>
+    </div>
+</section>
+
+<section class="panel-card section-shell">
+    <div class="section-subhead compact-section-subhead">
+        <div>
+            <div class="panel-kicker">操作审计</div>
+            <h3>记录列表</h3>
+        </div>
+        <div class="data-workspace-actions">
+            <div class="table-muted" id="user-operations-last-refresh" aria-live="polite">最近刷新：-</div>
+            <button class="btn btn-ghost interactive-btn" id="user-operations-refresh-btn" type="button">刷新</button>
+        </div>
+    </div>
+    <div class="data-workspace-card">
+        <div class="filter-grid compact-filter-grid">
+            <label>
+                <span>关键词</span>
+                <input class="field-input" id="user-operations-keyword" type="text" placeholder="动作、对象、摘要或 trace">
+            </label>
+            <label>
+                <span>动作</span>
+                <select class="field-input" id="user-operations-action">
+                    <option value="">全部</option>
+                    <option value="update_profile">资料更新</option>
+                    <option value="update_password">密码修改</option>
+                    <option value="create_api_key">创建 API Key</option>
+                    <option value="update_api_key">更新 API Key</option>
+                    <option value="toggle_api_key">启停 API Key</option>
+                    <option value="delete_api_key">删除 API Key</option>
+                    <option value="rotate_api_key">轮换 API Key</option>
+                    <option value="export_logs">日志导出</option>
+                    <option value="export_billing">账单导出</option>
+                    <option value="run_self_test">接入自检</option>
+                </select>
+            </label>
+            <label>
+                <span>结果</span>
+                <select class="field-input" id="user-operations-result">
+                    <option value="">全部</option>
+                    <option value="success">成功</option>
+                    <option value="failed">失败</option>
+                </select>
+            </label>
+        </div>
+        <div class="table-shell">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>时间</th>
+                        <th>动作</th>
+                        <th>对象</th>
+                        <th>结果</th>
+                        <th>来源 IP</th>
+                        <th>摘要</th>
+                    </tr>
+                </thead>
+                <tbody id="user-operations-table-body">
+                    <tr><td colspan="6"><div class="empty-state">加载中...</div></td></tr>
+                </tbody>
+            </table>
+        </div>
+        <div class="table-toolbar logs-pagination-bar workspace-pagination-bar">
+            <div class="logs-page-meta" id="user-operations-page-meta">第 1 页，共 1 页</div>
+            <div class="logs-page-actions">
+                <button class="btn btn-ghost interactive-btn" id="user-operations-prev-page-btn" type="button">上一页</button>
+                <button class="btn btn-ghost interactive-btn" id="user-operations-next-page-btn" type="button">下一页</button>
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock %}

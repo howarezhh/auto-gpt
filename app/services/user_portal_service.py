@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.models.api_client_billing_record import ApiClientBillingRecord
 from app.models.api_client_key import ApiClientKey
 from app.models.request_log import RequestLog
+from app.models.logging_events import UserOperationAuditLog
 from app.models.user_account import UserAccount
 from app.models.user_account_billing_record import UserAccountBillingRecord
 from app.schemas.conversation import ConversationReplay, ConversationSummaryItem
@@ -319,6 +320,14 @@ class UserPortalService:
                     .limit(20)
                 )
             )
+        recent_operations = list(
+            db.scalars(
+                select(UserOperationAuditLog)
+                .where(UserOperationAuditLog.user_account_id == user.id)
+                .order_by(UserOperationAuditLog.created_at.desc(), UserOperationAuditLog.id.desc())
+                .limit(20)
+            )
+        )
         return {
             "user": user,
             "owned_api_keys": overview["owned_api_keys"],
@@ -327,6 +336,7 @@ class UserPortalService:
             "conversation_count": conversation_count,
             "recent_logs": [RequestLogOut.model_validate(item) for item in LogService.serialize_logs(recent_logs)],
             "recent_billing": [BillingService.serialize_user_billing_record(item) for item in recent_billing],
+            "recent_operations": recent_operations,
         }
 
     @staticmethod
@@ -552,6 +562,9 @@ class UserPortalService:
                     manual_allow_fallback=api_key.manual_allow_fallback,
                     allowed_provider_ids=sorted(provider_ids),
                     route_exhausted_retry_infinite_enabled=api_key.route_exhausted_retry_infinite_enabled,
+                    allow_low_trust_providers=api_key.allow_low_trust_providers,
+                    require_trusted_provider=api_key.trusted_providers_only,
+                    content_guard_required=api_key.content_guard_required,
                 ),
             ):
                 if model.provider.id not in provider_ids:
@@ -572,7 +585,7 @@ class UserPortalService:
         if selected_key is not None:
             serialized_key = ApiKeyAdminService.serialize_api_key(selected_key)
             checks.append({"label": "密钥状态", "value": serialized_key["status"]})
-            checks.append({"label": "授权中转站", "value": len(serialized_key["allowed_provider_ids"])})
+            checks.append({"label": "授权提供商", "value": len(serialized_key["allowed_provider_ids"])})
             checks.append({"label": "模型白名单", "value": len(serialized_key["allowed_model_names"]) if serialized_key["allowed_model_names"] else "全部可路由模型"})
             checks.append({"label": "可回显明文", "value": "是" if serialized_key["has_stored_raw_key"] else "否"})
             if selected_model:
@@ -594,6 +607,9 @@ class UserPortalService:
                     manual_allow_fallback=selected_key.manual_allow_fallback,
                     allowed_provider_ids=[binding.provider_id for binding in selected_key.provider_bindings],
                     route_exhausted_retry_infinite_enabled=selected_key.route_exhausted_retry_infinite_enabled,
+                    allow_low_trust_providers=selected_key.allow_low_trust_providers,
+                    require_trusted_provider=selected_key.trusted_providers_only,
+                    content_guard_required=selected_key.content_guard_required,
                 )
                 candidates = RouterService.order_candidates(
                     db,

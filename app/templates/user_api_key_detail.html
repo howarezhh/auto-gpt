@@ -49,7 +49,7 @@
     <article class="metric-card"><span>共享账户余额</span><strong>{{ '%.6f'|format(api_key.balance_amount) if api_key.balance_amount is not none else '不限' }}</strong></article>
     <article class="metric-card"><span>24h 请求</span><strong>{{ api_key.recent_usage.recent_requests }}</strong></article>
     <article class="metric-card"><span>24h 费用</span><strong>{{ '%.6f'|format(api_key.recent_usage.recent_total_cost or 0) }}</strong></article>
-    <article class="metric-card"><span>授权中转站</span><strong>{{ api_key.allowed_providers|length }}</strong></article>
+    <article class="metric-card"><span>授权提供商</span><strong>{{ api_key.allowed_providers|length }}</strong></article>
 </section>
 
 <section class="dashboard-command-grid anchor-section-offset" id="user-key-console">
@@ -231,16 +231,16 @@ print(resp.output_text)</pre>
             <article class="api-key-chip-card">
                 <strong>路由主策略</strong>
                 <span>健康优先</span>
-                <span>默认中转回退：{{ '开启' if api_key.manual_allow_fallback else '关闭' }}</span>
+                <span>默认提供商回退：{{ '开启' if api_key.manual_allow_fallback else '关闭' }}</span>
                 <span>重试模式：{{ '无限重试' if api_key.route_exhausted_retry_infinite_enabled else '正常重试' }}</span>
             </article>
             <article class="api-key-chip-card">
-                <strong>默认中转站</strong>
+                <strong>默认提供商</strong>
                 <span>{{ api_key.default_provider_name or api_key.default_provider_id or '未指定' }}</span>
                 <span>未指定时按当前路由规则选择候选线路</span>
             </article>
             <article class="api-key-chip-card">
-                <strong>授权中转站</strong>
+                <strong>授权提供商</strong>
                 <span>{{ api_key.allowed_providers|length }} 个</span>
                 <span>{{ api_key.allowed_providers | map(attribute='name') | join('、') if api_key.allowed_providers else '未授权' }}</span>
             </article>

@@ -7,8 +7,6 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 class ModelMappingTarget(BaseModel):
     model_name: str = Field(..., min_length=1)
     enabled: bool = True
-    priority: int = Field(default=100, ge=0)
-    weight: int = Field(default=100, ge=0)
 
     @field_validator("model_name")
     @classmethod
@@ -19,7 +17,6 @@ class ModelMappingTarget(BaseModel):
 class ModelMappingBase(BaseModel):
     source_model_name: str = Field(..., min_length=1)
     enabled: bool = True
-    strategy: str = Field(default="auto", max_length=20)
     targets: list[ModelMappingTarget] = Field(default_factory=list)
     remark: str | None = None
 
@@ -27,14 +24,6 @@ class ModelMappingBase(BaseModel):
     @classmethod
     def normalize_source_model_name(cls, value: str) -> str:
         return value.strip()
-
-    @field_validator("strategy")
-    @classmethod
-    def normalize_strategy(cls, value: str) -> str:
-        normalized = value.strip().lower()
-        if normalized not in {"auto", "priority", "weighted"}:
-            raise ValueError("strategy 必须是 auto、priority 或 weighted")
-        return normalized
 
     @field_validator("remark")
     @classmethod
@@ -62,19 +51,8 @@ class ModelMappingCreate(ModelMappingBase):
 
 class ModelMappingUpdate(BaseModel):
     enabled: bool | None = None
-    strategy: str | None = Field(default=None, max_length=20)
     targets: list[ModelMappingTarget] | None = None
     remark: str | None = None
-
-    @field_validator("strategy")
-    @classmethod
-    def normalize_strategy(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        normalized = value.strip().lower()
-        if normalized not in {"auto", "priority", "weighted"}:
-            raise ValueError("strategy 必须是 auto、priority 或 weighted")
-        return normalized
 
     @field_validator("remark")
     @classmethod
@@ -120,5 +98,4 @@ class ModelMappingSelectionOut(BaseModel):
     mapped: bool = False
     source_model_name: str | None = None
     selected_model_name: str | None = None
-    strategy: str | None = None
     trace: dict[str, Any] | None = None

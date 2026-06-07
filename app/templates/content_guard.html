@@ -1,0 +1,365 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="page-heading content-guard-heading">
+    <div>
+        <div class="eyebrow">内容防护</div>
+        <h2>内容完整性防护</h2>
+    </div>
+    <button class="topbar-btn interactive-btn" id="content-guard-refresh-btn" type="button">
+        <i class="bi bi-arrow-clockwise" aria-hidden="true"></i>
+        <span>刷新</span>
+    </button>
+</section>
+
+<section class="content-guard-metrics" aria-label="内容防护概览">
+    <div class="metric-card">
+        <span>提供商</span>
+        <strong id="content-guard-provider-count">-</strong>
+    </div>
+    <div class="metric-card metric-card-alert">
+        <span>已隔离</span>
+        <strong id="content-guard-blocked-provider-count">-</strong>
+    </div>
+    <div class="metric-card">
+        <span>低信任</span>
+        <strong id="content-guard-low-trust-provider-count">-</strong>
+    </div>
+    <div class="metric-card">
+        <span>待复核</span>
+        <strong id="content-guard-review-provider-count">-</strong>
+    </div>
+    <div class="metric-card">
+        <span>检测 P50</span>
+        <strong id="content-guard-latency-p50">-</strong>
+    </div>
+    <div class="metric-card">
+        <span>检测 P95</span>
+        <strong id="content-guard-latency-p95">-</strong>
+    </div>
+    <div class="metric-card">
+        <span>检测 P99</span>
+        <strong id="content-guard-latency-p99">-</strong>
+    </div>
+</section>
+
+<section class="content-guard-layout">
+    <form class="panel-card content-guard-settings-panel" id="content-guard-settings-form">
+        <div class="section-subhead content-guard-panel-head">
+            <div>
+                <div class="panel-kicker">配置</div>
+                <h3>模块配置</h3>
+            </div>
+            <button class="topbar-btn interactive-btn" id="content-guard-settings-submit-btn" type="submit">
+                <i class="bi bi-check2" aria-hidden="true"></i>
+                <span>保存</span>
+            </button>
+        </div>
+        <div class="settings-switch-grid content-guard-switch-grid">
+            <label class="settings-switch-card" for="content-guard-enabled">
+                <span class="settings-switch-copy">
+                    <span class="settings-switch-title-row">
+                        <strong>启用检测</strong>
+                        <button class="settings-help-btn" type="button" title="同时控制代理检测、探针判定和监控自动隔离。" aria-label="启用检测说明">
+                            <i class="bi bi-question-circle" aria-hidden="true"></i>
+                        </button>
+                    </span>
+                </span>
+                <span class="settings-switch-control">
+                    <input id="content-guard-enabled" type="checkbox">
+                    <span class="settings-switch-slider"></span>
+                </span>
+            </label>
+            <label class="settings-switch-card" for="content-guard-block-on-high-risk">
+                <span class="settings-switch-copy">
+                    <span class="settings-switch-title-row">
+                        <strong>高风险拦截</strong>
+                        <button class="settings-help-btn" type="button" title="命中高风险时返回 content_integrity_violation。" aria-label="高风险拦截说明">
+                            <i class="bi bi-question-circle" aria-hidden="true"></i>
+                        </button>
+                    </span>
+                </span>
+                <span class="settings-switch-control">
+                    <input id="content-guard-block-on-high-risk" type="checkbox">
+                    <span class="settings-switch-slider"></span>
+                </span>
+            </label>
+            <label class="settings-switch-card" for="content-guard-low-trust-requires-buffer">
+                <span class="settings-switch-copy">
+                    <span class="settings-switch-title-row">
+                        <strong>低信任缓冲</strong>
+                        <button class="settings-help-btn" type="button" title="低信任流式响应先缓冲检查，再向调用方输出。" aria-label="低信任缓冲说明">
+                            <i class="bi bi-question-circle" aria-hidden="true"></i>
+                        </button>
+                    </span>
+                </span>
+                <span class="settings-switch-control">
+                    <input id="content-guard-low-trust-requires-buffer" type="checkbox">
+                    <span class="settings-switch-slider"></span>
+                </span>
+            </label>
+            <label class="settings-switch-card" for="content-guard-async-review-enabled">
+                <span class="settings-switch-copy">
+                    <span class="settings-switch-title-row">
+                        <strong>异步复核</strong>
+                        <button class="settings-help-btn" type="button" title="中风险先放行并记录，高置信高风险同步处理。" aria-label="异步复核说明">
+                            <i class="bi bi-question-circle" aria-hidden="true"></i>
+                        </button>
+                    </span>
+                </span>
+                <span class="settings-switch-control">
+                    <input id="content-guard-async-review-enabled" type="checkbox">
+                    <span class="settings-switch-slider"></span>
+                </span>
+            </label>
+            <label class="settings-switch-card" for="content-guard-url-check-enabled">
+                <span class="settings-switch-copy">
+                    <span class="settings-switch-title-row">
+                        <strong>URL 检测</strong>
+                        <button class="settings-help-btn" type="button" title="关闭后不再因为响应中出现未授权外链或短链而命中异常外链规则；其它文本、结构和工具参数检测仍会继续执行。" aria-label="URL 检测说明">
+                            <i class="bi bi-question-circle" aria-hidden="true"></i>
+                        </button>
+                    </span>
+                </span>
+                <span class="settings-switch-control">
+                    <input id="content-guard-url-check-enabled" type="checkbox">
+                    <span class="settings-switch-slider"></span>
+                </span>
+            </label>
+        </div>
+        <div class="content-guard-settings-grid">
+            <label>
+                <span class="content-guard-label">
+                    <span>高风险策略</span>
+                    <button class="settings-help-btn" type="button" title="切换渠道仅在响应尚未输出前生效；流式已输出后会发送标准错误事件收尾。" aria-label="高风险策略说明">
+                        <i class="bi bi-question-circle" aria-hidden="true"></i>
+                    </button>
+                </span>
+                <select class="field-input" id="content-guard-high-risk-strategy">
+                    <option value="switch_provider">切换渠道</option>
+                    <option value="block">阻断</option>
+                    <option value="safe_error">替换安全错误</option>
+                    <option value="record_only">仅记录</option>
+                </select>
+            </label>
+            <label>
+                <span class="content-guard-label">
+                    <span>最大延迟（ms）</span>
+                    <button class="settings-help-btn" type="button" title="300ms 缓冲模式下，到达字节阈值或到达该时间就立即检测。" aria-label="最大延迟说明">
+                        <i class="bi bi-question-circle" aria-hidden="true"></i>
+                    </button>
+                </span>
+                <input class="field-input" id="content-guard-max-detection-delay-ms" type="number" min="0" max="3000">
+            </label>
+            <label>
+                <span class="content-guard-label">
+                    <span>流式模式</span>
+                    <button class="settings-help-btn" type="button" title="低信任渠道建议使用 300ms 缓冲；完整缓冲延迟最高。" aria-label="流式模式说明">
+                        <i class="bi bi-question-circle" aria-hidden="true"></i>
+                    </button>
+                </span>
+                <select class="field-input" id="content-guard-stream-mode">
+                    <option value="pass_through_scan">透传扫描</option>
+                    <option value="buffer_300ms">300ms 缓冲</option>
+                    <option value="full_buffer">完整缓冲</option>
+                </select>
+            </label>
+            <label>
+                <span class="content-guard-label">
+                    <span>探针间隔（s）</span>
+                    <button class="settings-help-btn" type="button" title="后台内容探针最小间隔，下限 300 s。" aria-label="探针间隔说明">
+                        <i class="bi bi-question-circle" aria-hidden="true"></i>
+                    </button>
+                </span>
+                <input class="field-input" id="content-guard-probe-interval-sec" type="number" min="300">
+            </label>
+            <label>
+                <span class="content-guard-label">
+                    <span>扫描字节（B）</span>
+                    <button class="settings-help-btn" type="button" title="响应正文内容检测的最大扫描字节数。" aria-label="扫描字节说明">
+                        <i class="bi bi-question-circle" aria-hidden="true"></i>
+                    </button>
+                </span>
+                <input class="field-input" id="content-guard-max-scan-bytes" type="number" min="1024">
+            </label>
+            <label>
+                <span class="content-guard-label">
+                    <span>流式缓冲（B）</span>
+                    <button class="settings-help-btn" type="button" title="流式响应先行审核时最多缓冲的字节数。" aria-label="流式缓冲说明">
+                        <i class="bi bi-question-circle" aria-hidden="true"></i>
+                    </button>
+                </span>
+                <input class="field-input" id="content-guard-stream-buffer-max-bytes" type="number" min="1024">
+            </label>
+            <label>
+                <span class="content-guard-label">
+                    <span>高风险置信度（%）</span>
+                    <button class="settings-help-btn" type="button" title="达到该置信度的高风险命中才同步阻断或切换渠道。" aria-label="高风险置信度说明">
+                        <i class="bi bi-question-circle" aria-hidden="true"></i>
+                    </button>
+                </span>
+                <input class="field-input" id="content-guard-high-risk-confidence-threshold" type="number" min="0" max="100">
+            </label>
+            <label class="content-guard-allowlist-field">
+                <span class="content-guard-label">
+                    <span>URL 白名单</span>
+                    <button class="settings-help-btn" type="button" title="一行一个域名或 JSON 数组；用户请求中出现过的域名会自动加入本次白名单。" aria-label="URL 白名单说明">
+                        <i class="bi bi-question-circle" aria-hidden="true"></i>
+                    </button>
+                </span>
+                <textarea class="field-input content-guard-allowlist-input" id="content-guard-url-allowlist-json" rows="3" placeholder="example.com&#10;docs.example.com"></textarea>
+            </label>
+        </div>
+    </form>
+
+    <form class="panel-card content-guard-probe-panel" id="content-guard-probe-form">
+        <div class="section-subhead content-guard-panel-head">
+            <div>
+                <div class="panel-kicker">检测</div>
+                <h3>渠道检测</h3>
+            </div>
+            <button class="topbar-btn interactive-btn" id="content-guard-probe-submit-btn" type="submit">
+                <i class="bi bi-play-fill" aria-hidden="true"></i>
+                <span>检测</span>
+            </button>
+        </div>
+        <div class="content-guard-segment" role="group" aria-label="检测目标">
+            <label>
+                <input type="radio" name="content_guard_target_type" value="internal" checked>
+                <span>本项目</span>
+            </label>
+            <label>
+                <input type="radio" name="content_guard_target_type" value="external">
+                <span>外部渠道</span>
+            </label>
+        </div>
+        <div class="content-guard-target-group" id="content-guard-internal-fields">
+            <label>
+                <span>提供商</span>
+                <select class="field-input" id="content-guard-provider-id"></select>
+            </label>
+            <label>
+                <span>模型</span>
+                <select class="field-input" id="content-guard-provider-model-id"></select>
+            </label>
+        </div>
+        <div class="content-guard-target-group hidden" id="content-guard-external-fields">
+            <label>
+                <span>接口地址</span>
+                <input class="field-input" id="content-guard-external-base-url" type="url" placeholder="https://api.example.com/v1">
+            </label>
+            <label>
+                <span>密钥</span>
+                <input class="field-input" id="content-guard-external-api-key" type="password" autocomplete="off">
+            </label>
+            <label>
+                <span>模型名</span>
+                <input class="field-input" id="content-guard-external-model-name" type="text">
+            </label>
+            <label>
+                <span>端点</span>
+                <select class="field-input" id="content-guard-external-endpoint-path">
+                    <option value="/responses">/responses</option>
+                    <option value="/chat/completions">/chat/completions</option>
+                </select>
+            </label>
+        </div>
+        <div class="content-guard-probe-options" id="content-guard-probe-options" aria-label="探针类型"></div>
+    </form>
+</section>
+
+<section class="panel-card content-guard-rules-panel" aria-labelledby="content-guard-rules-title">
+    <div class="section-subhead content-guard-panel-head">
+        <div>
+            <div class="panel-kicker">规则</div>
+            <h3 id="content-guard-rules-title">规则管理</h3>
+        </div>
+        <div class="content-guard-actions">
+            <button class="topbar-btn interactive-btn" id="content-guard-add-rule-btn" type="button">
+                <i class="bi bi-plus-lg" aria-hidden="true"></i>
+                <span>新增</span>
+            </button>
+            <button class="topbar-btn interactive-btn" id="content-guard-reset-rules-btn" type="button">
+                <i class="bi bi-arrow-counterclockwise" aria-hidden="true"></i>
+                <span>默认</span>
+            </button>
+            <button class="topbar-btn interactive-btn" id="content-guard-save-rules-btn" type="button">
+                <i class="bi bi-check2" aria-hidden="true"></i>
+                <span>保存</span>
+            </button>
+        </div>
+    </div>
+    <div class="table-shell content-guard-rules-table-shell">
+        <table class="data-table content-guard-rules-table">
+            <thead>
+                <tr>
+                    <th>启用</th>
+                    <th>规则</th>
+                    <th>分类</th>
+                    <th>匹配</th>
+                    <th>风险</th>
+                    <th>动作</th>
+                    <th>可信度</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody id="content-guard-rules-body">
+                <tr>
+                    <td colspan="8" class="table-muted">加载中</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+    <form class="content-guard-inspect-form" id="content-guard-inspect-form">
+        <label>
+            <span class="content-guard-label">
+                <span>文本检测</span>
+                <button class="settings-help-btn" type="button" title="使用当前规则检测一段本地文本，不调用外部渠道。" aria-label="文本检测说明">
+                    <i class="bi bi-question-circle" aria-hidden="true"></i>
+                </button>
+            </span>
+            <textarea class="field-input content-guard-inspect-text" id="content-guard-inspect-text" rows="3"></textarea>
+        </label>
+        <button class="topbar-btn interactive-btn" id="content-guard-inspect-submit-btn" type="submit">
+            <i class="bi bi-search" aria-hidden="true"></i>
+            <span>检测</span>
+        </button>
+        <div class="content-guard-inspect-result" id="content-guard-inspect-result">
+            <span class="status-badge status-unknown">未检测</span>
+        </div>
+    </form>
+</section>
+
+<section class="panel-card content-guard-result-panel" aria-labelledby="content-guard-result-title">
+    <div class="section-subhead content-guard-panel-head">
+        <div>
+            <div class="panel-kicker">结果</div>
+            <h3 id="content-guard-result-title">检测结果</h3>
+        </div>
+        <span class="status-badge status-unknown" id="content-guard-result-status">未检测</span>
+    </div>
+    <div class="content-guard-result-grid">
+        <div class="content-guard-result-summary" id="content-guard-result-summary">
+            <strong>-</strong>
+            <span>通过 / 总数</span>
+        </div>
+        <div class="table-shell content-guard-result-table">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>探针</th>
+                        <th>结果</th>
+                        <th>风险</th>
+                        <th>耗时</th>
+                        <th>原因</th>
+                    </tr>
+                </thead>
+                <tbody id="content-guard-result-body">
+                    <tr>
+                        <td colspan="5" class="table-muted">等待检测</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</section>
+{% endblock %}

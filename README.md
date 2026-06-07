@@ -1,6 +1,6 @@
 # aotu-gpt
 
-基于 FastAPI 的个人多中转站统一管理与代理系统。
+基于 FastAPI 的个人多提供商统一管理与代理系统。
 
 ## 虚拟环境与国内镜像
 
@@ -26,7 +26,7 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 - `EXTERNAL_BASE_URL`：外部接入文档使用的统一地址，例如 `https://api.example.com`；若为空，文档页会回退到当前访问地址。
 - `APP_ENV`：当值为 `prod` 或 `production` 时，`SESSION_SECRET_KEY` 与 `API_KEY_ENCRYPTION_SECRET` 必须替换为至少 32 位的非默认高强度随机值，否则应用会拒绝启动。
 - `ENABLE_STARTUP_DB_INIT`：仅控制非生产环境 Web worker 是否自动初始化数据库；生产环境 Web worker 永不执行建表或迁移，部署时应先独立执行 `python scripts/run_startup_db_init.py`，再启动 Gunicorn 服务。
-- 当前对外提供的是 OpenAI 兼容入口，而不是 OpenAI 全量官方产品面；正式开放的路径为 `/v1/chat/completions`、`/v1/responses`、`/v1/responses/{response_id}`、`/v1/responses/{response_id}/cancel`、`/v1/models`。
+- 当前对外提供的是 OpenAI 兼容入口，而不是 OpenAI 全量官方产品面；正式开放的路径为 `/v1/chat/completions`、`/v1/completions`、`/v1/responses`、`/v1/responses/{response_id}`、`/v1/responses/{response_id}/cancel`、`/v1/models`。
 - 对外代理支持把 `model_reasoning_effort` 作为统一别名接入：`/v1/chat/completions` 会归一化为 `reasoning_effort`，`/v1/responses` 会归一化为 `reasoning.effort`，并在请求日志的 `model_reasoning_effort` 字段中留痕。
 - `/v1/responses` 请求会优先按原始 Responses 协议透传到命中的上游；若上游明确返回端点或模型兼容性错误，平台仅对简单文本、普通图片和基础流式请求尝试一次安全互转 fallback。只有进入 fallback 的请求才会收窄到适配子集；包含 `tools`、状态上下文、`reasoning`、结构化输出选项或复杂多模态内容的请求不会做有损互转。
 
@@ -77,7 +77,7 @@ sudo ./start_aliyun.sh
 
 生产环境由 `start_aliyun.sh` 写入 `systemd` 并使用 `Gunicorn + UvicornWorker` 多 worker 启动，默认 `WEB_CONCURRENCY=4`、`GUNICORN_TIMEOUT=120`、`GUNICORN_KEEPALIVE=75`、`GUNICORN_GRACEFUL_TIMEOUT=30`。Nginx 继续反向代理到 `127.0.0.1:8000`，并保持 `proxy_buffering off`、`proxy_request_buffering off`、`proxy_read_timeout 600s`、`proxy_send_timeout 600s`，避免 SSE 流式响应被缓冲。
 
-上游连接池按 1000 活跃请求目标预留初始值：`REQUEST_TIMEOUT_MS=60000`、`UPSTREAM_MAX_CONNECTIONS=1200`、`UPSTREAM_MAX_KEEPALIVE_CONNECTIONS=300`、`UPSTREAM_POOL_TIMEOUT_S=10`。后台“中转站”配置支持按 provider 设置最大活跃请求、最大流式请求、QPS、失败率上限和首 Token 超时；provider 活跃容量与 QPS 计数已优先使用 Redis 共享状态，避免 Gunicorn 多 worker 下只按进程内存计数。
+上游连接池按 1000 活跃请求目标预留初始值：`REQUEST_TIMEOUT_MS=60000`、`UPSTREAM_MAX_CONNECTIONS=1200`、`UPSTREAM_MAX_KEEPALIVE_CONNECTIONS=300`、`UPSTREAM_POOL_TIMEOUT_S=10`。后台“提供商”配置支持按 provider 设置最大活跃请求、最大流式请求、QPS、失败率上限和首 Token 超时；provider 活跃容量与 QPS 计数已优先使用 Redis 共享状态，避免 Gunicorn 多 worker 下只按进程内存计数。
 
 Redis 用于生产实时并发计数、租约释放和短窗口 QPS/RPM 限流。默认 `REDIS_URL=redis://127.0.0.1:6379/0`，并发初始值为 `GLOBAL_MAX_ACTIVE_REQUESTS=1000`、`GLOBAL_MAX_ACTIVE_STREAMS=1000`、`API_KEY_MAX_ACTIVE_REQUESTS=1000`、`API_KEY_MAX_ACTIVE_STREAMS=1000`、`ACCOUNT_MAX_ACTIVE_REQUESTS=1000`、`ACCOUNT_MAX_ACTIVE_STREAMS=1000`、`PROVIDER_MAX_ACTIVE_REQUESTS=1000`、`PROVIDER_MAX_ACTIVE_STREAMS=1000`。这些值可通过 `.env` 初始化，并可在后台“系统设置”中调整；已有数据库中的存量系统设置和 provider 配置不会被启动脚本强制覆盖，需要在后台按实际资源容量调整。
 

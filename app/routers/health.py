@@ -23,7 +23,7 @@ def liveness() -> dict:
 
 @router.get("/ready")
 def readiness(response: Response, db: Session = Depends(get_db)) -> dict:
-    metrics = SystemMetricsService.collect(db, window_minutes=5, refresh_alerts=True)
+    metrics = SystemMetricsService.collect(db, window_minutes=5, refresh_alerts=False)
     if not metrics["database"].get("ok") or not metrics["redis"].get("ok"):
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
     return {

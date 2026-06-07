@@ -23,6 +23,7 @@ from sqlalchemy import or_, select, update
 
 from app.config import get_settings
 from app.database import SessionLocal
+from app.logging.adapters.billing_adapter import BillingLogRecorder
 from app.models.api_client_key import ApiClientKey
 from app.models.request_log import RequestLog
 from app.scheduler import scheduler
@@ -141,6 +142,12 @@ class TokenUsageService:
             return None
         if request_path == "/v1/embeddings":
             return TokenUsageService._fast_count_value_tokens(payload.get("input"))
+        if request_path in {"/v1/completions", "/completions"}:
+            total = TokenUsageService._fast_count_value_tokens(payload.get("prompt"))
+            for key in ("suffix", "stop", "logit_bias"):
+                if key in payload:
+                    total += TokenUsageService._fast_count_value_tokens(payload[key])
+            return total
         if request_path in {"/v1/chat/completions", "/chat/completions"}:
             total = TokenUsageService._fast_count_chat_messages(payload.get("messages"))
             for key in ("tools", "functions", "function_call", "tool_choice", "response_format"):
@@ -494,6 +501,25 @@ class TokenUsageService:
                     )
                 )
             if completed_ids:
+                for log_id in completed_ids:
+                    log = log_by_id.get(log_id)
+                    if log is None:
+                        continue
+                    BillingLogRecorder.record_token_finalize(
+                        db,
+                        request_log_id=log.id,
+                        queue_source="request_log_queue",
+                        attempt_count=int(log.token_finalize_attempt_count or 0),
+                        usage_after={
+                            "prompt_tokens": log.prompt_tokens,
+                            "completion_tokens": log.completion_tokens,
+                            "total_tokens": log.total_tokens,
+                        },
+                        token_source="existing_request_log",
+                        enable_usage_fill=False,
+                        result="filled",
+                        auto_commit=False,
+                    )
                 db.commit()
             for log in auth_cache_log_by_api_key.values():
                 TokenUsageService._invalidate_api_client_auth_cache_for_log(db, log)
@@ -565,6 +591,15 @@ class TokenUsageService:
                 return
             log.token_finalize_error = str(error)[:1000]
             log.billing_error = log.billing_error or str(error)[:1000]
+            BillingLogRecorder.record_token_finalize(
+                db,
+                request_log_id=log.id,
+                queue_source="retry",
+                attempt_count=int(log.token_finalize_attempt_count or 0),
+                result="failed",
+                error=log.token_finalize_error,
+                auto_commit=False,
+            )
             db.commit()
         finally:
             db.close()
@@ -673,6 +708,13 @@ class TokenUsageService:
         original_total_tokens = log.total_tokens
         original_cache_read_tokens = log.cache_read_tokens
         original_cache_write_tokens = log.cache_write_tokens
+        usage_before = {
+            "prompt_tokens": original_prompt_tokens,
+            "completion_tokens": original_completion_tokens,
+            "total_tokens": original_total_tokens,
+            "cache_read_tokens": original_cache_read_tokens,
+            "cache_write_tokens": original_cache_write_tokens,
+        }
         usage_already_accounted = log.billing_finalized_at is not None and log.billing_status != "pending_tokens"
         accounted_prompt_tokens = original_prompt_tokens if usage_already_accounted else None
         accounted_completion_tokens = original_completion_tokens if usage_already_accounted else None
@@ -761,6 +803,25 @@ class TokenUsageService:
             force_auth_cache_invalidation = (
                 billing_delta is not None
                 and BillingService.to_decimal(billing_delta) != Decimal("0")
+            )
+            BillingLogRecorder.record_token_finalize(
+                db,
+                request_log_id=log.id,
+                queue_source="request_log_queue" if log.request_body_json else "backfill_job",
+                attempt_count=int(log.token_finalize_attempt_count or 0),
+                usage_before=usage_before,
+                usage_after={
+                    "prompt_tokens": log.prompt_tokens,
+                    "completion_tokens": log.completion_tokens,
+                    "total_tokens": log.total_tokens,
+                    "cache_read_tokens": log.cache_read_tokens,
+                    "cache_write_tokens": log.cache_write_tokens,
+                },
+                token_source="upstream_usage" if usage_from_upstream["total_tokens"] is not None else ("estimated" if enable_usage_fill else "missing"),
+                enable_usage_fill=enable_usage_fill,
+                result="filled" if (changed or billing_delta is not None) else "skipped",
+                error=log.token_finalize_error,
+                auto_commit=False,
             )
             db.commit()
             TokenUsageService._invalidate_api_client_auth_cache_for_log(
@@ -1024,6 +1085,8 @@ class TokenUsageService:
         # Embeddings has been retired externally. Keep legacy accounting only for historical logs.
         if request_path == "/v1/embeddings":
             return TokenUsageService._count_embedding_input_tokens(payload.get("input"), model_name)
+        if request_path in {"/v1/completions", "/completions"}:
+            return TokenUsageService._count_completions_payload_tokens(payload, model_name)
         if request_path in {"/v1/chat/completions", "/chat/completions"}:
             return TokenUsageService._count_chat_payload_tokens(payload, model_name)
         if request_path in {"/v1/responses", "/responses"}:
@@ -1050,6 +1113,14 @@ class TokenUsageService:
         if "input" in payload:
             total += TokenUsageService._count_response_input_tokens(payload["input"], model_name)
         for key in ("tools", "tool_choice", "response_format"):
+            if key in payload:
+                total += TokenUsageService._count_json_tokens(payload[key], model_name)
+        return total
+
+    @staticmethod
+    def _count_completions_payload_tokens(payload: dict[str, Any], model_name: str | None) -> int:
+        total = TokenUsageService._count_json_tokens(payload.get("prompt", ""), model_name)
+        for key in ("suffix", "stop", "logit_bias"):
             if key in payload:
                 total += TokenUsageService._count_json_tokens(payload[key], model_name)
         return total

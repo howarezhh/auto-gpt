@@ -302,6 +302,43 @@
                 </table>
             </div>
         </div>
+        <div class="panel-card section-shell">
+            <div class="section-subhead">
+                <div>
+                    <div class="panel-kicker">用户操作</div>
+                    <h3>最近操作记录</h3>
+                </div>
+            </div>
+            <div class="table-shell">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>时间</th>
+                            <th>动作</th>
+                            <th>对象</th>
+                            <th>结果</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% if recent_operations %}
+                            {% for item in recent_operations %}
+                            <tr>
+                                <td>{{ item.created_at }}</td>
+                                <td>{{ item.action }}</td>
+                                <td>
+                                    <div>{{ item.entity_type }}</div>
+                                    <div class="table-muted">{{ item.entity_name or item.entity_id or '-' }}</div>
+                                </td>
+                                <td>{{ '成功' if item.result == 'success' else '失败' if item.result == 'failed' else item.result }}</td>
+                            </tr>
+                            {% endfor %}
+                        {% else %}
+                            <tr><td colspan="4"><div class="empty-state">暂无用户操作记录。</div></td></tr>
+                        {% endif %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
     </div>
 </section>
 {% endblock %}

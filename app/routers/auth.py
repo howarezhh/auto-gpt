@@ -6,6 +6,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.services.admin_audit_service import AdminAuditService
 from app.services.setting_service import SettingService
 from app.services.user_auth_service import USER_ROLE_USER, UserAuthService
 
@@ -17,6 +18,35 @@ templates = Jinja2Templates(directory="app/templates")
 def _current_user(request: Request, db: Session):
     """读取当前请求对应的登录用户。"""
     return UserAuthService.get_current_user(request, db)
+
+
+def _record_auth_audit(
+    db: Session,
+    *,
+    request: Request,
+    action: str,
+    summary: str,
+    detail: dict | None = None,
+    actor_user_id: int | None = None,
+    actor_username: str | None = None,
+    target_user_id: int | None = None,
+    risk_level: str = "medium",
+) -> None:
+    AdminAuditService.create_log(
+        db,
+        actor_user_id=actor_user_id,
+        actor_username=actor_username,
+        action=action,
+        entity_type="auth",
+        entity_id=target_user_id or actor_user_id,
+        entity_name=actor_username,
+        target_user_id=target_user_id,
+        summary=summary,
+        detail=detail,
+        request_trace_id=getattr(request.state, "trace_id", None),
+        source_ip=request.client.host if request.client else None,
+        risk_level=risk_level,
+    )
 
 
 @router.get("/setup-admin", response_class=HTMLResponse)
@@ -38,6 +68,14 @@ def setup_admin_page(request: Request, db: Session = Depends(get_db)) -> HTMLRes
 @router.post("/setup-admin", response_class=HTMLResponse)
 def setup_admin_submit(request: Request, db: Session = Depends(get_db)):
     """阻止通过网页直接创建管理员，统一要求走服务器脚本。"""
+    _record_auth_audit(
+        db,
+        request=request,
+        action="setup_admin_refused",
+        summary="拒绝网页初始化管理员",
+        detail={"reason": "管理员账号禁止通过网页初始化"},
+        risk_level="high",
+    )
     return templates.TemplateResponse(
         "setup_admin.html",
         {
@@ -84,6 +122,14 @@ def login_submit(
         return RedirectResponse("/setup-admin", status_code=303)
     user = UserAuthService.authenticate(db, identifier, password)
     if user is None:
+        _record_auth_audit(
+            db,
+            request=request,
+            action="login_failed",
+            summary=f"登录失败：{identifier}",
+            detail={"identifier": identifier},
+            risk_level="medium",
+        )
         return templates.TemplateResponse(
             "login.html",
             {
@@ -96,6 +142,17 @@ def login_submit(
             status_code=400,
         )
     UserAuthService.login_user(request, user)
+    _record_auth_audit(
+        db,
+        request=request,
+        action="login_success",
+        summary=f"登录成功：{user.username}",
+        detail={"role": user.role},
+        actor_user_id=user.id,
+        actor_username=user.username,
+        target_user_id=user.id,
+        risk_level="low",
+    )
     return RedirectResponse(UserAuthService.resolve_post_login_path(user.role, next_path), status_code=303)
 
 
@@ -186,11 +243,34 @@ def register_submit(
     db.commit()
     db.refresh(user)
     UserAuthService.login_user(request, user)
+    _record_auth_audit(
+        db,
+        request=request,
+        action="register_success",
+        summary=f"用户公开注册成功：{user.username}",
+        detail={"email": user.email, "role": user.role},
+        actor_user_id=user.id,
+        actor_username=user.username,
+        target_user_id=user.id,
+        risk_level="medium",
+    )
     return RedirectResponse(UserAuthService.resolve_post_login_path(user.role, next_path), status_code=303)
 
 
 @router.get("/logout")
-def logout(request: Request) -> RedirectResponse:
+def logout(request: Request, db: Session = Depends(get_db)) -> RedirectResponse:
     """退出当前登录会话。"""
+    user = _current_user(request, db)
+    if user is not None:
+        _record_auth_audit(
+            db,
+            request=request,
+            action="logout",
+            summary=f"退出登录：{user.username}",
+            actor_user_id=user.id,
+            actor_username=user.username,
+            target_user_id=user.id,
+            risk_level="low",
+        )
     UserAuthService.logout_user(request)
     return RedirectResponse("/login", status_code=303)

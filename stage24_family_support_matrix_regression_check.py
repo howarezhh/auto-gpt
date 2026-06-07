@@ -25,7 +25,7 @@ def _assert_native_responses_support() -> None:
 
 
 def _assert_unknown_models_default_to_both_protocols() -> None:
-    unknown_cases = ("新中转未探测模型", "vendor-new-model-2026")
+    unknown_cases = ("新提供商未探测模型", "vendor-new-model-2026")
     for model_name in unknown_cases:
         inferred = ProviderService._infer_model_capabilities(model_name)
         _assert(

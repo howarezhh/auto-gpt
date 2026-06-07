@@ -19,11 +19,13 @@ from app.routers.auth import router as auth_router
 from app.routers.api_keys import router as api_keys_router
 from app.routers.api_key_policy_templates import router as api_key_policy_templates_router
 from app.routers.benchmark import router as benchmark_router
+from app.routers.content_guard import router as content_guard_router
 from app.routers.playground_api import router as playground_api_router
 from app.routers.dashboard import router as dashboard_router
 from app.routers.conversations import router as conversations_router
 from app.routers.health import router as health_router
 from app.routers.logs import router as logs_router
+from app.routers.logging_api import router as logging_api_router
 from app.routers.metrics import router as metrics_router
 from app.routers.models import router as models_router
 from app.routers.pages import router as pages_router
@@ -38,6 +40,8 @@ from app.services.api_key_auth_cache import ApiKeyAuthCache
 from app.services.api_key_admin_service import ApiKeyAdminService
 from app.services.api_key_service import ApiClientAuthError
 from app.services.log_service import LogService
+from app.logging.adapters.exception_adapter import ExceptionLogRecorder
+from app.logging.queue import LoggingQueue
 from app.services.error_catalog_service import ErrorCatalogService
 from app.services.model_catalog_service import ModelCatalogService
 from app.services.model_mapping_service import ModelMappingService
@@ -79,6 +83,7 @@ def init_database(*, allow_production_ddl: bool = False) -> None:
         _migrate_provider_capacity_columns(db)
         _migrate_provider_metadata_columns(db)
         _migrate_app_setting_concurrency_columns(db)
+        _migrate_admin_audit_log_columns(db)
         api_key_columns_changed = _migrate_api_client_key_columns(db)
         _migrate_cache_price_columns(db)
         _migrate_model_mapping_table(db)
@@ -93,6 +98,7 @@ def init_database(*, allow_production_ddl: bool = False) -> None:
             db.add(setting)
             db.commit()
             db.refresh(setting)
+        _backfill_provider_max_retries(db)
         if api_key_columns_changed:
             ApiKeyAdminService.backfill_all_api_keys_to_all_providers(db)
         else:
@@ -138,6 +144,23 @@ def _migrate_provider_capacity_columns(db) -> None:
         db.commit()
 
 
+def _backfill_provider_max_retries(db) -> None:
+    """统一提供商最大重试次数默认值，并保持不超过全局最大重试次数。"""
+    existing_columns = _get_table_columns(db, "providers")
+    if "max_retries" not in existing_columns:
+        return
+    global_max_retries = int(getattr(db.get(AppSetting, 1), "global_max_retries", 2) or 2)
+    target = max(0, min(2, global_max_retries))
+    db.execute(
+        text(
+            "UPDATE providers SET max_retries = :target "
+            "WHERE max_retries IS NULL OR max_retries != :target OR max_retries > :global_max_retries"
+        ),
+        {"target": target, "global_max_retries": global_max_retries},
+    )
+    db.commit()
+
+
 def _migrate_provider_metadata_columns(db) -> None:
     """为 providers 表补充路由、协议与运维治理字段。"""
     existing_columns = _get_table_columns(db, "providers")
@@ -159,6 +182,14 @@ def _migrate_provider_metadata_columns(db) -> None:
         "recovery_probe_interval_sec_override": "ALTER TABLE providers ADD COLUMN recovery_probe_interval_sec_override INTEGER",
         "credential_rotated_at": f"ALTER TABLE providers ADD COLUMN credential_rotated_at {datetime_type}",
         "credential_hint": "ALTER TABLE providers ADD COLUMN credential_hint TEXT",
+        "trust_level": "ALTER TABLE providers ADD COLUMN trust_level TEXT NOT NULL DEFAULT 'standard'",
+        "content_integrity_status": "ALTER TABLE providers ADD COLUMN content_integrity_status TEXT NOT NULL DEFAULT 'unknown'",
+        "content_integrity_score": "ALTER TABLE providers ADD COLUMN content_integrity_score INTEGER NOT NULL DEFAULT 80",
+        "content_violation_count": "ALTER TABLE providers ADD COLUMN content_violation_count INTEGER NOT NULL DEFAULT 0",
+        "last_content_violation_at": f"ALTER TABLE providers ADD COLUMN last_content_violation_at {datetime_type}",
+        "content_guard_enabled": f"ALTER TABLE providers ADD COLUMN content_guard_enabled BOOLEAN NOT NULL DEFAULT {true_default}",
+        "low_trust_route_enabled": f"ALTER TABLE providers ADD COLUMN low_trust_route_enabled BOOLEAN NOT NULL DEFAULT {false_default}",
+        "buffer_stream_for_guard": f"ALTER TABLE providers ADD COLUMN buffer_stream_for_guard BOOLEAN NOT NULL DEFAULT {true_default}",
     }
     changed = False
     for column, ddl in additions.items():
@@ -197,6 +228,20 @@ def _migrate_app_setting_concurrency_columns(db) -> None:
         "max_non_stream_response_body_bytes": "ALTER TABLE app_settings ADD COLUMN max_non_stream_response_body_bytes INTEGER DEFAULT 20971520",
         "stream_token_capture_max_bytes": "ALTER TABLE app_settings ADD COLUMN stream_token_capture_max_bytes INTEGER DEFAULT 1048576",
         "max_logged_metadata_bytes": "ALTER TABLE app_settings ADD COLUMN max_logged_metadata_bytes INTEGER DEFAULT 1024",
+        "content_guard_enabled": f"ALTER TABLE app_settings ADD COLUMN content_guard_enabled BOOLEAN DEFAULT {true_default}",
+        "content_guard_block_on_high_risk": f"ALTER TABLE app_settings ADD COLUMN content_guard_block_on_high_risk BOOLEAN DEFAULT {true_default}",
+        "content_guard_probe_interval_sec": "ALTER TABLE app_settings ADD COLUMN content_guard_probe_interval_sec INTEGER DEFAULT 3600",
+        "content_guard_max_scan_bytes": "ALTER TABLE app_settings ADD COLUMN content_guard_max_scan_bytes INTEGER DEFAULT 16384",
+        "content_guard_stream_buffer_max_bytes": "ALTER TABLE app_settings ADD COLUMN content_guard_stream_buffer_max_bytes INTEGER DEFAULT 16384",
+        "content_guard_low_trust_requires_buffer": f"ALTER TABLE app_settings ADD COLUMN content_guard_low_trust_requires_buffer BOOLEAN DEFAULT {true_default}",
+        "content_guard_rules_json": "ALTER TABLE app_settings ADD COLUMN content_guard_rules_json TEXT DEFAULT ''",
+        "content_guard_high_risk_strategy": "ALTER TABLE app_settings ADD COLUMN content_guard_high_risk_strategy TEXT DEFAULT 'switch_provider'",
+        "content_guard_max_detection_delay_ms": "ALTER TABLE app_settings ADD COLUMN content_guard_max_detection_delay_ms INTEGER DEFAULT 300",
+        "content_guard_stream_mode": "ALTER TABLE app_settings ADD COLUMN content_guard_stream_mode TEXT DEFAULT 'buffer_300ms'",
+        "content_guard_url_check_enabled": f"ALTER TABLE app_settings ADD COLUMN content_guard_url_check_enabled BOOLEAN DEFAULT {true_default}",
+        "content_guard_url_allowlist_json": "ALTER TABLE app_settings ADD COLUMN content_guard_url_allowlist_json TEXT DEFAULT ''",
+        "content_guard_async_review_enabled": f"ALTER TABLE app_settings ADD COLUMN content_guard_async_review_enabled BOOLEAN DEFAULT {true_default}",
+        "content_guard_high_risk_confidence_threshold": "ALTER TABLE app_settings ADD COLUMN content_guard_high_risk_confidence_threshold INTEGER DEFAULT 85",
         "global_max_active_requests": f"ALTER TABLE app_settings ADD COLUMN global_max_active_requests INTEGER DEFAULT {runtime_settings.global_max_active_requests}",
         "global_max_active_streams": f"ALTER TABLE app_settings ADD COLUMN global_max_active_streams INTEGER DEFAULT {runtime_settings.global_max_active_streams}",
         "api_key_max_active_requests": f"ALTER TABLE app_settings ADD COLUMN api_key_max_active_requests INTEGER DEFAULT {runtime_settings.api_key_max_active_requests}",
@@ -223,6 +268,15 @@ def _migrate_app_setting_concurrency_columns(db) -> None:
         "responses_chat_adapter_context_window_tokens": f"ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_context_window_tokens INTEGER DEFAULT {runtime_settings.responses_chat_adapter_context_window_tokens}",
         "responses_chat_adapter_snapshot_max_bytes": f"ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_snapshot_max_bytes INTEGER DEFAULT {runtime_settings.responses_chat_adapter_snapshot_max_bytes}",
         "responses_chat_adapter_db_cleanup_interval_seconds": f"ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_db_cleanup_interval_seconds INTEGER DEFAULT {runtime_settings.responses_chat_adapter_db_cleanup_interval_seconds}",
+        "request_log_retention_days": "ALTER TABLE app_settings ADD COLUMN request_log_retention_days INTEGER DEFAULT 90",
+        "admin_audit_log_retention_days": "ALTER TABLE app_settings ADD COLUMN admin_audit_log_retention_days INTEGER DEFAULT 180",
+        "request_child_log_retention_days": "ALTER TABLE app_settings ADD COLUMN request_child_log_retention_days INTEGER DEFAULT 90",
+        "exception_log_retention_days": "ALTER TABLE app_settings ADD COLUMN exception_log_retention_days INTEGER DEFAULT 180",
+        "health_log_retention_days": "ALTER TABLE app_settings ADD COLUMN health_log_retention_days INTEGER DEFAULT 7",
+        "billing_log_retention_days": "ALTER TABLE app_settings ADD COLUMN billing_log_retention_days INTEGER DEFAULT 365",
+        "background_job_log_retention_days": "ALTER TABLE app_settings ADD COLUMN background_job_log_retention_days INTEGER DEFAULT 90",
+        "user_operation_log_retention_days": "ALTER TABLE app_settings ADD COLUMN user_operation_log_retention_days INTEGER DEFAULT 180",
+        "asset_log_retention_days": "ALTER TABLE app_settings ADD COLUMN asset_log_retention_days INTEGER DEFAULT 180",
     }
     changed = False
     added_columns: set[str] = set()
@@ -251,18 +305,47 @@ def _migrate_app_setting_concurrency_columns(db) -> None:
         db.commit()
 
 
+def _migrate_admin_audit_log_columns(db) -> None:
+    """为后台审计表补齐统一日志体系需要的上下文字段。"""
+    existing_columns = _get_table_columns(db, "admin_audit_logs")
+    if not existing_columns:
+        return
+    additions = {
+        "request_trace_id": "ALTER TABLE admin_audit_logs ADD COLUMN request_trace_id TEXT",
+        "source_ip": "ALTER TABLE admin_audit_logs ADD COLUMN source_ip TEXT",
+        "before_json": "ALTER TABLE admin_audit_logs ADD COLUMN before_json TEXT",
+        "after_json": "ALTER TABLE admin_audit_logs ADD COLUMN after_json TEXT",
+        "changed_fields_json": "ALTER TABLE admin_audit_logs ADD COLUMN changed_fields_json TEXT",
+        "risk_level": "ALTER TABLE admin_audit_logs ADD COLUMN risk_level TEXT DEFAULT 'low'",
+    }
+    changed = False
+    for column, ddl in additions.items():
+        if column in existing_columns:
+            continue
+        db.execute(text(ddl))
+        changed = True
+    if changed:
+        db.commit()
+
+
 def _migrate_cache_price_columns(db) -> None:
     """为模型和日志表补充缓存计费与能力字段。"""
     dialect_name = db.get_bind().dialect.name
     price_type = f"NUMERIC({DB_PRICE_PRECISION}, {DB_PRICE_SCALE})"
     true_default = "TRUE" if dialect_name == "postgresql" else "1"
     false_default = "FALSE" if dialect_name == "postgresql" else "0"
+    datetime_type = "TIMESTAMP" if dialect_name == "postgresql" else "DATETIME"
     additions_by_table = {
         "provider_models": {
             "cache_price_per_1k": f"ALTER TABLE provider_models ADD COLUMN cache_price_per_1k {price_type}",
             "supports_tools": f"ALTER TABLE provider_models ADD COLUMN supports_tools BOOLEAN NOT NULL DEFAULT {false_default}",
             "supports_chat_completions": f"ALTER TABLE provider_models ADD COLUMN supports_chat_completions BOOLEAN NOT NULL DEFAULT {true_default}",
             "supports_responses": f"ALTER TABLE provider_models ADD COLUMN supports_responses BOOLEAN NOT NULL DEFAULT {true_default}",
+            "content_integrity_status": "ALTER TABLE provider_models ADD COLUMN content_integrity_status TEXT NOT NULL DEFAULT 'unknown'",
+            "content_probe_last_passed_at": f"ALTER TABLE provider_models ADD COLUMN content_probe_last_passed_at {datetime_type}",
+            "content_probe_last_failed_at": f"ALTER TABLE provider_models ADD COLUMN content_probe_last_failed_at {datetime_type}",
+            "content_probe_failure_count": "ALTER TABLE provider_models ADD COLUMN content_probe_failure_count INTEGER NOT NULL DEFAULT 0",
+            "content_probe_results_json": "ALTER TABLE provider_models ADD COLUMN content_probe_results_json TEXT",
             "context_window_tokens": "ALTER TABLE provider_models ADD COLUMN context_window_tokens INTEGER",
             "max_input_tokens": "ALTER TABLE provider_models ADD COLUMN max_input_tokens INTEGER",
             "max_output_tokens": "ALTER TABLE provider_models ADD COLUMN max_output_tokens INTEGER",
@@ -286,6 +369,16 @@ def _migrate_cache_price_columns(db) -> None:
             "model_reasoning_effort": "ALTER TABLE request_logs ADD COLUMN model_reasoning_effort TEXT",
             "pricing_tier_key": "ALTER TABLE request_logs ADD COLUMN pricing_tier_key TEXT",
             "pricing_tier_name": "ALTER TABLE request_logs ADD COLUMN pricing_tier_name TEXT",
+            "content_guard_result": "ALTER TABLE request_logs ADD COLUMN content_guard_result TEXT",
+            "content_guard_risk_level": "ALTER TABLE request_logs ADD COLUMN content_guard_risk_level TEXT",
+            "content_guard_categories_json": "ALTER TABLE request_logs ADD COLUMN content_guard_categories_json TEXT",
+            "content_guard_reason": "ALTER TABLE request_logs ADD COLUMN content_guard_reason TEXT",
+            "content_guard_action": "ALTER TABLE request_logs ADD COLUMN content_guard_action TEXT",
+            "content_guard_excerpt": "ALTER TABLE request_logs ADD COLUMN content_guard_excerpt TEXT",
+            "content_guard_latency_ms": "ALTER TABLE request_logs ADD COLUMN content_guard_latency_ms INTEGER",
+            "content_guard_buffer_wait_ms": "ALTER TABLE request_logs ADD COLUMN content_guard_buffer_wait_ms INTEGER",
+            "content_guard_retry_provider_count": "ALTER TABLE request_logs ADD COLUMN content_guard_retry_provider_count INTEGER",
+            "content_guard_final_strategy": "ALTER TABLE request_logs ADD COLUMN content_guard_final_strategy TEXT",
         },
     }
     changed = False
@@ -334,6 +427,9 @@ def _migrate_api_client_key_columns(db) -> bool:
     additions = {
         "route_exhausted_retry_infinite_enabled": f"ALTER TABLE api_client_keys ADD COLUMN route_exhausted_retry_infinite_enabled BOOLEAN NOT NULL DEFAULT {false_default}",
         "auto_sync_provider_bindings": f"ALTER TABLE api_client_keys ADD COLUMN auto_sync_provider_bindings BOOLEAN NOT NULL DEFAULT {true_default}",
+        "trusted_providers_only": f"ALTER TABLE api_client_keys ADD COLUMN trusted_providers_only BOOLEAN NOT NULL DEFAULT {false_default}",
+        "allow_low_trust_providers": f"ALTER TABLE api_client_keys ADD COLUMN allow_low_trust_providers BOOLEAN NOT NULL DEFAULT {false_default}",
+        "content_guard_required": f"ALTER TABLE api_client_keys ADD COLUMN content_guard_required BOOLEAN NOT NULL DEFAULT {true_default}",
     }
     changed = False
     for column, ddl in additions.items():
@@ -350,6 +446,7 @@ def _migrate_model_mapping_table(db) -> None:
     """补齐模型映射配置表与索引。"""
     inspector = inspect(db.get_bind())
     if "model_mappings" in inspector.get_table_names():
+        ModelMappingService.normalize_legacy_mapping_data(db)
         return
     Base.metadata.tables["model_mappings"].create(bind=db.get_bind(), checkfirst=True)
     db.commit()
@@ -436,6 +533,16 @@ def _migrate_request_log_columns(db) -> None:
         "api_client_remaining_requests_daily": "ALTER TABLE request_logs ADD COLUMN api_client_remaining_requests_daily INTEGER",
         "api_client_remaining_cost_daily": f"ALTER TABLE request_logs ADD COLUMN api_client_remaining_cost_daily {money_type}",
         "api_client_policy_snapshot_json": "ALTER TABLE request_logs ADD COLUMN api_client_policy_snapshot_json TEXT",
+        "content_guard_result": "ALTER TABLE request_logs ADD COLUMN content_guard_result TEXT",
+        "content_guard_risk_level": "ALTER TABLE request_logs ADD COLUMN content_guard_risk_level TEXT",
+        "content_guard_categories_json": "ALTER TABLE request_logs ADD COLUMN content_guard_categories_json TEXT",
+        "content_guard_reason": "ALTER TABLE request_logs ADD COLUMN content_guard_reason TEXT",
+        "content_guard_action": "ALTER TABLE request_logs ADD COLUMN content_guard_action TEXT",
+        "content_guard_excerpt": "ALTER TABLE request_logs ADD COLUMN content_guard_excerpt TEXT",
+        "content_guard_latency_ms": "ALTER TABLE request_logs ADD COLUMN content_guard_latency_ms INTEGER",
+        "content_guard_buffer_wait_ms": "ALTER TABLE request_logs ADD COLUMN content_guard_buffer_wait_ms INTEGER",
+        "content_guard_retry_provider_count": "ALTER TABLE request_logs ADD COLUMN content_guard_retry_provider_count INTEGER",
+        "content_guard_final_strategy": "ALTER TABLE request_logs ADD COLUMN content_guard_final_strategy TEXT",
     }
     changed = False
     for column, ddl in additions.items():
@@ -460,6 +567,11 @@ def _migrate_request_log_columns(db) -> None:
         "supports_tools": "ALTER TABLE provider_models ADD COLUMN supports_tools BOOLEAN NOT NULL DEFAULT 0",
         "supports_chat_completions": "ALTER TABLE provider_models ADD COLUMN supports_chat_completions BOOLEAN NOT NULL DEFAULT 1",
         "supports_responses": "ALTER TABLE provider_models ADD COLUMN supports_responses BOOLEAN NOT NULL DEFAULT 1",
+        "content_integrity_status": "ALTER TABLE provider_models ADD COLUMN content_integrity_status TEXT NOT NULL DEFAULT 'unknown'",
+        "content_probe_last_passed_at": "ALTER TABLE provider_models ADD COLUMN content_probe_last_passed_at DATETIME",
+        "content_probe_last_failed_at": "ALTER TABLE provider_models ADD COLUMN content_probe_last_failed_at DATETIME",
+        "content_probe_failure_count": "ALTER TABLE provider_models ADD COLUMN content_probe_failure_count INTEGER NOT NULL DEFAULT 0",
+        "content_probe_results_json": "ALTER TABLE provider_models ADD COLUMN content_probe_results_json TEXT",
         "context_window_tokens": "ALTER TABLE provider_models ADD COLUMN context_window_tokens INTEGER",
         "max_input_tokens": "ALTER TABLE provider_models ADD COLUMN max_input_tokens INTEGER",
         "max_output_tokens": "ALTER TABLE provider_models ADD COLUMN max_output_tokens INTEGER",
@@ -528,6 +640,9 @@ def _migrate_request_log_columns(db) -> None:
         "success_rate_bias": "ALTER TABLE api_client_keys ADD COLUMN success_rate_bias INTEGER NOT NULL DEFAULT 1",
         "cost_bias": "ALTER TABLE api_client_keys ADD COLUMN cost_bias INTEGER NOT NULL DEFAULT 0",
         "route_exhausted_retry_infinite_enabled": "ALTER TABLE api_client_keys ADD COLUMN route_exhausted_retry_infinite_enabled BOOLEAN NOT NULL DEFAULT 0",
+        "trusted_providers_only": "ALTER TABLE api_client_keys ADD COLUMN trusted_providers_only BOOLEAN NOT NULL DEFAULT 0",
+        "allow_low_trust_providers": "ALTER TABLE api_client_keys ADD COLUMN allow_low_trust_providers BOOLEAN NOT NULL DEFAULT 0",
+        "content_guard_required": "ALTER TABLE api_client_keys ADD COLUMN content_guard_required BOOLEAN NOT NULL DEFAULT 1",
     }
     changed_api_keys = False
     for column, ddl in api_key_additions.items():
@@ -570,6 +685,14 @@ def _migrate_request_log_columns(db) -> None:
         "recovery_probe_interval_sec_override": "ALTER TABLE providers ADD COLUMN recovery_probe_interval_sec_override INTEGER",
         "credential_rotated_at": "ALTER TABLE providers ADD COLUMN credential_rotated_at DATETIME",
         "credential_hint": "ALTER TABLE providers ADD COLUMN credential_hint TEXT",
+        "trust_level": "ALTER TABLE providers ADD COLUMN trust_level TEXT NOT NULL DEFAULT 'standard'",
+        "content_integrity_status": "ALTER TABLE providers ADD COLUMN content_integrity_status TEXT NOT NULL DEFAULT 'unknown'",
+        "content_integrity_score": "ALTER TABLE providers ADD COLUMN content_integrity_score INTEGER NOT NULL DEFAULT 80",
+        "content_violation_count": "ALTER TABLE providers ADD COLUMN content_violation_count INTEGER NOT NULL DEFAULT 0",
+        "last_content_violation_at": "ALTER TABLE providers ADD COLUMN last_content_violation_at DATETIME",
+        "content_guard_enabled": "ALTER TABLE providers ADD COLUMN content_guard_enabled BOOLEAN NOT NULL DEFAULT 1",
+        "low_trust_route_enabled": "ALTER TABLE providers ADD COLUMN low_trust_route_enabled BOOLEAN NOT NULL DEFAULT 0",
+        "buffer_stream_for_guard": "ALTER TABLE providers ADD COLUMN buffer_stream_for_guard BOOLEAN NOT NULL DEFAULT 1",
     }
     changed_providers = False
     for column, ddl in provider_additions.items():
@@ -609,9 +732,30 @@ def _migrate_request_log_columns(db) -> None:
         "max_non_stream_response_body_bytes": "ALTER TABLE app_settings ADD COLUMN max_non_stream_response_body_bytes INTEGER NOT NULL DEFAULT 20971520",
         "stream_token_capture_max_bytes": "ALTER TABLE app_settings ADD COLUMN stream_token_capture_max_bytes INTEGER NOT NULL DEFAULT 1048576",
         "max_logged_metadata_bytes": "ALTER TABLE app_settings ADD COLUMN max_logged_metadata_bytes INTEGER NOT NULL DEFAULT 1024",
+        "content_guard_enabled": "ALTER TABLE app_settings ADD COLUMN content_guard_enabled BOOLEAN NOT NULL DEFAULT 1",
+        "content_guard_block_on_high_risk": "ALTER TABLE app_settings ADD COLUMN content_guard_block_on_high_risk BOOLEAN NOT NULL DEFAULT 1",
+        "content_guard_probe_interval_sec": "ALTER TABLE app_settings ADD COLUMN content_guard_probe_interval_sec INTEGER NOT NULL DEFAULT 3600",
+        "content_guard_max_scan_bytes": "ALTER TABLE app_settings ADD COLUMN content_guard_max_scan_bytes INTEGER NOT NULL DEFAULT 16384",
+        "content_guard_stream_buffer_max_bytes": "ALTER TABLE app_settings ADD COLUMN content_guard_stream_buffer_max_bytes INTEGER NOT NULL DEFAULT 16384",
+        "content_guard_low_trust_requires_buffer": "ALTER TABLE app_settings ADD COLUMN content_guard_low_trust_requires_buffer BOOLEAN NOT NULL DEFAULT 1",
+        "content_guard_rules_json": "ALTER TABLE app_settings ADD COLUMN content_guard_rules_json TEXT NOT NULL DEFAULT ''",
+        "content_guard_high_risk_strategy": "ALTER TABLE app_settings ADD COLUMN content_guard_high_risk_strategy TEXT NOT NULL DEFAULT 'switch_provider'",
+        "content_guard_max_detection_delay_ms": "ALTER TABLE app_settings ADD COLUMN content_guard_max_detection_delay_ms INTEGER NOT NULL DEFAULT 300",
+        "content_guard_stream_mode": "ALTER TABLE app_settings ADD COLUMN content_guard_stream_mode TEXT NOT NULL DEFAULT 'buffer_300ms'",
+        "content_guard_url_check_enabled": "ALTER TABLE app_settings ADD COLUMN content_guard_url_check_enabled BOOLEAN NOT NULL DEFAULT 1",
+        "content_guard_url_allowlist_json": "ALTER TABLE app_settings ADD COLUMN content_guard_url_allowlist_json TEXT NOT NULL DEFAULT ''",
+        "content_guard_async_review_enabled": "ALTER TABLE app_settings ADD COLUMN content_guard_async_review_enabled BOOLEAN NOT NULL DEFAULT 1",
+        "content_guard_high_risk_confidence_threshold": "ALTER TABLE app_settings ADD COLUMN content_guard_high_risk_confidence_threshold INTEGER NOT NULL DEFAULT 85",
         "allow_public_user_registration": "ALTER TABLE app_settings ADD COLUMN allow_public_user_registration BOOLEAN NOT NULL DEFAULT 0",
         "request_log_retention_days": "ALTER TABLE app_settings ADD COLUMN request_log_retention_days INTEGER NOT NULL DEFAULT 90",
         "admin_audit_log_retention_days": "ALTER TABLE app_settings ADD COLUMN admin_audit_log_retention_days INTEGER NOT NULL DEFAULT 180",
+        "request_child_log_retention_days": "ALTER TABLE app_settings ADD COLUMN request_child_log_retention_days INTEGER NOT NULL DEFAULT 90",
+        "exception_log_retention_days": "ALTER TABLE app_settings ADD COLUMN exception_log_retention_days INTEGER NOT NULL DEFAULT 180",
+        "health_log_retention_days": "ALTER TABLE app_settings ADD COLUMN health_log_retention_days INTEGER NOT NULL DEFAULT 7",
+        "billing_log_retention_days": "ALTER TABLE app_settings ADD COLUMN billing_log_retention_days INTEGER NOT NULL DEFAULT 365",
+        "background_job_log_retention_days": "ALTER TABLE app_settings ADD COLUMN background_job_log_retention_days INTEGER NOT NULL DEFAULT 90",
+        "user_operation_log_retention_days": "ALTER TABLE app_settings ADD COLUMN user_operation_log_retention_days INTEGER NOT NULL DEFAULT 180",
+        "asset_log_retention_days": "ALTER TABLE app_settings ADD COLUMN asset_log_retention_days INTEGER NOT NULL DEFAULT 180",
         "route_candidate_cache_ttl_sec": "ALTER TABLE app_settings ADD COLUMN route_candidate_cache_ttl_sec INTEGER NOT NULL DEFAULT 10",
         "model_list_cache_ttl_sec": "ALTER TABLE app_settings ADD COLUMN model_list_cache_ttl_sec INTEGER NOT NULL DEFAULT 15",
         "provider_status_cache_ttl_sec": "ALTER TABLE app_settings ADD COLUMN provider_status_cache_ttl_sec INTEGER NOT NULL DEFAULT 10",
@@ -750,6 +894,7 @@ async def lifespan(_: FastAPI):
     await RedisService.init()
     UpstreamClientService.get_client()
     if settings.enable_background_workers:
+        await LoggingQueue.start_background_workers()
         await RequestLogQueueService.start_background_workers()
         await TokenUsageService.start_background_workers()
     if settings.enable_scheduler and not scheduler.running:
@@ -759,6 +904,7 @@ async def lifespan(_: FastAPI):
     if scheduler.running:
         scheduler.shutdown(wait=False)
     await RequestLogQueueService.stop_background_workers()
+    await LoggingQueue.stop_background_workers()
     if settings.enable_background_workers:
         await TokenUsageService.stop_background_workers()
     await UpstreamClientService.aclose()
@@ -914,6 +1060,16 @@ async def api_client_auth_error_handler(request: Request, exc: ApiClientAuthErro
 
 @app.exception_handler(RequestValidationError)
 async def request_validation_exception_handler(request: Request, exc: RequestValidationError):
+    _record_exception_event(
+        request=request,
+        exc=exc,
+        handler_name="request_validation_exception_handler",
+        status_code=422,
+        error_code="request_validation_failed",
+        message="Request validation failed",
+        detail={"errors": _make_json_safe(exc.errors())},
+        severity="warning",
+    )
     if not (_is_external_v1_path(request.url.path) or request.url.path.startswith("/api/")):
         return JSONResponse(status_code=422, content={"detail": exc.errors()})
     trace_id = getattr(request.state, "trace_id", None)
@@ -946,10 +1102,21 @@ async def request_validation_exception_handler(request: Request, exc: RequestVal
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
+    detail_payload = exc.detail if isinstance(exc.detail, dict) else None
+    classified_for_log = OpenAIErrorService.classify_error(status_code=exc.status_code, detail=detail_payload)
+    _record_exception_event(
+        request=request,
+        exc=exc,
+        handler_name="http_exception_handler",
+        status_code=exc.status_code,
+        error_code=str(classified_for_log.get("code") or getattr(exc, "status_code", "http_exception")),
+        message=str(exc.detail),
+        detail=detail_payload,
+        severity="warning" if exc.status_code < 500 else "danger",
+    )
     if not (_is_external_v1_path(request.url.path) or request.url.path.startswith("/api/")):
         return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
     trace_id = getattr(request.state, "trace_id", None)
-    detail_payload = exc.detail if isinstance(exc.detail, dict) else None
     error_object = ErrorCatalogService.build_error_object(
         status_code=exc.status_code,
         detail=detail_payload if detail_payload is not None else exc.detail,
@@ -995,6 +1162,16 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
+    _record_exception_event(
+        request=request,
+        exc=exc,
+        handler_name="unhandled_exception_handler",
+        status_code=500,
+        error_code="internal_server_error",
+        message=str(exc),
+        detail={"exception_type": exc.__class__.__name__},
+        severity="critical",
+    )
     if _is_external_v1_path(request.url.path):
         return _build_unhandled_v1_error_response(request, exc)
     raise exc
@@ -1008,6 +1185,16 @@ def _build_unhandled_v1_error_response(request: Request, exc: Exception) -> JSON
         "exception_type": exc.__class__.__name__,
         "message": message,
     }
+    _record_exception_event(
+        request=request,
+        exc=exc,
+        handler_name="build_unhandled_v1_error_response",
+        status_code=500,
+        error_code="internal_server_error",
+        message=message,
+        detail=detail,
+        severity="critical",
+    )
     classified = OpenAIErrorService.classify_error(status_code=500, detail=detail)
     error_object = ErrorCatalogService.build_error_object(status_code=500, detail=detail, trace_id=trace_id)
     _log_v1_request_rejected_before_route(
@@ -1035,6 +1222,40 @@ def _build_unhandled_v1_error_response(request: Request, exc: Exception) -> JSON
         ),
         headers={"X-Trace-Id": trace_id or "", "X-Request-Id": trace_id or ""},
     )
+
+
+def _record_exception_event(
+    *,
+    request: Request,
+    exc: BaseException | None,
+    handler_name: str,
+    status_code: int | None,
+    error_code: str | None,
+    message: str | None,
+    detail: dict | None = None,
+    severity: str = "danger",
+) -> None:
+    db = SessionLocal()
+    try:
+        ExceptionLogRecorder.record_exception(
+            db,
+            exc=exc,
+            handler_name=handler_name,
+            request_path=request.url.path,
+            method=request.method.upper(),
+            trace_id=getattr(request.state, "trace_id", None),
+            status_code=status_code,
+            error_code=error_code,
+            message=message,
+            source_ip=ProxySafeHelpers.extract_source_ip(request),
+            is_external_v1=_is_external_v1_path(request.url.path),
+            severity=severity,
+            detail=detail,
+        )
+    except Exception as log_exc:
+        logger.warning("Failed to record exception event: %s", log_exc)
+    finally:
+        db.close()
 
 
 def _log_v1_request_rejected_before_route(
@@ -1065,6 +1286,46 @@ def _log_v1_request_rejected_before_route(
                 request.state.v1_rejection_logged = True
                 return
         request.state.v1_rejection_logged = True
+        classified = OpenAIErrorService.classify_error(
+            status_code=status_code,
+            detail=detail if detail is not None else {"message": message, "code": error_code},
+        )
+        rejection_trace = [
+            {
+                "result": "request_rejected_before_route",
+                "error": error_code,
+                "latency_ms": 0,
+            },
+            {
+                "typed_event": "request_validation",
+                "event_result": "failed",
+                "severity": "warning",
+                "module": "proxy",
+                "payload": {
+                    "validation_stage": "body_read" if error_code == "request_body_too_large" else "json_parse",
+                    "passed": False,
+                    "request_body_summary_json": request_body_json,
+                    "error_code": error_code,
+                    "safe_detail_json": dumps_json(detail if detail is not None else {"message": message, "code": error_code}),
+                },
+            },
+            {
+                "typed_event": "request_error_response",
+                "event_result": "failed",
+                "severity": "warning" if status_code < 500 else "danger",
+                "module": "proxy",
+                "payload": {
+                    "status_code": status_code,
+                    "error_type": str(log_context.get("error_type") or classified["error_type"]),
+                    "error_code": str(log_context.get("code") or error_code),
+                    "public_message": str(log_context.get("message") or message),
+                    "category": str(log_context.get("category") or classified["category"]),
+                    "retryable": bool(log_context.get("retryable", retryable)),
+                    "recoverable": bool(classified["recoverable"]),
+                    "diagnostic_sample_json": dumps_json(detail if detail is not None else {"message": message, "code": error_code}),
+                },
+            },
+        ]
         LogService.create_log(
             db,
             log_type="api_client_auth",
@@ -1102,7 +1363,7 @@ def _log_v1_request_rejected_before_route(
             error_code=str(log_context.get("code") or error_code),
             retryable=bool(log_context.get("retryable", retryable)),
             api_client_auth_result=error_code,
-            trace=[{"result": "request_rejected_before_route", "error": error_code, "latency_ms": 0}],
+            trace=rejection_trace,
             attempt_count=0,
             schedule_token_fill=False,
         )
@@ -1143,6 +1404,57 @@ async def _log_api_client_auth_failure(request: Request, exc: ApiClientAuthError
         requested_model = None
         if isinstance(parsed_body, dict):
             requested_model = parsed_body.get("model") if isinstance(parsed_body.get("model"), str) else None
+        classified = OpenAIErrorService.classify_error(
+            status_code=exc.status_code,
+            detail={"message": exc.message, "code": exc.code},
+        )
+        trace = [
+            {"result": "auth_rejected", "error": exc.code, "latency_ms": 0},
+            {
+                "typed_event": "request_auth",
+                "event_result": "failed",
+                "severity": "warning",
+                "module": "proxy",
+                "payload": {
+                    "auth_result": exc.code,
+                    "api_client_key_id": exc.api_client_key_id,
+                    "api_client_key_prefix": exc.api_client_key_prefix,
+                    "user_account_id": exc.user_account_id,
+                    "remaining_tokens": exc.remaining_tokens,
+                    "remaining_requests_daily": exc.remaining_requests_daily,
+                    "remaining_cost_daily": float(exc.remaining_cost_daily) if exc.remaining_cost_daily is not None else None,
+                    "policy_snapshot_json": exc.policy_snapshot_json,
+                    "error_code": exc.code,
+                },
+            },
+            {
+                "typed_event": "request_validation",
+                "event_result": "success" if request_body_json else "skipped",
+                "severity": "info",
+                "module": "proxy",
+                "payload": {
+                    "validation_stage": "request_summary",
+                    "passed": True,
+                    "request_body_summary_json": request_body_json,
+                },
+            },
+            {
+                "typed_event": "request_error_response",
+                "event_result": "failed",
+                "severity": "warning",
+                "module": "proxy",
+                "payload": {
+                    "status_code": exc.status_code,
+                    "error_type": str(classified["error_type"]),
+                    "error_code": exc.code,
+                    "public_message": exc.message,
+                    "category": str(classified["category"]),
+                    "retryable": exc.status_code == 429,
+                    "recoverable": bool(classified["recoverable"]),
+                    "diagnostic_sample_json": dumps_json({"message": exc.message, "code": exc.code}),
+                },
+            },
+        ]
         LogService.create_log(
             db,
             log_type="api_client_auth",
@@ -1174,7 +1486,7 @@ async def _log_api_client_auth_failure(request: Request, exc: ApiClientAuthError
             api_client_remaining_requests_daily=exc.remaining_requests_daily,
             api_client_remaining_cost_daily=exc.remaining_cost_daily,
             api_client_policy_snapshot_json=exc.policy_snapshot_json,
-            trace=[{"result": "auth_rejected", "error": exc.code, "latency_ms": 0}],
+            trace=trace,
             attempt_count=1,
             token_request_payload=parsed_body if isinstance(parsed_body, dict) else None,
             schedule_token_fill=False,
@@ -1337,8 +1649,10 @@ app.include_router(api_key_policy_templates_router, dependencies=[Depends(requir
 app.include_router(providers_router, dependencies=[Depends(require_admin_api_user)])
 app.include_router(provider_models_router, dependencies=[Depends(require_admin_api_user)])
 app.include_router(models_router)
+app.include_router(content_guard_router, dependencies=[Depends(require_admin_api_user)])
 app.include_router(settings_router, dependencies=[Depends(require_admin_api_user)])
 app.include_router(logs_router, dependencies=[Depends(require_admin_api_user)])
+app.include_router(logging_api_router, dependencies=[Depends(require_admin_api_user)])
 app.include_router(metrics_router, dependencies=[Depends(require_admin_api_user)])
 app.include_router(playground_api_router, dependencies=[Depends(require_admin_api_user)])
 app.include_router(benchmark_router, dependencies=[Depends(require_admin_api_user)])

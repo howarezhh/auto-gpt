@@ -17,6 +17,10 @@ from app.models.api_client_key_provider_binding import ApiClientKeyProviderBindi
 from app.models.api_client_key import ApiClientKey
 from app.models.app_setting import AppSetting
 from app.schemas.provider import (
+    CONTENT_INTEGRITY_STATUS_LABELS,
+    MODEL_TRUST_STATUS_LABELS,
+    PROVIDER_TRUST_STATUS_LABELS,
+    PROVIDER_TRUST_LEVEL_LABELS,
     ProviderBatchImportRequest,
     ProviderBatchImportResponse,
     ProviderCreate,
@@ -95,9 +99,9 @@ class ProviderService:
         "exception",
         "client_cancelled",
     }
-    BATCH_IMPORT_TEMPLATE = """# 中转站批量导入模板
+    BATCH_IMPORT_TEMPLATE = """# 提供商批量导入模板
 
-每个中转站使用一段键值内容，段落之间用空行或 --- 分隔。AI 根据用户提供的中转站信息生成时，必须保留字段名。
+每个提供商使用一段键值内容，段落之间用空行或 --- 分隔。AI 根据用户提供的提供商信息生成时，必须保留字段名。
 
 名称: 中文渠道名
 Base URL: https://example.com/v1
@@ -109,7 +113,7 @@ API Key: sk-xxxx
 优先级: 100
 权重: 100
 超时毫秒: 30000
-最大重试次数: 1
+最大重试次数: 2
 最大活跃请求: 20
 最大流式请求: 10
 最大 QPS: 20
@@ -301,11 +305,19 @@ API Key: sk-yyyy
         """返回带质量指标的 provider 序列化结果。"""
         providers = ProviderService.list_providers(db)
         metrics = ProviderService._build_quality_metrics(db, providers)
-        return [ProviderService.provider_to_dict(provider, metrics=metrics) for provider in providers]
+        recent_content_events = ProviderService._build_recent_content_guard_events(db, providers)
+        return [
+            ProviderService.provider_to_dict(
+                provider,
+                metrics=metrics,
+                recent_content_guard_events=recent_content_events.get(provider.id, []),
+            )
+            for provider in providers
+        ]
 
     @staticmethod
     def build_provider_page_content(db: Session) -> dict:
-        """返回中转站页面首屏与异步刷新共用的数据口径。"""
+        """返回提供商页面首屏与异步刷新共用的数据口径。"""
         providers = ProviderService.list_provider_dicts(db)
         return ProviderService.build_provider_page_content_from_dicts(providers)
 
@@ -361,8 +373,8 @@ API Key: sk-yyyy
             "avg_stability_score": average_stability,
         }
         telemetry_cards = [
-            {"id": "provider_count", "label": "中转站总数", "value": summary["provider_count"]},
-            {"id": "enabled_provider_count", "label": "已启用中转站", "value": summary["enabled_provider_count"]},
+            {"id": "provider_count", "label": "提供商总数", "value": summary["provider_count"]},
+            {"id": "enabled_provider_count", "label": "已启用提供商", "value": summary["enabled_provider_count"]},
             {"id": "model_count", "label": "挂载模型数", "value": summary["model_count"]},
             {"id": "stream_model_count", "label": "支持 Stream", "value": summary["stream_model_count"]},
             {"id": "vision_model_count", "label": "支持图像理解", "value": summary["vision_model_count"]},
@@ -400,6 +412,7 @@ API Key: sk-yyyy
         provider_id: int | None = None,
         enabled: bool | None = None,
         health_status: str | None = None,
+        trust_status: str | None = None,
     ) -> dict:
         """分页返回 provider model 挂载列表。"""
         page = max(1, page)
@@ -423,7 +436,17 @@ API Key: sk-yyyy
             filters.append(ProviderModel.enabled == enabled)
         normalized_health = (health_status or "").strip()
         if normalized_health:
-            filters.append(ProviderModel.health_status == normalized_health)
+            if normalized_health == "abnormal":
+                filters.append(ProviderModel.health_status.in_(["degraded", "unhealthy"]))
+            else:
+                filters.append(ProviderModel.health_status == normalized_health)
+        normalized_trust = (trust_status or "").strip()
+        if normalized_trust == "trusted":
+            filters.append(ProviderModel.content_integrity_status == "passed")
+        elif normalized_trust == "abnormal":
+            filters.append(ProviderModel.content_integrity_status.in_(["degraded", "blocked"]))
+        elif normalized_trust == "unknown":
+            filters.append(ProviderModel.content_integrity_status == "unknown")
 
         base_stmt = select(ProviderModel).join(Provider)
         if filters:
@@ -463,11 +486,24 @@ API Key: sk-yyyy
         )
 
     @staticmethod
+    def _global_max_retries(db: Session) -> int:
+        return max(0, int(SettingService.get_or_create(db).global_max_retries or 0))
+
+    @staticmethod
+    def _validate_provider_retry_limit(db: Session, max_retries: int | None) -> None:
+        if max_retries is None:
+            return
+        global_max_retries = ProviderService._global_max_retries(db)
+        if int(max_retries) > global_max_retries:
+            raise ValueError(f"提供商最大重试次数不能大于全局最大重试次数 {global_max_retries}")
+
+    @staticmethod
     def create_provider(db: Session, payload: ProviderCreate) -> Provider:
         """创建 provider，并同步初始化模型挂载和模型目录。"""
         from app.services.api_key_admin_service import ApiKeyAdminService
         from app.services.model_catalog_service import ModelCatalogService
 
+        ProviderService._validate_provider_retry_limit(db, payload.max_retries)
         provider = Provider(
             name=payload.name,
             base_url=payload.base_url.rstrip("/"),
@@ -493,6 +529,12 @@ API Key: sk-yyyy
             auto_recover_enabled=payload.auto_recover_enabled,
             circuit_breaker_threshold_override=payload.circuit_breaker_threshold_override,
             recovery_probe_interval_sec_override=payload.recovery_probe_interval_sec_override,
+            trust_level=payload.trust_level,
+            content_integrity_status=payload.content_integrity_status,
+            content_integrity_score=payload.content_integrity_score,
+            content_guard_enabled=payload.content_guard_enabled,
+            low_trust_route_enabled=payload.low_trust_route_enabled,
+            buffer_stream_for_guard=payload.buffer_stream_for_guard,
             credential_rotated_at=datetime.utcnow(),
             remark=payload.remark,
         )
@@ -533,7 +575,7 @@ API Key: sk-yyyy
                     skipped = True
                     skipped_count += 1
                 else:
-                    errors.append("中转站名称已存在")
+                    errors.append("提供商名称已存在")
 
             if provider_payload and not errors and not payload.dry_run and not skipped:
                 try:
@@ -650,13 +692,13 @@ API Key: sk-yyyy
         aliases = {
             "名称": "name",
             "渠道名称": "name",
-            "中转站名称": "name",
+            "提供商名称": "name",
             "name": "name",
             "baseurl": "base_url",
             "base_url": "base_url",
             "地址": "base_url",
             "接口地址": "base_url",
-            "中转站地址": "base_url",
+            "提供商地址": "base_url",
             "api地址": "base_url",
             "apikey": "api_key",
             "api_key": "api_key",
@@ -783,7 +825,7 @@ API Key: sk-yyyy
             "priority": ProviderService._parse_batch_int(normalized.get("priority"), default=100, minimum=0),
             "weight": ProviderService._parse_batch_int(normalized.get("weight"), default=100, minimum=0),
             "timeout_ms": ProviderService._parse_batch_int(normalized.get("timeout_ms"), default=30000, minimum=1000),
-            "max_retries": ProviderService._parse_batch_int(normalized.get("max_retries"), default=1, minimum=0),
+            "max_retries": ProviderService._parse_batch_int(normalized.get("max_retries"), default=2, minimum=0),
             "max_active_requests": ProviderService._parse_batch_nullable_int(normalized.get("max_active_requests"), default=20),
             "max_active_streams": ProviderService._parse_batch_nullable_int(normalized.get("max_active_streams"), default=10),
             "max_qps": ProviderService._parse_batch_nullable_int(normalized.get("max_qps"), default=20),
@@ -920,6 +962,7 @@ API Key: sk-yyyy
         from app.services.model_catalog_service import ModelCatalogService
 
         data = payload.model_dump(exclude_unset=True)
+        ProviderService._validate_provider_retry_limit(db, data.get("max_retries"))
         for field, value in data.items():
             if field in {"models", "model_configs"}:
                 continue
@@ -1020,6 +1063,10 @@ API Key: sk-yyyy
                 continue
             if field == "price_multiplier" and value is None:
                 continue
+            if field == "content_integrity_status":
+                provider_model.content_integrity_status = str(value or "unknown")
+                ProviderService._ensure_manual_content_probe_reason(provider_model)
+                continue
             setattr(provider_model, field, value)
         ProviderService._sync_provider_model_price_from_catalog(db, provider_model)
 
@@ -1032,7 +1079,105 @@ API Key: sk-yyyy
         return provider_model
 
     @staticmethod
-    def provider_to_dict(provider: Provider, *, metrics: dict | None = None) -> dict:
+    def _ensure_manual_content_probe_reason(provider_model: ProviderModel) -> None:
+        status = str(provider_model.content_integrity_status or "unknown")
+        existing = ProviderService._parse_content_probe_results(provider_model.content_probe_results_json)
+        if status == "passed":
+            return
+        now = datetime.utcnow()
+        reason = {
+            "blocked": "管理员手动标记为异常，未填写检测明细。",
+            "degraded": "管理员手动标记为异常，未填写检测明细。",
+            "unknown": "管理员手动标记为未检测。",
+        }.get(status, "管理员手动更新可信度状态。")
+        provider_model.content_probe_results_json = dumps_json(
+            {
+                "updated_at": now,
+                "status": status,
+                "results": existing or [
+                    {
+                        "phase_key": "manual",
+                        "endpoint_label": "管理员手动标记",
+                        "success": status == "passed",
+                        "content_guard_result": "pass" if status == "passed" else "review",
+                        "content_guard_reason": reason,
+                        "message": reason,
+                    }
+                ],
+                "last_result": {
+                    "phase_key": "manual",
+                    "endpoint_label": "管理员手动标记",
+                    "success": status == "passed",
+                    "content_guard_result": "pass" if status == "passed" else "review",
+                    "content_guard_reason": reason,
+                    "message": reason,
+                },
+            }
+        )
+
+    @staticmethod
+    def provider_model_trust_status(provider_model: ProviderModel) -> str:
+        status = str(provider_model.content_integrity_status or "unknown")
+        if status == "passed":
+            return "trusted"
+        if status in {"degraded", "blocked"}:
+            return "abnormal"
+        return "unknown"
+
+    @staticmethod
+    def _content_probe_reason(provider_model: ProviderModel) -> str | None:
+        results = ProviderService._parse_content_probe_results(provider_model.content_probe_results_json)
+        candidates = list(reversed(results))
+        if not candidates and provider_model.content_integrity_status in {"degraded", "blocked"}:
+            return "该模型内容完整性检测异常，但当前没有保留详细检测明细。"
+        for item in candidates:
+            for key in ("content_guard_reason", "message", "support_label", "endpoint_label"):
+                value = item.get(key)
+                if value:
+                    return str(value)
+        if provider_model.content_integrity_status == "unknown":
+            return "该模型尚未执行可信度检测。"
+        return None
+
+    @staticmethod
+    def provider_trust_summary(provider: Provider) -> dict:
+        models = list(provider.provider_models or [])
+        if not models:
+            return {
+                "status": "unknown",
+                "label": PROVIDER_TRUST_STATUS_LABELS["unknown"],
+                "reason": "该提供商尚未挂载模型，无法计算可信属性。",
+            }
+        statuses = [ProviderService.provider_model_trust_status(item) for item in models]
+        total = len(statuses)
+        trusted_count = statuses.count("trusted")
+        abnormal_count = statuses.count("abnormal")
+        unknown_count = statuses.count("unknown")
+        if trusted_count == total:
+            status = "trusted"
+            reason = None
+        elif abnormal_count == total:
+            status = "untrusted"
+            reason = f"全部 {total} 个模型可信度均为异常。"
+        elif unknown_count == total:
+            status = "unknown"
+            reason = f"全部 {total} 个模型尚未检测可信度。"
+        else:
+            status = "partially_trusted"
+            reason = f"共 {total} 个模型，可信 {trusted_count} 个，异常 {abnormal_count} 个，未检测 {unknown_count} 个。"
+        return {
+            "status": status,
+            "label": PROVIDER_TRUST_STATUS_LABELS.get(status, status),
+            "reason": reason,
+        }
+
+    @staticmethod
+    def provider_to_dict(
+        provider: Provider,
+        *,
+        metrics: dict | None = None,
+        recent_content_guard_events: list[dict] | None = None,
+    ) -> dict:
         metrics = metrics or {"providers": {}, "provider_models": {}}
         provider_metric = metrics["providers"].get(provider.id, {})
         try:
@@ -1047,11 +1192,12 @@ API Key: sk-yyyy
             (item.output_price_per_1k for item in provider.provider_models if item.output_price_per_1k is not None),
             default=None,
         )
+        trust_summary = ProviderService.provider_trust_summary(provider)
         return {
             "id": provider.id,
             "name": provider.name,
             "base_url": provider.base_url,
-            "api_key": provider.api_key,
+            "api_key": ProviderService.mask_api_key(provider.api_key),
             "api_key_masked": ProviderService.mask_api_key(provider.api_key),
             "provider_type": provider.provider_type,
             "protocol_type": ProviderService.provider_protocol_type(provider),
@@ -1079,6 +1225,20 @@ API Key: sk-yyyy
             "auto_recover_enabled": provider.auto_recover_enabled,
             "circuit_breaker_threshold_override": provider.circuit_breaker_threshold_override,
             "recovery_probe_interval_sec_override": provider.recovery_probe_interval_sec_override,
+            "trust_level": provider.trust_level,
+            "trust_level_label": PROVIDER_TRUST_LEVEL_LABELS.get(provider.trust_level, provider.trust_level),
+            "content_integrity_status": provider.content_integrity_status,
+            "content_integrity_status_label": CONTENT_INTEGRITY_STATUS_LABELS.get(provider.content_integrity_status, provider.content_integrity_status),
+            "content_integrity_score": provider.content_integrity_score,
+            "computed_trust_status": trust_summary["status"],
+            "computed_trust_status_label": trust_summary["label"],
+            "computed_trust_status_reason": trust_summary["reason"],
+            "content_violation_count": provider.content_violation_count,
+            "last_content_violation_at": provider.last_content_violation_at,
+            "recent_content_guard_events": recent_content_guard_events or [],
+            "content_guard_enabled": provider.content_guard_enabled,
+            "low_trust_route_enabled": provider.low_trust_route_enabled,
+            "buffer_stream_for_guard": provider.buffer_stream_for_guard,
             "models": [item.model_name for item in provider.provider_models],
             "model_configs": [
                 ProviderService.provider_model_to_dict(item, metrics=metrics["provider_models"].get(item.id))
@@ -1204,7 +1364,7 @@ API Key: sk-yyyy
         base_url = payload.base_url or (provider.base_url if provider else None)
         api_key = payload.api_key or (provider.api_key if provider else None)
         if not base_url or not api_key:
-            raise ValueError("必须提供 Base URL 和 API 密钥，或指定已存在的中转站")
+            raise ValueError("必须提供 Base URL 和 API 密钥，或指定已存在的提供商")
 
         normalized_base_url = base_url.rstrip("/")
         timeout_ms = payload.timeout_ms or (provider.timeout_ms if provider else 30000)
@@ -1325,6 +1485,8 @@ API Key: sk-yyyy
     @staticmethod
     def provider_model_to_dict(provider_model: ProviderModel, *, metrics: dict | None = None) -> dict:
         metrics = metrics or {}
+        trust_status = ProviderService.provider_model_trust_status(provider_model)
+        content_probe_results = ProviderService._parse_content_probe_results(provider_model.content_probe_results_json)
         return {
             "id": provider_model.id,
             "model_name": provider_model.model_name,
@@ -1347,6 +1509,15 @@ API Key: sk-yyyy
             "supports_responses": provider_model.supports_responses,
             "protocol_type": ProviderService.provider_model_protocol_type(provider_model),
             "protocol_label": ProviderService.provider_model_protocol_label(provider_model),
+            "content_integrity_status": provider_model.content_integrity_status,
+            "content_integrity_status_label": CONTENT_INTEGRITY_STATUS_LABELS.get(provider_model.content_integrity_status, provider_model.content_integrity_status),
+            "content_probe_last_passed_at": provider_model.content_probe_last_passed_at,
+            "content_probe_last_failed_at": provider_model.content_probe_last_failed_at,
+            "content_probe_failure_count": provider_model.content_probe_failure_count,
+            "content_probe_results": content_probe_results,
+            "trust_status": trust_status,
+            "trust_status_label": MODEL_TRUST_STATUS_LABELS.get(trust_status, trust_status),
+            "trust_status_reason": ProviderService._content_probe_reason(provider_model),
             "context_window_tokens": provider_model.context_window_tokens,
             "max_input_tokens": provider_model.max_input_tokens,
             "max_output_tokens": provider_model.max_output_tokens,
@@ -1363,8 +1534,57 @@ API Key: sk-yyyy
         }
 
     @staticmethod
+    def _parse_content_probe_results(value: str | None) -> list[dict]:
+        payload = loads_json(value, {})
+        if isinstance(payload, list):
+            items = payload
+        elif isinstance(payload, dict):
+            items = payload.get("results") or ([payload.get("last_result")] if isinstance(payload.get("last_result"), dict) else [])
+        else:
+            items = []
+        return [item for item in items if isinstance(item, dict)]
+
+    @staticmethod
+    def _build_recent_content_guard_events(db: Session, providers: list[Provider], *, per_provider_limit: int = 3) -> dict[int, list[dict]]:
+        provider_ids = [provider.id for provider in providers]
+        if not provider_ids:
+            return {}
+        rows = list(
+            db.scalars(
+                select(RequestLog)
+                .where(
+                    RequestLog.provider_id.in_(provider_ids),
+                    RequestLog.content_guard_result.isnot(None),
+                )
+                .order_by(RequestLog.created_at.desc(), RequestLog.id.desc())
+                .limit(max(1, len(provider_ids)) * max(1, per_provider_limit))
+            )
+        )
+        results: dict[int, list[dict]] = {provider_id: [] for provider_id in provider_ids}
+        for item in rows:
+            provider_id = item.provider_id
+            if provider_id is None or len(results.get(provider_id, [])) >= per_provider_limit:
+                continue
+            results.setdefault(provider_id, []).append(
+                {
+                    "id": item.id,
+                    "created_at": item.created_at,
+                    "model_name": item.model_name or item.requested_model,
+                    "content_guard_result": item.content_guard_result,
+                    "content_guard_risk_level": item.content_guard_risk_level,
+                    "content_guard_categories_json": item.content_guard_categories_json,
+                    "content_guard_reason": item.content_guard_reason,
+                    "content_guard_action": item.content_guard_action,
+                    "content_guard_excerpt": item.content_guard_excerpt,
+                    "trace_id": item.trace_id,
+                }
+            )
+        return results
+
+    @staticmethod
     def provider_model_mount_to_dict(provider_model: ProviderModel, *, metrics: dict | None = None) -> dict:
         provider = provider_model.provider
+        provider_trust_summary = ProviderService.provider_trust_summary(provider)
         return {
             "provider": {
                 "id": provider.id,
@@ -1376,6 +1596,9 @@ API Key: sk-yyyy
                 "region_tag": provider.region_tag,
                 "enabled": provider.enabled,
                 "health_status": provider.health_status,
+                "trust_status": provider_trust_summary["status"],
+                "trust_status_label": provider_trust_summary["label"],
+                "trust_status_reason": provider_trust_summary["reason"],
             },
             "model": ProviderService.provider_model_to_dict(provider_model, metrics=metrics),
         }

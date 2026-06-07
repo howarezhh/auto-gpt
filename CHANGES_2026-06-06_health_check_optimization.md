@@ -2,7 +2,7 @@
 
 ## 变更概述
 
-本次变更将协议字段从中转站级移到模型挂载矩阵级，并优化健康检查测试策略，显著缩短测试时间。
+本次变更将协议字段从提供商级移到模型挂载矩阵级，并优化健康检查测试策略，显著缩短测试时间。
 
 ## 主要变更
 
@@ -66,7 +66,7 @@
 新增以下规范条目：
 - 后台健康检查所有能力测试必须只执行一次，禁止失败后自动重试
 - 文本测试必须默认只测试流式文本，禁止同时测试非流式和流式两种模式
-- 中转站模型挂载矩阵的 `protocol_type` 字段作为端点协议权威来源
+- 提供商模型挂载矩阵的 `protocol_type` 字段作为端点协议权威来源
 - 测试端点按挂载级协议选择，优先 `responses`，不支持时选择 `chat_completions`
 
 ### 5. 变更记录更新 ✅
@@ -155,7 +155,7 @@
            <input class="field-input" id="${rowId}-name" data-model-config-field="model_name"
                   value="${escapeHtml(item.model_name)}" placeholder="模型名称（必填）" required>
        </label>
-       <label class="provider-model-mini-switch settings-switch-control" title="控制该模型是否加入当前中转站路由">
+       <label class="provider-model-mini-switch settings-switch-control" title="控制该模型是否加入当前提供商路由">
            <input type="checkbox" data-model-config-field="enabled" ${item.enabled ? "checked" : ""}>
            <span class="settings-switch-slider" aria-hidden="true"></span>
        </label>
@@ -195,10 +195,10 @@
    });
    ```
 
-5. **中转站卡片协议字段处理**
+5. **提供商卡片协议字段处理**
 
-   - **选项 A**: 从中转站编辑表单中完全移除协议类型选择（推荐）
-   - **选项 B**: 将其改为只读显示，显示该中转站下所有模型的协议汇总
+   - **选项 A**: 从提供商编辑表单中完全移除协议类型选择（推荐）
+   - **选项 B**: 将其改为只读显示，显示该提供商下所有模型的协议汇总
 
 ### CSS 样式调整（可选）
 
@@ -235,7 +235,7 @@ curl -X POST http://localhost:8000/api/providers/{provider_id}/check
 
 在浏览器中测试：
 
-1. 打开中转站编辑页面
+1. 打开提供商编辑页面
 2. 添加新模型，验证协议类型下拉选择器
 3. 保存后验证数据正确提交
 4. 刷新页面验证数据正确回显

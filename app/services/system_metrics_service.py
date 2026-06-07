@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import os
 import platform
-import shutil
 import time
+from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -13,19 +13,22 @@ except ImportError:  # pragma: no cover - deployment fallback
     psutil = None
 
 from redis import Redis
-from sqlalchemy import case, func, select, text
+from sqlalchemy import case, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import engine
 from app.models.alert_event import AlertEvent
+from app.models.logging_events import BackgroundJobEvent
 from app.models.provider import Provider
 from app.models.request_log import RequestLog
 from app.scheduler import scheduler
 from app.services.log_service import LogService
+from app.logging.queue import LoggingQueue
 from app.services.cache_service import CacheService
 from app.services.request_log_queue_service import RequestLogQueueService
 from app.services.provider_capacity_service import ProviderCapacityService, ProviderCapacityUnavailableError
+from app.services.provider_service import ProviderService
 from app.services.runtime_state_service import RuntimeStateService
 from app.services.setting_service import SettingService
 from app.utils.json_utils import dumps_json
@@ -45,10 +48,18 @@ class SystemMetricsService:
     BACKGROUND_BACKLOG_WARNING_THRESHOLD = 1000
     BILLING_FAILURE_WARNING_THRESHOLD = 10
     TOKEN_FAILURE_WARNING_THRESHOLD = 10
+    CONTENT_GUARD_HIGH_RISK_PROVIDER_THRESHOLD = 3
+    CONTENT_GUARD_HIGH_RISK_PROVIDER_WINDOW_MINUTES = 10
+    CONTENT_GUARD_HIGH_RISK_PROVIDER_ALERT_PREFIX = "monitoring:content_guard_high_risk_provider:"
     METRIC_PERCENTILE_SAMPLE_LIMIT = 5000
-    # Operations refreshes often; recursive project-size scans must stay infrequent.
-    PROJECT_DISK_CACHE_SECONDS = 6 * 60 * 60
-    _project_disk_cache: dict[str, Any] = {"path": None, "size_bytes": None, "checked_at": 0.0}
+    PROJECT_PROCESS_CACHE_SECONDS = 30
+    _project_process_cache: dict[str, Any] = {
+        "path": None,
+        "snapshot": None,
+        "checked_at": 0.0,
+        "cpu_times": {},
+        "cpu_checked_at": 0.0,
+    }
 
     @classmethod
     def collect(
@@ -65,15 +76,63 @@ class SystemMetricsService:
         redis_snapshot.update(limits)
         runtime = cls._runtime_snapshot()
         host = cls._host_snapshot()
-        traffic = cls._traffic_snapshot(db, window_minutes=window_minutes) if database["ok"] else cls._empty_traffic()
+        section_errors: dict[str, str] = {}
+        traffic = (
+            cls._safe_snapshot(
+                db,
+                section_errors,
+                "traffic",
+                lambda: cls._traffic_snapshot(db, window_minutes=window_minutes),
+                cls._empty_traffic,
+            )
+            if database["ok"]
+            else cls._empty_traffic()
+        )
         bucket_minutes = cls._bucket_minutes(window_minutes)
         timeseries = (
-            LogService.metric_timeseries(db, window_minutes=window_minutes, bucket_minutes=bucket_minutes)
+            cls._safe_snapshot(
+                db,
+                section_errors,
+                "timeseries",
+                lambda: LogService.metric_timeseries(db, window_minutes=window_minutes, bucket_minutes=bucket_minutes),
+                list,
+            )
             if database["ok"]
             else []
         )
-        providers = cls._provider_snapshot(db, window_minutes=window_minutes) if database["ok"] else []
-        background = cls._background_snapshot(db) if database["ok"] else cls._empty_background()
+        providers = (
+            cls._safe_snapshot(
+                db,
+                section_errors,
+                "providers",
+                lambda: cls._provider_snapshot(db, window_minutes=window_minutes),
+                list,
+            )
+            if database["ok"]
+            else []
+        )
+        content_guard = (
+            cls._safe_snapshot(
+                db,
+                section_errors,
+                "content_guard",
+                lambda: cls._content_guard_snapshot(db, window_minutes=window_minutes),
+                cls._empty_content_guard,
+            )
+            if database["ok"]
+            else cls._empty_content_guard()
+        )
+        background = (
+            cls._safe_snapshot(
+                db,
+                section_errors,
+                "background",
+                lambda: cls._background_snapshot(db),
+                cls._empty_background,
+            )
+            if database["ok"]
+            else cls._empty_background()
+        )
         pool = cls._database_pool_snapshot()
         status = cls._resolve_status(
             database_ok=database["ok"],
@@ -81,6 +140,8 @@ class SystemMetricsService:
             background=background,
             traffic=traffic,
         )
+        if section_errors and status == "ready":
+            status = "degraded"
         metrics = {
             "status": status,
             "window_minutes": window_minutes,
@@ -94,16 +155,34 @@ class SystemMetricsService:
             "timeseries": timeseries,
             "bucket_minutes": bucket_minutes,
             "providers": providers,
+            "content_guard": content_guard,
             "background": background,
+            "section_errors": section_errors,
         }
         metrics["alerts"] = cls._evaluate_alerts(metrics)
         if refresh_alerts and database["ok"]:
             cls.write_monitoring_alerts(db, metrics)
         return metrics
 
+    @staticmethod
+    def _safe_snapshot(
+        db: Session,
+        section_errors: dict[str, str],
+        section_name: str,
+        loader: Any,
+        fallback_factory: Any,
+    ) -> Any:
+        try:
+            return loader()
+        except Exception as exc:
+            db.rollback()
+            section_errors[section_name] = str(exc)
+            return fallback_factory()
+
     @classmethod
     def write_monitoring_alerts(cls, db: Session, metrics: dict[str, Any]) -> None:
         active_events = cls._build_monitoring_alert_events(metrics)
+        changed = cls.apply_monitoring_alert_actions(db, active_events, auto_commit=False)
         existing_items = list(
             db.scalars(
                 select(AlertEvent).where(
@@ -114,7 +193,6 @@ class SystemMetricsService:
         existing_by_key = {item.alert_key: item for item in existing_items}
         active_keys = set(active_events)
         now = datetime.utcnow()
-        changed = False
         for alert_key, payload in active_events.items():
             item = existing_by_key.get(alert_key)
             if item is None:
@@ -140,6 +218,113 @@ class SystemMetricsService:
             changed = True
         if changed:
             db.commit()
+
+    @classmethod
+    def apply_monitoring_actions(cls, db: Session, metrics: dict[str, Any]) -> bool:
+        active_events = cls._build_monitoring_alert_events(metrics)
+        return cls.apply_monitoring_alert_actions(db, active_events)
+
+    @classmethod
+    def apply_monitoring_alert_actions(
+        cls,
+        db: Session,
+        active_events: dict[str, dict[str, Any]],
+        *,
+        auto_commit: bool = True,
+    ) -> bool:
+        changed = cls._apply_monitoring_actions(db, active_events, now=datetime.utcnow())
+        if changed and auto_commit:
+            db.commit()
+        return changed
+
+    @classmethod
+    def _apply_monitoring_actions(
+        cls,
+        db: Session,
+        active_events: dict[str, dict[str, Any]],
+        *,
+        now: datetime,
+    ) -> bool:
+        changed = False
+        for alert_key, event in active_events.items():
+            if not alert_key.startswith(cls.CONTENT_GUARD_HIGH_RISK_PROVIDER_ALERT_PREFIX):
+                continue
+            changed = cls._auto_isolate_high_risk_content_provider(db, event, now=now) or changed
+        if changed:
+            ProviderService.invalidate_provider_runtime_cache()
+        return changed
+
+    @classmethod
+    def _auto_isolate_high_risk_content_provider(
+        cls,
+        db: Session,
+        event: dict[str, Any],
+        *,
+        now: datetime,
+    ) -> bool:
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            return False
+        provider_id = payload.get("provider_id")
+        try:
+            provider_id = int(provider_id)
+        except (TypeError, ValueError):
+            return False
+        high_risk_count = int(payload.get("high_risk_count") or 0)
+        if high_risk_count < cls.CONTENT_GUARD_HIGH_RISK_PROVIDER_THRESHOLD:
+            return False
+        provider = db.get(Provider, provider_id)
+        if provider is None:
+            return False
+
+        changed = False
+        is_new_isolation = (
+            provider.trust_level != "blocked"
+            or provider.content_integrity_status != "blocked"
+            or provider.circuit_state != "open"
+        )
+        updates = {
+            "trust_level": "blocked",
+            "content_integrity_status": "blocked",
+            "circuit_state": "open",
+            "low_trust_route_enabled": False,
+        }
+        for field, value in updates.items():
+            if getattr(provider, field) == value:
+                continue
+            setattr(provider, field, value)
+            changed = True
+
+        new_score = max(0, min(int(provider.content_integrity_score or 80), 20))
+        if provider.content_integrity_score != new_score:
+            provider.content_integrity_score = new_score
+            changed = True
+        if is_new_isolation and provider.last_content_violation_at != now:
+            provider.last_content_violation_at = now
+            changed = True
+
+        for provider_model in provider.provider_models:
+            model_updates = {
+                "content_integrity_status": "blocked",
+                "circuit_state": "open",
+            }
+            for field, value in model_updates.items():
+                if getattr(provider_model, field) == value:
+                    continue
+                setattr(provider_model, field, value)
+                changed = True
+            if is_new_isolation and provider_model.circuit_opened_at != now:
+                provider_model.circuit_opened_at = now
+                changed = True
+
+        payload["auto_isolated"] = True
+        payload["isolation_status"] = "blocked"
+        payload["isolated_at"] = now.isoformat()
+        event["message"] = (
+            f"最近 {payload.get('window_minutes', cls.CONTENT_GUARD_HIGH_RISK_PROVIDER_WINDOW_MINUTES)} 分钟"
+            f"内容高风险命中 {high_risk_count} 次，已自动隔离并从路由候选排除"
+        )
+        return changed
 
     @staticmethod
     def _database_snapshot(db: Session) -> dict[str, Any]:
@@ -197,6 +382,7 @@ class SystemMetricsService:
                 "active_streams": None,
                 "token_finalize_backlog": None,
                 "request_log_queue": {"queued": None, "processing": None, "total": None},
+                "logging_event_queue": {"queued": None, "processing": None, "total": None},
                 "error": "REDIS_URL is empty",
             }
         started = time.perf_counter()
@@ -210,6 +396,7 @@ class SystemMetricsService:
                     "concurrency:global:streams",
                 ])
                 request_log_queue = cls._request_log_queue_snapshot(client)
+                logging_event_queue = cls._logging_event_queue_snapshot(client)
                 return {
                     "ok": True,
                     "status": "ok",
@@ -218,6 +405,7 @@ class SystemMetricsService:
                     "active_streams": int(active_values[1] or 0),
                     "token_finalize_backlog": cls._count_redis_keys(client, "token_usage:finalize:dedupe:*", limit=1001),
                     "request_log_queue": request_log_queue,
+                    "logging_event_queue": logging_event_queue,
                     "scheduler_jobs": cls._scheduler_job_states(client),
                     "error": None,
                 }
@@ -233,6 +421,7 @@ class SystemMetricsService:
                 "active_streams": None,
                 "token_finalize_backlog": None,
                 "request_log_queue": {"queued": None, "processing": None, "total": None},
+                "logging_event_queue": {"queued": None, "processing": None, "total": None},
                 "error": str(exc),
             }
 
@@ -241,6 +430,15 @@ class SystemMetricsService:
         try:
             queued = int(client.llen(RequestLogQueueService.QUEUE_KEY) or 0)
             processing = int(client.llen(RequestLogQueueService.PROCESSING_KEY) or 0)
+            return {"queued": queued, "processing": processing, "total": queued + processing}
+        except Exception:
+            return {"queued": None, "processing": None, "total": None}
+
+    @staticmethod
+    def _logging_event_queue_snapshot(client: Redis) -> dict[str, int | None]:
+        try:
+            queued = int(client.llen(LoggingQueue.QUEUE_KEY) or 0)
+            processing = int(client.llen(LoggingQueue.PROCESSING_KEY) or 0)
             return {"queued": queued, "processing": processing, "total": queued + processing}
         except Exception:
             return {"queued": None, "processing": None, "total": None}
@@ -296,15 +494,17 @@ class SystemMetricsService:
             "note": "RuntimeStateService reflects only the current worker; Redis counters are the global concurrency source.",
         }
 
-    @staticmethod
-    def _host_snapshot() -> dict[str, Any]:
-        project_root = os.getcwd()
-        disk_usage = shutil.disk_usage(project_root)
-        project_disk = SystemMetricsService._project_disk_snapshot(project_root, disk_usage.total)
+    @classmethod
+    def _host_snapshot(cls) -> dict[str, Any]:
+        project_root = cls._project_root()
         now = time.time()
         snapshot: dict[str, Any] = {
             "available": psutil is not None,
             "provider": "psutil" if psutil is not None else "stdlib",
+            "scope": {
+                "host": "宿主机或当前运行环境",
+                "project_process": "当前项目相关进程组",
+            },
             "platform": platform.platform(),
             "python_version": platform.python_version(),
             "cpu_count": os.cpu_count(),
@@ -316,14 +516,6 @@ class SystemMetricsService:
                 "used_bytes": None,
                 "percent": None,
             },
-            "disk": {
-                "path": project_root,
-                "total_bytes": disk_usage.total,
-                "used_bytes": disk_usage.used,
-                "free_bytes": disk_usage.free,
-                "percent": round((disk_usage.used / disk_usage.total) * 100, 2) if disk_usage.total else None,
-            },
-            "project_disk": project_disk,
             "process": {
                 "pid": os.getpid(),
                 "cpu_percent": None,
@@ -336,6 +528,7 @@ class SystemMetricsService:
                 "started_at": datetime.utcfromtimestamp(PROCESS_STARTED_AT).isoformat(),
                 "uptime_seconds": round(now - PROCESS_STARTED_AT, 2),
             },
+            "project_process": cls._empty_project_process_snapshot(project_root, now),
             "error": None,
         }
         if psutil is None:
@@ -346,14 +539,8 @@ class SystemMetricsService:
             process = psutil.Process(os.getpid())
             with process.oneshot():
                 process_memory = process.memory_info()
-                try:
-                    open_file_count = len(process.open_files())
-                except Exception:
-                    open_file_count = None
-                try:
-                    connection_count = len(process.net_connections())
-                except Exception:
-                    connection_count = None
+                open_file_count = None
+                connection_count = None
                 create_time = process.create_time()
                 snapshot["process"].update(
                     {
@@ -368,6 +555,11 @@ class SystemMetricsService:
                         "uptime_seconds": round(now - create_time, 2),
                     }
                 )
+            snapshot["project_process"] = cls._project_process_snapshot(
+                project_root,
+                memory_total_bytes=memory.total,
+                now=now,
+            )
             snapshot.update(
                 {
                     "cpu_percent": round(psutil.cpu_percent(interval=None), 2),
@@ -385,48 +577,219 @@ class SystemMetricsService:
             snapshot["error"] = str(exc)
             return snapshot
 
-    @classmethod
-    def _project_disk_snapshot(cls, project_root: str, disk_total_bytes: int) -> dict[str, Any]:
-        now = time.time()
-        cached_path = cls._project_disk_cache.get("path")
-        cached_size = cls._project_disk_cache.get("size_bytes")
-        checked_at = float(cls._project_disk_cache.get("checked_at") or 0)
-        if cached_path == project_root and cached_size is not None and now - checked_at < cls.PROJECT_DISK_CACHE_SECONDS:
-            size_bytes = int(cached_size)
-        else:
-            size_bytes = cls._directory_size_bytes(project_root)
-            cls._project_disk_cache = {
-                "path": project_root,
-                "size_bytes": size_bytes,
-                "checked_at": now,
-            }
+    @staticmethod
+    def _project_root() -> str:
+        return str(Path(__file__).resolve().parents[2])
+
+    @staticmethod
+    def _empty_project_process_snapshot(project_root: str, now: float) -> dict[str, Any]:
         return {
             "path": project_root,
-            "used_bytes": size_bytes,
-            "percent": round((size_bytes / disk_total_bytes) * 100, 2) if disk_total_bytes else None,
-            "scope": "project_directory",
-            "cached_seconds": cls.PROJECT_DISK_CACHE_SECONDS,
+            "scope": "project_process_group",
+            "available": False,
+            "process_count": 0,
+            "pids": [],
+            "names": [],
+            "cpu_percent": None,
+            "cpu_percent_of_one_core": None,
+            "cpu_sample_ready": False,
+            "memory_rss_bytes": None,
+            "memory_vms_bytes": None,
+            "memory_percent": None,
+            "thread_count": None,
+            "oldest_started_at": None,
+            "uptime_seconds": None,
+            "cache_seconds": SystemMetricsService.PROJECT_PROCESS_CACHE_SECONDS,
+            "cache_age_seconds": 0.0,
+            "checked_at": datetime.utcfromtimestamp(now).isoformat(),
         }
 
     @classmethod
-    def _directory_size_bytes(cls, directory_path: str) -> int:
-        total = 0
-        try:
-            with os.scandir(directory_path) as entries:
-                for entry in entries:
-                    try:
-                        if entry.is_symlink():
-                            continue
-                        if entry.is_dir(follow_symlinks=False):
-                            total += cls._directory_size_bytes(entry.path)
-                        elif entry.is_file(follow_symlinks=False):
-                            total += entry.stat(follow_symlinks=False).st_size
-                    except OSError:
-                        continue
-        except OSError:
-            return 0
-        return total
+    def _project_process_snapshot(
+        cls,
+        project_root: str,
+        *,
+        memory_total_bytes: int,
+        now: float,
+    ) -> dict[str, Any]:
+        cached_path = cls._project_process_cache.get("path")
+        cached_snapshot = cls._project_process_cache.get("snapshot")
+        checked_at = float(cls._project_process_cache.get("checked_at") or 0)
+        if (
+            cached_path == project_root
+            and isinstance(cached_snapshot, dict)
+            and now - checked_at < cls.PROJECT_PROCESS_CACHE_SECONDS
+        ):
+            snapshot = dict(cached_snapshot)
+            snapshot["cache_age_seconds"] = round(now - checked_at, 2)
+            return snapshot
 
+        previous_cpu_times = dict(cls._project_process_cache.get("cpu_times") or {})
+        previous_checked_at = float(cls._project_process_cache.get("cpu_checked_at") or 0)
+        cpu_times: dict[int, float] = {}
+        process_items: list[dict[str, Any]] = []
+        total_rss = 0
+        total_vms = 0
+        total_threads = 0
+        oldest_create_time: float | None = None
+
+        if psutil is None:
+            return cls._empty_project_process_snapshot(project_root, now)
+
+        root_path = Path(project_root).resolve()
+        current_pid = os.getpid()
+        for proc in cls._related_project_processes(root_path, current_pid):
+            try:
+                if not cls._is_project_process(proc, root_path, current_pid):
+                    continue
+                with proc.oneshot():
+                    memory_info = proc.memory_info()
+                    proc_cpu_times = proc.cpu_times()
+                    create_time = proc.create_time()
+                    thread_count = proc.num_threads()
+                    name = proc.name()
+                pid = int(proc.pid)
+                proc_cpu_total = float(proc_cpu_times.user + proc_cpu_times.system)
+                cpu_times[pid] = proc_cpu_total
+                total_rss += int(memory_info.rss)
+                total_vms += int(memory_info.vms)
+                total_threads += int(thread_count)
+                oldest_create_time = create_time if oldest_create_time is None else min(oldest_create_time, create_time)
+                process_items.append(
+                    {
+                        "pid": pid,
+                        "name": name,
+                        "memory_rss_bytes": int(memory_info.rss),
+                        "thread_count": int(thread_count),
+                        "started_at": datetime.utcfromtimestamp(create_time).isoformat(),
+                    }
+                )
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+                continue
+
+        elapsed = now - previous_checked_at if previous_checked_at > 0 else 0
+        cpu_delta = 0.0
+        if elapsed > 0:
+            for pid, current_cpu_time in cpu_times.items():
+                previous_cpu_time = previous_cpu_times.get(pid)
+                if previous_cpu_time is None:
+                    continue
+                cpu_delta += max(0.0, current_cpu_time - float(previous_cpu_time))
+        cpu_count = os.cpu_count() or 1
+        cpu_sample_ready = elapsed > 0 and bool(previous_cpu_times)
+        cpu_percent = round((cpu_delta / elapsed / cpu_count) * 100, 2) if cpu_sample_ready else None
+        cpu_percent_of_one_core = round((cpu_delta / elapsed) * 100, 2) if cpu_sample_ready else None
+        process_items.sort(key=lambda item: int(item["pid"]))
+        names = sorted({str(item["name"]) for item in process_items if item.get("name")})
+        snapshot = {
+            "path": project_root,
+            "scope": "project_process_group",
+            "available": True,
+            "process_count": len(process_items),
+            "pids": [item["pid"] for item in process_items],
+            "names": names,
+            "cpu_percent": cpu_percent,
+            "cpu_percent_of_one_core": cpu_percent_of_one_core,
+            "cpu_sample_ready": cpu_sample_ready,
+            "memory_rss_bytes": total_rss,
+            "memory_vms_bytes": total_vms,
+            "memory_percent": round((total_rss / memory_total_bytes) * 100, 2) if memory_total_bytes else None,
+            "thread_count": total_threads,
+            "oldest_started_at": datetime.utcfromtimestamp(oldest_create_time).isoformat() if oldest_create_time else None,
+            "uptime_seconds": round(now - oldest_create_time, 2) if oldest_create_time else None,
+            "processes": process_items[:50],
+            "cache_seconds": cls.PROJECT_PROCESS_CACHE_SECONDS,
+            "cache_age_seconds": 0.0,
+            "checked_at": datetime.utcfromtimestamp(now).isoformat(),
+        }
+        cls._project_process_cache = {
+            "path": project_root,
+            "snapshot": snapshot,
+            "checked_at": now,
+            "cpu_times": cpu_times,
+            "cpu_checked_at": now,
+        }
+        return snapshot
+
+    @classmethod
+    def _related_project_processes(cls, root_path: Path, current_pid: int) -> list[Any]:
+        try:
+            current = psutil.Process(current_pid)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+            return []
+        related: dict[int, Any] = {current_pid: current}
+        topmost = current
+        try:
+            for parent in current.parents():
+                if not cls._is_project_process(parent, root_path, current_pid):
+                    break
+                related[int(parent.pid)] = parent
+                topmost = parent
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+            pass
+        try:
+            candidates = [topmost, *topmost.children(recursive=True)]
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+            candidates = [current]
+        for candidate in candidates:
+            try:
+                if cls._is_project_process(candidate, root_path, current_pid):
+                    related[int(candidate.pid)] = candidate
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+                continue
+        for candidate in psutil.process_iter(["pid", "name"]):
+            try:
+                pid = int(candidate.pid)
+                if pid in related:
+                    continue
+                name = str((getattr(candidate, "info", {}) or {}).get("name") or "").lower()
+                if not any(token in name for token in ("python", "gunicorn", "uvicorn")):
+                    continue
+                if cls._is_project_process(candidate, root_path, current_pid):
+                    related[pid] = candidate
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+                continue
+        return list(related.values())
+
+    @classmethod
+    def _is_project_process(cls, proc: Any, root_path: Path, current_pid: int) -> bool:
+        if int(proc.pid) == current_pid:
+            return True
+        info = getattr(proc, "info", {}) or {}
+        try:
+            cwd = info.get("cwd") if "cwd" in info else proc.cwd()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+            cwd = None
+        if cwd and cls._path_is_inside(cwd, root_path):
+            return True
+        try:
+            cmdline = info.get("cmdline") if "cmdline" in info else proc.cmdline()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+            cmdline = []
+        cmdline = cmdline or []
+        root_text = os.path.normcase(str(root_path))
+        for arg in cmdline:
+            if not arg:
+                continue
+            normalized_arg = os.path.normcase(str(arg).strip().strip('"'))
+            if root_text in normalized_arg or cls._path_is_inside(normalized_arg, root_path):
+                return True
+        return False
+
+    @staticmethod
+    def _path_is_inside(candidate: str, root_path: Path) -> bool:
+        try:
+            candidate_path = Path(candidate)
+            if not candidate_path.is_absolute():
+                return False
+            candidate_path = candidate_path.resolve()
+        except (OSError, RuntimeError, ValueError):
+            return False
+        try:
+            candidate_path.relative_to(root_path)
+            return True
+        except ValueError:
+            return False
     @classmethod
     def _traffic_snapshot(cls, db: Session, *, window_minutes: int) -> dict[str, Any]:
         since = datetime.utcnow() - timedelta(minutes=window_minutes)
@@ -481,6 +844,145 @@ class SystemMetricsService:
             else None,
             "stream_requests": int(row.stream_requests or 0),
             "image_requests": int(row.image_requests or 0),
+        }
+
+    @classmethod
+    def _content_guard_snapshot(cls, db: Session, *, window_minutes: int) -> dict[str, Any]:
+        setting = SettingService.get_or_create(db)
+        if not bool(getattr(setting, "content_guard_enabled", True)):
+            return cls._empty_content_guard(enabled=False)
+        since = datetime.utcnow() - timedelta(minutes=window_minutes)
+        high_risk_since = datetime.utcnow() - timedelta(minutes=cls.CONTENT_GUARD_HIGH_RISK_PROVIDER_WINDOW_MINUTES)
+        row = db.execute(
+            select(
+                func.count(RequestLog.id).label("total_requests"),
+                func.sum(case((RequestLog.content_guard_result == "block", 1), else_=0)).label("block_count"),
+                func.sum(case((RequestLog.content_guard_result == "review", 1), else_=0)).label("review_count"),
+                func.sum(case((RequestLog.content_guard_risk_level == "high", 1), else_=0)).label("high_risk_count"),
+            ).where(
+                RequestLog.created_at >= since,
+                RequestLog.log_type.in_(cls.TRAFFIC_LOG_TYPES),
+            )
+        ).one()
+        total_requests = int(row.total_requests or 0)
+        guard_latencies = list(
+            db.scalars(
+                select(RequestLog.content_guard_latency_ms)
+                .where(
+                    RequestLog.created_at >= since,
+                    RequestLog.log_type.in_(cls.TRAFFIC_LOG_TYPES),
+                    RequestLog.content_guard_latency_ms.is_not(None),
+                )
+                .order_by(RequestLog.created_at.desc(), RequestLog.id.desc())
+                .limit(cls.METRIC_PERCENTILE_SAMPLE_LIMIT)
+            )
+        )
+        low_trust_traffic = int(
+            db.scalar(
+                select(func.count(RequestLog.id))
+                .select_from(RequestLog)
+                .join(Provider, RequestLog.provider_id == Provider.id)
+                .where(
+                    RequestLog.created_at >= since,
+                    RequestLog.log_type.in_(cls.TRAFFIC_LOG_TYPES),
+                    Provider.trust_level == "low",
+                )
+            )
+            or 0
+        )
+        blocked_provider_count = int(
+            db.scalar(
+                select(func.count(Provider.id)).where(
+                    or_(
+                        Provider.trust_level == "blocked",
+                        Provider.content_integrity_status == "blocked",
+                    )
+                )
+            )
+            or 0
+        )
+        provider_rows = db.execute(
+            select(
+                RequestLog.provider_id,
+                RequestLog.provider_name,
+                func.count(RequestLog.id).label("total_requests"),
+                func.sum(
+                    case(
+                        (
+                            or_(
+                                RequestLog.content_guard_result == "block",
+                                RequestLog.content_guard_risk_level == "high",
+                            ),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ).label("high_risk_count"),
+                func.sum(case((RequestLog.content_guard_result == "review", 1), else_=0)).label("review_count"),
+            )
+            .where(
+                RequestLog.created_at >= since,
+                RequestLog.log_type.in_(cls.TRAFFIC_LOG_TYPES),
+                RequestLog.provider_id.is_not(None),
+            )
+            .group_by(RequestLog.provider_id, RequestLog.provider_name)
+        )
+        provider_content_violation_rate = []
+        for item in provider_rows:
+            total = int(item.total_requests or 0)
+            high_risk = int(item.high_risk_count or 0)
+            review = int(item.review_count or 0)
+            if high_risk <= 0 and review <= 0:
+                continue
+            provider_content_violation_rate.append(
+                {
+                    "provider_id": item.provider_id,
+                    "provider_name": item.provider_name,
+                    "total_requests": total,
+                    "high_risk_count": high_risk,
+                    "review_count": review,
+                    "violation_rate": round(((high_risk + review) / total) * 100, 2) if total else 0.0,
+                }
+            )
+        high_risk_rows = db.execute(
+            select(
+                RequestLog.provider_id,
+                RequestLog.provider_name,
+                func.count(RequestLog.id).label("high_risk_count"),
+            )
+            .where(
+                RequestLog.created_at >= high_risk_since,
+                RequestLog.log_type.in_(cls.TRAFFIC_LOG_TYPES),
+                RequestLog.provider_id.is_not(None),
+                or_(
+                    RequestLog.content_guard_result == "block",
+                    RequestLog.content_guard_risk_level == "high",
+                ),
+            )
+            .group_by(RequestLog.provider_id, RequestLog.provider_name)
+        )
+        high_risk_provider_counts = [
+            {
+                "provider_id": item.provider_id,
+                "provider_name": item.provider_name,
+                "high_risk_count": int(item.high_risk_count or 0),
+                "window_minutes": cls.CONTENT_GUARD_HIGH_RISK_PROVIDER_WINDOW_MINUTES,
+            }
+            for item in high_risk_rows
+        ]
+        return {
+            "enabled": True,
+            "block_count": int(row.block_count or 0),
+            "review_count": int(row.review_count or 0),
+            "high_risk_count": int(row.high_risk_count or 0),
+            "blocked_provider_count": blocked_provider_count,
+            "low_trust_traffic_count": low_trust_traffic,
+            "low_trust_traffic_ratio": round((low_trust_traffic / total_requests) * 100, 2) if total_requests else 0.0,
+            "latency_p50_ms": cls._percentile(guard_latencies, 50),
+            "latency_p95_ms": cls._percentile(guard_latencies, 95),
+            "latency_p99_ms": cls._percentile(guard_latencies, 99),
+            "provider_content_violation_rate": provider_content_violation_rate,
+            "high_risk_provider_counts": high_risk_provider_counts,
         }
 
     @classmethod
@@ -588,7 +1090,29 @@ class SystemMetricsService:
             "pending_finalize_logs": pending_finalize,
             "billing_failed_logs": billing_failed,
             "token_failed_logs": token_failed,
+            "recent_failed_jobs": cls._recent_failed_background_jobs(db),
         }
+
+    @staticmethod
+    def _recent_failed_background_jobs(db: Session) -> list[dict[str, Any]]:
+        rows = db.scalars(
+            select(BackgroundJobEvent)
+            .where(BackgroundJobEvent.status.in_(("failed", "cancelled")))
+            .order_by(BackgroundJobEvent.created_at.desc())
+            .limit(10)
+        ).all()
+        return [
+            {
+                "job_run_id": item.job_run_id,
+                "job_name": item.job_name,
+                "status": item.status,
+                "lock_status": item.lock_status,
+                "duration_ms": item.duration_ms,
+                "error": item.error,
+                "created_at": item.created_at.isoformat() if item.created_at else None,
+            }
+            for item in rows
+        ]
 
     @staticmethod
     def _empty_traffic() -> dict[str, Any]:
@@ -619,6 +1143,24 @@ class SystemMetricsService:
             "pending_finalize_logs": None,
             "billing_failed_logs": None,
             "token_failed_logs": None,
+            "recent_failed_jobs": [],
+        }
+
+    @staticmethod
+    def _empty_content_guard(*, enabled: bool = True) -> dict[str, Any]:
+        return {
+            "enabled": enabled,
+            "block_count": 0,
+            "review_count": 0,
+            "high_risk_count": 0,
+            "blocked_provider_count": 0,
+            "low_trust_traffic_count": 0,
+            "low_trust_traffic_ratio": 0.0,
+            "latency_p50_ms": None,
+            "latency_p95_ms": None,
+            "latency_p99_ms": None,
+            "provider_content_violation_rate": [],
+            "high_risk_provider_counts": [],
         }
 
     @classmethod
@@ -648,6 +1190,7 @@ class SystemMetricsService:
         redis_snapshot = metrics.get("redis", {})
         database = metrics.get("database", {})
         traffic = metrics.get("traffic", {})
+        content_guard = metrics.get("content_guard", {})
         background = metrics.get("background", {})
         active_requests = redis_snapshot.get("active_requests")
         active_streams = redis_snapshot.get("active_streams")
@@ -730,6 +1273,20 @@ class SystemMetricsService:
                 f"最近 {metrics.get('window_minutes')} 分钟失败率 {provider['failure_rate']}%",
                 provider,
             )
+        if content_guard.get("enabled", True):
+            for provider in content_guard.get("high_risk_provider_counts", []):
+                if int(provider.get("high_risk_count") or 0) < cls.CONTENT_GUARD_HIGH_RISK_PROVIDER_THRESHOLD:
+                    continue
+                provider_id = provider.get("provider_id")
+                key = f"monitoring:content_guard_high_risk_provider:{provider_id}"
+                events[key] = cls._event(
+                    key,
+                    "provider",
+                    "danger",
+                    f"提供商内容高风险命中突增 · {provider.get('provider_name') or provider_id}",
+                    f"最近 {provider.get('window_minutes', cls.CONTENT_GUARD_HIGH_RISK_PROVIDER_WINDOW_MINUTES)} 分钟内容高风险命中 {provider.get('high_risk_count')} 次，已自动隔离并从路由候选排除",
+                    provider,
+                )
         pending_finalize = background.get("pending_finalize_logs")
         if pending_finalize is not None and pending_finalize >= cls.BACKGROUND_BACKLOG_WARNING_THRESHOLD:
             events["monitoring:background_backlog"] = cls._event(

@@ -1,6 +1,6 @@
 -- 迁移说明：为 provider_models 表添加 protocol_type 字段
 -- 创建时间：2026-06-06 18:05:38
--- 变更原因：协议字段从中转站级移到模型挂载矩阵级，支持同一中转站下不同模型配置不同端点协议
+-- 变更原因：协议字段从提供商级移到模型挂载矩阵级，支持同一提供商下不同模型配置不同端点协议
 
 -- 添加 protocol_type 字段，默认值为 'responses'
 ALTER TABLE provider_models

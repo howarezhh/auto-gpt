@@ -15,6 +15,26 @@ from app.models.responses_chat_adapter_session import ResponsesChatAdapterSessio
 from app.models.uploaded_asset import UploadedAsset
 from app.models.user_account import UserAccount
 from app.models.user_account_billing_record import UserAccountBillingRecord
+from app.models.logging_events import (
+    AssetEvent,
+    BackgroundJobEvent,
+    BillingProcessEvent,
+    ExceptionEvent,
+    HealthCheckRun,
+    HealthProbeEvent,
+    RequestAuthEvent,
+    RequestBillingEvent,
+    RequestContentGuardEvent,
+    RequestErrorResponseEvent,
+    RequestModelPermissionEvent,
+    RequestProviderAttemptEvent,
+    RequestRouteDecisionEvent,
+    RequestStreamEvent,
+    RequestUpstreamResponseEvent,
+    RequestValidationEvent,
+    TokenFinalizeEvent,
+    UserOperationAuditLog,
+)
 
 __all__ = [
     "AlertEvent",
@@ -34,5 +54,23 @@ __all__ = [
     "UploadedAsset",
     "UserAccount",
     "UserAccountBillingRecord",
+    "AssetEvent",
+    "BackgroundJobEvent",
+    "BillingProcessEvent",
+    "ExceptionEvent",
+    "HealthCheckRun",
+    "HealthProbeEvent",
+    "RequestAuthEvent",
+    "RequestBillingEvent",
+    "RequestContentGuardEvent",
+    "RequestErrorResponseEvent",
+    "RequestModelPermissionEvent",
+    "RequestProviderAttemptEvent",
+    "RequestRouteDecisionEvent",
+    "RequestStreamEvent",
+    "RequestUpstreamResponseEvent",
+    "RequestValidationEvent",
+    "TokenFinalizeEvent",
+    "UserOperationAuditLog",
 ]
 

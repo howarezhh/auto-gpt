@@ -2,6 +2,7 @@ import asyncio
 import signal
 
 from app.config import get_settings
+from app.logging.queue import LoggingQueue
 from app.services.redis_service import RedisService
 from app.services.request_log_queue_service import RequestLogQueueService
 from app.services.token_usage_service import TokenUsageService
@@ -19,6 +20,7 @@ async def main() -> None:
             pass
 
     await RedisService.init()
+    await LoggingQueue.start_background_workers()
     await RequestLogQueueService.start_background_workers()
     await TokenUsageService.start_background_workers()
     try:
@@ -26,6 +28,7 @@ async def main() -> None:
     finally:
         await RequestLogQueueService.stop_background_workers()
         await TokenUsageService.stop_background_workers()
+        await LoggingQueue.stop_background_workers()
         await RedisService.aclose()
 
 

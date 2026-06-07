@@ -42,7 +42,7 @@ class RouteCandidate:
 
 @dataclass(slots=True)
 class RecentSessionRoute:
-    """记录同一会话最近一次成功使用的模型与中转站。"""
+    """记录同一会话最近一次成功使用的模型与提供商。"""
 
     provider_id: int | None
     provider_model_id: int | None
@@ -65,6 +65,9 @@ class RoutePolicyContext:
     success_rate_bias: int = 1
     cost_bias: int = 0
     route_exhausted_retry_infinite_enabled: bool = False
+    allow_low_trust_providers: bool = False
+    require_trusted_provider: bool = False
+    content_guard_required: bool = True
 
     def with_forced_provider_id(self, forced_provider_id: int | None) -> "RoutePolicyContext":
         """返回一个仅修改强制 provider 配置的新上下文对象。"""
@@ -81,6 +84,9 @@ class RoutePolicyContext:
             success_rate_bias=self.success_rate_bias,
             cost_bias=self.cost_bias,
             route_exhausted_retry_infinite_enabled=self.route_exhausted_retry_infinite_enabled,
+            allow_low_trust_providers=self.allow_low_trust_providers,
+            require_trusted_provider=self.require_trusted_provider,
+            content_guard_required=self.content_guard_required,
         )
 
 
@@ -89,6 +95,7 @@ class RouterService:
 
     RECENT_WINDOW_MINUTES = 5
     ROUTE_DIAGNOSTIC_SAMPLE_LIMIT = 8
+    MIN_CONTENT_INTEGRITY_SCORE = 20
     CAPABILITY_HEALTH_CACHE_PREFIX = "health-capability-probe"
     _candidate_cache_locks: dict[str, Lock] = {}
     _candidate_cache_locks_guard = Lock()
@@ -258,10 +265,18 @@ class RouterService:
         for provider in providers:
             if not provider.enabled or provider.circuit_state == "open" or provider.maintenance_mode_enabled:
                 continue
+            if RouterService._provider_blocked_by_content_policy(provider, route_context=route_context):
+                continue
             if allowed_provider_ids is not None and provider.id not in allowed_provider_ids:
+                continue
+            if require_chat_completions and not ProviderService.provider_supports_chat_completions(provider):
+                continue
+            if require_responses and not ProviderService.provider_supports_responses(provider):
                 continue
             for provider_model in provider.provider_models:
                 if not provider_model.enabled:
+                    continue
+                if RouterService._provider_model_blocked_by_content_policy(provider_model):
                     continue
                 if provider_model.model_name not in enabled_model_names:
                     continue
@@ -607,8 +622,18 @@ class RouterService:
             if provider.maintenance_mode_enabled:
                 RouterService._record_diagnostic_reason(diagnostics, "provider_maintenance_mode", provider=provider)
                 continue
+            content_policy_reason = RouterService._content_policy_diagnostic_reason(provider, route_context=route_context)
+            if content_policy_reason:
+                RouterService._record_diagnostic_reason(diagnostics, content_policy_reason, provider=provider)
+                continue
             if allowed_provider_ids is not None and provider.id not in allowed_provider_ids:
                 RouterService._record_diagnostic_reason(diagnostics, "provider_not_authorized", provider=provider)
+                continue
+            if require_chat_completions and not ProviderService.provider_supports_chat_completions(provider):
+                RouterService._record_diagnostic_reason(diagnostics, "provider_chat_protocol_not_supported", provider=provider)
+                continue
+            if require_responses and not ProviderService.provider_supports_responses(provider):
+                RouterService._record_diagnostic_reason(diagnostics, "provider_responses_protocol_not_supported", provider=provider)
                 continue
             for provider_model in provider.provider_models:
                 diagnostics["mounted_model_total"] += 1
@@ -616,6 +641,9 @@ class RouterService:
                     diagnostics["matching_model_mount_count"] += 1
                 if not provider_model.enabled:
                     RouterService._record_diagnostic_reason(diagnostics, "model_disabled", provider=provider, provider_model=provider_model)
+                    continue
+                if RouterService._provider_model_blocked_by_content_policy(provider_model):
+                    RouterService._record_diagnostic_reason(diagnostics, "model_content_integrity_blocked", provider=provider, provider_model=provider_model)
                     continue
                 if provider_model.model_name not in enabled_model_names:
                     RouterService._record_diagnostic_reason(diagnostics, "model_globally_disabled", provider=provider, provider_model=provider_model)
@@ -991,15 +1019,15 @@ class RouterService:
     @staticmethod
     def _diagnostic_reason_label(reason_code: str) -> str:
         return {
-            "forced_provider_not_found": "指定中转站不存在",
-            "provider_without_models": "中转站未挂载模型",
-            "provider_disabled": "中转站已禁用",
-            "provider_circuit_open": "中转站已熔断",
-            "provider_maintenance_mode": "中转站维护中",
-            "provider_not_authorized": "当前密钥未授权该中转站",
-            "provider_chat_protocol_not_supported": "中转站不支持 Chat Completions API",
-            "provider_responses_protocol_not_supported": "中转站不支持 Responses API",
-            "model_disabled": "中转站模型已禁用",
+            "forced_provider_not_found": "指定提供商不存在",
+            "provider_without_models": "提供商未挂载模型",
+            "provider_disabled": "提供商已禁用",
+            "provider_circuit_open": "提供商已熔断",
+            "provider_maintenance_mode": "提供商维护中",
+            "provider_not_authorized": "当前密钥未授权该提供商",
+            "provider_chat_protocol_not_supported": "提供商不支持 Chat Completions API",
+            "provider_responses_protocol_not_supported": "提供商不支持 Responses API",
+            "model_disabled": "提供商模型已禁用",
             "model_globally_disabled": "模型管理中已禁用",
             "model_name_mismatch": "模型名不匹配",
             "stream_not_supported": "模型不支持流式",
@@ -1016,8 +1044,14 @@ class RouterService:
             "model_circuit_open": "模型已熔断",
             "model_unhealthy": "模型健康状态异常",
             "capacity_snapshot_unavailable": "未获取到容量快照",
-            "provider_capacity_exceeded": "中转站容量已满",
-            "provider_failure_rate_limited": "中转站失败率超限",
+            "provider_capacity_exceeded": "提供商容量已满",
+            "provider_failure_rate_limited": "提供商失败率超限",
+            "provider_trust_blocked": "提供商信任等级已阻断",
+            "provider_content_integrity_blocked": "提供商内容完整性已隔离",
+            "provider_content_integrity_score_too_low": "提供商内容完整性评分过低",
+            "provider_low_trust_route_disabled": "低信任提供商未允许普通路由",
+            "provider_trusted_required": "当前策略要求可信及以上提供商",
+            "model_content_integrity_blocked": "模型内容完整性已隔离",
         }.get(reason_code, reason_code)
 
     @staticmethod
@@ -1065,6 +1099,9 @@ class RouterService:
                     str(route_context.latency_bias),
                     str(route_context.success_rate_bias),
                     str(route_context.cost_bias),
+                    "low-trust" if route_context.allow_low_trust_providers else "no-low-trust",
+                    "trusted" if route_context.require_trusted_provider else "any-trust",
+                    "guard" if route_context.content_guard_required else "guard-optional",
                 ]
             )
         return "|".join(parts)
@@ -1120,6 +1157,16 @@ class RouterService:
         region_bonus = 0.0
         if route_context and route_context.preferred_region_tags and provider.region_tag in set(route_context.preferred_region_tags):
             region_bonus = 20.0
+        integrity_score = max(0.0, min(100.0, float(getattr(provider, "content_integrity_score", 80) or 0)))
+        integrity_bonus = (integrity_score - 50.0) * 0.35
+        trust_bonus = {
+            "official": 18.0,
+            "trusted": 12.0,
+            "standard": 0.0,
+            "low": -35.0,
+            "blocked": -100.0,
+        }.get(str(getattr(provider, "trust_level", "standard") or "standard"), 0.0)
+        violation_penalty = min(35.0, float(getattr(provider, "content_violation_count", 0) or 0) * 5.0)
 
         return (
             health_score
@@ -1128,11 +1175,42 @@ class RouterService:
             + success_score
             + cost_score
             + region_bonus
+            + integrity_bonus
+            + trust_bonus
             - latency_penalty
             - ttfb_penalty
             - saturation_penalty
             - recent_error_penalty
+            - violation_penalty
         )
+
+    @staticmethod
+    def _provider_blocked_by_content_policy(provider: Provider, *, route_context: RoutePolicyContext | None) -> bool:
+        return RouterService._content_policy_diagnostic_reason(provider, route_context=route_context) is not None
+
+    @staticmethod
+    def _content_policy_diagnostic_reason(provider: Provider, *, route_context: RoutePolicyContext | None) -> str | None:
+        trust_level = str(getattr(provider, "trust_level", "standard") or "standard")
+        integrity_status = str(getattr(provider, "content_integrity_status", "unknown") or "unknown")
+        if trust_level == "blocked":
+            return "provider_trust_blocked"
+        if integrity_status == "blocked":
+            return "provider_content_integrity_blocked"
+        integrity_score = int(getattr(provider, "content_integrity_score", 80) or 0)
+        if integrity_score <= RouterService.MIN_CONTENT_INTEGRITY_SCORE:
+            return "provider_content_integrity_score_too_low"
+        if route_context and route_context.require_trusted_provider and trust_level not in {"official", "trusted"}:
+            return "provider_trusted_required"
+        if trust_level == "low":
+            if not bool(getattr(provider, "low_trust_route_enabled", False)):
+                return "provider_low_trust_route_disabled"
+            if not (route_context and route_context.allow_low_trust_providers):
+                return "provider_low_trust_route_disabled"
+        return None
+
+    @staticmethod
+    def _provider_model_blocked_by_content_policy(provider_model: ProviderModel) -> bool:
+        return str(getattr(provider_model, "content_integrity_status", "unknown") or "unknown") == "blocked"
 
     @staticmethod
     def _saturation_penalty(

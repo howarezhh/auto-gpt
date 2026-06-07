@@ -122,14 +122,43 @@
                             {% endif %}
                         </td>
                         <td>
-                            {% if item.detail_json %}
-                            <details>
+                            <details class="audit-detail-panel">
                                 <summary>查看</summary>
+                                <div class="alert-detail-card">
+                                    {% if item.entity_type == 'api_key' %}
+                                    <span><b>密钥</b>{{ item.entity_name or item.entity_id or '-' }}</span><span><b>重点</b>权限 / 额度 / 模型白名单</span>
+                                    {% elif item.entity_type == 'provider' %}
+                                    <span><b>渠道</b>{{ item.entity_name or item.entity_id or '-' }}</span><span><b>重点</b>Base URL / 协议 / 容量 / 凭据</span>
+                                    {% elif item.entity_type == 'provider_model' %}
+                                    <span><b>模型</b>{{ item.entity_name or item.entity_id or '-' }}</span><span><b>重点</b>协议 / 能力 / 健康检查</span>
+                                    {% elif item.entity_type == 'user' or item.entity_type == 'auth' %}
+                                    <span><b>账号</b>{{ item.entity_name or item.entity_id or '-' }}</span><span><b>重点</b>角色 / 状态 / 登录安全</span>
+                                    {% elif item.entity_type == 'benchmark' %}
+                                    <span><b>任务</b>{{ item.entity_id or '-' }}</span><span><b>重点</b>压测启动 / 停止 / 报告访问</span>
+                                    {% else %}
+                                    <span><b>对象</b>{{ item.entity_type }}</span><span><b>重点</b>配置变更</span>
+                                    {% endif %}
+                                    <span><b>风险</b>{{ item.risk_level or 'low' }}</span>
+                                </div>
+                                {% if item.changed_fields_json %}
+                                <div class="panel-kicker">字段变化</div>
+                                <pre class="code-block code-block-inline">{{ serialize_audit_detail(item.changed_fields_json) }}</pre>
+                                {% endif %}
+                                {% if item.before_json or item.after_json %}
+                                <div class="log-detail-card-grid">
+                                    {% if item.before_json %}
+                                    <article class="log-detail-card"><h4>变更前</h4><pre class="code-block code-block-inline">{{ serialize_audit_detail(item.before_json) }}</pre></article>
+                                    {% endif %}
+                                    {% if item.after_json %}
+                                    <article class="log-detail-card"><h4>变更后</h4><pre class="code-block code-block-inline">{{ serialize_audit_detail(item.after_json) }}</pre></article>
+                                    {% endif %}
+                                </div>
+                                {% endif %}
+                                {% if item.detail_json %}
+                                <div class="panel-kicker">安全详情</div>
                                 <pre class="code-block code-block-inline">{{ serialize_audit_detail(item.detail_json) }}</pre>
+                                {% endif %}
                             </details>
-                            {% else %}
-                            -
-                            {% endif %}
                         </td>
                     </tr>
                     {% endfor %}

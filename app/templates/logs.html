@@ -3,11 +3,20 @@
 <section class="page-heading">
     <div>
         <div class="eyebrow">日志中心</div>
-        <h2>日志中心</h2>
+        <h2>请求日志中心</h2>
     </div>
 </section>
 
-<section class="stats-grid">
+<nav class="logs-segmented-nav" aria-label="日志类型">
+    <button class="logs-segment active" type="button" data-logging-tab="request">请求日志</button>
+    <button class="logs-segment" type="button" data-logging-tab="exceptions">异常事件</button>
+    <button class="logs-segment" type="button" data-logging-tab="health-runs">健康检查日志</button>
+    <button class="logs-segment" type="button" data-logging-tab="billing-events">计费日志</button>
+    <button class="logs-segment" type="button" data-logging-tab="background-jobs">后台任务日志</button>
+    <button class="logs-segment" type="button" data-logging-tab="asset-events">素材日志</button>
+</nav>
+
+<section class="stats-grid" data-logging-panel="request">
     <article class="metric-card"><span>当前请求量</span><strong data-log-summary="total_requests">0</strong></article>
     <article class="metric-card"><span>成功请求</span><strong data-log-summary="success_requests">0</strong></article>
     <article class="metric-card metric-card-alert"><span>失败请求</span><strong data-log-summary="failed_requests">0</strong></article>
@@ -17,7 +26,7 @@
     <article class="metric-card"><span>总 Token</span><strong data-log-summary="total_tokens">0</strong></article>
 </section>
 
-<section class="panel-card section-shell">
+<section class="panel-card section-shell" data-logging-panel="request">
     <div class="section-subhead compact-section-subhead">
         <div>
             <div class="panel-kicker">日志列表</div>
@@ -49,9 +58,20 @@
                 </select>
             </label>
             <label>
-                <span>中转站 ID</span>
+                <span>提供商 ID</span>
                 <select class="field-input" id="logs-provider-id">
                     <option value="">全部</option>
+                </select>
+            </label>
+            <label>
+                <span>提供商信任等级</span>
+                <select class="field-input" id="logs-provider-trust-level">
+                    <option value="">全部</option>
+                    <option value="official">官方</option>
+                    <option value="trusted">可信</option>
+                    <option value="standard">标准</option>
+                    <option value="low">低信任</option>
+                    <option value="blocked">已阻断</option>
                 </select>
             </label>
             <label>
@@ -131,6 +151,24 @@
                 </select>
             </label>
             <label>
+                <span>内容检测结果</span>
+                <select class="field-input" id="logs-content-guard-result">
+                    <option value="">全部</option>
+                    <option value="pass">通过</option>
+                    <option value="review">需复核</option>
+                    <option value="block">已拦截</option>
+                </select>
+            </label>
+            <label>
+                <span>内容风险等级</span>
+                <select class="field-input" id="logs-content-guard-risk-level">
+                    <option value="">全部</option>
+                    <option value="low">低</option>
+                    <option value="medium">中</option>
+                    <option value="high">高</option>
+                </select>
+            </label>
+            <label>
                 <span>会话键</span>
                 <input class="field-input" id="logs-conversation-key" type="text" placeholder="例如 user-001 或 request_id">
             </label>
@@ -181,12 +219,57 @@
     </div>
 </section>
 
+<section class="panel-card section-shell hidden" data-logging-panel="typed">
+    <div class="section-subhead compact-section-subhead">
+        <div>
+            <div class="panel-kicker" id="typed-logs-kicker">类型化日志</div>
+            <h3 id="typed-logs-title">异常事件</h3>
+        </div>
+        <div class="data-workspace-actions">
+            <div class="table-muted" id="typed-logs-last-refresh" aria-live="polite">最近刷新：-</div>
+            <button class="btn btn-ghost interactive-btn" id="typed-logs-refresh-btn" type="button">刷新</button>
+        </div>
+    </div>
+    <div class="data-workspace-card">
+        <div class="filter-grid compact-filter-grid">
+            <label>
+                <span id="typed-logs-keyword-label">关键词</span>
+                <input class="field-input" id="typed-logs-keyword" type="text" placeholder="trace、对象、错误码或摘要">
+            </label>
+            <label id="typed-logs-page-size-field">
+                <span>每页数量</span>
+                <select class="field-input" id="typed-logs-page-size">
+                    <option value="20" selected>20</option>
+                    <option value="50">50</option>
+                    <option value="100">100</option>
+                </select>
+            </label>
+        </div>
+        <div class="table-shell typed-logs-table-shell">
+            <table class="data-table">
+                <thead>
+                    <tr id="typed-logs-table-head"></tr>
+                </thead>
+                <tbody id="typed-logs-table-body"></tbody>
+            </table>
+        </div>
+        <div class="table-toolbar logs-pagination-bar workspace-pagination-bar">
+            <div class="logs-page-meta" id="typed-logs-page-meta">第 1 页，共 1 页</div>
+            <div class="logs-page-actions">
+                <button class="btn btn-ghost interactive-btn" id="typed-logs-prev-page-btn" type="button">上一页</button>
+                <button class="btn btn-ghost interactive-btn" id="typed-logs-next-page-btn" type="button">下一页</button>
+            </div>
+        </div>
+    </div>
+</section>
+
 <div class="modal-shell hidden" id="log-trace-modal">
     <div class="modal-card modal-lg">
         <div class="modal-head">
             <h3>请求详情与 Trace</h3>
             <button class="icon-btn interactive-btn" id="log-trace-close" type="button">×</button>
         </div>
+        <div class="log-detail-card-grid" id="log-detail-cards"></div>
         <pre class="code-block" id="log-trace-content">暂无 Trace</pre>
     </div>
 </div>

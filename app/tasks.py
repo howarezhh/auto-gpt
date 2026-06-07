@@ -10,6 +10,7 @@ from app.database import SessionLocal
 from app.scheduler import scheduler
 from app.services.data_retention_service import DataRetentionService
 from app.services.health_service import HealthService
+from app.logging.adapters.background_job_adapter import BackgroundJobLogRecorder
 from app.services.redis_service import RedisService
 from app.services.responses_chat_adapter_service import ResponsesChatAdapterService
 from app.services.setting_service import SettingService
@@ -35,11 +36,29 @@ def distributed_job_lock(job_name: str, *, ttl_seconds: int) -> Callable:
             token = uuid4().hex
             lock_key = f"scheduler:lock:{job_name}"
             state_key = f"scheduler:job:{job_name}:state"
+            job_run_id = BackgroundJobLogRecorder.new_run_id()
+            started_at = datetime.utcnow()
             try:
                 client = RedisService.get_client()
                 acquired = await client.set(lock_key, token, nx=True, ex=ttl_seconds)
             except Exception as exc:
                 logger.warning("Skip scheduler job %s because Redis lock is unavailable: %s", job_name, exc)
+                db = SessionLocal()
+                try:
+                    BackgroundJobLogRecorder.record_job_event(
+                        db,
+                        job_run_id=job_run_id,
+                        job_name=job_name,
+                        lock_key=lock_key,
+                        lock_status="unavailable",
+                        status="skipped",
+                        started_at=started_at,
+                        finished_at=datetime.utcnow(),
+                        duration_ms=int((datetime.utcnow() - started_at).total_seconds() * 1000),
+                        error=str(exc),
+                    )
+                finally:
+                    db.close()
                 return None
             if not acquired:
                 try:
@@ -53,6 +72,21 @@ def distributed_job_lock(job_name: str, *, ttl_seconds: int) -> Callable:
                     await client.expire(state_key, max(ttl_seconds, 300))
                 except Exception:
                     pass
+                db = SessionLocal()
+                try:
+                    BackgroundJobLogRecorder.record_job_event(
+                        db,
+                        job_run_id=job_run_id,
+                        job_name=job_name,
+                        lock_key=lock_key,
+                        lock_status="skipped_locked",
+                        status="skipped_locked",
+                        started_at=started_at,
+                        finished_at=datetime.utcnow(),
+                        duration_ms=int((datetime.utcnow() - started_at).total_seconds() * 1000),
+                    )
+                finally:
+                    db.close()
                 return None
             try:
                 await client.hset(
@@ -68,44 +102,94 @@ def distributed_job_lock(job_name: str, *, ttl_seconds: int) -> Callable:
                 result = func(*args, **kwargs)
                 if inspect.isawaitable(result):
                     result = await result
+                finished_at = datetime.utcnow()
                 await client.hset(
                     state_key,
                     mapping={
                         "status": "success",
-                        "finished_at": datetime.utcnow().isoformat(),
-                        "updated_at": datetime.utcnow().isoformat(),
+                        "finished_at": finished_at.isoformat(),
+                        "updated_at": finished_at.isoformat(),
                     },
                 )
                 await client.expire(state_key, max(ttl_seconds, 300))
+                db = SessionLocal()
+                try:
+                    BackgroundJobLogRecorder.record_job_event(
+                        db,
+                        job_run_id=job_run_id,
+                        job_name=job_name,
+                        lock_key=lock_key,
+                        lock_status="acquired",
+                        status="success",
+                        started_at=started_at,
+                        finished_at=finished_at,
+                        duration_ms=int((finished_at - started_at).total_seconds() * 1000),
+                        result_summary=result if isinstance(result, dict) else None,
+                    )
+                finally:
+                    db.close()
                 return result
             except asyncio.CancelledError:
+                finished_at = datetime.utcnow()
                 try:
                     await client.hset(
                         state_key,
                         mapping={
                             "status": "cancelled",
-                            "finished_at": datetime.utcnow().isoformat(),
-                            "updated_at": datetime.utcnow().isoformat(),
+                            "finished_at": finished_at.isoformat(),
+                            "updated_at": finished_at.isoformat(),
                         },
                     )
                     await client.expire(state_key, max(ttl_seconds, 300))
                 except Exception:
                     pass
+                db = SessionLocal()
+                try:
+                    BackgroundJobLogRecorder.record_job_event(
+                        db,
+                        job_run_id=job_run_id,
+                        job_name=job_name,
+                        lock_key=lock_key,
+                        lock_status="acquired",
+                        status="cancelled",
+                        started_at=started_at,
+                        finished_at=finished_at,
+                        duration_ms=int((finished_at - started_at).total_seconds() * 1000),
+                    )
+                finally:
+                    db.close()
                 raise
             except Exception as exc:
+                finished_at = datetime.utcnow()
                 try:
                     await client.hset(
                         state_key,
                         mapping={
                             "status": "failed",
                             "error": str(exc)[:1000],
-                            "finished_at": datetime.utcnow().isoformat(),
-                            "updated_at": datetime.utcnow().isoformat(),
+                            "finished_at": finished_at.isoformat(),
+                            "updated_at": finished_at.isoformat(),
                         },
                     )
                     await client.expire(state_key, max(ttl_seconds, 300))
                 except Exception:
                     pass
+                db = SessionLocal()
+                try:
+                    BackgroundJobLogRecorder.record_job_event(
+                        db,
+                        job_run_id=job_run_id,
+                        job_name=job_name,
+                        lock_key=lock_key,
+                        lock_status="acquired",
+                        status="failed",
+                        started_at=started_at,
+                        finished_at=finished_at,
+                        duration_ms=int((finished_at - started_at).total_seconds() * 1000),
+                        error=str(exc)[:1000],
+                    )
+                finally:
+                    db.close()
                 raise
             finally:
                 try:
@@ -159,6 +243,16 @@ async def scheduled_model_l2_capability_health_check() -> None:
         db.close()
 
 
+@distributed_job_lock("model_l3_content_integrity_health_check", ttl_seconds=60 * 60)
+async def scheduled_model_l3_content_integrity_health_check() -> None:
+    db = SessionLocal()
+    try:
+        if SettingService.get_or_create(db).auto_health_check:
+            await HealthService.check_scheduled_content_integrity_models(db)
+    finally:
+        db.close()
+
+
 @distributed_job_lock("token_usage_backfill", ttl_seconds=120)
 def scheduled_token_usage_backfill() -> None:
     db = SessionLocal()
@@ -178,6 +272,13 @@ def scheduled_data_retention_cleanup() -> None:
             db,
             request_log_retention_days=setting.request_log_retention_days,
             admin_audit_log_retention_days=setting.admin_audit_log_retention_days,
+            request_child_log_retention_days=setting.request_child_log_retention_days,
+            exception_log_retention_days=setting.exception_log_retention_days,
+            health_log_retention_days=setting.health_log_retention_days,
+            billing_log_retention_days=setting.billing_log_retention_days,
+            background_job_log_retention_days=setting.background_job_log_retention_days,
+            user_operation_log_retention_days=setting.user_operation_log_retention_days,
+            asset_log_retention_days=setting.asset_log_retention_days,
         )
     finally:
         db.close()
@@ -226,6 +327,13 @@ def configure_scheduler() -> None:
         "interval",
         seconds=max(MODEL_L2_CAPABILITY_CHECK_MIN_INTERVAL_SEC, interval * 3),
         id="model_l2_capability_health_check",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        scheduled_model_l3_content_integrity_health_check,
+        "interval",
+        seconds=max(3600, interval * 4),
+        id="model_l3_content_integrity_health_check",
         replace_existing=True,
     )
     scheduler.add_job(
