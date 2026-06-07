@@ -110,8 +110,14 @@ class SettingService:
         setting = db.get(AppSetting, 1)
         if setting:
             # 兼容旧数据，把过低的健康检查间隔自动拉回最小安全值。
+            changed = False
             if setting.health_check_interval_sec < 300:
                 setting.health_check_interval_sec = 300
+                changed = True
+            if int(setting.global_max_retries or 0) < 2:
+                setting.global_max_retries = 2
+                changed = True
+            if changed:
                 db.commit()
                 db.refresh(setting)
                 SettingService.invalidate_runtime_cache()

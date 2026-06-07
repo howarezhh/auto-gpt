@@ -149,8 +149,12 @@ def _backfill_provider_max_retries(db) -> None:
     existing_columns = _get_table_columns(db, "providers")
     if "max_retries" not in existing_columns:
         return
+    setting = db.get(AppSetting, 1)
+    if setting is not None and int(setting.global_max_retries or 0) < 2:
+        setting.global_max_retries = 2
+        db.commit()
     global_max_retries = int(getattr(db.get(AppSetting, 1), "global_max_retries", 2) or 2)
-    target = max(0, min(2, global_max_retries))
+    target = 2
     db.execute(
         text(
             "UPDATE providers SET max_retries = :target "

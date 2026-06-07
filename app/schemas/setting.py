@@ -12,7 +12,7 @@ class SettingUpdate(BaseModel):
     default_provider_id: int | None = None
     manual_allow_fallback: bool = True
     global_timeout_ms: int = Field(default=30000, ge=0)
-    global_max_retries: int = Field(default=2, ge=0)
+    global_max_retries: int = Field(default=2, ge=2)
     route_exhausted_retry_max_wait_seconds: int = Field(default=600, ge=0, le=600)
     route_exhausted_retry_infinite_enabled: bool = False
     max_candidate_count: int = Field(default=10, ge=1, le=500)
