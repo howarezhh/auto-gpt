@@ -100,7 +100,7 @@ class ModelMappingService:
 
     @staticmethod
     def normalize_legacy_mapping_data(db: Session) -> bool:
-        """清理模型映射历史策略字段与目标优先级/权重残留。"""
+        """清理模型映射目标优先级/权重历史残留。"""
         changed = False
         mappings = list(db.scalars(select(ModelMapping)))
         for mapping in mappings:
@@ -108,9 +108,6 @@ class ModelMappingService:
             normalized_raw = dumps_json(normalized_targets)
             if mapping.targets_json != normalized_raw:
                 mapping.targets_json = normalized_raw
-                changed = True
-            if getattr(mapping, "strategy", None) != "auto":
-                mapping.strategy = "auto"
                 changed = True
         if changed:
             db.commit()

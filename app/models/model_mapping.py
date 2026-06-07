@@ -12,7 +12,6 @@ class ModelMapping(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     source_model_name: Mapped[str] = mapped_column(Text, unique=True, nullable=False, index=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    strategy: Mapped[str] = mapped_column(Text, nullable=False, default="auto")
     targets_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     remark: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
