@@ -450,10 +450,7 @@ def _migrate_model_mapping_table(db) -> None:
     """补齐模型映射配置表与索引。"""
     inspector = inspect(db.get_bind())
     if "model_mappings" in inspector.get_table_names():
-        columns = {
-            row[1]
-            for row in db.execute(text("PRAGMA table_info(model_mappings)")).fetchall()
-        }
+        columns = {column["name"] for column in inspector.get_columns("model_mappings")}
         if "strategy" in columns:
             try:
                 db.execute(text("ALTER TABLE model_mappings DROP COLUMN strategy"))
