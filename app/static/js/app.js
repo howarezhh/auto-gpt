@@ -5917,7 +5917,7 @@
 
         try {
             const settings = await api.get("/api/settings");
-            providerGlobalMaxRetries = Math.max(0, Number(settings.global_max_retries ?? 2));
+            providerGlobalMaxRetries = Math.max(2, Number(settings.global_max_retries ?? 2));
         } catch (error) {
             providerGlobalMaxRetries = 2;
         }

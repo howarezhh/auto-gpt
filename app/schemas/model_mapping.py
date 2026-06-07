@@ -1,10 +1,12 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ModelMappingTarget(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     model_name: str = Field(..., min_length=1)
     enabled: bool = True
 
@@ -15,6 +17,8 @@ class ModelMappingTarget(BaseModel):
 
 
 class ModelMappingBase(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     source_model_name: str = Field(..., min_length=1)
     enabled: bool = True
     targets: list[ModelMappingTarget] = Field(default_factory=list)
@@ -50,6 +54,8 @@ class ModelMappingCreate(ModelMappingBase):
 
 
 class ModelMappingUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     enabled: bool | None = None
     targets: list[ModelMappingTarget] | None = None
     remark: str | None = None

@@ -450,6 +450,17 @@ def _migrate_model_mapping_table(db) -> None:
     """补齐模型映射配置表与索引。"""
     inspector = inspect(db.get_bind())
     if "model_mappings" in inspector.get_table_names():
+        columns = {
+            row[1]
+            for row in db.execute(text("PRAGMA table_info(model_mappings)")).fetchall()
+        }
+        if "strategy" in columns:
+            try:
+                db.execute(text("ALTER TABLE model_mappings DROP COLUMN strategy"))
+                db.commit()
+            except Exception as exc:
+                db.rollback()
+                logging.warning("模型映射旧 strategy 列删除失败，保留为数据库历史冗余列: %s", exc)
         ModelMappingService.normalize_legacy_mapping_data(db)
         return
     Base.metadata.tables["model_mappings"].create(bind=db.get_bind(), checkfirst=True)
