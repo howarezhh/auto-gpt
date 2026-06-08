@@ -263,7 +263,6 @@ class ProxyService:
             success_rate_bias=route_context.success_rate_bias,
             cost_bias=route_context.cost_bias,
             require_trusted_provider=True,
-            content_guard_required=True,
         )
 
     @staticmethod
@@ -1239,10 +1238,7 @@ class ProxyService:
 
     @staticmethod
     def _append_limited_bytes(buffer: bytearray, chunk: bytes, *, limit_bytes: int) -> None:
-        if limit_bytes <= 0 or len(buffer) >= limit_bytes:
-            return
-        remaining = limit_bytes - len(buffer)
-        buffer.extend(chunk[:remaining])
+        ContentRuntimeGuardService.append_limited_bytes(buffer, chunk, limit_bytes=limit_bytes)
 
     @staticmethod
     async def _inspect_stream_guard_buffer(
@@ -1370,15 +1366,7 @@ class ProxyService:
         provider_model_id: int,
         guard_result: Any,
     ) -> None:
-        provider = db.get(Provider, provider_id)
-        provider_model = db.get(ProviderModel, provider_model_id)
-        ContentGuardService.record_violation(
-            db,
-            provider=provider,
-            provider_model=provider_model,
-            result=guard_result,
-            auto_commit=False,
-        )
+        ContentRuntimeGuardService.record_content_guard_violation_by_id(db, provider_id, provider_model_id, guard_result)
 
     @staticmethod
     async def _log_content_guard_violation(
@@ -6654,35 +6642,11 @@ class ProxyService:
         retried: bool,
         final: bool = False,
     ) -> dict[str, Any]:
-        message = (
-            "所有可用渠道的上游响应均未通过内容完整性防护，已阻断返回。"
-            if final
-            else "当前渠道的上游响应未通过内容完整性防护，已尝试切换其它可用渠道。"
-            if retried
-            else "上游响应未通过内容完整性防护，已阻断返回。"
-        )
-        detail = {
-            "message": message,
-            "code": "content_integrity_violation",
-            "content_guard": {
-                "result": guard_result.result,
-                "risk_level": guard_result.risk_level,
-                "categories": guard_result.categories,
-                "reason": guard_result.reason,
-                "action": guard_result.action,
-            },
-        }
-        classified = OpenAIErrorService.classify_error(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail)
-        return OpenAIErrorService.build_error_payload(
-            message=message,
-            code="content_integrity_violation",
+        return ContentRuntimeGuardService.build_guard_error(
+            guard_result=guard_result,
             trace_id=trace_id,
-            error_type=str(classified["error_type"]),
-            retryable=True if retried and not final else bool(classified["retryable"]),
-            recoverable=True if retried and not final else bool(classified["recoverable"]),
-            category=str(classified["category"]),
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=detail,
+            retried=retried,
+            final=final,
         )
 
     @staticmethod
@@ -8096,41 +8060,7 @@ class ProxyService:
 
     @staticmethod
     def _consume_sse_data_payloads(event_buffer: bytearray) -> list[str]:
-        payloads: list[str] = []
-        while True:
-            separator_length = 0
-            separator_index = event_buffer.find(b"\r\n\r\n")
-            if separator_index >= 0:
-                separator_length = 4
-            else:
-                separator_index = event_buffer.find(b"\n\n")
-                if separator_index >= 0:
-                    separator_length = 2
-            if separator_index < 0:
-                break
-            raw_event = bytes(event_buffer[:separator_index])
-            del event_buffer[: separator_index + separator_length]
-            if not raw_event:
-                continue
-            stripped = raw_event.strip()
-            if not stripped:
-                continue
-            if stripped.startswith(b"data:") and b"\n" not in stripped and b"\r" not in stripped:
-                payload = stripped[5:].strip()
-                if payload:
-                    payloads.append(payload.decode("utf-8", errors="ignore"))
-                continue
-            event_payload_lines: list[str] = []
-            for raw_line in raw_event.splitlines():
-                line = raw_line.strip()
-                if not line.startswith(b"data:"):
-                    continue
-                payload = line[5:].strip()
-                if payload:
-                    event_payload_lines.append(payload.decode("utf-8", errors="ignore"))
-            if event_payload_lines:
-                payloads.append("\n".join(event_payload_lines))
-        return payloads
+        return ContentRuntimeGuardService.consume_sse_data_payloads(event_buffer)
 
     @staticmethod
     def _consume_sse_event_texts(event_buffer: bytearray) -> list[str]:
@@ -8280,7 +8210,6 @@ class ProxyService:
                     "success_rate_bias": route_context.success_rate_bias,
                     "cost_bias": route_context.cost_bias,
                     "require_trusted_provider": route_context.require_trusted_provider,
-                    "content_guard_required": route_context.content_guard_required,
                 }
                 if route_context is not None
                 else None

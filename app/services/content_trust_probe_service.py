@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlparse
 
 from sqlalchemy.orm import Session
 
@@ -146,9 +148,14 @@ class ContentTrustProbeService:
             if payload.external is None:
                 raise ValueError("外部渠道检测必须提供接口地址、密钥和模型名")
             external = payload.external
+            target_identity = ContentTrustProbeService._external_target_identity(
+                base_url=external.base_url,
+                endpoint_path=external.endpoint_path,
+                model_name=external.model_name,
+            )
             provider = Provider(
-                id=0,
-                name="外部渠道",
+                id=target_identity["provider_id"],
+                name=target_identity["provider_name"],
                 base_url=external.base_url,
                 api_key=external.api_key,
                 provider_type="openai_compatible",
@@ -160,8 +167,8 @@ class ContentTrustProbeService:
                 content_guard_enabled=True,
             )
             provider_model = ProviderModel(
-                id=0,
-                provider_id=0,
+                id=target_identity["provider_model_id"],
+                provider_id=target_identity["provider_id"],
                 model_name=external.model_name,
                 enabled=True,
                 supports_stream=True,
@@ -173,8 +180,9 @@ class ContentTrustProbeService:
             provider_model.provider = provider
             return provider, provider_model, {
                 "type": "external",
-                "name": "外部渠道",
-                "base_url": external.base_url,
+                "name": target_identity["provider_name"],
+                "target_id": target_identity["target_id"],
+                "endpoint_path": external.endpoint_path,
                 "model_name": external.model_name,
             }
         if payload.provider_id is None:
@@ -197,6 +205,22 @@ class ContentTrustProbeService:
             "provider_name": provider.name,
             "provider_model_id": provider_model.id,
             "model_name": provider_model.model_name,
+        }
+
+    @staticmethod
+    def _external_target_identity(*, base_url: str, endpoint_path: str, model_name: str) -> dict[str, Any]:
+        parsed = urlparse(str(base_url or ""))
+        host = parsed.hostname or "external"
+        fingerprint = hashlib.sha256(f"{host}|{endpoint_path}|{model_name}".encode("utf-8")).hexdigest()
+        numeric = int(fingerprint[:8], 16)
+        provider_id = -(numeric % 900_000_000 + 1)
+        provider_model_id = provider_id - 900_000_000
+        return {
+            "target_id": fingerprint[:16],
+            "host": host,
+            "provider_id": provider_id,
+            "provider_model_id": provider_model_id,
+            "provider_name": f"外部渠道 {fingerprint[:8]}",
         }
 
     @staticmethod

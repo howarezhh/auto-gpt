@@ -225,38 +225,37 @@ def _check_runtime_guard_request_semantics() -> None:
     setting_disabled = type("Setting", (), {"content_guard_enabled": False})()
     provider_disabled = _provider(content_guard_enabled=False)
     provider_enabled = _provider(content_guard_enabled=True)
-    required_context = _context(content_guard_required=True)
-    optional_context = _context(content_guard_required=False)
+    route_context = _context()
 
     _assert(
         ContentRuntimeGuardService.enabled_for_request(
             setting=setting_enabled,
             provider=provider_disabled,
-            route_context=required_context,
-        ) is True,
-        "API Key 要求内容检测时必须强制进入检测链路，不能被提供商单项开关绕过",
+            route_context=route_context,
+        ) is False,
+        "provider 关闭内容防护时不得因 API Key 局部字段强制进入检测链路",
     )
     _assert(
         ContentRuntimeGuardService.enabled_for_request(
             setting=setting_enabled,
             provider=provider_disabled,
-            route_context=optional_context,
+            route_context=route_context,
         ) is False,
-        "API Key 内容检测为可选时不得回落到提供商开关继续检测",
+        "provider 关闭内容防护时必须跳过运行时检测",
     )
     _assert(
         ContentRuntimeGuardService.enabled_for_request(
             setting=setting_enabled,
             provider=provider_enabled,
-            route_context=optional_context,
-        ) is False,
-        "API Key 内容检测为可选时必须关闭运行时检测，避免前端语义误导",
+            route_context=route_context,
+        ) is True,
+        "provider 开启且全局开启时应执行运行时检测",
     )
     _assert(
         ContentRuntimeGuardService.enabled_for_request(
             setting=setting_disabled,
             provider=provider_enabled,
-            route_context=required_context,
+            route_context=route_context,
         ) is False,
         "内容完整性全局总开关关闭时必须停用请求过程检测",
     )
@@ -289,7 +288,7 @@ def _check_high_risk_route_detection() -> None:
         ),
         "长上下文请求必须被识别为长上下文场景",
     )
-    base_context = _context(content_guard_required=False)
+    base_context = _context()
     trusted_context = ProxyService._with_content_guard_route_policy(
         base_context,
         payload={"messages": [{"role": "user", "content": "长上下文" * 4000}]},
@@ -298,7 +297,6 @@ def _check_high_risk_route_detection() -> None:
         require_tools=False,
     )
     _assert(trusted_context is not None and trusted_context.require_trusted_provider is True, "长上下文等高风险请求必须动态要求可信提供商")
-    _assert(trusted_context.content_guard_required is True, "动态可信路由必须同步强制内容检测")
     normal_context = ProxyService._with_content_guard_route_policy(
         base_context,
         payload={"messages": [{"role": "user", "content": "ping"}]},
@@ -310,8 +308,8 @@ def _check_high_risk_route_detection() -> None:
 
 
 def _check_content_guard_route_cache_and_scheduler_policy() -> None:
-    required_context = _context(content_guard_required=True)
-    optional_context = _context(content_guard_required=False)
+    required_context = _context()
+    optional_context = _context()
     common = {
         "model_name": "stage33-model",
         "require_vision": False,
@@ -367,14 +365,14 @@ def _check_content_guard_frontend_policy_wiring() -> None:
     _assert("selectedProviderId = providerSelect.value" in app_js, "内容防护概览刷新必须保留提供商选择")
     _assert("selectedModelId = providerModelSelect.value" in app_js, "内容防护概览刷新必须保留模型选择")
     _assert("existingChecked" in app_js and "selectedKeys" in app_js, "内容防护概览刷新必须保留探针勾选状态")
-    _assert("api-key-content-guard-filter" in api_keys_template and "content_guard_required" in app_js, "API Key 管理端必须提供独立内容检测筛选")
-    _assert("api-key-template-content-guard-required" in api_keys_template, "API Key 策略模板必须提供内容检测策略控件")
-    _assert("content_guard_required: templateContentGuardRequiredInput.checked" in app_js, "策略模板提交必须同步内容检测策略")
-    _assert("contentGuardRequiredInput.checked = template.content_guard_required" in app_js, "套用模板必须预填内容检测策略")
+    _assert("api-key-content-guard-filter" not in api_keys_template, "API Key 管理端禁止继续暴露内容检测局部筛选")
+    _assert("api-key-template-content-guard-required" not in api_keys_template, "API Key 策略模板禁止继续暴露内容检测局部控件")
+    _assert("content_guard_required: templateContentGuardRequiredInput.checked" not in app_js, "策略模板提交禁止继续写入内容检测局部字段")
+    _assert("contentGuardRequiredInput.checked = template.content_guard_required" not in app_js, "套用模板禁止继续预填内容检测局部字段")
     _assert("user-api-key-create-content-guard-required" not in user_template, "普通用户端禁止提供关闭内容检测的创建控件")
     _assert('name="content_guard_required"' not in user_template, "普通用户端禁止提交内容检测开关字段")
     _assert("content_guard_required: str | None = Form" not in user_router, "普通用户端接口禁止接收内容检测开关字段")
-    _assert("content_guard_required=True" in user_router, "普通用户创建/更新 API Key 必须强制要求内容检测")
+    _assert('"content_guard_required": True' not in user_router, "普通用户创建/更新 API Key 禁止继续写入内容检测局部字段")
 
 
 def _check_error_catalog() -> None:
@@ -908,7 +906,7 @@ def _check_settings_submit_affects_runtime() -> None:
         ContentRuntimeGuardService.enabled_for_request(
             setting=updated,
             provider=_provider(content_guard_enabled=True),
-            route_context=_context(content_guard_required=True),
+            route_context=_context(),
         )
         is False,
         "关闭内容防护设置后运行时检测必须立即停用",
@@ -984,20 +982,13 @@ def _check_frontend_and_log_wiring() -> None:
             "provider-trust-level",
             "provider-content-integrity-status",
         ]),
-        ("app/templates/api_keys.html", [
-            "api-key-content-guard-required",
-            "api-key-content-guard-filter",
-            "api-key-template-content-guard-required",
-        ]),
+        ("app/templates/api_keys.html", []),
         ("app/templates/user_api_keys.html", [
             "管理员统一要求",
         ]),
-        ("app/routers/user_portal.py", [
-            "content_guard_required=True",
-        ]),
+        ("app/routers/user_portal.py", []),
         ("app/services/user_portal_service.py", [
             "require_trusted_provider=bool(getattr(route_setting, \"trusted_providers_only\", False))",
-            "content_guard_required=api_key.content_guard_required",
         ]),
         ("app/templates/logs.html", [
             "logs-provider-trust-level",
@@ -1013,9 +1004,6 @@ def _check_frontend_and_log_wiring() -> None:
         ("app/static/js/app.js", [
             "content_guard_enabled",
             "trusted_providers_only",
-            "content_guard_required",
-            "contentGuardFilter",
-            "templateContentGuardRequiredInput",
             "content_guard_result",
             "content_guard_risk_level",
             "formatContentGuardResultLabel",
@@ -1092,8 +1080,6 @@ def _check_frontend_and_log_wiring() -> None:
             "CREATE TABLE IF NOT EXISTS request_content_guard_events",
             "CREATE TABLE IF NOT EXISTS health_probe_events",
             "ix_request_logs_content_guard_risk_created_provider",
-            "ALTER TABLE api_key_policy_templates",
-            "content_guard_required BOOLEAN NOT NULL DEFAULT TRUE",
         ]),
         ("migrations/2026-06-07_extend_content_guard_strategy_metrics.sql", [
             "ix_request_logs_content_guard_final_strategy",
@@ -1137,7 +1123,6 @@ def _check_frontend_and_log_wiring() -> None:
             "run_trust_probe",
             "ContentTrustProbeService",
             "run_capability_probe",
-            "external.base_url",
         ]),
         ("app/services/content_trust_probe_service.py", [
             "class ContentTrustProbeService",
@@ -1145,6 +1130,8 @@ def _check_frontend_and_log_wiring() -> None:
             "run_trust_probe",
             "update_provider_model_trust_status",
             "get_trust_decision_for_route",
+            "_external_target_identity",
+            "target_id",
         ]),
         ("app/services/content_runtime_guard_service.py", [
             "class ContentRuntimeGuardService",
@@ -1163,6 +1150,9 @@ def _check_frontend_and_log_wiring() -> None:
             "data-action=\"trust-binding\"",
             "content-guard-rules-body",
             "content-guard-inspect-form",
+            "formatContentGuardActionLabel",
+            "检测明细",
+            "通过 ${passed}/${total}",
         ]),
         ("app/services/provider_service.py", [
             "content_probe_results_json",
@@ -1175,6 +1165,14 @@ def _check_frontend_and_log_wiring() -> None:
         text = Path(filename).read_text(encoding="utf-8", errors="ignore")
         missing = [needle for needle in needles if needle not in text]
         _assert(not missing, f"{filename} 缺少内容治理接线：{missing}")
+    trust_probe_text = Path("app/services/content_trust_probe_service.py").read_text(encoding="utf-8", errors="ignore")
+    _assert("Provider(\n                id=0" not in trust_probe_text, "外部检测禁止继续构造 Provider(id=0)")
+    _assert("ProviderModel(\n                id=0" not in trust_probe_text, "外部检测禁止继续构造 ProviderModel(id=0)")
+    _assert('"base_url": external.base_url' not in trust_probe_text, "外部检测返回给前端的 target 禁止包含完整 base_url")
+    app_css = Path("app/static/css/app.css").read_text(encoding="utf-8", errors="ignore")
+    _assert(".content-guard-segment input:focus-visible + span" in app_css, "内容防护分段切换必须具备键盘焦点样式")
+    _assert(".content-guard-probe-option input:checked + span::before" in app_css, "内容防护探针多选禁止裸露浏览器默认 checkbox")
+    _assert('body[data-page="content-guard"] .content-guard-rules-table' in app_css and "table-layout: auto;" in app_css, "内容防护规则表移动端必须取消硬宽并使用卡片化披露")
 
 
 def main() -> None:

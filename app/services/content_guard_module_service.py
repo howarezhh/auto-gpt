@@ -10,9 +10,7 @@ from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
 from app.models.request_log import RequestLog
 from app.schemas.content_guard import ContentGuardRulesUpdate, ContentGuardRunRequest, ContentGuardSettingsUpdate, ContentGuardTextInspectRequest
-from app.services.content_guard_probe_service import ContentGuardProbeService
 from app.services.content_guard_rule_service import ContentGuardRuleService
-from app.services.content_guard_service import ContentGuardService
 from app.services.content_trust_probe_service import ContentTrustProbeService
 from app.services.provider_service import (
     CONTENT_INTEGRITY_STATUS_LABELS,
@@ -180,7 +178,10 @@ class ContentGuardModuleService:
             url_check_enabled=bool(getattr(setting, "content_guard_url_check_enabled", True)),
         )
         matched_rules = ContentGuardRuleService.match_text_rules(
-            ContentGuardRuleService._clip_text(ContentGuardRuleService.normalize_scan_text(payload.text), max_scan_bytes=payload.max_scan_bytes),
+            ContentGuardRuleService.clip_text(
+                ContentGuardRuleService.normalize_scan_text(payload.text),
+                max_scan_bytes=payload.max_scan_bytes,
+            ),
             request_payload=payload.request_payload,
             url_allowlist=getattr(setting, "content_guard_url_allowlist_json", ""),
             url_check_enabled=bool(getattr(setting, "content_guard_url_check_enabled", True)),
@@ -289,167 +290,3 @@ class ContentGuardModuleService:
     @staticmethod
     async def run_trust_probe(db: Session, payload: ContentGuardRunRequest) -> dict[str, Any]:
         return await ContentTrustProbeService.run_trust_probe(db, payload)
-
-    @staticmethod
-    def _resolve_probe_target(db: Session, payload: ContentGuardRunRequest) -> tuple[Provider, ProviderModel, dict[str, Any]]:
-        if payload.target_type == "external":
-            if payload.external is None:
-                raise ValueError("外部渠道检测必须提供接口地址、密钥和模型名")
-            external = payload.external
-            provider = Provider(
-                id=0,
-                name="外部渠道",
-                base_url=external.base_url,
-                api_key=external.api_key,
-                provider_type="openai_compatible",
-                protocol_type="responses" if external.endpoint_path == "/responses" else "chat_completions",
-                enabled=True,
-                trust_level="standard",
-                content_integrity_status="unknown",
-                content_integrity_score=80,
-                content_guard_enabled=True,
-            )
-            provider_model = ProviderModel(
-                id=0,
-                provider_id=0,
-                model_name=external.model_name,
-                enabled=True,
-                supports_stream=True,
-                supports_tools=True,
-                supports_chat_completions=external.endpoint_path == "/chat/completions",
-                supports_responses=external.endpoint_path == "/responses",
-                protocol_type="responses" if external.endpoint_path == "/responses" else "chat_completions",
-            )
-            provider_model.provider = provider
-            return provider, provider_model, {
-                "type": "external",
-                "name": "外部渠道",
-                "base_url": external.base_url,
-                "model_name": external.model_name,
-            }
-        if payload.provider_id is None:
-            raise ValueError("本项目提供商检测必须选择提供商")
-        provider = db.get(Provider, payload.provider_id)
-        if provider is None:
-            raise ValueError("提供商不存在")
-        provider_model = None
-        if payload.provider_model_id is not None:
-            provider_model = db.get(ProviderModel, payload.provider_model_id)
-            if provider_model is None or provider_model.provider_id != provider.id:
-                raise ValueError("模型不属于当前提供商")
-        if provider_model is None:
-            provider_model = next((item for item in provider.provider_models if item.enabled), None)
-        if provider_model is None:
-            raise ValueError("当前提供商没有可检测的已启用模型")
-        return provider, provider_model, {
-            "type": "internal",
-            "provider_id": provider.id,
-            "provider_name": provider.name,
-            "provider_model_id": provider_model.id,
-            "model_name": provider_model.model_name,
-        }
-
-    @staticmethod
-    def _resolve_endpoint_path(provider: Provider, provider_model: ProviderModel, payload: ContentGuardRunRequest) -> str:
-        if payload.target_type == "external" and payload.external is not None:
-            return payload.external.endpoint_path
-        endpoint_path = ContentGuardProbeService.content_probe_endpoint_path(provider, provider_model)
-        if endpoint_path is None:
-            raise ValueError("当前模型未启用 Chat Completions 或 Responses 端点")
-        return endpoint_path
-
-    @staticmethod
-    async def _run_single_probe(provider: Provider, provider_model: ProviderModel, endpoint_path: str, probe_key: str) -> dict[str, Any]:
-        if probe_key == "fixed_answer":
-            result = await ContentGuardProbeService.probe_fixed_answer(provider, provider_model, endpoint_path=endpoint_path)
-        elif probe_key == "pollution_rules":
-            result = await ContentGuardProbeService.probe_pollution_rules(provider, provider_model, endpoint_path=endpoint_path)
-        elif probe_key == "json":
-            result = await ContentGuardProbeService.probe_json(provider, provider_model, endpoint_path=endpoint_path)
-        elif probe_key == "sse":
-            result = await ContentGuardProbeService.probe_sse(provider, provider_model, endpoint_path=endpoint_path)
-        elif probe_key == "tools":
-            result = await ContentGuardProbeService.probe_tools(provider, provider_model, endpoint_path=endpoint_path)
-        else:
-            result = ContentGuardModuleService._skipped_probe(
-                probe_key=probe_key,
-                endpoint_path=endpoint_path,
-                message="未知探针",
-            )
-        result["capability_key"] = f"content_{probe_key}"
-        result["probe_key"] = probe_key
-        result["probe_label"] = ContentGuardModuleService.PROBE_LABELS.get(probe_key, probe_key)
-        return result
-
-    @staticmethod
-    def _skipped_probe(*, probe_key: str, endpoint_path: str, message: str) -> dict[str, Any]:
-        return {
-            "capability_key": f"content_{probe_key}",
-            "probe_key": probe_key,
-            "probe_label": ContentGuardModuleService.PROBE_LABELS.get(probe_key, probe_key),
-            "endpoint_path": endpoint_path,
-            "endpoint_label": ContentGuardModuleService.PROBE_LABELS.get(probe_key, probe_key),
-            "success": False,
-            "native_success": False,
-            "adapted_success": False,
-            "support_mode": "skipped",
-            "support_label": "已跳过",
-            "latency_ms": 0,
-            "status_code": None,
-            "message": message,
-            "trace": [],
-            "retryable": False,
-        }
-
-    @staticmethod
-    def _summarize_probe_results(results: list[dict[str, Any]]) -> dict[str, Any]:
-        total = len(results)
-        passed = sum(1 for item in results if item.get("success") is True)
-        content_results = [
-            str((item.get("content_guard") or {}).get("content_guard_result") or "")
-            for item in results
-            if isinstance(item.get("content_guard"), dict)
-        ]
-        aggregate_guard = ContentGuardModuleService._aggregate_content_guard_result(results) or {
-            "content_guard_result": ContentGuardService.RESULT_PASS,
-            "content_guard_reason": "未返回内容防护结果",
-        }
-        decision = ContentGuardProbeService._content_probe_decision(
-            [ContentGuardProbeService.summarize_probe_result(item) for item in results],
-            aggregate_guard,
-        )
-        result = str(decision.get("content_guard_result") or "")
-        if result == ContentGuardService.RESULT_BLOCK or ContentGuardService.RESULT_BLOCK in content_results:
-            status = "blocked"
-            result = ContentGuardService.RESULT_BLOCK
-        elif result == ContentGuardService.RESULT_REVIEW or ContentGuardService.RESULT_REVIEW in content_results or passed < total:
-            status = "review"
-            result = ContentGuardService.RESULT_REVIEW
-        else:
-            status = "passed"
-            result = ContentGuardService.RESULT_PASS
-        return {
-            "status": status,
-            "content_guard_result": result,
-            "content_guard_reason": decision.get("content_guard_reason"),
-            "total": total,
-            "passed": passed,
-            "failed": max(0, total - passed),
-        }
-
-    @staticmethod
-    def _aggregate_content_guard_result(results: list[dict[str, Any]]) -> dict[str, Any] | None:
-        candidates = [
-            item.get("content_guard")
-            for item in results
-            if isinstance(item.get("content_guard"), dict)
-        ]
-        if not candidates:
-            return None
-        priority = {
-            ContentGuardService.RESULT_BLOCK: 3,
-            ContentGuardService.RESULT_REVIEW: 2,
-            ContentGuardService.RESULT_ERROR: 2,
-            ContentGuardService.RESULT_PASS: 1,
-        }
-        return max(candidates, key=lambda item: priority.get(str(item.get("content_guard_result") or ""), 0))

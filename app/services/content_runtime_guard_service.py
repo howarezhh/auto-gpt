@@ -5,9 +5,13 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy.orm import Session
+from starlette import status
+from starlette.concurrency import run_in_threadpool
 
+from app.database import SessionLocal
 from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
+from app.services.openai_error_service import OpenAIErrorService
 from app.services.content_guard_rule_service import ContentGuardRuleService
 from app.services.content_guard_service import ContentGuardResult
 
@@ -71,8 +75,6 @@ class ContentRuntimeGuardService:
         request_payload: dict[str, Any],
         buffered_bytes: bytes,
     ) -> ContentGuardResult:
-        from app.services.proxy_service import ProxyService
-
         text = buffered_bytes.decode("utf-8", errors="ignore")
         max_scan_bytes = int(getattr(setting, "content_guard_max_scan_bytes", 16384) or 16384)
         event_buffer = bytearray(buffered_bytes)
@@ -82,7 +84,7 @@ class ContentRuntimeGuardService:
             reason="流式缓冲片段通过内容完整性审核",
             action="allow",
         )
-        for data in ProxyService._consume_sse_data_payloads(event_buffer):
+        for data in ContentRuntimeGuardService.consume_sse_data_payloads(event_buffer):
             current = ContentGuardRuleService.inspect_sse_event(
                 data,
                 endpoint_path=endpoint_path,
@@ -128,17 +130,15 @@ class ContentRuntimeGuardService:
         endpoint_path: str,
         request_payload: dict[str, Any] | None,
     ) -> ContentGuardResult:
-        from app.services.proxy_service import ProxyService
-
         max_scan_bytes = int(getattr(setting, "content_guard_max_scan_bytes", 16384) or 16384)
-        ProxyService._append_limited_bytes(event_buffer, chunk, limit_bytes=max_scan_bytes)
+        ContentRuntimeGuardService.append_limited_bytes(event_buffer, chunk, limit_bytes=max_scan_bytes)
         combined_result = ContentGuardResult(
             result=ContentGuardRuleService.RESULT_PASS,
             risk_level="low",
             reason="流式分块通过内容完整性审核",
             action="allow",
         )
-        for data in ProxyService._consume_sse_data_payloads(event_buffer):
+        for data in ContentRuntimeGuardService.consume_sse_data_payloads(event_buffer):
             current = ContentGuardRuleService.inspect_sse_event(
                 data,
                 endpoint_path=endpoint_path,
@@ -195,13 +195,35 @@ class ContentRuntimeGuardService:
 
     @staticmethod
     def build_guard_error(*, guard_result: ContentGuardResult, trace_id: str | None, retried: bool, final: bool = False) -> dict[str, Any]:
-        from app.services.proxy_service import ProxyService
-
-        return ProxyService._build_content_guard_error_detail(
-            guard_result=guard_result,
+        message = (
+            "所有可用渠道的上游响应均未通过内容完整性防护，已阻断返回。"
+            if final
+            else "当前渠道的上游响应未通过内容完整性防护，已尝试切换其它可用渠道。"
+            if retried
+            else "上游响应未通过内容完整性防护，已阻断返回。"
+        )
+        detail = {
+            "message": message,
+            "code": "content_integrity_violation",
+            "content_guard": {
+                "result": guard_result.result,
+                "risk_level": guard_result.risk_level,
+                "categories": guard_result.categories,
+                "reason": guard_result.reason,
+                "action": guard_result.action,
+            },
+        }
+        classified = OpenAIErrorService.classify_error(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail)
+        return OpenAIErrorService.build_error_payload(
+            message=message,
+            code="content_integrity_violation",
             trace_id=trace_id,
-            retried=retried,
-            final=final,
+            error_type=str(classified["error_type"]),
+            retryable=True if retried and not final else bool(classified["retryable"]),
+            recoverable=True if retried and not final else bool(classified["recoverable"]),
+            category=str(classified["category"]),
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=detail,
         )
 
     @staticmethod
@@ -212,22 +234,26 @@ class ContentRuntimeGuardService:
         provider_model_id: int,
         guard_result: Any,
     ) -> None:
-        from app.services.proxy_service import ProxyService
-
-        await ProxyService._run_db_write(
-            ProxyService._record_content_guard_violation_by_id,
+        if db is not None:
+            await run_in_threadpool(
+                ContentRuntimeGuardService.record_content_guard_violation_by_id,
+                db,
+                provider_id,
+                provider_model_id,
+                guard_result,
+            )
+            return
+        await run_in_threadpool(
+            ContentRuntimeGuardService.record_content_guard_violation_by_id_in_new_session,
             provider_id,
             provider_model_id,
             guard_result,
-            db=db,
         )
 
     @staticmethod
     def enabled_for_request(*, setting: Any, provider: Provider, route_context: Any) -> bool:
         if not bool(getattr(setting, "content_guard_enabled", True)):
             return False
-        if route_context is not None:
-            return bool(getattr(route_context, "content_guard_required", True))
         return bool(getattr(provider, "content_guard_enabled", True))
 
     @staticmethod
@@ -262,6 +288,88 @@ class ContentRuntimeGuardService:
         return bool(
             route_context
             and getattr(route_context, "require_trusted_provider", False)
-            and getattr(route_context, "content_guard_required", True)
             and bool(getattr(provider, "buffer_stream_for_guard", True))
         )
+
+    @staticmethod
+    def append_limited_bytes(buffer: bytearray, chunk: bytes, *, limit_bytes: int) -> None:
+        if limit_bytes <= 0 or len(buffer) >= limit_bytes:
+            return
+        remaining = limit_bytes - len(buffer)
+        buffer.extend(chunk[:remaining])
+
+    @staticmethod
+    def consume_sse_data_payloads(event_buffer: bytearray) -> list[str]:
+        payloads: list[str] = []
+        while True:
+            separator_length = 0
+            separator_index = event_buffer.find(b"\r\n\r\n")
+            if separator_index >= 0:
+                separator_length = 4
+            else:
+                separator_index = event_buffer.find(b"\n\n")
+                if separator_index >= 0:
+                    separator_length = 2
+            if separator_index < 0:
+                break
+            raw_event = bytes(event_buffer[:separator_index])
+            del event_buffer[: separator_index + separator_length]
+            if not raw_event:
+                continue
+            stripped = raw_event.strip()
+            if not stripped:
+                continue
+            if stripped.startswith(b"data:") and b"\n" not in stripped and b"\r" not in stripped:
+                payload = stripped[5:].strip()
+                if payload:
+                    payloads.append(payload.decode("utf-8", errors="ignore"))
+                continue
+            event_payload_lines: list[str] = []
+            for raw_line in raw_event.splitlines():
+                line = raw_line.strip()
+                if not line.startswith(b"data:"):
+                    continue
+                payload = line[5:].strip()
+                if payload:
+                    event_payload_lines.append(payload.decode("utf-8", errors="ignore"))
+            if event_payload_lines:
+                payloads.append("\n".join(event_payload_lines))
+        return payloads
+
+    @staticmethod
+    def record_content_guard_violation_by_id(
+        db: Session,
+        provider_id: int,
+        provider_model_id: int,
+        guard_result: Any,
+    ) -> None:
+        provider = db.get(Provider, provider_id)
+        provider_model = db.get(ProviderModel, provider_model_id)
+        ContentGuardRuleService.record_violation(
+            db,
+            provider=provider,
+            provider_model=provider_model,
+            result=guard_result,
+            auto_commit=False,
+        )
+
+    @staticmethod
+    def record_content_guard_violation_by_id_in_new_session(
+        provider_id: int,
+        provider_model_id: int,
+        guard_result: Any,
+    ) -> None:
+        db = SessionLocal()
+        try:
+            ContentRuntimeGuardService.record_content_guard_violation_by_id(
+                db,
+                provider_id,
+                provider_model_id,
+                guard_result,
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
