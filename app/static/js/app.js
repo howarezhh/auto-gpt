@@ -9326,7 +9326,7 @@
             externalApiKeyInput.type = visible ? "password" : "text";
             externalApiKeyToggleBtn.setAttribute("aria-label", visible ? "显示密钥" : "隐藏密钥");
             externalApiKeyToggleBtn.innerHTML = `<i class="bi ${visible ? "bi-eye" : "bi-eye-slash"}" aria-hidden="true"></i>`;
-            setButtonTransientFeedback(externalApiKeyToggleBtn, "success", { successText: visible ? "已隐藏" : "已显示" });
+            showToast(visible ? "密钥已隐藏" : "密钥已显示");
         });
         externalApiKeyClearBtn?.addEventListener("click", () => {
             if (!externalApiKeyInput) return;
@@ -9334,7 +9334,7 @@
             externalApiKeyInput.type = "password";
             externalApiKeyToggleBtn?.setAttribute("aria-label", "显示密钥");
             if (externalApiKeyToggleBtn) externalApiKeyToggleBtn.innerHTML = '<i class="bi bi-eye" aria-hidden="true"></i>';
-            setButtonTransientFeedback(externalApiKeyClearBtn, "success", { successText: "已清除" });
+            showToast("密钥已清除");
         });
         addRuleBtn?.addEventListener("click", () => {
             state.rules = collectRules();
@@ -9473,8 +9473,8 @@
             event.preventDefault();
             try {
                 setButtonLoading(probeSubmitBtn, true);
-                const result = await api.post("/api/content-guard/precheck/probe", buildProbePayload());
                 const usedExternalTarget = selectedTargetType() === "external";
+                const result = await api.post("/api/content-guard/precheck/probe", buildProbePayload());
                 renderProbeResult(result);
                 activateContentGuardTab("results");
                 setButtonTransientFeedback(probeSubmitBtn, result?.summary?.status === "passed" ? "success" : "error", {

@@ -299,7 +299,6 @@ class SystemMetricsService:
             "trust_level": "blocked",
             "content_integrity_status": "blocked",
             "circuit_state": "open",
-            "low_trust_route_enabled": False,
         }
         for field, value in updates.items():
             if getattr(provider, field, None) == value:

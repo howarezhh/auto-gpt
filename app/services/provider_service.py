@@ -517,7 +517,6 @@ API Key: sk-yyyy
             content_integrity_status=payload.content_integrity_status,
             content_integrity_score=payload.content_integrity_score,
             content_guard_enabled=payload.content_guard_enabled,
-            low_trust_route_enabled=False,
             buffer_stream_for_guard=payload.buffer_stream_for_guard,
             credential_rotated_at=datetime.utcnow(),
             remark=payload.remark,

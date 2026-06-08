@@ -187,7 +187,7 @@
             <label>
                 <span class="content-guard-label">
                     <span>自动预检间隔（s）</span>
-                    <button class="settings-help-btn" type="button" title="内容防护自动预检的运行间隔，下限 300 s；不会在正式请求前实时跑探针。" aria-label="自动预检间隔说明">
+                    <button class="settings-help-btn" type="button" title="内容防护自动预检的运行间隔，下限 300 s；保存设置后会重新配置调度器，但不会中断已在运行的单次任务。" aria-label="自动预检间隔说明">
                         <i class="bi bi-question-circle" aria-hidden="true"></i>
                     </button>
                 </span>
@@ -271,14 +271,27 @@
                 </label>
                 <label>
                     <span>密钥</span>
-                    <input class="field-input" id="content-guard-external-api-key" type="password" autocomplete="off">
+                    <span class="content-guard-secret-field">
+                        <input class="field-input" id="content-guard-external-api-key" type="password" autocomplete="off">
+                        <button class="icon-btn interactive-btn content-guard-secret-btn" id="content-guard-external-api-key-toggle" type="button" aria-label="显示密钥" title="显示/隐藏密钥">
+                            <i class="bi bi-eye" aria-hidden="true"></i>
+                        </button>
+                        <button class="icon-btn interactive-btn content-guard-secret-btn" id="content-guard-external-api-key-clear" type="button" aria-label="清除密钥" title="清除密钥">
+                            <i class="bi bi-x-lg" aria-hidden="true"></i>
+                        </button>
+                    </span>
                 </label>
                 <label>
                     <span>模型名</span>
                     <input class="field-input" id="content-guard-external-model-name" type="text">
                 </label>
                 <label>
-                    <span>端点</span>
+                    <span class="content-guard-label">
+                        <span>端点</span>
+                        <button class="settings-help-btn" type="button" title="系统会把所选端点追加到接口地址后；接口地址请填写不含 /responses 或 /chat/completions 的根路径，例如 https://api.example.com/v1。" aria-label="外部端点拼接说明">
+                            <i class="bi bi-question-circle" aria-hidden="true"></i>
+                        </button>
+                    </span>
                     <select class="field-input" id="content-guard-external-endpoint-path">
                         <option value="/responses">/responses</option>
                         <option value="/chat/completions">/chat/completions</option>

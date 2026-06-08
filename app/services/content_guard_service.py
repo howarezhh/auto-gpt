@@ -224,7 +224,9 @@ class ContentGuardService:
             match_type="regex",
             patterns=[
                 r"(添加|联系|私聊|加|加入|进).{0,10}(微信|wechat|qq|telegram|whatsapp|群|社群|社区|客服)",
+                r"(添加|联系|私聊|加|加入|进).{0,12}(微\s*信|w\s*e\s*c\s*h\s*a\s*t|q\s*q|telegram|whatsapp|群|社群|社区|客服)",
                 r"(微信|wechat|qq|telegram|whatsapp).{0,8}(号|群|联系|私聊|客服|添加)",
+                r"(微\s*信|w\s*e\s*c\s*h\s*a\s*t|q\s*q|telegram|whatsapp).{0,10}(号|群|联系|私聊|客服|添加|[a-z0-9_-]{3,})",
                 r"(加群|进群|联系我|私聊|加入社群|加入社区)",
             ],
             risk_level="medium",
@@ -392,7 +394,24 @@ class ContentGuardService:
             if not rule.enabled:
                 continue
             if rule.match_type == "unexpected_url":
-                if url_check_enabled and unexpected_domains and not cls._request_allows_advertising(request_payload):
+                if not url_check_enabled or not unexpected_domains:
+                    continue
+                if cls._request_disallows_advertising_or_links(request_payload):
+                    matched.append(
+                        ContentGuardRule(
+                            id="forbidden_unexpected_link",
+                            name="禁止链接场景外链",
+                            category="unexpected_link",
+                            match_type="unexpected_url",
+                            patterns=[],
+                            risk_level="high",
+                            action="block",
+                            score_delta=-25,
+                            confidence=0.9,
+                            reason="用户明确要求不要链接、外链或联系方式，但响应包含外部链接",
+                        )
+                    )
+                elif not cls._request_allows_advertising(request_payload):
                     matched.append(rule)
                 continue
             if rule.match_type == "keyword_any":
@@ -673,6 +692,7 @@ class ContentGuardService:
         if not isinstance(text, str) or not text:
             return ""
         normalized = unicodedata.normalize("NFKC", text)
+        normalized = normalized.translate(str.maketrans({"。": ".", "．": ".", "｡": "."}))
         normalized = cls._ZERO_WIDTH_RE.sub("", normalized)
         normalized = html.unescape(normalized)
         previous = normalized
@@ -1190,12 +1210,18 @@ class ContentGuardService:
     @staticmethod
     def _request_allows_advertising(request_payload: dict[str, Any] | None) -> bool:
         text = ContentGuardService._extract_scan_text(request_payload or {}, max_scan_bytes=8192).lower()
-        if re.search(r"(不要|禁止|不得|不能|避免|不允许|无|去除|移除).{0,16}(广告|推广|营销|落地页|优惠|链接|联系方式|外链)", text):
-            return False
-        if re.search(r"(广告|推广|营销|落地页|优惠|链接|联系方式|外链).{0,16}(不要|禁止|不得|不能|避免|不允许|无|去除|移除)", text):
+        if ContentGuardService._request_disallows_advertising_or_links(request_payload):
             return False
         explicit_allow_patterns = (
             r"(生成|撰写|编写|输出|包含|加入|附带|提供|设计|创建).{0,16}(广告|推广|营销|落地页|优惠|链接|联系方式|外链)",
             r"(广告|推广|营销|落地页|优惠|链接|联系方式|外链).{0,16}(文案|内容|链接|地址|联系方式|素材)",
         )
         return any(re.search(pattern, text) for pattern in explicit_allow_patterns)
+
+    @staticmethod
+    def _request_disallows_advertising_or_links(request_payload: dict[str, Any] | None) -> bool:
+        text = ContentGuardService._extract_scan_text(request_payload or {}, max_scan_bytes=8192).lower()
+        return bool(
+            re.search(r"(不要|禁止|不得|不能|避免|不允许|无|去除|移除|不要提供).{0,16}(广告|推广|营销|落地页|优惠|链接|联系方式|外链)", text)
+            or re.search(r"(广告|推广|营销|落地页|优惠|链接|联系方式|外链).{0,16}(不要|禁止|不得|不能|避免|不允许|无|去除|移除)", text)
+        )

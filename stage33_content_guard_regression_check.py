@@ -1095,6 +1095,9 @@ def _check_frontend_and_log_wiring() -> None:
             "content-guard-settings-form",
             "content-guard-probe-form",
             "content-guard-external-base-url",
+            "content-guard-external-api-key-toggle",
+            "content-guard-external-api-key-clear",
+            "不含 /responses 或 /chat/completions",
             "content-guard-rules-body",
             "content-guard-inspect-form",
             "content-guard-result-body",
@@ -1153,6 +1156,15 @@ def _check_frontend_and_log_wiring() -> None:
             "formatContentGuardActionLabel",
             "检测明细",
             "通过 ${passed}/${total}",
+            "normalizeRuleId",
+            "nextCustomRuleId",
+            "readNumberField",
+            "new RegExp(normalizedPattern)",
+            "重复匹配项",
+            "放行动作时扣分必须为 0",
+            "拦截动作时风险等级必须为高",
+            "externalApiKeyInput.value = \"\"",
+            "content-guard-external-api-key-toggle",
         ]),
         ("app/services/provider_service.py", [
             "content_probe_results_json",
@@ -1173,6 +1185,8 @@ def _check_frontend_and_log_wiring() -> None:
     _assert(".content-guard-segment input:focus-visible + span" in app_css, "内容防护分段切换必须具备键盘焦点样式")
     _assert(".content-guard-probe-option input:checked + span::before" in app_css, "内容防护探针多选禁止裸露浏览器默认 checkbox")
     _assert('body[data-page="content-guard"] .content-guard-rules-table' in app_css and "table-layout: auto;" in app_css, "内容防护规则表移动端必须取消硬宽并使用卡片化披露")
+    content_guard_template = Path("app/templates/content_guard.html").read_text(encoding="utf-8", errors="ignore")
+    _assert("用户请求中出现过的域名会自动加入本次白名单" not in content_guard_template, "URL 白名单说明禁止暗示请求体可自动放行域名")
 
 
 def main() -> None:

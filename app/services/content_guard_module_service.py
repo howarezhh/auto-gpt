@@ -14,6 +14,7 @@ from app.services.content_guard_rule_service import ContentGuardRuleService
 from app.services.content_trust_probe_service import ContentTrustProbeService
 from app.services.provider_service import (
     CONTENT_INTEGRITY_STATUS_LABELS,
+    MODEL_TRUST_STATUS_LABELS,
     PROVIDER_TRUST_LEVEL_LABELS,
     ProviderService,
 )
@@ -221,6 +222,9 @@ class ContentGuardModuleService:
             "last_content_violation_at": provider.last_content_violation_at,
             "content_guard_enabled": provider.content_guard_enabled,
             "buffer_stream_for_guard": provider.buffer_stream_for_guard,
+            "computed_trust_status": trust_summary.get("status"),
+            "computed_trust_status_label": trust_summary.get("label"),
+            "computed_trust_status_reason": trust_summary.get("reason"),
             "trust_status": trust_summary.get("status"),
             "trust_status_label": trust_summary.get("label"),
             "trust_status_reason": trust_summary.get("reason"),
@@ -264,6 +268,8 @@ class ContentGuardModuleService:
 
     @staticmethod
     def serialize_provider_model(provider_model: ProviderModel) -> dict[str, Any]:
+        trust_status = ProviderService.provider_model_trust_status(provider_model)
+        trust_reason = ProviderService._content_probe_reason(provider_model)
         return {
             "id": provider_model.id,
             "model_name": provider_model.model_name,
@@ -281,6 +287,9 @@ class ContentGuardModuleService:
             "content_probe_last_failed_at": provider_model.content_probe_last_failed_at,
             "content_probe_failure_count": provider_model.content_probe_failure_count,
             "content_probe_results": loads_json(provider_model.content_probe_results_json, None),
+            "trust_status": trust_status,
+            "trust_status_label": MODEL_TRUST_STATUS_LABELS.get(trust_status, trust_status),
+            "trust_status_reason": trust_reason,
         }
 
     @staticmethod

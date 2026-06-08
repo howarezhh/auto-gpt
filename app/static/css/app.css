@@ -3365,6 +3365,22 @@ html[data-theme="dark"] .settings-switch-control input:checked + .settings-switc
     margin-top: 6px;
 }
 
+.content-guard-secret-field {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+
+.content-guard-secret-field .field-input {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.content-guard-secret-btn {
+    flex: 0 0 34px;
+}
+
 .content-guard-rule-patterns {
     resize: vertical;
     min-height: 58px;

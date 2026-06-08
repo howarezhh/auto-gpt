@@ -39,7 +39,6 @@ class Provider(Base):
     content_violation_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_content_violation_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     content_guard_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    low_trust_route_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     buffer_stream_for_guard: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     models_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     health_status: Mapped[str] = mapped_column(Text, nullable=False, default="unknown")
