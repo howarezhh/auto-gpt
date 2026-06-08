@@ -195,7 +195,19 @@ def _safe_finish_job_event(
         db.close()
 
 
-def distributed_job_lock(job_name: str, *, ttl_seconds: int) -> Callable:
+def _content_integrity_lock_ttl_seconds() -> int:
+    setting = SettingService.get_cached()
+    interval_seconds = max(300, int(getattr(setting, "content_guard_probe_interval_sec", 3600) or 3600))
+    return max(600, interval_seconds * 2)
+
+
+def _resolve_lock_ttl_seconds(ttl_seconds: int | Callable[[], int]) -> int:
+    if callable(ttl_seconds):
+        ttl_seconds = ttl_seconds()
+    return max(60, int(ttl_seconds or 60))
+
+
+def distributed_job_lock(job_name: str, *, ttl_seconds: int | Callable[[], int]) -> Callable:
     def decorator(func: Callable) -> Callable:
         @wraps(func)
         async def async_wrapper(*args, **kwargs):
@@ -208,9 +220,10 @@ def distributed_job_lock(job_name: str, *, ttl_seconds: int) -> Callable:
             lock_acquired = False
             lock_status = "acquired"
             job_event_id: int | None = None
+            lock_ttl_seconds = _resolve_lock_ttl_seconds(ttl_seconds)
             try:
                 client = RedisService.get_client()
-                acquired = await client.set(lock_key, token, nx=True, ex=ttl_seconds)
+                acquired = await client.set(lock_key, token, nx=True, ex=lock_ttl_seconds)
             except Exception as exc:
                 logger.warning("Skip scheduler job %s because Redis distributed lock is unavailable: %s", job_name, exc)
                 _safe_record_job_event(
@@ -233,7 +246,7 @@ def distributed_job_lock(job_name: str, *, ttl_seconds: int) -> Callable:
                             "updated_at": datetime.utcnow().isoformat(),
                         },
                     )
-                    await client.expire(state_key, max(ttl_seconds, 300))
+                    await client.expire(state_key, max(lock_ttl_seconds, 300))
                 except Exception:
                     pass
                 _safe_record_job_event(
@@ -258,7 +271,7 @@ def distributed_job_lock(job_name: str, *, ttl_seconds: int) -> Callable:
                             "updated_at": datetime.utcnow().isoformat(),
                         },
                     )
-                    await client.expire(state_key, max(ttl_seconds, 300))
+                    await client.expire(state_key, max(lock_ttl_seconds, 300))
                 job_event_id = _safe_record_job_event(
                     job_run_id=job_run_id,
                     job_name=job_name,
@@ -280,7 +293,7 @@ def distributed_job_lock(job_name: str, *, ttl_seconds: int) -> Callable:
                             "updated_at": finished_at.isoformat(),
                         },
                     )
-                    await client.expire(state_key, max(ttl_seconds, 300))
+                    await client.expire(state_key, max(lock_ttl_seconds, 300))
                 processed_count, success_count, failed_count, result_summary = _extract_job_metrics(result)
                 _safe_finish_job_event(
                     job_event_id,
@@ -309,7 +322,7 @@ def distributed_job_lock(job_name: str, *, ttl_seconds: int) -> Callable:
                                 "updated_at": finished_at.isoformat(),
                             },
                         )
-                        await client.expire(state_key, max(ttl_seconds, 300))
+                            await client.expire(state_key, max(lock_ttl_seconds, 300))
                 except Exception:
                     pass
                 _safe_finish_job_event(
@@ -336,7 +349,7 @@ def distributed_job_lock(job_name: str, *, ttl_seconds: int) -> Callable:
                                 "updated_at": finished_at.isoformat(),
                             },
                         )
-                        await client.expire(state_key, max(ttl_seconds, 300))
+                            await client.expire(state_key, max(lock_ttl_seconds, 300))
                 except Exception:
                     pass
                 _safe_finish_job_event(
@@ -422,7 +435,7 @@ async def scheduled_model_l2_capability_health_check() -> list[dict]:
         db.close()
 
 
-@distributed_job_lock("model_l3_content_integrity_health_check", ttl_seconds=60 * 60)
+@distributed_job_lock("model_l3_content_integrity_health_check", ttl_seconds=_content_integrity_lock_ttl_seconds)
 async def scheduled_model_l3_content_integrity_health_check() -> list[dict]:
     db = SessionLocal()
     try:

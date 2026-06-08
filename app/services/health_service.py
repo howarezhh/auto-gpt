@@ -2174,9 +2174,11 @@ class HealthService:
         setting: Any,
     ) -> bool:
         interval_seconds = max(300, int(getattr(setting, "content_guard_probe_interval_sec", 3600) or 3600))
+        if provider_model.content_integrity_status == "blocked":
+            return False
         if provider_model.content_probe_last_passed_at is None and provider_model.content_probe_last_failed_at is None:
             return True
-        if provider_model.content_integrity_status in {"unknown", "degraded", "blocked"}:
+        if provider_model.content_integrity_status in {"unknown", "degraded"}:
             return True
         last_probe_at = max(
             (
