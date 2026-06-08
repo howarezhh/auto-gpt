@@ -4,6 +4,7 @@ import asyncio
 import copy
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -22,10 +23,12 @@ from app.main import app
 from app.models.api_client_key import ApiClientKey
 from app.models.model_catalog import ModelCatalog
 from app.models.provider import Provider
+from app.models.provider_model import ProviderModel
 from app.models.request_log import RequestLog
 from app.models.user_account import UserAccount
 from app.services.log_service import LogService
 from app.services.model_catalog_service import ModelCatalogService
+from app.services.provider_service import ProviderService
 from app.services.proxy_service import ProxyService
 from app.services.user_auth_service import USER_ROLE_ADMIN, UserAuthService
 
@@ -124,6 +127,7 @@ def _create_provider(client: TestClient) -> dict:
             "base_url": "https://example.com/v1",
             "api_key": "upstream-secret",
             "provider_type": "openai_compatible",
+            "protocol_type": "both",
             "enabled": True,
             "priority": 10,
             "weight": 100,
@@ -136,6 +140,9 @@ def _create_provider(client: TestClient) -> dict:
                     "weight": 100,
                     "supports_stream": True,
                     "supports_vision": False,
+                    "supports_chat_completions": True,
+                    "supports_responses": True,
+                    "protocol_type": "both",
                     "enabled": True,
                     "input_price_per_1k": 0.003,
                     "output_price_per_1k": 0.006,
@@ -161,10 +168,6 @@ def _create_api_key(
             "name": name,
             "remark": f"stage8 {name}",
             "enabled": True,
-            "token_limit_total": 5000,
-            "route_mode": "failover",
-            "default_provider_id": provider_id,
-            "manual_allow_fallback": True,
             "allowed_provider_ids": [provider_id],
             "owner_user_id": owner_user_id,
         },
@@ -182,8 +185,47 @@ def _login(client: TestClient, *, identifier: str, password: str) -> None:
     _assert(response.status_code == 303, f"login failed: {response.text}")
 
 
+def _check_v1_auxiliary_log_types() -> None:
+    from app.routers.proxy import _log_unsupported_v1_endpoint, _log_v1_preflight
+
+    calls: list[dict] = []
+    api_key = SimpleNamespace(
+        id=8801,
+        name="stage8-auxiliary-log-key",
+        key_prefix="sk-stage8",
+        owner_user_id=None,
+        owner_user=None,
+    )
+    auth_context = SimpleNamespace(
+        api_client_key=api_key,
+        policy_snapshot_json="{}",
+    )
+    with patch.object(LogService, "create_log", side_effect=lambda db, **kwargs: calls.append(kwargs)):
+        _log_unsupported_v1_endpoint(
+            request_path="/v1/unsupported",
+            http_method="POST",
+            trace_id="stage8-unsupported",
+            source_ip="127.0.0.1",
+            api_client_auth=auth_context,
+            message="unsupported",
+            detail={"code": "unsupported_endpoint"},
+            request_body_json=None,
+        )
+        _log_v1_preflight(
+            request_path="/v1/chat/completions",
+            trace_id="stage8-preflight",
+            source_ip="127.0.0.1",
+        )
+    _assert(calls[0]["log_type"] == "unsupported_endpoint", f"unsupported endpoint log type polluted auth logs: {calls[0]}")
+    _assert(calls[1]["log_type"] == "v1_preflight", f"preflight log type polluted auth logs: {calls[1]}")
+
+
 def main() -> None:
-    with patch.object(ProxyService, "_forward_json_with_endpoint_fallback", side_effect=_fake_forward_json_with_endpoint_fallback):
+    _check_v1_auxiliary_log_types()
+    with (
+        patch.object(ProxyService, "_forward_json_with_endpoint_fallback", side_effect=_fake_forward_json_with_endpoint_fallback),
+        patch.object(ProxyService, "_precheck_owner_balance_for_candidate", return_value=None),
+    ):
         with TestClient(app) as client:
             _bootstrap_admin(client)
             _create_user(client, username="stage8-user-a", email="stage8-user-a@example.com", password="Stage8User#123")
@@ -195,11 +237,20 @@ def main() -> None:
                 user_b = db.scalar(select(UserAccount).where(UserAccount.username == "stage8-user-b"))
                 provider_record = db.get(Provider, provider["id"])
                 _assert(user_a is not None and user_b is not None and provider_record is not None, "bootstrap records missing")
+                provider_record.health_status = "healthy"
+                provider_record.circuit_state = "closed"
+                provider_record.content_integrity_status = "passed"
+                provider_record.content_integrity_score = 80
                 provider_model = next((item for item in provider_record.provider_models if item.model_name == "log-model"), None)
                 _assert(provider_model is not None, "provider model missing")
+                provider_model.enabled = True
+                provider_model.health_status = "healthy"
+                provider_model.circuit_state = "closed"
+                provider_model.content_integrity_status = "passed"
                 provider_model.price_multiplier = 1.5
                 provider_model.input_price_per_1k = 0.003
                 provider_model.output_price_per_1k = 0.006
+                ProviderService.refresh_provider_state(provider_record)
                 model_catalog = db.scalar(select(ModelCatalog).where(ModelCatalog.model_name == "log-model"))
                 _assert(model_catalog is not None, "model catalog missing")
                 model_catalog.enabled = True
@@ -209,11 +260,31 @@ def main() -> None:
                 user_b.total_recharge_amount = 50
                 db.commit()
                 ModelCatalogService.invalidate_model_runtime_cache()
+                ProviderService.invalidate_provider_runtime_cache()
                 user_a_id = user_a.id
                 user_b_id = user_b.id
 
             api_key_a = _create_api_key(client, name="stage8-key-a", provider_id=provider["id"], owner_user_id=user_a_id)
             api_key_b = _create_api_key(client, name="stage8-key-b", provider_id=provider["id"], owner_user_id=user_b_id)
+
+            with SessionLocal() as db:
+                provider_record = db.get(Provider, provider["id"])
+                _assert(provider_record is not None, "provider missing before request")
+                provider_record.health_status = "healthy"
+                provider_record.circuit_state = "closed"
+                provider_record.content_integrity_status = "passed"
+                provider_record.content_integrity_score = 80
+                db.query(ProviderModel).filter(ProviderModel.provider_id == provider["id"]).update(
+                    {
+                        ProviderModel.enabled: True,
+                        ProviderModel.health_status: "healthy",
+                        ProviderModel.circuit_state: "closed",
+                        ProviderModel.content_integrity_status: "passed",
+                    },
+                    synchronize_session=False,
+                )
+                db.commit()
+                ProviderService.invalidate_provider_runtime_cache()
 
             response_a = client.post(
                 "/v1/chat/completions",
@@ -350,16 +421,25 @@ def main() -> None:
 
             admin_logs_page = client.get("/logs")
             _assert(admin_logs_page.status_code == 200, f"admin logs page failed: {admin_logs_page.text}")
-            _assert("日志中心" in admin_logs_page.text and "关键列日志列表" in admin_logs_page.text, "admin logs page headers missing")
+            _assert(
+                "日志中心" in admin_logs_page.text
+                and "请求日志中心" in admin_logs_page.text
+                and "日志列表" in admin_logs_page.text,
+                "admin logs page headers missing",
+            )
 
             client.get("/logout")
             _login(client, identifier="stage8-user-a", password="Stage8User#123")
             user_logs_page = client.get("/user/logs")
             _assert(user_logs_page.status_code == 200, f"user logs page failed: {user_logs_page.text}")
-            _assert("sess-u1" in user_logs_page.text, "user own session missing from user logs page")
-            _assert("sess-u2" not in user_logs_page.text, "other user session leaked into user logs page")
-            _assert("health-u1" not in user_logs_page.text, "health check log leaked into user logs page")
-            _assert("请求记录与排障入口" in user_logs_page.text and "关键列请求记录" in user_logs_page.text, "user logs page headers missing")
+            _assert("我的日志" in user_logs_page.text and "日志类型" in user_logs_page.text, "user logs page headers missing")
+            user_logs_response = client.get("/api/user/logs?exclude_health_checks=true&page=1&page_size=20")
+            _assert(user_logs_response.status_code == 200, f"user logs api failed: {user_logs_response.text}")
+            user_log_items = user_logs_response.json()["items"]
+            user_sessions = {item.get("session_id") for item in user_log_items}
+            _assert("sess-u1" in user_sessions, f"user own session missing from user logs api: {user_log_items}")
+            _assert("sess-u2" not in user_sessions, f"other user session leaked into user logs api: {user_log_items}")
+            _assert("health-u1" not in user_sessions, f"health check log leaked into user logs api: {user_log_items}")
 
     print("stage8 log regression passed")
 

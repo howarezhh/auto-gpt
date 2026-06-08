@@ -239,7 +239,7 @@ class TokenUsageService:
         response_text: str | None = None,
         enable_usage_fill: bool = True,
     ) -> None:
-        if not request_path or request_path == "/v1/models":
+        if not request_path or LogService.is_model_list_request_path(request_path):
             return
         if not TokenUsageService._claim_finalize_job(log_id):
             return
@@ -528,6 +528,7 @@ class TokenUsageService:
                     log,
                     original_total_tokens=None,
                     billing_delta=Decimal("0"),
+                    request_delta=1,
                 )
             for log_id in completed_ids:
                 TokenUsageService._release_finalize_job(log_id)
@@ -549,16 +550,14 @@ class TokenUsageService:
         return True
 
     @staticmethod
-    def backfill_missing_usage(limit: int = BACKFILL_BATCH_SIZE) -> None:
+    def backfill_missing_usage(limit: int = BACKFILL_BATCH_SIZE) -> int:
+        processed_count = 0
         db = SessionLocal()
         try:
             logs = list(
                 db.scalars(
                     select(RequestLog)
-                    .where(RequestLog.request_path.is_not(None))
-                    .where(RequestLog.request_path != "/v1/models")
-                    .where(LogService._non_health_check_expr())
-                    .where(RequestLog.api_client_key_id.is_not(None))
+                    .where(LogService._token_billing_finalize_candidate_expr())
                     .where(
                         or_(
                             RequestLog.prompt_tokens.is_(None),
@@ -579,8 +578,10 @@ class TokenUsageService:
                     request_path=log.request_path,
                     enable_usage_fill=tiktoken is not None,
                 )
+                processed_count += 1
         finally:
             db.close()
+        return processed_count
 
     @staticmethod
     def _record_finalize_failure(*, log_id: int, error: Exception) -> None:
@@ -708,6 +709,7 @@ class TokenUsageService:
         original_total_tokens = log.total_tokens
         original_cache_read_tokens = log.cache_read_tokens
         original_cache_write_tokens = log.cache_write_tokens
+        original_token_source = log.token_source
         usage_before = {
             "prompt_tokens": original_prompt_tokens,
             "completion_tokens": original_completion_tokens,
@@ -731,11 +733,68 @@ class TokenUsageService:
         )
 
         usage_from_upstream = TokenUsageService._extract_usage_from_response(response_data)
-        prompt_tokens = log.prompt_tokens if log.prompt_tokens is not None else usage_from_upstream["prompt_tokens"]
-        completion_tokens = log.completion_tokens if log.completion_tokens is not None else usage_from_upstream["completion_tokens"]
-        total_tokens = log.total_tokens if log.total_tokens is not None else usage_from_upstream["total_tokens"]
-        cache_read_tokens = log.cache_read_tokens if log.cache_read_tokens is not None else usage_from_upstream["cache_read_tokens"]
-        cache_write_tokens = log.cache_write_tokens if log.cache_write_tokens is not None else usage_from_upstream["cache_write_tokens"]
+        if usage_from_upstream["has_usage"]:
+            prompt_tokens = (
+                usage_from_upstream["prompt_tokens"]
+                if usage_from_upstream["prompt_tokens"] is not None
+                else log.prompt_tokens
+            )
+            completion_tokens = (
+                usage_from_upstream["completion_tokens"]
+                if usage_from_upstream["completion_tokens"] is not None
+                else log.completion_tokens
+            )
+            total_tokens = (
+                usage_from_upstream["total_tokens"]
+                if usage_from_upstream["total_tokens"] is not None
+                else log.total_tokens
+            )
+            cache_read_tokens = (
+                usage_from_upstream["cache_read_tokens"]
+                if usage_from_upstream["cache_read_tokens"] is not None
+                else log.cache_read_tokens
+            )
+            cache_write_tokens = (
+                usage_from_upstream["cache_write_tokens"]
+                if usage_from_upstream["cache_write_tokens"] is not None
+                else log.cache_write_tokens
+            )
+            reasoning_tokens = (
+                usage_from_upstream["reasoning_tokens"]
+                if usage_from_upstream["reasoning_tokens"] is not None
+                else log.reasoning_tokens
+            )
+            prompt_audio_tokens = (
+                usage_from_upstream["prompt_audio_tokens"]
+                if usage_from_upstream["prompt_audio_tokens"] is not None
+                else log.prompt_audio_tokens
+            )
+            completion_audio_tokens = (
+                usage_from_upstream["completion_audio_tokens"]
+                if usage_from_upstream["completion_audio_tokens"] is not None
+                else log.completion_audio_tokens
+            )
+            accepted_prediction_tokens = (
+                usage_from_upstream["accepted_prediction_tokens"]
+                if usage_from_upstream["accepted_prediction_tokens"] is not None
+                else log.accepted_prediction_tokens
+            )
+            rejected_prediction_tokens = (
+                usage_from_upstream["rejected_prediction_tokens"]
+                if usage_from_upstream["rejected_prediction_tokens"] is not None
+                else log.rejected_prediction_tokens
+            )
+        else:
+            prompt_tokens = log.prompt_tokens
+            completion_tokens = log.completion_tokens
+            total_tokens = log.total_tokens
+            cache_read_tokens = log.cache_read_tokens
+            cache_write_tokens = log.cache_write_tokens
+            reasoning_tokens = log.reasoning_tokens
+            prompt_audio_tokens = log.prompt_audio_tokens
+            completion_audio_tokens = log.completion_audio_tokens
+            accepted_prediction_tokens = log.accepted_prediction_tokens
+            rejected_prediction_tokens = log.rejected_prediction_tokens
 
         if enable_usage_fill and tiktoken is not None and prompt_tokens is None and request_data is not None:
             prompt_tokens = TokenUsageService._count_request_tokens(
@@ -768,6 +827,41 @@ class TokenUsageService:
         if cache_write_tokens is not None and log.cache_write_tokens != cache_write_tokens:
             log.cache_write_tokens = cache_write_tokens
             changed = True
+        for field_name, value in {
+            "reasoning_tokens": reasoning_tokens,
+            "prompt_audio_tokens": prompt_audio_tokens,
+            "completion_audio_tokens": completion_audio_tokens,
+            "accepted_prediction_tokens": accepted_prediction_tokens,
+            "rejected_prediction_tokens": rejected_prediction_tokens,
+        }.items():
+            if value is not None and getattr(log, field_name, None) != value:
+                setattr(log, field_name, value)
+                changed = True
+
+        if usage_from_upstream["has_usage"]:
+            if log.token_source != "upstream_usage":
+                log.token_source = "upstream_usage"
+                changed = True
+            if log.upstream_usage_missing is not False:
+                log.upstream_usage_missing = False
+                changed = True
+            if isinstance(usage_from_upstream["usage_details"], dict):
+                usage_details_json = json.dumps(usage_from_upstream["usage_details"], ensure_ascii=False, separators=(",", ":"))
+                if log.usage_details_json != usage_details_json:
+                    log.usage_details_json = usage_details_json
+                    changed = True
+        else:
+            estimated_values_available = any(
+                value is not None
+                for value in (prompt_tokens, completion_tokens, total_tokens)
+            )
+            resolved_token_source = "estimated" if estimated_values_available and enable_usage_fill else "missing"
+            if log.token_source != resolved_token_source:
+                log.token_source = resolved_token_source
+                changed = True
+            if log.upstream_usage_missing is not True:
+                log.upstream_usage_missing = True
+                changed = True
 
         if LogService.refresh_derived_fields(log, response_payload=response_data):
             changed = True
@@ -816,8 +910,9 @@ class TokenUsageService:
                     "total_tokens": log.total_tokens,
                     "cache_read_tokens": log.cache_read_tokens,
                     "cache_write_tokens": log.cache_write_tokens,
+                    "token_source": log.token_source,
                 },
-                token_source="upstream_usage" if usage_from_upstream["total_tokens"] is not None else ("estimated" if enable_usage_fill else "missing"),
+                token_source=log.token_source or original_token_source or "missing",
                 enable_usage_fill=enable_usage_fill,
                 result="filled" if (changed or billing_delta is not None) else "skipped",
                 error=log.token_finalize_error,
@@ -834,6 +929,7 @@ class TokenUsageService:
                 log,
                 original_total_tokens=accounted_total_tokens,
                 billing_delta=billing_delta,
+                request_delta=0 if usage_already_accounted else 1,
             )
 
     @staticmethod
@@ -847,8 +943,11 @@ class TokenUsageService:
             log.channel_price_input_per_1k,
             log.channel_price_output_per_1k,
             log.channel_price_cache_per_1k,
+            log.channel_price_cache_write_per_1k,
         )
         if any(value is None for value in prices):
+            return False
+        if int(log.cache_write_tokens or 0) > 0 and log.channel_price_cache_write_per_1k is None:
             return False
         return all(BillingService.to_decimal(value) == Decimal("0") for value in prices)
 
@@ -920,6 +1019,7 @@ class TokenUsageService:
         *,
         original_total_tokens: int | None,
         billing_delta,
+        request_delta: int = 0,
     ) -> None:
         if log.api_client_key_id is None:
             return
@@ -928,7 +1028,7 @@ class TokenUsageService:
             return
         token_delta = int(log.total_tokens or 0) - int(original_total_tokens or 0)
         scaled_cost_delta = money_to_scaled_int(billing_delta) if billing_delta is not None else 0
-        if token_delta == 0 and scaled_cost_delta == 0:
+        if token_delta == 0 and scaled_cost_delta == 0 and int(request_delta or 0) == 0:
             return
         usage_time = log.created_at or datetime.utcnow()
         day_key = usage_time.strftime("%Y%m%d")
@@ -945,6 +1045,10 @@ class TokenUsageService:
                 pipe.incrby(f"quota:api_key:{log.api_client_key_id}:cost:total", scaled_cost_delta)
                 pipe.incrby(f"quota:api_key:{log.api_client_key_id}:cost:{day_key}", scaled_cost_delta)
                 pipe.expire(f"quota:api_key:{log.api_client_key_id}:cost:{day_key}", 60 * 60 * 26)
+            if request_delta:
+                pipe.incrby(f"quota:api_key:{log.api_client_key_id}:requests:total", int(request_delta))
+                pipe.incrby(f"quota:api_key:{log.api_client_key_id}:requests:{day_key}", int(request_delta))
+                pipe.expire(f"quota:api_key:{log.api_client_key_id}:requests:{day_key}", 60 * 60 * 26)
             owner_user_id = log.user_account_id or TokenUsageService._resolve_owner_user_id(log.api_client_key_id)
             if owner_user_id is not None:
                 month_key = usage_time.strftime("%Y%m")
@@ -960,6 +1064,12 @@ class TokenUsageService:
                     pipe.expire(f"quota:account:{owner_user_id}:cost:{day_key}", 60 * 60 * 26)
                     pipe.incrby(f"quota:account:{owner_user_id}:cost:{month_key}", scaled_cost_delta)
                     pipe.expire(f"quota:account:{owner_user_id}:cost:{month_key}", 60 * 60 * 24 * 33)
+                if request_delta:
+                    pipe.incrby(f"quota:account:{owner_user_id}:requests:total", int(request_delta))
+                    pipe.incrby(f"quota:account:{owner_user_id}:requests:{day_key}", int(request_delta))
+                    pipe.expire(f"quota:account:{owner_user_id}:requests:{day_key}", 60 * 60 * 26)
+                    pipe.incrby(f"quota:account:{owner_user_id}:requests:{month_key}", int(request_delta))
+                    pipe.expire(f"quota:account:{owner_user_id}:requests:{month_key}", 60 * 60 * 24 * 33)
             pipe.execute()
         except Exception:
             return
@@ -979,42 +1089,38 @@ class TokenUsageService:
         return parsed if isinstance(parsed, dict) else None
 
     @staticmethod
-    def _extract_usage_from_response(response_data: dict[str, Any] | None) -> dict[str, int | None]:
+    def _extract_usage_from_response(response_data: dict[str, Any] | None) -> dict[str, Any]:
+        empty_usage = {
+            "has_usage": False,
+            "usage_details": None,
+            "prompt_tokens": None,
+            "completion_tokens": None,
+            "total_tokens": None,
+            "cache_read_tokens": None,
+            "cache_write_tokens": None,
+            "reasoning_tokens": None,
+            "prompt_audio_tokens": None,
+            "completion_audio_tokens": None,
+            "accepted_prediction_tokens": None,
+            "rejected_prediction_tokens": None,
+        }
         if not isinstance(response_data, dict):
-            return {
-                "prompt_tokens": None,
-                "completion_tokens": None,
-                "total_tokens": None,
-                "cache_read_tokens": None,
-                "cache_write_tokens": None,
-            }
-        usage = response_data.get("usage")
+            return empty_usage
+        usage = LogService.extract_usage_payload(response_data)
         if not isinstance(usage, dict):
-            nested_response = response_data.get("response")
-            if isinstance(nested_response, dict):
-                usage = nested_response.get("usage")
-        if not isinstance(usage, dict):
-            return {
-                "prompt_tokens": None,
-                "completion_tokens": None,
-                "total_tokens": None,
-                "cache_read_tokens": None,
-                "cache_write_tokens": None,
-            }
-        prompt_tokens = usage.get("prompt_tokens", usage.get("input_tokens"))
-        completion_tokens = usage.get("completion_tokens", usage.get("output_tokens"))
-        total_tokens = usage.get("total_tokens")
+            return empty_usage
+        token_counts = LogService.extract_usage_token_counts(usage)
         cache_read_tokens, cache_write_tokens = LogService.extract_cache_tokens({"usage": usage})
-        normalized_prompt_tokens = LogService.normalize_prompt_tokens_for_cache_usage(
-            usage,
-            TokenUsageService._coerce_non_negative_int(prompt_tokens),
-        )
+        detail_tokens = LogService.extract_usage_detail_tokens(usage)
         return {
-            "prompt_tokens": normalized_prompt_tokens,
-            "completion_tokens": TokenUsageService._coerce_non_negative_int(completion_tokens),
-            "total_tokens": TokenUsageService._coerce_non_negative_int(total_tokens),
+            "has_usage": True,
+            "usage_details": usage,
+            "prompt_tokens": token_counts["prompt_tokens"],
+            "completion_tokens": token_counts["completion_tokens"],
+            "total_tokens": token_counts["total_tokens"],
             "cache_read_tokens": cache_read_tokens,
             "cache_write_tokens": cache_write_tokens,
+            **detail_tokens,
         }
 
     @staticmethod

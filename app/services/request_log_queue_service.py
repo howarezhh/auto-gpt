@@ -4,6 +4,7 @@ import asyncio
 import logging
 import time
 import threading
+import hashlib
 from typing import Any
 
 from redis.exceptions import RedisError
@@ -42,8 +43,7 @@ class RequestLogQueueService:
     def enqueue(cls, **kwargs: Any) -> bool:
         if not cls.enabled():
             return False
-        if not cls._has_active_workers():
-            return False
+        kwargs = cls._with_dedupe_key(dict(kwargs))
         loop = RedisService.event_loop()
         if loop is not None:
             try:
@@ -69,9 +69,6 @@ class RequestLogQueueService:
             return False
 
     @classmethod
-    def _has_active_workers(cls) -> bool:
-        return any(not worker.done() for worker in cls._workers)
-
     @classmethod
     def _ensure_ingress_worker(cls, loop: asyncio.AbstractEventLoop) -> None:
         with cls._ingress_guard:
@@ -241,7 +238,12 @@ class RequestLogQueueService:
                 if not isinstance(kwargs, dict):
                     continue
                 payload_kwargs = dict(kwargs)
+                existing = RequestLogQueueService._find_existing_log(db, payload_kwargs)
+                if existing is not None:
+                    finalize_jobs.append((existing, kwargs))
+                    continue
                 RequestLogQueueService._sanitize_log_provider_id(db, payload_kwargs, Provider)
+                payload_kwargs.pop("_dedupe_key", None)
                 payload_kwargs["auto_commit"] = False
                 payload_kwargs["refresh_after_create"] = False
                 payload_kwargs["flush_after_add"] = False
@@ -276,7 +278,12 @@ class RequestLogQueueService:
                 if not isinstance(kwargs, dict):
                     continue
                 payload = dict(kwargs)
+                existing = RequestLogQueueService._find_existing_log(db, payload)
+                if existing is not None:
+                    finalize_jobs.append((existing, kwargs))
+                    continue
                 RequestLogQueueService._sanitize_log_provider_id(db, payload, Provider)
+                payload.pop("_dedupe_key", None)
                 payload["auto_commit"] = False
                 payload["refresh_after_create"] = False
                 payload["flush_after_add"] = False
@@ -309,6 +316,44 @@ class RequestLogQueueService:
             return
         if db.get(provider_cls, normalized_provider_id) is None:
             payload["provider_id"] = None
+
+    @staticmethod
+    def _with_dedupe_key(kwargs: dict[str, Any]) -> dict[str, Any]:
+        if kwargs.get("_dedupe_key"):
+            return kwargs
+        stable_parts = [
+            str(kwargs.get("trace_id") or ""),
+            str(kwargs.get("request_id") or ""),
+            str(kwargs.get("log_type") or ""),
+            str(kwargs.get("request_path") or ""),
+            str(kwargs.get("http_method") or ""),
+            str(kwargs.get("api_client_key_id") or ""),
+            str(kwargs.get("created_at") or ""),
+        ]
+        kwargs["_dedupe_key"] = hashlib.sha256("|".join(stable_parts).encode("utf-8")).hexdigest()
+        return kwargs
+
+    @staticmethod
+    def _find_existing_log(db, payload: dict[str, Any]):
+        from app.models.request_log import RequestLog
+
+        trace_id = payload.get("trace_id")
+        if not trace_id:
+            return None
+        stmt = db.query(RequestLog).filter(RequestLog.trace_id == trace_id)
+        request_id = payload.get("request_id")
+        if request_id:
+            stmt = stmt.filter(RequestLog.request_id == request_id)
+        log_type = payload.get("log_type")
+        if log_type:
+            stmt = stmt.filter(RequestLog.log_type == log_type)
+        request_path = payload.get("request_path")
+        if request_path:
+            stmt = stmt.filter(RequestLog.request_path == request_path)
+        http_method = payload.get("http_method")
+        if http_method:
+            stmt = stmt.filter(RequestLog.http_method == http_method)
+        return stmt.order_by(RequestLog.id.desc()).first()
 
     @staticmethod
     def _enqueue_finalize_jobs(finalize_jobs: list[tuple[Any, dict[str, Any]]]) -> None:

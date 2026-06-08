@@ -56,6 +56,14 @@ class RequestLogOut(BaseModel):
     total_tokens: int | None
     cache_read_tokens: int | None
     cache_write_tokens: int | None
+    reasoning_tokens: int | None = None
+    prompt_audio_tokens: int | None = None
+    completion_audio_tokens: int | None = None
+    accepted_prediction_tokens: int | None = None
+    rejected_prediction_tokens: int | None = None
+    token_source: str | None = None
+    upstream_usage_missing: bool | None = None
+    usage_details_json: str | None = None
     finish_reason: str | None
     upstream_request_id: str | None
     request_body_json: str | None
@@ -81,9 +89,6 @@ class RequestLogOut(BaseModel):
     user_account_id: int | None
     user_account_name: str | None
     api_client_auth_result: str | None
-    api_client_remaining_tokens: int | None
-    api_client_remaining_requests_daily: int | None
-    api_client_remaining_cost_daily: float | None
     api_client_policy_snapshot_json: str | None
     trace_json: str | None
     has_image_input: bool | None = None
@@ -95,7 +100,6 @@ class RequestLogOut(BaseModel):
     has_partial_generated_image: bool | None = None
     generated_image_result_truncated: bool | None = None
     image_response_mode: str | None = None
-    upstream_usage_missing: bool | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}

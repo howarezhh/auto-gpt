@@ -89,9 +89,6 @@ class RequestLogRecorder:
                     "api_client_key_id": log.api_client_key_id,
                     "api_client_key_prefix": log.api_client_key_prefix,
                     "user_account_id": log.user_account_id,
-                    "remaining_tokens": log.api_client_remaining_tokens,
-                    "remaining_requests_daily": log.api_client_remaining_requests_daily,
-                    "remaining_cost_daily": float(log.api_client_remaining_cost_daily) if log.api_client_remaining_cost_daily is not None else None,
                     "policy_snapshot_json": log.api_client_policy_snapshot_json,
                     "error_code": None if log.api_client_auth_result == "authenticated" else log.api_client_auth_result,
                 },
@@ -283,7 +280,7 @@ class RequestLogRecorder:
                     "reason": log.content_guard_reason,
                     "action": log.content_guard_action,
                     "excerpt": log.content_guard_excerpt,
-                    "provider_status_after": log.content_guard_final_strategy,
+                    "provider_status_after": None,
                 },
             ))
         if (log.billing_status or log.billing_event_id) and "request_billing" not in native_event_names:

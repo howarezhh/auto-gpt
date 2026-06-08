@@ -3,7 +3,7 @@ import io
 from typing import Any
 from datetime import datetime, timedelta
 
-from sqlalchemy import Text, case, cast, delete, func, not_, or_, select
+from sqlalchemy import Text, and_, case, cast, delete, func, not_, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.provider import Provider
@@ -18,9 +18,34 @@ from app.utils.json_utils import dumps_json, safeJsonParse
 class LogService:
     """负责请求日志落库、派生指标计算和日志序列化。"""
 
+    @staticmethod
+    def format_money_display(value) -> str:
+        if value is None:
+            return ""
+        return f"{float(value):.9f}".rstrip("0").rstrip(".") + " $"
+
+    @staticmethod
+    def format_price_display(value) -> str:
+        if value is None:
+            return ""
+        return f"{float(value) * 1000:.9f}".rstrip("0").rstrip(".") + " $/1M"
+
+    @staticmethod
+    def format_token_display(value) -> str:
+        if value is None:
+            return ""
+        numeric = max(0, int(value))
+        if numeric < 1000:
+            return f"{numeric} token"
+        if numeric < 1000000:
+            return f"{numeric / 1000:.2f}k"
+        return f"{numeric / 1000000:.2f}m"
+
     HEALTH_CHECK_LOG_TYPES = ("health_check", "health_check_provider", "health_check_model")
     ROUTE_TRAFFIC_LOG_TYPES = ("chat", "responses", "moderations", "files")
+    TOKEN_BILLING_LOG_TYPES = ("chat", "responses", "embeddings")
     USER_VISIBLE_LOG_TYPES = ("chat", "responses", "moderations", "files")
+    MODEL_LIST_PATH = "/v1/models"
     REASONING_LEVEL_NONE = "无"
     REASONING_LEVEL_VALUES = {REASONING_LEVEL_NONE, "low", "medium", "high", "xhigh"}
     METRIC_ROW_SAMPLE_LIMIT = 10000
@@ -64,6 +89,14 @@ class LogService:
         total_tokens: int | None = None,
         cache_read_tokens: int | None = None,
         cache_write_tokens: int | None = None,
+        reasoning_tokens: int | None = None,
+        prompt_audio_tokens: int | None = None,
+        completion_audio_tokens: int | None = None,
+        accepted_prediction_tokens: int | None = None,
+        rejected_prediction_tokens: int | None = None,
+        token_source: str | None = None,
+        upstream_usage_missing: bool | None = None,
+        usage_details_json: str | None = None,
         finish_reason: str | None = None,
         upstream_request_id: str | None = None,
         request_body_json: str | None = None,
@@ -89,9 +122,6 @@ class LogService:
         user_account_id: int | None = None,
         user_account_name: str | None = None,
         api_client_auth_result: str | None = None,
-        api_client_remaining_tokens: int | None = None,
-        api_client_remaining_requests_daily: int | None = None,
-        api_client_remaining_cost_daily: float | None = None,
         api_client_policy_snapshot_json: str | None = None,
         billing_multiplier: float | None = None,
         channel_price_input_per_1k: float | None = None,
@@ -117,7 +147,38 @@ class LogService:
             or channel_price_cache_per_1k is None
         ):
             provider_model = db.get(ProviderModel, resolved_provider_model_id)
+        usage_payload = LogService.extract_usage_payload(token_response_payload)
         read_tokens, write_tokens = LogService.extract_cache_tokens(token_response_payload)
+        usage_token_counts = LogService.extract_usage_token_counts(usage_payload)
+        usage_detail_tokens = LogService.extract_usage_detail_tokens(usage_payload)
+        effective_prompt_tokens = prompt_tokens if prompt_tokens is not None else usage_token_counts["prompt_tokens"]
+        effective_completion_tokens = (
+            completion_tokens if completion_tokens is not None else usage_token_counts["completion_tokens"]
+        )
+        effective_total_tokens = total_tokens if total_tokens is not None else usage_token_counts["total_tokens"]
+        effective_usage_details_json = usage_details_json
+        if effective_usage_details_json is None and isinstance(usage_payload, dict):
+            effective_usage_details_json = dumps_json(usage_payload)
+        effective_token_source = token_source or LogService.resolve_token_source(
+            has_upstream_usage=isinstance(usage_payload, dict),
+            has_token_values=any(
+                value is not None
+                for value in (
+                    effective_prompt_tokens,
+                    effective_completion_tokens,
+                    effective_total_tokens,
+                    cache_read_tokens,
+                    cache_write_tokens,
+                )
+            ),
+            schedule_token_fill=schedule_token_fill,
+            success=success,
+        )
+        effective_upstream_usage_missing = (
+            upstream_usage_missing
+            if upstream_usage_missing is not None
+            else (bool(success and schedule_token_fill) and not isinstance(usage_payload, dict))
+        )
         normalized_reasoning_level = LogService.normalize_reasoning_level(reasoning_level)
         normalized_model_reasoning_effort = LogService.normalize_reasoning_effort(
             model_reasoning_effort
@@ -134,7 +195,7 @@ class LogService:
         effective_duration_ms = LogService.resolve_duration_ms(latency_ms=latency_ms, duration_ms=duration_ms)
         effective_attempt_count = attempt_count if attempt_count is not None else LogService.derive_attempt_count(trace)
         effective_tps = tps if tps is not None else LogService.compute_tps(
-            completion_tokens=completion_tokens,
+            completion_tokens=effective_completion_tokens,
             duration_ms=effective_duration_ms,
             ttfb_ms=effective_ttfb_ms,
         )
@@ -185,11 +246,33 @@ class LogService:
             reasoning_level=normalized_reasoning_level,
             model_reasoning_effort=normalized_model_reasoning_effort,
             attempt_count=effective_attempt_count,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=total_tokens,
+            prompt_tokens=effective_prompt_tokens,
+            completion_tokens=effective_completion_tokens,
+            total_tokens=effective_total_tokens,
             cache_read_tokens=cache_read_tokens if cache_read_tokens is not None else read_tokens,
             cache_write_tokens=cache_write_tokens if cache_write_tokens is not None else write_tokens,
+            reasoning_tokens=reasoning_tokens if reasoning_tokens is not None else usage_detail_tokens.get("reasoning_tokens"),
+            prompt_audio_tokens=(
+                prompt_audio_tokens if prompt_audio_tokens is not None else usage_detail_tokens.get("prompt_audio_tokens")
+            ),
+            completion_audio_tokens=(
+                completion_audio_tokens
+                if completion_audio_tokens is not None
+                else usage_detail_tokens.get("completion_audio_tokens")
+            ),
+            accepted_prediction_tokens=(
+                accepted_prediction_tokens
+                if accepted_prediction_tokens is not None
+                else usage_detail_tokens.get("accepted_prediction_tokens")
+            ),
+            rejected_prediction_tokens=(
+                rejected_prediction_tokens
+                if rejected_prediction_tokens is not None
+                else usage_detail_tokens.get("rejected_prediction_tokens")
+            ),
+            token_source=effective_token_source,
+            upstream_usage_missing=effective_upstream_usage_missing,
+            usage_details_json=effective_usage_details_json,
             finish_reason=finish_reason,
             upstream_request_id=upstream_request_id,
             request_body_json=request_body_json,
@@ -215,9 +298,6 @@ class LogService:
             user_account_id=user_account_id,
             user_account_name=user_account_name,
             api_client_auth_result=api_client_auth_result,
-            api_client_remaining_tokens=api_client_remaining_tokens,
-            api_client_remaining_requests_daily=api_client_remaining_requests_daily,
-            api_client_remaining_cost_daily=api_client_remaining_cost_daily,
             api_client_policy_snapshot_json=api_client_policy_snapshot_json,
             billing_multiplier=billing_multiplier if billing_multiplier is not None else (provider_model.price_multiplier if provider_model else None),
             channel_price_input_per_1k=(
@@ -248,6 +328,11 @@ class LogService:
         )
         if log_type in LogService.HEALTH_CHECK_LOG_TYPES:
             log.billing_status = "skipped"
+            log.billing_finalized_at = datetime.utcnow()
+            log.token_finalize_error = None
+            log.billing_error = None
+        elif LogService._should_mark_no_charge_without_finalize(log):
+            log.billing_status = "no_charge"
             log.billing_finalized_at = datetime.utcnow()
             log.token_finalize_error = None
             log.billing_error = None
@@ -350,8 +435,7 @@ class LogService:
         if (
             log.id is None
             or not request_path
-            or request_path == "/v1/models"
-            or log.log_type in LogService.HEALTH_CHECK_LOG_TYPES
+            or not LogService.is_token_billing_finalize_candidate(log)
         ):
             return
         from app.services.token_usage_service import TokenUsageService
@@ -416,7 +500,6 @@ class LogService:
         generated_image_approx_bytes = generated_summary.get("approx_bytes")
         has_partial_generated_image = generated_summary.get("has_partial")
         generated_image_result_truncated = generated_summary.get("result_truncated")
-        has_upstream_usage = LogService._response_has_usage(response_payload)
         imagegen_related = bool(uses_image_generation or (generated_images_count and generated_images_count > 0))
         return {
             "has_image_input": has_image_input,
@@ -428,7 +511,6 @@ class LogService:
             "has_partial_generated_image": has_partial_generated_image,
             "generated_image_result_truncated": generated_image_result_truncated,
             "image_response_mode": ("stream" if log.is_stream else "json") if imagegen_related else None,
-            "upstream_usage_missing": (not has_upstream_usage) if imagegen_related else None,
         }
 
     @staticmethod
@@ -586,6 +668,10 @@ class LogService:
         exclude_health_checks: bool = False,
         content_guard_result: str | None = None,
         content_guard_risk_level: str | None = None,
+        content_guard_action: str | None = None,
+        content_guard_final_strategy: str | None = None,
+        content_guard_retry_count: int | None = None,
+        content_guard_guard_stage: str | None = None,
         api_client_key_ids: list[int] | None = None,
     ) -> tuple[int, list[RequestLog], dict[str, int]]:
         stmt = select(RequestLog)
@@ -621,6 +707,10 @@ class LogService:
             exclude_health_checks=exclude_health_checks,
             content_guard_result=content_guard_result,
             content_guard_risk_level=content_guard_risk_level,
+            content_guard_action=content_guard_action,
+            content_guard_final_strategy=content_guard_final_strategy,
+            content_guard_retry_count=content_guard_retry_count,
+            content_guard_guard_stage=content_guard_guard_stage,
             api_client_key_ids=api_client_key_ids,
         )
         count_stmt = LogService._apply_log_filters(
@@ -644,6 +734,10 @@ class LogService:
             exclude_health_checks=exclude_health_checks,
             content_guard_result=content_guard_result,
             content_guard_risk_level=content_guard_risk_level,
+            content_guard_action=content_guard_action,
+            content_guard_final_strategy=content_guard_final_strategy,
+            content_guard_retry_count=content_guard_retry_count,
+            content_guard_guard_stage=content_guard_guard_stage,
             api_client_key_ids=api_client_key_ids,
         )
         summary_stmt = LogService._apply_log_filters(
@@ -667,6 +761,10 @@ class LogService:
             exclude_health_checks=exclude_health_checks,
             content_guard_result=content_guard_result,
             content_guard_risk_level=content_guard_risk_level,
+            content_guard_action=content_guard_action,
+            content_guard_final_strategy=content_guard_final_strategy,
+            content_guard_retry_count=content_guard_retry_count,
+            content_guard_guard_stage=content_guard_guard_stage,
             api_client_key_ids=api_client_key_ids,
         )
         total = db.scalar(count_stmt) or 0
@@ -683,7 +781,7 @@ class LogService:
         }
         items = list(
             db.scalars(
-                stmt.order_by(RequestLog.created_at.desc()).offset((page - 1) * page_size).limit(page_size)
+                stmt.order_by(RequestLog.created_at.desc(), RequestLog.id.desc()).offset((page - 1) * page_size).limit(page_size)
             )
         )
         return total, items, summary
@@ -711,6 +809,10 @@ class LogService:
         provider_trust_level: str | None = None,
         content_guard_result: str | None = None,
         content_guard_risk_level: str | None = None,
+        content_guard_action: str | None = None,
+        content_guard_final_strategy: str | None = None,
+        content_guard_retry_count: int | None = None,
+        content_guard_guard_stage: str | None = None,
         api_client_key_ids: list[int] | None = None,
     ):
         if exclude_health_checks:
@@ -796,6 +898,17 @@ class LogService:
             stmt = stmt.where(RequestLog.content_guard_result == content_guard_result.strip())
         if content_guard_risk_level:
             stmt = stmt.where(RequestLog.content_guard_risk_level == content_guard_risk_level.strip())
+        if content_guard_action:
+            stmt = stmt.where(RequestLog.content_guard_action == content_guard_action.strip())
+        if content_guard_final_strategy:
+            stmt = stmt.where(RequestLog.content_guard_final_strategy == content_guard_final_strategy.strip())
+        if content_guard_retry_count is not None:
+            stmt = stmt.where(RequestLog.content_guard_retry_provider_count == content_guard_retry_count)
+        if content_guard_guard_stage:
+            stage = content_guard_guard_stage.strip()
+            stmt = stmt.where(
+                RequestLog.trace_json.ilike(f'%"guard_stage": "{stage}"%')
+            )
         return stmt
 
     @staticmethod
@@ -810,6 +923,55 @@ class LogService:
     @staticmethod
     def _route_traffic_expr():
         return RequestLog.log_type.in_(LogService.ROUTE_TRAFFIC_LOG_TYPES)
+
+    @staticmethod
+    def _token_billing_finalize_candidate_expr():
+        return and_(
+            RequestLog.request_path.is_not(None),
+            LogService._non_model_list_request_expr(),
+            LogService._non_health_check_expr(),
+            RequestLog.log_type.in_(LogService.TOKEN_BILLING_LOG_TYPES),
+            RequestLog.api_client_key_id.is_not(None),
+            RequestLog.success.is_(True),
+        )
+
+    @staticmethod
+    def is_token_billing_finalize_candidate(log: RequestLog) -> bool:
+        return bool(
+            log.request_path
+            and not LogService.is_model_list_request_path(log.request_path)
+            and log.log_type not in LogService.HEALTH_CHECK_LOG_TYPES
+            and log.log_type in LogService.TOKEN_BILLING_LOG_TYPES
+            and log.api_client_key_id is not None
+            and log.success is True
+        )
+
+    @staticmethod
+    def _should_mark_no_charge_without_finalize(log: RequestLog) -> bool:
+        if log.api_client_key_id is None or log.billing_finalized_at is not None:
+            return False
+        if LogService.is_token_billing_finalize_candidate(log):
+            return False
+        return True
+
+    @staticmethod
+    def is_model_list_request_path(request_path: str | None) -> bool:
+        return bool(
+            request_path == LogService.MODEL_LIST_PATH
+            or (isinstance(request_path, str) and request_path.startswith(f"{LogService.MODEL_LIST_PATH}/"))
+        )
+
+    @staticmethod
+    def _non_model_list_request_expr():
+        return or_(
+            RequestLog.request_path.is_(None),
+            not_(
+                or_(
+                    RequestLog.request_path == LogService.MODEL_LIST_PATH,
+                    RequestLog.request_path.like(f"{LogService.MODEL_LIST_PATH}/%"),
+                )
+            ),
+        )
 
     @staticmethod
     def get_filter_options(
@@ -1235,13 +1397,7 @@ class LogService:
 
     @staticmethod
     def extract_cache_tokens(response_payload: dict | None) -> tuple[int | None, int | None]:
-        if not isinstance(response_payload, dict):
-            return None, None
-        usage = response_payload.get("usage")
-        if not isinstance(usage, dict):
-            nested_response = response_payload.get("response")
-            if isinstance(nested_response, dict):
-                usage = nested_response.get("usage")
+        usage = LogService.extract_usage_payload(response_payload)
         if not isinstance(usage, dict):
             return None, None
         cache_read = LogService._extract_usage_int(
@@ -1286,6 +1442,94 @@ class LogService:
             ("input_tokens_details", "cacheCreationInputTokens"),
         )
         return cache_read, cache_write
+
+    @staticmethod
+    def extract_usage_payload(response_payload: dict | None) -> dict | None:
+        if not isinstance(response_payload, dict):
+            return None
+        usage = response_payload.get("usage")
+        if not isinstance(usage, dict):
+            nested_response = response_payload.get("response")
+            if isinstance(nested_response, dict):
+                usage = nested_response.get("usage")
+        return usage if isinstance(usage, dict) else None
+
+    @staticmethod
+    def extract_usage_token_counts(usage: dict | None) -> dict[str, int | None]:
+        if not isinstance(usage, dict):
+            return {"prompt_tokens": None, "completion_tokens": None, "total_tokens": None}
+        prompt_tokens = LogService._extract_usage_int(
+            usage,
+            ("prompt_tokens",),
+            ("input_tokens",),
+        )
+        completion_tokens = LogService._extract_usage_int(
+            usage,
+            ("completion_tokens",),
+            ("output_tokens",),
+        )
+        total_tokens = LogService._extract_usage_int(usage, ("total_tokens",))
+        return {
+            "prompt_tokens": LogService.normalize_prompt_tokens_for_cache_usage(usage, prompt_tokens),
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+        }
+
+    @staticmethod
+    def extract_usage_detail_tokens(usage: dict | None) -> dict[str, int | None]:
+        if not isinstance(usage, dict):
+            return {
+                "reasoning_tokens": None,
+                "prompt_audio_tokens": None,
+                "completion_audio_tokens": None,
+                "accepted_prediction_tokens": None,
+                "rejected_prediction_tokens": None,
+            }
+        return {
+            "reasoning_tokens": LogService._extract_usage_int(
+                usage,
+                ("completion_tokens_details", "reasoning_tokens"),
+                ("output_tokens_details", "reasoning_tokens"),
+            ),
+            "prompt_audio_tokens": LogService._extract_usage_int(
+                usage,
+                ("prompt_tokens_details", "audio_tokens"),
+                ("input_tokens_details", "audio_tokens"),
+            ),
+            "completion_audio_tokens": LogService._extract_usage_int(
+                usage,
+                ("completion_tokens_details", "audio_tokens"),
+                ("output_tokens_details", "audio_tokens"),
+            ),
+            "accepted_prediction_tokens": LogService._extract_usage_int(
+                usage,
+                ("completion_tokens_details", "accepted_prediction_tokens"),
+                ("output_tokens_details", "accepted_prediction_tokens"),
+            ),
+            "rejected_prediction_tokens": LogService._extract_usage_int(
+                usage,
+                ("completion_tokens_details", "rejected_prediction_tokens"),
+                ("output_tokens_details", "rejected_prediction_tokens"),
+            ),
+        }
+
+    @staticmethod
+    def resolve_token_source(
+        *,
+        has_upstream_usage: bool,
+        has_token_values: bool,
+        schedule_token_fill: bool,
+        success: bool,
+    ) -> str | None:
+        if has_upstream_usage:
+            return "upstream_usage"
+        if has_token_values:
+            return "precomputed"
+        if not success:
+            return "missing"
+        if schedule_token_fill:
+            return "pending"
+        return "disabled"
 
     @staticmethod
     def normalize_prompt_tokens_for_cache_usage(usage: dict, prompt_tokens: int | None) -> int | None:
@@ -1367,6 +1611,12 @@ class LogService:
         if payload is None:
             parsed_response = safeJsonParse(log.response_body_json) if log.response_body_json else None
             payload = parsed_response if isinstance(parsed_response, dict) else None
+        usage_payload = LogService.extract_usage_payload(payload)
+        usage_token_counts = LogService.extract_usage_token_counts(usage_payload)
+        for field_name, value in usage_token_counts.items():
+            if value is not None and getattr(log, field_name, None) != value:
+                setattr(log, field_name, value)
+                changed = True
         cache_read, cache_write = LogService.extract_cache_tokens(payload)
         if cache_read is not None and log.cache_read_tokens != cache_read:
             log.cache_read_tokens = cache_read
@@ -1374,6 +1624,22 @@ class LogService:
         if cache_write is not None and log.cache_write_tokens != cache_write:
             log.cache_write_tokens = cache_write
             changed = True
+        if isinstance(usage_payload, dict):
+            usage_details_json = dumps_json(usage_payload)
+            if log.usage_details_json != usage_details_json:
+                log.usage_details_json = usage_details_json
+                changed = True
+            if log.token_source != "upstream_usage":
+                log.token_source = "upstream_usage"
+                changed = True
+            if log.upstream_usage_missing is not False:
+                log.upstream_usage_missing = False
+                changed = True
+            detail_tokens = LogService.extract_usage_detail_tokens(usage_payload)
+            for field_name, value in detail_tokens.items():
+                if value is not None and getattr(log, field_name, None) != value:
+                    setattr(log, field_name, value)
+                    changed = True
         return changed
 
     @staticmethod
@@ -1558,6 +1824,10 @@ class LogService:
         provider_trust_level: str | None = None,
         content_guard_result: str | None = None,
         content_guard_risk_level: str | None = None,
+        content_guard_action: str | None = None,
+        content_guard_final_strategy: str | None = None,
+        content_guard_retry_count: int | None = None,
+        content_guard_guard_stage: str | None = None,
         api_client_key_ids: list[int] | None = None,
         limit: int = 5000,
     ) -> str:
@@ -1583,6 +1853,10 @@ class LogService:
             exclude_health_checks=exclude_health_checks,
             content_guard_result=content_guard_result,
             content_guard_risk_level=content_guard_risk_level,
+            content_guard_action=content_guard_action,
+            content_guard_final_strategy=content_guard_final_strategy,
+            content_guard_retry_count=content_guard_retry_count,
+            content_guard_guard_stage=content_guard_guard_stage,
             api_client_key_ids=api_client_key_ids,
         )
         rows = list(
@@ -1628,28 +1902,34 @@ class LogService:
             "content_guard_result",
             "content_guard_risk_level",
             "content_guard_action",
+            "content_guard_final_strategy",
+            "content_guard_retry_provider_count",
             "content_guard_reason",
             "content_guard_excerpt",
             "latency_ms",
             "ttfb_ms",
             "duration_ms",
             "tps",
-            "prompt_tokens",
-            "completion_tokens",
-            "total_tokens",
-            "cache_read_tokens",
-            "cache_write_tokens",
+            "prompt_tokens_display",
+            "completion_tokens_display",
+            "total_tokens_display",
+            "cache_read_tokens_display",
+            "cache_write_tokens_display",
+            "reasoning_tokens_display",
+            "prompt_audio_tokens_display",
+            "completion_audio_tokens_display",
+            "accepted_prediction_tokens_display",
+            "rejected_prediction_tokens_display",
+            "token_source",
             "billing_multiplier",
-            "channel_price_cache_write_per_1k",
+            "channel_price_cache_write_display",
             "pricing_tier_name",
-            "total_cost",
+            "total_cost_display",
             "billing_calculation",
             "reasoning_level",
             "model_reasoning_effort",
             "api_client_key_name",
             "user_account_name",
-            "api_client_remaining_requests_daily",
-            "api_client_remaining_cost_daily",
             "message",
         ])
         for item in rows:
@@ -1690,28 +1970,34 @@ class LogService:
                 item.content_guard_result or "",
                 item.content_guard_risk_level or "",
                 item.content_guard_action or "",
+                item.content_guard_final_strategy or "",
+                item.content_guard_retry_provider_count if item.content_guard_retry_provider_count is not None else "",
                 item.content_guard_reason or "",
                 item.content_guard_excerpt or "",
                 item.latency_ms if item.latency_ms is not None else "",
                 item.ttfb_ms if item.ttfb_ms is not None else "",
                 item.duration_ms if item.duration_ms is not None else "",
                 item.tps if item.tps is not None else "",
-                item.prompt_tokens if item.prompt_tokens is not None else "",
-                item.completion_tokens if item.completion_tokens is not None else "",
-                item.total_tokens if item.total_tokens is not None else "",
-                item.cache_read_tokens if item.cache_read_tokens is not None else "",
-                item.cache_write_tokens if item.cache_write_tokens is not None else "",
+                LogService.format_token_display(item.prompt_tokens),
+                LogService.format_token_display(item.completion_tokens),
+                LogService.format_token_display(item.total_tokens),
+                LogService.format_token_display(item.cache_read_tokens),
+                LogService.format_token_display(item.cache_write_tokens),
+                LogService.format_token_display(item.reasoning_tokens),
+                LogService.format_token_display(item.prompt_audio_tokens),
+                LogService.format_token_display(item.completion_audio_tokens),
+                LogService.format_token_display(item.accepted_prediction_tokens),
+                LogService.format_token_display(item.rejected_prediction_tokens),
+                item.token_source or "",
                 item.billing_multiplier if item.billing_multiplier is not None else "",
-                item.channel_price_cache_write_per_1k if item.channel_price_cache_write_per_1k is not None else "",
+                LogService.format_price_display(item.channel_price_cache_write_per_1k),
                 item.pricing_tier_name or "",
-                item.total_cost if item.total_cost is not None else "",
+                LogService.format_money_display(item.total_cost),
                 LogService.format_billing_calculation(item),
                 item.reasoning_level or "",
                 item.model_reasoning_effort or "",
                 item.api_client_key_name or "",
                 item.user_account_name or "",
-                item.api_client_remaining_requests_daily if item.api_client_remaining_requests_daily is not None else "",
-                item.api_client_remaining_cost_daily if item.api_client_remaining_cost_daily is not None else "",
                 item.message or "",
             ])
         return buffer.getvalue()
@@ -1729,7 +2015,7 @@ class LogService:
         input_part = (
             "输入单价未设置"
             if input_price is None
-            else f"输入 {regular_input_tokens}/1000 × {float(input_price):.6f}"
+            else f"输入 {LogService.format_token_display(regular_input_tokens)} × {LogService.format_price_display(input_price)}"
         )
         cache_part = (
             None
@@ -1737,7 +2023,7 @@ class LogService:
             else (
                 "缓存单价未设置"
                 if cache_price is None
-                else f"缓存 {cache_read_tokens}/1000 × {float(cache_price):.6f}"
+                else f"缓存 {LogService.format_token_display(cache_read_tokens)} × {LogService.format_price_display(cache_price)}"
             )
         )
         cache_write_part = (
@@ -1746,13 +2032,13 @@ class LogService:
             else (
                 "缓存写入单价未设置"
                 if cache_write_price is None
-                else f"缓存写 {cache_write_tokens}/1000 × {float(cache_write_price):.6f}"
+                else f"缓存写 {LogService.format_token_display(cache_write_tokens)} × {LogService.format_price_display(cache_write_price)}"
             )
         )
         output_part = (
             "输出单价未设置"
             if output_price is None
-            else f"输出 {int(item.completion_tokens or 0)}/1000 × {float(output_price):.6f}"
+            else f"输出 {LogService.format_token_display(item.completion_tokens or 0)} × {LogService.format_price_display(output_price)}"
         )
         parts = [input_part]
         if cache_part:

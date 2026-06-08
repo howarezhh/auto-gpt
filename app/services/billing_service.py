@@ -14,6 +14,7 @@ from app.models.user_account import UserAccount
 from app.models.user_account_billing_record import UserAccountBillingRecord
 from app.schemas.api_key import ApiKeyBillingRecordOut, ApiKeyBillingSummaryOut
 from app.logging.adapters.billing_adapter import BillingLogRecorder
+from app.services.log_service import LogService
 from app.services.model_pricing_service import ModelPricingService
 from app.utils.decimal_utils import (
     MONEY_QUANT,
@@ -46,16 +47,16 @@ class BillingService:
             return {"prompt_cost": BillingService.to_decimal(0), "completion_cost": BillingService.to_decimal(0), "total_cost": BillingService.to_decimal(0), "billing_status": "no_charge"}
         if log.api_client_key_id is None:
             return {"prompt_cost": BillingService.to_decimal(0), "completion_cost": BillingService.to_decimal(0), "total_cost": BillingService.to_decimal(0), "billing_status": "internal_request"}
-        if log.request_path == "/v1/models":
+        if LogService.is_model_list_request_path(log.request_path):
             return {"prompt_cost": BillingService.to_decimal(0), "completion_cost": BillingService.to_decimal(0), "total_cost": BillingService.to_decimal(0), "billing_status": "no_charge"}
         if log.prompt_tokens is None and log.completion_tokens is None and log.total_tokens is None:
             return {"prompt_cost": None, "completion_cost": None, "total_cost": None, "billing_status": "pending_tokens"}
         if log.resolved_provider_model_id is None:
-            return {"prompt_cost": BillingService.to_decimal(0), "completion_cost": BillingService.to_decimal(0), "total_cost": BillingService.to_decimal(0), "billing_status": "price_unresolved"}
+            return {"prompt_cost": None, "completion_cost": None, "total_cost": None, "billing_status": "price_unresolved"}
 
         provider_model = db.get(ProviderModel, log.resolved_provider_model_id)
         if provider_model is None:
-            return {"prompt_cost": BillingService.to_decimal(0), "completion_cost": BillingService.to_decimal(0), "total_cost": BillingService.to_decimal(0), "billing_status": "price_unresolved"}
+            return {"prompt_cost": None, "completion_cost": None, "total_cost": None, "billing_status": "price_unresolved"}
         catalog = db.scalar(select(ModelCatalog).where(ModelCatalog.model_name == provider_model.model_name))
 
         prompt_tokens = max(0, int(log.prompt_tokens or 0))
@@ -84,7 +85,9 @@ class BillingService:
                 "cache_price_per_1k": to_price_decimal(provider_model.cache_price_per_1k)
                 if provider_model.cache_price_per_1k is not None
                 else to_price_decimal(provider_model.input_price_per_1k),
-                "cache_write_price_per_1k": None,
+                "cache_write_price_per_1k": to_price_decimal(provider_model.cache_write_price_per_1k)
+                if provider_model.cache_write_price_per_1k is not None
+                else to_price_decimal(provider_model.input_price_per_1k),
             }
         log.billing_multiplier = to_multiplier_decimal(provider_model.price_multiplier)
         log.channel_price_input_per_1k = resolved_prices["input_price_per_1k"]
@@ -101,16 +104,29 @@ class BillingService:
             if resolved_prices.get("cache_write_price_per_1k") is not None
             else input_price
         )
-
-        if input_price is None and output_price is None:
-            return {"prompt_cost": BillingService.to_decimal(0), "completion_cost": BillingService.to_decimal(0), "total_cost": BillingService.to_decimal(0), "billing_status": "price_unset"}
+        log.channel_price_cache_write_per_1k = cache_write_price
 
         regular_prompt_tokens = max(0, prompt_tokens - cache_read_tokens - cache_write_tokens)
+        effective_cache_price = cache_price if cache_price is not None else input_price
+        effective_cache_write_price = cache_write_price if cache_write_price is not None else input_price
+        missing_price_components = []
+        if regular_prompt_tokens > 0 and input_price is None:
+            missing_price_components.append("input_price")
+        if cache_read_tokens > 0 and effective_cache_price is None:
+            missing_price_components.append("cache_read_price")
+        if cache_write_tokens > 0 and effective_cache_write_price is None:
+            missing_price_components.append("cache_write_price")
+        if completion_tokens > 0 and output_price is None:
+            missing_price_components.append("output_price")
+        if missing_price_components:
+            log.billing_error = f"price_unset:{','.join(missing_price_components)}"
+            return {"prompt_cost": None, "completion_cost": None, "total_cost": None, "billing_status": "price_unset"}
+
         prompt_cost = (Decimal(regular_prompt_tokens) / Decimal("1000")) * (input_price or Decimal("0"))
         if cache_read_tokens > 0:
-            prompt_cost += (Decimal(cache_read_tokens) / Decimal("1000")) * (cache_price or input_price or Decimal("0"))
+            prompt_cost += (Decimal(cache_read_tokens) / Decimal("1000")) * (effective_cache_price or Decimal("0"))
         if cache_write_tokens > 0:
-            prompt_cost += (Decimal(cache_write_tokens) / Decimal("1000")) * (cache_write_price or input_price or Decimal("0"))
+            prompt_cost += (Decimal(cache_write_tokens) / Decimal("1000")) * (effective_cache_write_price or Decimal("0"))
         completion_cost = (Decimal(completion_tokens) / Decimal("1000")) * (output_price or Decimal("0"))
         total_cost = BillingService.to_decimal(prompt_cost + completion_cost)
         return {
@@ -233,8 +249,6 @@ class BillingService:
             if owner_user is not None:
                 BillingService._apply_api_key_cost_delta(db, api_key_id=api_key.id, delta=delta)
                 BillingService._apply_user_billing_delta(db, user_id=owner_user.id, delta=delta)
-            elif api_key.balance_amount is not None:
-                BillingService._apply_api_key_billing_delta(db, api_key_id=api_key.id, delta=delta)
             else:
                 BillingService._apply_api_key_cost_delta(db, api_key_id=api_key.id, delta=delta)
 
@@ -242,9 +256,6 @@ class BillingService:
         if owner_user is not None:
             db.refresh(owner_user)
             balance_after = BillingService.to_decimal(owner_user.balance_amount)
-        elif api_key.balance_amount is not None:
-            db.refresh(api_key)
-            balance_after = BillingService.to_decimal(api_key.balance_amount)
 
         if new_amount > 0:
             if existing_record is None:
@@ -262,8 +273,12 @@ class BillingService:
             existing_record.prompt_tokens = log.prompt_tokens
             existing_record.completion_tokens = log.completion_tokens
             existing_record.total_tokens = log.total_tokens
+            existing_record.cache_read_tokens = log.cache_read_tokens
+            existing_record.cache_write_tokens = log.cache_write_tokens
             existing_record.unit_input_price_per_1k = to_price_decimal(log.channel_price_input_per_1k)
             existing_record.unit_output_price_per_1k = to_price_decimal(log.channel_price_output_per_1k)
+            existing_record.unit_cache_read_price_per_1k = to_price_decimal(log.channel_price_cache_per_1k)
+            existing_record.unit_cache_write_price_per_1k = to_price_decimal(log.channel_price_cache_write_per_1k)
             existing_record.remark = log.message
         elif existing_record is not None:
             db.delete(existing_record)
@@ -288,8 +303,12 @@ class BillingService:
             existing_user_record.prompt_tokens = log.prompt_tokens
             existing_user_record.completion_tokens = log.completion_tokens
             existing_user_record.total_tokens = log.total_tokens
+            existing_user_record.cache_read_tokens = log.cache_read_tokens
+            existing_user_record.cache_write_tokens = log.cache_write_tokens
             existing_user_record.unit_input_price_per_1k = to_price_decimal(log.channel_price_input_per_1k)
             existing_user_record.unit_output_price_per_1k = to_price_decimal(log.channel_price_output_per_1k)
+            existing_user_record.unit_cache_read_price_per_1k = to_price_decimal(log.channel_price_cache_per_1k)
+            existing_user_record.unit_cache_write_price_per_1k = to_price_decimal(log.channel_price_cache_write_per_1k)
             existing_user_record.remark = log.message
         elif existing_user_record is not None:
             db.delete(existing_user_record)
@@ -314,8 +333,11 @@ class BillingService:
             existing_record = db.scalar(
                 select(ApiClientBillingRecord).where(ApiClientBillingRecord.request_log_id == log.id)
             )
-            if log.billing_status == "pending_tokens":
-                log.billing_error = "pending_tokens"
+            if log.billing_status in {"pending_tokens", "price_unresolved", "price_unset"}:
+                if log.billing_status == "pending_tokens":
+                    log.billing_error = "pending_tokens"
+                else:
+                    log.billing_error = log.billing_error or log.billing_status
                 BillingLogRecorder.record_billing_process(
                     db,
                     request_log_id=log.id,
@@ -328,7 +350,7 @@ class BillingService:
                         "total_cost": BillingService.to_float(log.total_cost),
                     },
                     balance_after=BillingService.to_float(log.api_client_balance_after),
-                    billing_status="pending_tokens",
+                    billing_status=log.billing_status,
                     error=log.billing_error,
                     auto_commit=False,
                 )
@@ -404,42 +426,14 @@ class BillingService:
                 total_tokens=record.total_tokens,
                 unit_input_price_per_1k=record.unit_input_price_per_1k,
                 unit_output_price_per_1k=record.unit_output_price_per_1k,
+                cache_read_tokens=record.cache_read_tokens,
+                cache_write_tokens=record.cache_write_tokens,
+                unit_cache_read_price_per_1k=record.unit_cache_read_price_per_1k,
+                unit_cache_write_price_per_1k=record.unit_cache_write_price_per_1k,
                 remark=record.remark,
                 created_at=record.created_at,
             )
-        delta = BillingService.to_decimal(amount)
-        current_balance = BillingService.to_decimal(api_key.balance_amount) if api_key.balance_amount is not None else Decimal("0")
-        new_balance = current_balance + delta
-        api_key.balance_amount = new_balance
-        if delta > 0:
-            api_key.total_recharge_amount = BillingService.to_decimal(api_key.total_recharge_amount) + delta
-            record_type = "top_up"
-        else:
-            record_type = "manual_adjustment"
-        record = ApiClientBillingRecord(
-            api_client_key_id=api_key.id,
-            request_log_id=None,
-            record_type=record_type,
-            amount=delta,
-            balance_after=new_balance,
-            provider_id=None,
-            provider_name=None,
-            model_name=None,
-            prompt_tokens=None,
-            completion_tokens=None,
-            total_tokens=None,
-            unit_input_price_per_1k=None,
-            unit_output_price_per_1k=None,
-            remark=remark,
-        )
-        db.add(record)
-        db.commit()
-        db.refresh(record)
-        db.refresh(api_key)
-        from app.services.api_key_auth_cache import ApiKeyAuthCache
-
-        ApiKeyAuthCache.invalidate_api_key(api_key.id, api_key.key_hash)
-        return record
+        raise ValueError("API Key 已取消独立余额，请先绑定归属用户后在用户账户余额中调账")
 
     @staticmethod
     def create_user_balance_adjustment(
@@ -473,8 +467,12 @@ class BillingService:
             prompt_tokens=None,
             completion_tokens=None,
             total_tokens=None,
+            cache_read_tokens=None,
+            cache_write_tokens=None,
             unit_input_price_per_1k=None,
             unit_output_price_per_1k=None,
+            unit_cache_read_price_per_1k=None,
+            unit_cache_write_price_per_1k=None,
             remark=remark,
         )
         db.add(record)
@@ -496,31 +494,32 @@ class BillingService:
         api_key = db.get(ApiClientKey, api_key_id)
         if api_key is None:
             raise ValueError("API key not found")
+        owner_user = db.get(UserAccount, api_key.owner_user_id) if api_key.owner_user_id is not None else None
+        record_model = UserAccountBillingRecord if owner_user is not None else ApiClientBillingRecord
         items = list(
             db.scalars(
-                select(ApiClientBillingRecord)
-                .where(ApiClientBillingRecord.api_client_key_id == api_key_id)
-                .order_by(ApiClientBillingRecord.created_at.desc(), ApiClientBillingRecord.id.desc())
+                select(record_model)
+                .where(record_model.api_client_key_id == api_key_id)
+                .order_by(record_model.created_at.desc(), record_model.id.desc())
                 .limit(max(1, limit))
             )
         )
         recent_since = datetime.utcnow() - timedelta(hours=24)
         recent_billed_cost = db.scalar(
-            select(func.sum(func.abs(ApiClientBillingRecord.amount))).where(
-                ApiClientBillingRecord.api_client_key_id == api_key_id,
-                ApiClientBillingRecord.record_type == "request_charge",
-                ApiClientBillingRecord.created_at >= recent_since,
+            select(func.sum(func.abs(record_model.amount))).where(
+                record_model.api_client_key_id == api_key_id,
+                record_model.record_type == "request_charge",
+                record_model.created_at >= recent_since,
             )
         ) or 0
         total_records = db.scalar(
-            select(func.count(ApiClientBillingRecord.id)).where(ApiClientBillingRecord.api_client_key_id == api_key_id)
+            select(func.count(record_model.id)).where(record_model.api_client_key_id == api_key_id)
         ) or 0
-        owner_user = db.get(UserAccount, api_key.owner_user_id) if api_key.owner_user_id is not None else None
         return ApiKeyBillingSummaryOut(
             api_client_key_id=api_key.id,
-            balance_amount=BillingService.to_float(owner_user.balance_amount) if owner_user is not None else BillingService.to_float(api_key.balance_amount),
+            balance_amount=BillingService.to_float(owner_user.balance_amount) if owner_user is not None else None,
             total_cost_used=BillingService.to_float(api_key.total_cost_used) or 0,
-            total_recharge_amount=BillingService.to_float(owner_user.total_recharge_amount) if owner_user is not None else (BillingService.to_float(api_key.total_recharge_amount) or 0),
+            total_recharge_amount=BillingService.to_float(owner_user.total_recharge_amount) if owner_user is not None else 0,
             recent_billed_cost=BillingService.to_float(recent_billed_cost) or 0,
             total_billing_records=int(total_records),
             items=[BillingService.serialize_billing_record(item) for item in items],
@@ -541,8 +540,12 @@ class BillingService:
             prompt_tokens=item.prompt_tokens,
             completion_tokens=item.completion_tokens,
             total_tokens=item.total_tokens,
+            cache_read_tokens=item.cache_read_tokens,
+            cache_write_tokens=item.cache_write_tokens,
             unit_input_price_per_1k=BillingService.to_price_float(item.unit_input_price_per_1k),
             unit_output_price_per_1k=BillingService.to_price_float(item.unit_output_price_per_1k),
+            unit_cache_read_price_per_1k=BillingService.to_price_float(item.unit_cache_read_price_per_1k),
+            unit_cache_write_price_per_1k=BillingService.to_price_float(item.unit_cache_write_price_per_1k),
             remark=item.remark,
             created_at=item.created_at,
         )
@@ -563,8 +566,12 @@ class BillingService:
             "prompt_tokens": item.prompt_tokens,
             "completion_tokens": item.completion_tokens,
             "total_tokens": item.total_tokens,
+            "cache_read_tokens": item.cache_read_tokens,
+            "cache_write_tokens": item.cache_write_tokens,
             "unit_input_price_per_1k": BillingService.to_price_float(item.unit_input_price_per_1k),
             "unit_output_price_per_1k": BillingService.to_price_float(item.unit_output_price_per_1k),
+            "unit_cache_read_price_per_1k": BillingService.to_price_float(item.unit_cache_read_price_per_1k),
+            "unit_cache_write_price_per_1k": BillingService.to_price_float(item.unit_cache_write_price_per_1k),
             "remark": item.remark,
             "created_at": item.created_at,
         }

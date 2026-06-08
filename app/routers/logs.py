@@ -53,6 +53,10 @@ async def list_logs(
     success: bool | None = None,
     content_guard_result: str | None = None,
     content_guard_risk_level: str | None = None,
+    content_guard_action: str | None = None,
+    content_guard_final_strategy: str | None = None,
+    content_guard_retry_count: int | None = Query(default=None, ge=0),
+    content_guard_guard_stage: str | None = None,
     exclude_health_checks: bool = Query(default=True),
     wait_for_latest: bool = Query(default=False),
     wait_timeout_ms: int = Query(default=2000, ge=0, le=10000),
@@ -87,6 +91,10 @@ async def list_logs(
         exclude_health_checks=exclude_health_checks,
         content_guard_result=content_guard_result,
         content_guard_risk_level=content_guard_risk_level,
+        content_guard_action=content_guard_action,
+        content_guard_final_strategy=content_guard_final_strategy,
+        content_guard_retry_count=content_guard_retry_count,
+        content_guard_guard_stage=content_guard_guard_stage,
     )
     return LogListResponse(
         total=total,
@@ -133,6 +141,10 @@ def export_logs(
     success: bool | None = None,
     content_guard_result: str | None = None,
     content_guard_risk_level: str | None = None,
+    content_guard_action: str | None = None,
+    content_guard_final_strategy: str | None = None,
+    content_guard_retry_count: int | None = Query(default=None, ge=0),
+    content_guard_guard_stage: str | None = None,
     exclude_health_checks: bool = Query(default=True),
     limit: int = Query(default=5000, ge=1, le=10000),
     db: Session = Depends(get_db),
@@ -158,6 +170,10 @@ def export_logs(
         exclude_health_checks=exclude_health_checks,
         content_guard_result=content_guard_result,
         content_guard_risk_level=content_guard_risk_level,
+        content_guard_action=content_guard_action,
+        content_guard_final_strategy=content_guard_final_strategy,
+        content_guard_retry_count=content_guard_retry_count,
+        content_guard_guard_stage=content_guard_guard_stage,
         limit=limit,
     )
     filename = f"logs-export-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.csv"

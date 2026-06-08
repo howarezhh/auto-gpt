@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import csv
+import io
 from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response
 from sqlalchemy import desc, func, or_, select
 from sqlalchemy.orm import Session
 
@@ -52,6 +55,41 @@ REQUEST_TIMELINE_MODELS: tuple[tuple[str, type], ...] = (
 )
 
 
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _contains(column, value: str):
+    return column.ilike(f"%{_escape_like(value.strip())}%", escape="\\")
+
+
+def build_request_log_timeline_payload(db: Session, log: RequestLog) -> dict[str, Any]:
+    events: list[dict[str, Any]] = []
+    for label, model in REQUEST_TIMELINE_MODELS:
+        rows = db.scalars(
+            select(model)
+            .where(model.request_log_id == log.id)
+            .order_by(model.created_at.asc(), model.id.asc())
+        ).all()
+        for row in rows:
+            payload = _model_to_dict(row)
+            events.append(
+                {
+                    "id": f"{model.__tablename__}:{row.id}",
+                    "event_type": model.__tablename__,
+                    "label": label,
+                    "event_name": model.__tablename__,
+                    "created_at": payload.get("created_at"),
+                    "payload": payload,
+                }
+            )
+    events.sort(key=lambda item: str(item.get("created_at") or ""))
+    return {
+        "request_log": RequestLogOut.model_validate(LogService.serialize_logs([log])[0]).model_dump(mode="json"),
+        "events": events,
+    }
+
+
 @router.get("/request-logs")
 async def list_request_logs(
     page: int = Query(default=1, ge=1),
@@ -66,17 +104,16 @@ async def list_request_logs(
     count_query = select(func.count()).select_from(RequestLog)
     conditions = []
     if keyword:
-        like = f"%{keyword.strip()}%"
         conditions.append(
             or_(
-                RequestLog.trace_id.like(like),
-                RequestLog.request_path.like(like),
-                RequestLog.requested_model.like(like),
-                RequestLog.model_name.like(like),
-                RequestLog.api_client_key_name.like(like),
-                RequestLog.user_account_name.like(like),
-                RequestLog.error_code.like(like),
-                RequestLog.message.like(like),
+                _contains(RequestLog.trace_id, keyword),
+                _contains(RequestLog.request_path, keyword),
+                _contains(RequestLog.requested_model, keyword),
+                _contains(RequestLog.model_name, keyword),
+                _contains(RequestLog.api_client_key_name, keyword),
+                _contains(RequestLog.user_account_name, keyword),
+                _contains(RequestLog.error_code, keyword),
+                _contains(RequestLog.message, keyword),
             )
         )
     if success is not None:
@@ -90,7 +127,7 @@ async def list_request_logs(
         count_query = count_query.where(condition)
     total = int(db.scalar(count_query) or 0)
     items = db.scalars(
-        query.order_by(desc(RequestLog.created_at))
+        query.order_by(desc(RequestLog.created_at), desc(RequestLog.id))
         .offset((page - 1) * page_size)
         .limit(page_size)
     ).all()
@@ -115,30 +152,7 @@ def get_request_log_timeline(request_log_id: int, db: Session = Depends(get_db))
     log = db.get(RequestLog, request_log_id)
     if log is None:
         raise HTTPException(status_code=404, detail="request log not found")
-    events: list[dict[str, Any]] = []
-    for label, model in REQUEST_TIMELINE_MODELS:
-        rows = db.scalars(
-            select(model)
-            .where(model.request_log_id == request_log_id)
-            .order_by(model.created_at.asc(), model.id.asc())
-        ).all()
-        for row in rows:
-            payload = _model_to_dict(row)
-            events.append(
-                {
-                    "id": f"{model.__tablename__}:{row.id}",
-                    "event_type": model.__tablename__,
-                    "label": label,
-                    "event_name": model.__tablename__,
-                    "created_at": payload.get("created_at"),
-                    "payload": payload,
-                }
-            )
-    events.sort(key=lambda item: str(item.get("created_at") or ""))
-    return {
-        "request_log": RequestLogOut.model_validate(LogService.serialize_logs([log])[0]).model_dump(mode="json"),
-        "events": events,
-    }
+    return build_request_log_timeline_payload(db, log)
 
 
 @router.get("/exceptions")
@@ -149,6 +163,9 @@ def list_exception_events(
     severity: str | None = None,
     error_code: str | None = None,
     path: str | None = None,
+    trace_id: str | None = None,
+    start_at: datetime | None = None,
+    end_at: datetime | None = None,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     return _list_model(
@@ -158,8 +175,10 @@ def list_exception_events(
         page_size=page_size,
         keyword=keyword,
         keyword_columns=("trace_id", "exception_type", "message", "request_path", "error_code"),
-        filters={"severity": severity, "error_code": error_code, "request_path": path},
+        filters={"severity": severity, "error_code": error_code, "request_path": path, "trace_id": trace_id},
         order_column=ExceptionEvent.occurred_at,
+        start_at=start_at,
+        end_at=end_at,
     )
 
 
@@ -170,6 +189,8 @@ def list_health_runs(
     keyword: str | None = None,
     trigger_type: str | None = None,
     overall_result: str | None = None,
+    start_at: datetime | None = None,
+    end_at: datetime | None = None,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     return _list_model(
@@ -181,6 +202,8 @@ def list_health_runs(
         keyword_columns=("run_id", "scope_type", "scope_id"),
         filters={"trigger_type": trigger_type, "overall_result": overall_result},
         order_column=HealthCheckRun.started_at,
+        start_at=start_at,
+        end_at=end_at,
     )
 
 
@@ -206,23 +229,28 @@ def list_billing_events(
     result: str | None = None,
     billing_status: str | None = None,
     request_log_id: int | None = None,
+    start_at: datetime | None = None,
+    end_at: datetime | None = None,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     normalized_family = (event_family or "").strip()
     include_token = normalized_family in ("", "token_finalize")
     include_billing = normalized_family in ("", "billing_process")
 
+    merge_window_size = page * page_size
     token_page = {"total": 0, "items": []}
     if include_token:
         token_page = _list_model(
             db,
             TokenFinalizeEvent,
             page=1,
-            page_size=page_size,
+            page_size=merge_window_size,
             keyword=keyword,
             keyword_columns=("queue_source", "token_source", "result", "error"),
             filters={"request_log_id": request_log_id, "result": result},
             order_column=TokenFinalizeEvent.created_at,
+            start_at=start_at,
+            end_at=end_at,
         )
 
     billing_page = {"total": 0, "items": []}
@@ -231,7 +259,7 @@ def list_billing_events(
             db,
             BillingProcessEvent,
             page=1,
-            page_size=page_size,
+            page_size=merge_window_size,
             keyword=keyword,
             keyword_columns=("pricing_source", "billing_status", "error"),
             filters={
@@ -239,6 +267,8 @@ def list_billing_events(
                 "request_log_id": request_log_id,
             },
             order_column=BillingProcessEvent.created_at,
+            start_at=start_at,
+            end_at=end_at,
         )
 
     items = [
@@ -253,6 +283,161 @@ def list_billing_events(
     return _page_response(page=page, page_size=page_size, total=total, items=items[(page - 1) * page_size : page * page_size])
 
 
+@router.get("/content-guard-events")
+def list_content_guard_events(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=200),
+    keyword: str | None = None,
+    guard_stage: str | None = None,
+    guard_result: str | None = None,
+    risk_level: str | None = None,
+    action: str | None = None,
+    request_log_id: int | None = None,
+    trace_id: str | None = None,
+    start_at: datetime | None = None,
+    end_at: datetime | None = None,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    return _list_model(
+        db,
+        RequestContentGuardEvent,
+        page=page,
+        page_size=page_size,
+        keyword=keyword,
+        keyword_columns=("trace_id", "guard_stage", "guard_result", "risk_level", "reason", "action", "excerpt"),
+        filters={
+            "guard_stage": guard_stage,
+            "guard_result": guard_result,
+            "risk_level": risk_level,
+            "action": action,
+            "request_log_id": request_log_id,
+            "trace_id": trace_id,
+        },
+        order_column=RequestContentGuardEvent.created_at,
+        start_at=start_at,
+        end_at=end_at,
+    )
+
+
+@router.get("/export")
+def export_typed_logs(
+    log_type: str = Query(...),
+    keyword: str | None = None,
+    severity: str | None = None,
+    error_code: str | None = None,
+    path: str | None = None,
+    trace_id: str | None = None,
+    request_log_id: int | None = None,
+    trigger_type: str | None = None,
+    overall_result: str | None = None,
+    event_family: str | None = None,
+    result: str | None = None,
+    billing_status: str | None = None,
+    status: str | None = None,
+    job_name: str | None = None,
+    lock_status: str | None = None,
+    guard_stage: str | None = None,
+    guard_result: str | None = None,
+    risk_level: str | None = None,
+    action: str | None = None,
+    actor_type: str | None = None,
+    storage_scope: str | None = None,
+    start_at: datetime | None = None,
+    end_at: datetime | None = None,
+    limit: int = Query(default=5000, ge=1, le=10000),
+    db: Session = Depends(get_db),
+) -> Response:
+    if log_type == "exceptions":
+        data = _list_model(
+            db,
+            ExceptionEvent,
+            page=1,
+            page_size=limit,
+            keyword=keyword,
+            keyword_columns=("trace_id", "exception_type", "message", "request_path", "error_code"),
+            filters={"severity": severity, "error_code": error_code, "request_path": path, "trace_id": trace_id},
+            order_column=ExceptionEvent.occurred_at,
+            start_at=start_at,
+            end_at=end_at,
+        )
+    elif log_type == "health-runs":
+        data = _list_model(
+            db,
+            HealthCheckRun,
+            page=1,
+            page_size=limit,
+            keyword=keyword,
+            keyword_columns=("run_id", "scope_type", "scope_id"),
+            filters={"trigger_type": trigger_type, "overall_result": overall_result},
+            order_column=HealthCheckRun.started_at,
+            start_at=start_at,
+            end_at=end_at,
+        )
+    elif log_type == "billing-events":
+        data = list_billing_events(
+            page=1,
+            page_size=limit,
+            keyword=keyword,
+            event_family=event_family,
+            result=result,
+            billing_status=billing_status,
+            request_log_id=request_log_id,
+            start_at=start_at,
+            end_at=end_at,
+            db=db,
+        )
+    elif log_type == "content-guard-events":
+        data = list_content_guard_events(
+            page=1,
+            page_size=limit,
+            keyword=keyword,
+            guard_stage=guard_stage,
+            guard_result=guard_result,
+            risk_level=risk_level,
+            action=action,
+            request_log_id=request_log_id,
+            trace_id=trace_id,
+            start_at=start_at,
+            end_at=end_at,
+            db=db,
+        )
+    elif log_type == "background-jobs":
+        data = _list_background_jobs(
+            db,
+            page=1,
+            page_size=limit,
+            keyword=keyword,
+            status=status,
+            job_name=job_name,
+            trigger_type=trigger_type,
+            lock_status=lock_status,
+            start_at=start_at,
+            end_at=end_at,
+        )
+    elif log_type == "asset-events":
+        data = _list_model(
+            db,
+            AssetEvent,
+            page=1,
+            page_size=limit,
+            keyword=keyword,
+            keyword_columns=("filename", "content_type", "sha256_prefix", "trace_id", "error"),
+            filters={"actor_type": actor_type, "storage_scope": storage_scope, "result": result, "request_log_id": request_log_id},
+            order_column=AssetEvent.created_at,
+            start_at=start_at,
+            end_at=end_at,
+        )
+    else:
+        raise HTTPException(status_code=400, detail="unsupported typed log export")
+    csv_text = _items_to_csv(data.get("items") or [])
+    filename = f"{log_type}-export-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.csv"
+    return Response(
+        content=csv_text,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @router.get("/background-jobs")
 def list_background_jobs(
     page: int = Query(default=1, ge=1),
@@ -260,18 +445,76 @@ def list_background_jobs(
     keyword: str | None = None,
     status: str | None = None,
     job_name: str | None = None,
+    trigger_type: str | None = None,
+    lock_status: str | None = None,
+    start_at: datetime | None = None,
+    end_at: datetime | None = None,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    return _list_model(
+    return _list_background_jobs(
         db,
-        BackgroundJobEvent,
         page=page,
         page_size=page_size,
         keyword=keyword,
-        keyword_columns=("job_run_id", "job_name", "lock_key", "error"),
-        filters={"status": status, "job_name": job_name},
-        order_column=BackgroundJobEvent.created_at,
+        status=status,
+        job_name=job_name,
+        trigger_type=trigger_type,
+        lock_status=lock_status,
+        start_at=start_at,
+        end_at=end_at,
     )
+
+
+def _list_background_jobs(
+    db: Session,
+    *,
+    page: int,
+    page_size: int,
+    keyword: str | None,
+    status: str | None,
+    job_name: str | None,
+    trigger_type: str | None = None,
+    lock_status: str | None = None,
+    start_at: datetime | None = None,
+    end_at: datetime | None = None,
+) -> dict[str, Any]:
+    query = select(BackgroundJobEvent)
+    count_query = select(func.count()).select_from(BackgroundJobEvent)
+    conditions = []
+    if keyword:
+        conditions.append(
+            or_(
+                _contains(BackgroundJobEvent.job_run_id, keyword),
+                _contains(BackgroundJobEvent.job_name, keyword),
+                _contains(BackgroundJobEvent.lock_key, keyword),
+                _contains(BackgroundJobEvent.error, keyword),
+            )
+        )
+    if status:
+        if status == "skipped":
+            conditions.append(BackgroundJobEvent.status.in_(("skipped", "skipped_locked", "skipped_lock_unavailable")))
+        else:
+            conditions.append(BackgroundJobEvent.status == status)
+    if job_name:
+        conditions.append(_contains(BackgroundJobEvent.job_name, job_name))
+    if trigger_type:
+        conditions.append(BackgroundJobEvent.trigger_type == trigger_type)
+    if lock_status:
+        conditions.append(BackgroundJobEvent.lock_status == lock_status)
+    if start_at is not None:
+        conditions.append(BackgroundJobEvent.started_at >= start_at)
+    if end_at is not None:
+        conditions.append(BackgroundJobEvent.started_at <= end_at)
+    for condition in conditions:
+        query = query.where(condition)
+        count_query = count_query.where(condition)
+    total = int(db.scalar(count_query) or 0)
+    rows = db.scalars(
+        query.order_by(desc(BackgroundJobEvent.created_at), desc(BackgroundJobEvent.id))
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    return _page_response(page=page, page_size=page_size, total=total, items=[_model_to_dict(item) for item in rows])
 
 
 @router.get("/admin-audits")
@@ -326,6 +569,10 @@ def list_asset_events(
     actor_type: str | None = None,
     storage_scope: str | None = None,
     result: str | None = None,
+    trace_id: str | None = None,
+    request_log_id: int | None = None,
+    start_at: datetime | None = None,
+    end_at: datetime | None = None,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     return _list_model(
@@ -335,8 +582,10 @@ def list_asset_events(
         page_size=page_size,
         keyword=keyword,
         keyword_columns=("filename", "content_type", "sha256_prefix", "trace_id", "error"),
-        filters={"actor_type": actor_type, "storage_scope": storage_scope, "result": result},
+        filters={"actor_type": actor_type, "storage_scope": storage_scope, "result": result, "trace_id": trace_id, "request_log_id": request_log_id},
         order_column=AssetEvent.created_at,
+        start_at=start_at,
+        end_at=end_at,
     )
 
 
@@ -350,14 +599,15 @@ def _list_model(
     keyword_columns: tuple[str, ...],
     filters: dict[str, Any],
     order_column,
+    start_at: datetime | None = None,
+    end_at: datetime | None = None,
 ) -> dict[str, Any]:
     query = select(model)
     count_query = select(func.count()).select_from(model)
     conditions = []
     if keyword:
-        like = f"%{keyword.strip()}%"
         keyword_conditions = [
-            getattr(model, column).like(like)
+            _contains(getattr(model, column), keyword)
             for column in keyword_columns
             if hasattr(model, column)
         ]
@@ -367,12 +617,16 @@ def _list_model(
         if value is None or value == "" or not hasattr(model, field_name):
             continue
         conditions.append(getattr(model, field_name) == value)
+    if start_at is not None:
+        conditions.append(order_column >= start_at)
+    if end_at is not None:
+        conditions.append(order_column <= end_at)
     for condition in conditions:
         query = query.where(condition)
         count_query = count_query.where(condition)
     total = int(db.scalar(count_query) or 0)
     rows = db.scalars(
-        query.order_by(desc(order_column))
+        query.order_by(desc(order_column), desc(model.id))
         .offset((page - 1) * page_size)
         .limit(page_size)
     ).all()
@@ -394,3 +648,25 @@ def _model_to_dict(item) -> dict[str, Any]:
         for column in item.__table__.columns
     }
     return to_jsonable(payload)
+
+
+def _items_to_csv(items: list[dict[str, Any]]) -> str:
+    buffer = io.StringIO()
+    fieldnames: list[str] = []
+    for item in items:
+        for key in item.keys():
+            if key not in fieldnames:
+                fieldnames.append(key)
+    writer = csv.writer(buffer)
+    writer.writerow(fieldnames)
+    for item in items:
+        writer.writerow([_format_csv_value(item.get(key)) for key in fieldnames])
+    return buffer.getvalue()
+
+
+def _format_csv_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        return str(to_jsonable(value))
+    return str(value)
