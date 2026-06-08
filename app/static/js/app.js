@@ -9026,16 +9026,18 @@
 
         const renderProviderOptions = () => {
             const providers = Array.isArray(state.overview?.providers) ? state.overview.providers : [];
+            const selectedProviderId = providerSelect.value;
             providerSelect.innerHTML = providers.map((provider) => `
-                <option value="${provider.id}">${escapeHtml(provider.name)} · ${escapeHtml(provider.content_integrity_status_label || formatContentIntegrityStatusLabel(provider.content_integrity_status))}</option>
+                <option value="${provider.id}" ${String(provider.id) === String(selectedProviderId) ? "selected" : ""}>${escapeHtml(provider.name)} · ${escapeHtml(provider.content_integrity_status_label || formatContentIntegrityStatusLabel(provider.content_integrity_status))}</option>
             `).join("");
             renderProviderModelOptions();
         };
 
         const renderProviderModelOptions = () => {
             const models = getProviderModels();
+            const selectedModelId = providerModelSelect.value;
             providerModelSelect.innerHTML = models.map((model) => `
-                <option value="${model.id}">${escapeHtml(model.model_name)} · ${escapeHtml(model.content_integrity_status_label || formatContentIntegrityStatusLabel(model.content_integrity_status))}</option>
+                <option value="${model.id}" ${String(model.id) === String(selectedModelId) ? "selected" : ""}>${escapeHtml(model.model_name)} · ${escapeHtml(model.content_integrity_status_label || formatContentIntegrityStatusLabel(model.content_integrity_status))}</option>
             `).join("");
             if (!models.length) {
                 providerModelSelect.innerHTML = '<option value="">无可检测模型</option>';
@@ -9090,9 +9092,13 @@
         const renderProbeOptions = () => {
             const defaults = new Set(CONTENT_TRUST_PROBE_KEYS);
             const options = Array.isArray(state.overview?.probe_options) ? state.overview.probe_options : [];
+            const existingChecked = new Set(
+                Array.from(probeOptionsNode.querySelectorAll("input[type='checkbox']:checked")).map((item) => item.value)
+            );
+            const selectedKeys = probeOptionsNode.querySelectorAll("input[type='checkbox']").length ? existingChecked : defaults;
             probeOptionsNode.innerHTML = options.map((item) => `
                 <label class="content-guard-probe-option">
-                    <input type="checkbox" value="${escapeHtml(item.key)}" ${defaults.has(item.key) ? "checked" : ""}>
+                    <input type="checkbox" value="${escapeHtml(item.key)}" ${selectedKeys.has(item.key) ? "checked" : ""}>
                     <span>${escapeHtml(item.label)}</span>
                 </label>
             `).join("");
@@ -12307,6 +12313,7 @@
         const searchInput = document.getElementById("api-key-search");
         const statusFilter = document.getElementById("api-key-status-filter");
         const enabledFilter = document.getElementById("api-key-enabled-filter");
+        const contentGuardFilter = document.getElementById("api-key-content-guard-filter");
         const ownerFilter = document.getElementById("api-key-owner-filter");
         const pageSizeSelect = document.getElementById("api-key-page-size");
         const refreshBtn = document.getElementById("api-key-refresh-btn");
@@ -12361,6 +12368,7 @@
         const templateNameInput = document.getElementById("api-key-template-name");
         const templateExpiresInDaysInput = document.getElementById("api-key-template-expires-in-days");
         const templateEnabledInput = document.getElementById("api-key-template-enabled");
+        const templateContentGuardRequiredInput = document.getElementById("api-key-template-content-guard-required");
         const templateRemarkInput = document.getElementById("api-key-template-remark");
         const templateProviderSelector = document.getElementById("api-key-template-provider-selector");
         const templateModelSelector = document.getElementById("api-key-template-model-selector");
@@ -12399,6 +12407,7 @@
                 keyword: "",
                 status: "",
                 enabled: "",
+                contentGuardRequired: "",
                 ownerUserId: "",
             },
             selectedIds: new Set(),
@@ -12445,6 +12454,7 @@
             state.filters.keyword = searchInput.value.trim();
             state.filters.status = statusFilter.value;
             state.filters.enabled = enabledFilter.value;
+            state.filters.contentGuardRequired = contentGuardFilter?.value || "";
             state.filters.ownerUserId = ownerFilter.value;
         }
 
@@ -12955,6 +12965,7 @@
             if (state.filters.keyword) params.set("keyword", state.filters.keyword);
             if (state.filters.status) params.set("status", state.filters.status);
             if (state.filters.enabled) params.set("enabled", state.filters.enabled);
+            if (state.filters.contentGuardRequired) params.set("content_guard_required", state.filters.contentGuardRequired);
             if (state.filters.ownerUserId) params.set("owner_user_id", state.filters.ownerUserId);
             renderLoadingState();
             let summary;
