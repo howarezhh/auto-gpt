@@ -1,5 +1,6 @@
 import re
 import ipaddress
+import socket
 from typing import Literal
 from urllib.parse import urlparse
 
@@ -177,6 +178,26 @@ class ContentGuardExternalTarget(BaseModel):
             or host_ip.is_unspecified
         ):
             raise ValueError("外部渠道接口地址禁止使用内网、回环、链路本地或保留地址")
+        if host_ip is None:
+            try:
+                resolved_hosts = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
+            except socket.gaierror as exc:
+                raise ValueError("外部渠道接口地址主机名无法解析") from exc
+            for resolved in resolved_hosts:
+                address = resolved[4][0]
+                try:
+                    resolved_ip = ipaddress.ip_address(address)
+                except ValueError:
+                    continue
+                if (
+                    resolved_ip.is_private
+                    or resolved_ip.is_loopback
+                    or resolved_ip.is_link_local
+                    or resolved_ip.is_multicast
+                    or resolved_ip.is_reserved
+                    or resolved_ip.is_unspecified
+                ):
+                    raise ValueError("外部渠道接口地址解析到内网、回环、链路本地或保留地址")
         return normalized
 
     @field_validator("api_key", "model_name")

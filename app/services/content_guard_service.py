@@ -1071,7 +1071,7 @@ class ContentGuardService:
                 return
             if isinstance(item, dict):
                 for key, nested in item.items():
-                    if key in {"api_key", "authorization", "base64", "b64_json", "image_url"}:
+                    if key in {"api_key", "authorization", "base64", "b64_json"}:
                         continue
                     walk(nested)
                     if current_bytes >= max_scan_bytes:
@@ -1095,6 +1095,16 @@ class ContentGuardService:
             if isinstance(text, str) and text:
                 parts.append(text)
 
+        def add_scan(value: Any) -> None:
+            if value is None:
+                return
+            if isinstance(value, str):
+                add(value)
+                return
+            extracted = cls._extract_scan_text(value, max_scan_bytes=max_scan_bytes)
+            if extracted:
+                parts.append(extracted)
+
         if endpoint_path == "/chat/completions":
             for choice in value.get("choices") or []:
                 if not isinstance(choice, dict):
@@ -1105,6 +1115,8 @@ class ContentGuardService:
                 add(delta.get("content"))
                 add(message.get("refusal"))
                 add(delta.get("refusal"))
+                add_scan(message.get("image_url"))
+                add_scan(delta.get("image_url"))
                 for container in (message, delta):
                     for tool_call in container.get("tool_calls") or []:
                         if not isinstance(tool_call, dict):
@@ -1127,6 +1139,7 @@ class ContentGuardService:
                     add(content.get("text"))
                     add(content.get("output_text"))
                     add(content.get("delta"))
+                    add_scan(content.get("image_url"))
             add(value.get("output_text"))
         if not parts:
             return cls._extract_scan_text(value, max_scan_bytes=max_scan_bytes)

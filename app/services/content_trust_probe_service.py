@@ -71,7 +71,9 @@ class ContentTrustProbeService:
                 continue
             probe_results.append(await ContentTrustProbeService.run_single_probe(provider, provider_model, endpoint_path, probe_key))
         summary = ContentTrustProbeService.summarize_probe_results(probe_results)
-        if payload.target_type == "internal" and payload.persist_internal_result:
+        selected_probe_keys = {str(item) for item in payload.probe_keys or []}
+        can_persist_trust_status = set(ContentTrustProbeService.REQUIRED_TRUST_PROBE_KEYS).issubset(selected_probe_keys)
+        if payload.target_type == "internal" and payload.persist_internal_result and can_persist_trust_status:
             aggregate_guard = ContentTrustProbeService.aggregate_content_guard_result(probe_results)
             if aggregate_guard is not None:
                 ContentTrustProbeService.update_provider_model_trust_status(
