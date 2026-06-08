@@ -138,6 +138,54 @@ def content_guard_runtime_settings(db: Session = Depends(get_db)) -> dict:
     return {"settings": ContentGuardModuleService.build_overview(db)["settings"]}
 
 
+@router.post("/providers/{provider_id}/isolate")
+def isolate_content_guard_provider(
+    provider_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_admin_api_user),
+) -> dict:
+    try:
+        provider = ContentGuardModuleService.set_provider_content_integrity_status(db, provider_id, status="blocked")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    AdminAuditService.create_log(
+        db,
+        actor_user_id=current_user.id,
+        actor_username=current_user.username,
+        action="update",
+        entity_type="provider",
+        entity_id=provider.id,
+        entity_name=provider.name,
+        summary=f"内容防护手动隔离提供商 {provider.name}",
+        detail={"content_integrity_status": "blocked"},
+    )
+    return {"provider": ContentGuardModuleService.serialize_provider(provider)}
+
+
+@router.post("/providers/{provider_id}/restore")
+def restore_content_guard_provider(
+    provider_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_admin_api_user),
+) -> dict:
+    try:
+        provider = ContentGuardModuleService.set_provider_content_integrity_status(db, provider_id, status="passed")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    AdminAuditService.create_log(
+        db,
+        actor_user_id=current_user.id,
+        actor_username=current_user.username,
+        action="update",
+        entity_type="provider",
+        entity_id=provider.id,
+        entity_name=provider.name,
+        summary=f"内容防护手动恢复提供商 {provider.name}",
+        detail={"content_integrity_status": "passed"},
+    )
+    return {"provider": ContentGuardModuleService.serialize_provider(provider)}
+
+
 @router.post("/probe")
 async def run_content_guard_probe(
     payload: ContentGuardRunRequest,

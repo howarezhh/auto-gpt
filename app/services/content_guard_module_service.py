@@ -17,6 +17,7 @@ from app.services.content_trust_probe_service import ContentTrustProbeService
 from app.services.provider_service import (
     CONTENT_INTEGRITY_STATUS_LABELS,
     PROVIDER_TRUST_LEVEL_LABELS,
+    ProviderService,
 )
 from app.services.setting_service import SettingService
 from app.utils.json_utils import loads_json
@@ -58,6 +59,22 @@ class ContentGuardModuleService:
                 .limit(5000)
             )
         )
+        recent_events = list(
+            db.scalars(
+                select(RequestLog)
+                .where(RequestLog.content_guard_result.is_not(None))
+                .order_by(RequestLog.created_at.desc(), RequestLog.id.desc())
+                .limit(200)
+            )
+        )
+        events_by_provider: dict[int, list[dict[str, Any]]] = {}
+        for event in recent_events:
+            provider_id = int(event.provider_id or 0)
+            if provider_id <= 0:
+                continue
+            bucket = events_by_provider.setdefault(provider_id, [])
+            if len(bucket) < 5:
+                bucket.append(ContentGuardModuleService.serialize_runtime_event(event))
         return {
             "settings": ContentGuardModuleService.serialize_settings(SettingService.get_or_create(db)),
             "summary": {
@@ -69,7 +86,13 @@ class ContentGuardModuleService:
                 "latency_p95_ms": ContentGuardModuleService.percentile(guard_latencies, 95),
                 "latency_p99_ms": ContentGuardModuleService.percentile(guard_latencies, 99),
             },
-            "providers": [ContentGuardModuleService.serialize_provider(item) for item in providers],
+            "providers": [
+                ContentGuardModuleService.serialize_provider(
+                    item,
+                    recent_events=events_by_provider.get(item.id, []),
+                )
+                for item in providers
+            ],
             "rules": ContentGuardModuleService.serialize_rules(SettingService.get_or_create(db)),
             "rule_defaults": ContentGuardRuleService.default_rules(),
             "probe_options": [
@@ -173,12 +196,13 @@ class ContentGuardModuleService:
         }
 
     @staticmethod
-    def serialize_provider(provider: Provider) -> dict[str, Any]:
+    def serialize_provider(provider: Provider, *, recent_events: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         models = [
             ContentGuardModuleService.serialize_provider_model(item)
             for item in sorted(provider.provider_models, key=lambda model: (model.priority, model.id))
             if item.enabled
         ]
+        trust_summary = ProviderService.provider_trust_summary(provider)
         return {
             "id": provider.id,
             "name": provider.name,
@@ -196,8 +220,46 @@ class ContentGuardModuleService:
             "last_content_violation_at": provider.last_content_violation_at,
             "content_guard_enabled": provider.content_guard_enabled,
             "buffer_stream_for_guard": provider.buffer_stream_for_guard,
+            "trust_status": trust_summary.get("status"),
+            "trust_status_label": trust_summary.get("label"),
+            "trust_status_reason": trust_summary.get("reason"),
+            "recent_events": list(recent_events or []),
             "models": models,
         }
+
+    @staticmethod
+    def serialize_runtime_event(event: RequestLog) -> dict[str, Any]:
+        return {
+            "id": event.id,
+            "created_at": event.created_at,
+            "trace_id": event.trace_id,
+            "model_name": event.model_name,
+            "request_path": event.request_path,
+            "content_guard_result": event.content_guard_result,
+            "content_guard_risk_level": event.content_guard_risk_level,
+            "content_guard_reason": event.content_guard_reason,
+            "content_guard_action": event.content_guard_action,
+            "content_guard_final_strategy": event.content_guard_final_strategy,
+        }
+
+    @staticmethod
+    def set_provider_content_integrity_status(db: Session, provider_id: int, *, status: str) -> Provider:
+        if status not in {"passed", "blocked"}:
+            raise ValueError("内容防护处置状态仅支持 passed 或 blocked")
+        provider = db.get(Provider, provider_id)
+        if provider is None:
+            raise ValueError("提供商不存在")
+        enabled_models = [item for item in provider.provider_models if item.enabled]
+        if not enabled_models:
+            raise ValueError("当前提供商没有可处置的已启用模型")
+        for provider_model in enabled_models:
+            provider_model.content_integrity_status = status
+            ProviderService._ensure_manual_content_probe_reason(provider_model)
+        ProviderService.refresh_provider_state(provider)
+        db.commit()
+        db.refresh(provider)
+        ProviderService.invalidate_provider_runtime_cache()
+        return provider
 
     @staticmethod
     def serialize_provider_model(provider_model: ProviderModel) -> dict[str, Any]:
