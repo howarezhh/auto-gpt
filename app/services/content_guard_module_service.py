@@ -11,7 +11,9 @@ from app.models.provider_model import ProviderModel
 from app.models.request_log import RequestLog
 from app.schemas.content_guard import ContentGuardRulesUpdate, ContentGuardRunRequest, ContentGuardSettingsUpdate, ContentGuardTextInspectRequest
 from app.services.content_guard_probe_service import ContentGuardProbeService
+from app.services.content_guard_rule_service import ContentGuardRuleService
 from app.services.content_guard_service import ContentGuardService
+from app.services.content_trust_probe_service import ContentTrustProbeService
 from app.services.provider_service import (
     CONTENT_INTEGRITY_STATUS_LABELS,
     PROVIDER_TRUST_LEVEL_LABELS,
@@ -23,13 +25,7 @@ from app.utils.json_utils import loads_json
 class ContentGuardModuleService:
     """内容完整性防护模块的统一配置、概览与检测入口。"""
 
-    PROBE_LABELS = {
-        "fixed_answer": "固定答案",
-        "json": "严格 JSON",
-        "sse": "SSE",
-        "refusal": "拒答",
-        "tools": "工具调用",
-    }
+    PROBE_LABELS = ContentTrustProbeService.PROBE_LABELS
 
     @staticmethod
     def build_overview(db: Session) -> dict[str, Any]:
@@ -75,7 +71,7 @@ class ContentGuardModuleService:
             },
             "providers": [ContentGuardModuleService.serialize_provider(item) for item in providers],
             "rules": ContentGuardModuleService.serialize_rules(SettingService.get_or_create(db)),
-            "rule_defaults": ContentGuardService.default_rules(),
+            "rule_defaults": ContentGuardRuleService.default_rules(),
             "probe_options": [
                 {"key": key, "label": label}
                 for key, label in ContentGuardModuleService.PROBE_LABELS.items()
@@ -99,13 +95,14 @@ class ContentGuardModuleService:
     def serialize_settings(setting: Any) -> dict[str, Any]:
         return {
             "content_guard_enabled": bool(getattr(setting, "content_guard_enabled", True)),
+            "content_guard_precheck_auto_enabled": bool(getattr(setting, "content_guard_precheck_auto_enabled", False)),
             "content_guard_block_on_high_risk": bool(getattr(setting, "content_guard_block_on_high_risk", True)),
             "content_guard_probe_interval_sec": int(getattr(setting, "content_guard_probe_interval_sec", 3600) or 3600),
             "content_guard_max_scan_bytes": int(getattr(setting, "content_guard_max_scan_bytes", 16384) or 16384),
             "content_guard_stream_buffer_max_bytes": int(getattr(setting, "content_guard_stream_buffer_max_bytes", 16384) or 16384),
             "content_guard_low_trust_requires_buffer": bool(getattr(setting, "content_guard_low_trust_requires_buffer", True)),
             "content_guard_high_risk_strategy": str(getattr(setting, "content_guard_high_risk_strategy", "switch_provider") or "switch_provider"),
-            "content_guard_max_detection_delay_ms": int(getattr(setting, "content_guard_max_detection_delay_ms", 300) or 300),
+            "content_guard_max_detection_delay_ms": min(500, max(0, int(getattr(setting, "content_guard_max_detection_delay_ms", 300) or 300))),
             "content_guard_stream_mode": str(getattr(setting, "content_guard_stream_mode", "buffer_300ms") or "buffer_300ms"),
             "content_guard_url_check_enabled": bool(getattr(setting, "content_guard_url_check_enabled", True)),
             "content_guard_url_allowlist_json": str(getattr(setting, "content_guard_url_allowlist_json", "") or ""),
@@ -115,7 +112,7 @@ class ContentGuardModuleService:
 
     @staticmethod
     def serialize_rules(setting: Any) -> list[dict[str, Any]]:
-        return [rule.to_dict() for rule in ContentGuardService.parse_rules_json(getattr(setting, "content_guard_rules_json", ""))]
+        return [rule.to_dict() for rule in ContentGuardRuleService.parse_rules_json(getattr(setting, "content_guard_rules_json", ""))]
 
     @staticmethod
     def update_settings(db: Session, payload: ContentGuardSettingsUpdate) -> Any:
@@ -130,7 +127,7 @@ class ContentGuardModuleService:
     @staticmethod
     def update_rules(db: Session, payload: ContentGuardRulesUpdate) -> Any:
         setting = SettingService.get_or_create(db)
-        setting.content_guard_rules_json = ContentGuardService.serialize_rules_json(
+        setting.content_guard_rules_json = ContentGuardRuleService.serialize_rules_json(
             [item.model_dump() for item in payload.rules]
         )
         db.commit()
@@ -150,7 +147,7 @@ class ContentGuardModuleService:
     @staticmethod
     def inspect_text(db: Session, payload: ContentGuardTextInspectRequest) -> dict[str, Any]:
         setting = SettingService.get_or_create(db)
-        result = ContentGuardService.inspect_response_text(
+        result = ContentGuardRuleService.inspect_response_text(
             payload.text,
             endpoint_path=payload.endpoint_path,
             request_payload=payload.request_payload,
@@ -159,12 +156,12 @@ class ContentGuardModuleService:
             url_allowlist=getattr(setting, "content_guard_url_allowlist_json", ""),
             url_check_enabled=bool(getattr(setting, "content_guard_url_check_enabled", True)),
         )
-        matched_rules = ContentGuardService.match_text_rules(
-            ContentGuardService._clip_text(ContentGuardService.normalize_scan_text(payload.text), max_scan_bytes=payload.max_scan_bytes),
+        matched_rules = ContentGuardRuleService.match_text_rules(
+            ContentGuardRuleService._clip_text(ContentGuardRuleService.normalize_scan_text(payload.text), max_scan_bytes=payload.max_scan_bytes),
             request_payload=payload.request_payload,
             url_allowlist=getattr(setting, "content_guard_url_allowlist_json", ""),
             url_check_enabled=bool(getattr(setting, "content_guard_url_check_enabled", True)),
-            rules=ContentGuardService.parse_rules_json(getattr(setting, "content_guard_rules_json", "")),
+            rules=ContentGuardRuleService.parse_rules_json(getattr(setting, "content_guard_rules_json", "")),
         )
         return {
             "result": result.to_log_kwargs(),
@@ -198,7 +195,6 @@ class ContentGuardModuleService:
             "content_violation_count": provider.content_violation_count,
             "last_content_violation_at": provider.last_content_violation_at,
             "content_guard_enabled": provider.content_guard_enabled,
-            "low_trust_route_enabled": provider.low_trust_route_enabled,
             "buffer_stream_for_guard": provider.buffer_stream_for_guard,
             "models": models,
         }
@@ -226,47 +222,11 @@ class ContentGuardModuleService:
 
     @staticmethod
     async def run_probe(db: Session, payload: ContentGuardRunRequest) -> dict[str, Any]:
-        provider, provider_model, target = ContentGuardModuleService._resolve_probe_target(db, payload)
-        endpoint_path = ContentGuardModuleService._resolve_endpoint_path(provider, provider_model, payload)
-        probe_results: list[dict[str, Any]] = []
-        for probe_key in payload.probe_keys:
-            if probe_key == "sse" and not bool(getattr(provider_model, "supports_stream", True)):
-                probe_results.append(
-                    ContentGuardModuleService._skipped_probe(
-                        probe_key=probe_key,
-                        endpoint_path=endpoint_path,
-                        message="模型未启用流式能力",
-                    )
-                )
-                continue
-            if probe_key == "tools" and not bool(getattr(provider_model, "supports_tools", True)):
-                probe_results.append(
-                    ContentGuardModuleService._skipped_probe(
-                        probe_key=probe_key,
-                        endpoint_path=endpoint_path,
-                        message="模型未启用工具调用能力",
-                    )
-                )
-                continue
-            probe_results.append(await ContentGuardModuleService._run_single_probe(provider, provider_model, endpoint_path, probe_key))
-        summary = ContentGuardModuleService._summarize_probe_results(probe_results)
-        if payload.target_type == "internal" and payload.persist_internal_result:
-            aggregate_guard = ContentGuardModuleService._aggregate_content_guard_result(probe_results)
-            if aggregate_guard is not None:
-                ContentGuardProbeService.apply_content_probe_health(
-                    db,
-                    provider,
-                    provider_model,
-                    content_guard_result=aggregate_guard,
-                    endpoint_results=probe_results,
-                )
-        return {
-            "target": target,
-            "endpoint_path": endpoint_path,
-            "summary": summary,
-            "probe_results": probe_results,
-            "checked_at": datetime.utcnow(),
-        }
+        return await ContentTrustProbeService.run_capability_probe(db, payload)
+
+    @staticmethod
+    async def run_trust_probe(db: Session, payload: ContentGuardRunRequest) -> dict[str, Any]:
+        return await ContentTrustProbeService.run_trust_probe(db, payload)
 
     @staticmethod
     def _resolve_probe_target(db: Session, payload: ContentGuardRunRequest) -> tuple[Provider, ProviderModel, dict[str, Any]]:
@@ -340,12 +300,12 @@ class ContentGuardModuleService:
     async def _run_single_probe(provider: Provider, provider_model: ProviderModel, endpoint_path: str, probe_key: str) -> dict[str, Any]:
         if probe_key == "fixed_answer":
             result = await ContentGuardProbeService.probe_fixed_answer(provider, provider_model, endpoint_path=endpoint_path)
+        elif probe_key == "pollution_rules":
+            result = await ContentGuardProbeService.probe_pollution_rules(provider, provider_model, endpoint_path=endpoint_path)
         elif probe_key == "json":
             result = await ContentGuardProbeService.probe_json(provider, provider_model, endpoint_path=endpoint_path)
         elif probe_key == "sse":
             result = await ContentGuardProbeService.probe_sse(provider, provider_model, endpoint_path=endpoint_path)
-        elif probe_key == "refusal":
-            result = await ContentGuardProbeService.probe_refusal(provider, provider_model, endpoint_path=endpoint_path)
         elif probe_key == "tools":
             result = await ContentGuardProbeService.probe_tools(provider, provider_model, endpoint_path=endpoint_path)
         else:
@@ -388,10 +348,19 @@ class ContentGuardModuleService:
             for item in results
             if isinstance(item.get("content_guard"), dict)
         ]
-        if ContentGuardService.RESULT_BLOCK in content_results:
+        aggregate_guard = ContentGuardModuleService._aggregate_content_guard_result(results) or {
+            "content_guard_result": ContentGuardService.RESULT_PASS,
+            "content_guard_reason": "未返回内容防护结果",
+        }
+        decision = ContentGuardProbeService._content_probe_decision(
+            [ContentGuardProbeService.summarize_probe_result(item) for item in results],
+            aggregate_guard,
+        )
+        result = str(decision.get("content_guard_result") or "")
+        if result == ContentGuardService.RESULT_BLOCK or ContentGuardService.RESULT_BLOCK in content_results:
             status = "blocked"
             result = ContentGuardService.RESULT_BLOCK
-        elif ContentGuardService.RESULT_REVIEW in content_results or passed < total:
+        elif result == ContentGuardService.RESULT_REVIEW or ContentGuardService.RESULT_REVIEW in content_results or passed < total:
             status = "review"
             result = ContentGuardService.RESULT_REVIEW
         else:
@@ -400,6 +369,7 @@ class ContentGuardModuleService:
         return {
             "status": status,
             "content_guard_result": result,
+            "content_guard_reason": decision.get("content_guard_reason"),
             "total": total,
             "passed": passed,
             "failed": max(0, total - passed),

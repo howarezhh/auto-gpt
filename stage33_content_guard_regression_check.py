@@ -1,14 +1,26 @@
 from __future__ import annotations
 
+import asyncio
+import os
+import re
+import sqlite3
 from pathlib import Path
+from app.utils.json_utils import loads_json
 
 from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
+from app.schemas.content_guard import ContentGuardExternalTarget, ContentGuardSettingsUpdate
 from app.services.content_guard_probe_service import ContentGuardProbeService
+import app.services.content_guard_module_service as content_guard_module_service
+from app.services.content_guard_module_service import ContentGuardModuleService
 from app.services.content_guard_service import ContentGuardService
+from app.services.content_runtime_guard_service import ContentRuntimeGuardService
 from app.services.error_catalog_service import ErrorCatalogService
+from app.services.log_service import LogService
+from app.services.provider_service import ProviderService
 from app.services.router_service import RoutePolicyContext, RouterService
 from app.services.system_metrics_service import SystemMetricsService
+from app.schemas.provider import ProviderBase, ProviderOut, ProviderUpdate
 
 
 def _assert(condition: bool, message: str) -> None:
@@ -43,6 +55,13 @@ def _check_content_guard_detection() -> None:
         request_payload={"messages": [{"role": "user", "content": "写一段普通说明"}]},
     )
     _assert(review.result == ContentGuardService.RESULT_REVIEW, f"单纯异常外链应进入复核：{review}")
+
+    short_link = ContentGuardService.inspect_response_text(
+        "更多额度请访问 https://bit.ly/aotu-vip 领取优惠码。",
+        request_payload={"messages": [{"role": "user", "content": "写一段普通说明"}]},
+    )
+    _assert(short_link.result == ContentGuardService.RESULT_BLOCK, f"短链导流应被拦截：{short_link}")
+    _assert("unexpected_link" in short_link.categories, f"短链导流分类缺失：{short_link}")
 
     allowed = ContentGuardService.inspect_response_text(
         "营销落地页可放置优惠链接：https://example.com/campaign",
@@ -122,12 +141,7 @@ def _check_response_structure_detection() -> None:
 
 
 def _context(**kwargs) -> RoutePolicyContext:
-    return RoutePolicyContext(
-        route_mode="failover",
-        default_provider_id=None,
-        manual_allow_fallback=True,
-        **kwargs,
-    )
+    return RoutePolicyContext(**kwargs)
 
 
 def _provider(**kwargs) -> Provider:
@@ -143,7 +157,6 @@ def _provider(**kwargs) -> Provider:
         "trust_level": "standard",
         "content_integrity_status": "unknown",
         "content_integrity_score": 80,
-        "low_trust_route_enabled": False,
     }
     payload.update(kwargs)
     return Provider(**payload)
@@ -189,15 +202,10 @@ def _check_router_content_policy() -> None:
         "要求可信 provider 时 standard 不应进入候选",
     )
 
-    low_trust = _provider(trust_level="low", low_trust_route_enabled=True)
+    low_trust = _provider(trust_level="low")
     _assert(
-        RouterService._content_policy_diagnostic_reason(low_trust, route_context=_context(allow_low_trust_providers=False))
-        == "provider_low_trust_route_disabled",
-        "API Key 未允许低信任时 low provider 不应进入候选",
-    )
-    _assert(
-        RouterService._content_policy_diagnostic_reason(low_trust, route_context=_context(allow_low_trust_providers=True)) is None,
-        "双侧允许低信任时不应被内容策略硬排除",
+        RouterService._content_policy_diagnostic_reason(low_trust, route_context=_context()) is None,
+        "全局未要求只走可信时 low provider 不应被局部开关硬排除",
     )
 
     official = _provider(trust_level="official", content_integrity_status="passed")
@@ -207,33 +215,74 @@ def _check_router_content_policy() -> None:
     )
 
 
+def _check_runtime_guard_request_semantics() -> None:
+    setting_enabled = type("Setting", (), {"content_guard_enabled": True})()
+    setting_disabled = type("Setting", (), {"content_guard_enabled": False})()
+    provider_disabled = _provider(content_guard_enabled=False)
+    provider_enabled = _provider(content_guard_enabled=True)
+    required_context = _context(content_guard_required=True)
+    optional_context = _context(content_guard_required=False)
+
+    _assert(
+        ContentRuntimeGuardService.enabled_for_request(
+            setting=setting_enabled,
+            provider=provider_disabled,
+            route_context=required_context,
+        ) is True,
+        "API Key 要求内容检测时必须强制进入检测链路，不能被提供商单项开关绕过",
+    )
+    _assert(
+        ContentRuntimeGuardService.enabled_for_request(
+            setting=setting_enabled,
+            provider=provider_disabled,
+            route_context=optional_context,
+        ) is False,
+        "API Key 内容检测为可选时应回落到提供商内容检测开关",
+    )
+    _assert(
+        ContentRuntimeGuardService.enabled_for_request(
+            setting=setting_enabled,
+            provider=provider_enabled,
+            route_context=optional_context,
+        ) is True,
+        "API Key 内容检测为可选且提供商开启检测时仍应执行检测",
+    )
+    _assert(
+        ContentRuntimeGuardService.enabled_for_request(
+            setting=setting_disabled,
+            provider=provider_enabled,
+            route_context=required_context,
+        ) is False,
+        "内容完整性全局总开关关闭时必须停用请求过程检测",
+    )
+
+
+def _check_low_trust_route_field_hidden() -> None:
+    for schema in (ProviderBase, ProviderUpdate, ProviderOut):
+        _assert(
+            "low_trust_route_enabled" not in schema.model_fields,
+            f"{schema.__name__} 不应继续暴露低信任放行字段",
+        )
+
+
 def _check_high_risk_route_detection() -> None:
     _assert(
-        ContentGuardService.requires_trusted_provider(
-            payload={"messages": [{"role": "user", "content": "请按 JSON 输出"}], "response_format": {"type": "json_object"}},
-            endpoint_path="/chat/completions",
-            has_image=False,
-            require_tools=False,
+        ContentGuardService._request_expects_json_response(
+            {"messages": [{"role": "user", "content": "请按 JSON 输出"}], "response_format": {"type": "json_object"}}
         ),
-        "结构化 JSON 请求必须升级为可信提供商",
+        "结构化 JSON 请求必须被识别为结构化输出场景",
     )
     _assert(
-        ContentGuardService.requires_trusted_provider(
-            payload={"input": [{"type": "input_file", "file_id": "file-stage33"}]},
-            endpoint_path="/responses",
-            has_image=False,
-            require_tools=False,
+        ContentGuardService._payload_contains_file_reference(
+            {"input": [{"type": "input_file", "file_id": "file-stage33"}]}
         ),
-        "文件类请求必须升级为可信提供商",
+        "文件类请求必须被识别为文件输入场景",
     )
     _assert(
-        ContentGuardService.requires_trusted_provider(
-            payload={"messages": [{"role": "user", "content": "长上下文" * 4000}]},
-            endpoint_path="/chat/completions",
-            has_image=False,
-            require_tools=False,
+        ContentGuardService._payload_has_long_context(
+            {"messages": [{"role": "user", "content": "长上下文" * 4000}]}
         ),
-        "长上下文请求必须升级为可信提供商",
+        "长上下文请求必须被识别为长上下文场景",
     )
 
 
@@ -276,6 +325,45 @@ def _check_health_probe_guard_helpers() -> None:
     _assert(failure["success"] is False, f"内容探针失败必须转为健康检查失败：{failure}")
     _assert(failure["retryable"] is False, f"内容完整性失败不应自动重试：{failure}")
     _assert(failure["content_guard"]["content_guard_result"] == ContentGuardService.RESULT_BLOCK, f"探针失败缺少内容检测上下文：{failure}")
+
+    trust_decision = ContentGuardProbeService._content_probe_decision(
+        [
+            {"phase_key": "content_fixed_answer", "success": True, "content_guard_result": "pass"},
+            {"phase_key": "content_pollution_rules", "success": True, "content_guard_result": "pass"},
+            {"phase_key": "content_sse", "success": True, "content_guard_result": "pass"},
+        ],
+        {"content_guard_result": "pass"},
+    )
+    _assert(trust_decision["content_guard_result"] == "pass", f"必需可信探针全部通过才应标记可信：{trust_decision}")
+    incomplete_decision = ContentGuardProbeService._content_probe_decision(
+        [
+            {"phase_key": "content_fixed_answer", "success": True, "content_guard_result": "pass"},
+        ],
+        {"content_guard_result": "pass"},
+    )
+    _assert(incomplete_decision["content_guard_result"] != "pass", f"缺少短链/外链/广告识别探针不应标记可信：{incomplete_decision}")
+
+
+def _check_manual_trust_edit_trace() -> None:
+    provider_model = ProviderModel(
+        id=4402,
+        provider_id=3301,
+        model_name="stage33-manual-trust-model",
+        enabled=True,
+        content_integrity_status="passed",
+    )
+    ProviderService._ensure_manual_content_probe_reason(provider_model)
+    payload = loads_json(provider_model.content_probe_results_json, {})
+    _assert(provider_model.content_probe_last_passed_at is not None, "手动标记可信必须更新通过时间")
+    _assert(provider_model.content_probe_failure_count == 0, "手动标记可信必须清空失败次数")
+    _assert(payload.get("status") == "passed", f"手动可信明细必须记录 passed 状态：{payload}")
+    _assert((payload.get("last_result") or {}).get("endpoint_label") == "管理员手动标记", f"手动可信明细必须可追溯：{payload}")
+    phase_keys = {item.get("phase_key") for item in payload.get("results", []) if isinstance(item, dict)}
+    _assert(
+        {"content_fixed_answer", "content_pollution_rules"}.issubset(phase_keys),
+        f"手动可信也必须按必需可信探针留下确认记录：{payload}",
+    )
+    _assert(ProviderService.provider_model_trust_status(provider_model) == "trusted", "手动标记可信后模型可信度应更新为可信")
 
 
 def _check_content_guard_metrics_alerts() -> None:
@@ -325,7 +413,6 @@ def _check_content_guard_auto_isolation() -> None:
         content_integrity_status="passed",
         content_integrity_score=75,
         circuit_state="closed",
-        low_trust_route_enabled=True,
     )
     provider.provider_models = [
         ProviderModel(
@@ -366,7 +453,6 @@ def _check_content_guard_auto_isolation() -> None:
     _assert(provider.trust_level == "blocked", f"自动隔离必须阻断提供商信任等级：{provider.trust_level}")
     _assert(provider.content_integrity_status == "blocked", f"自动隔离必须标记内容完整性 blocked：{provider.content_integrity_status}")
     _assert(provider.circuit_state == "open", f"自动隔离必须打开提供商熔断：{provider.circuit_state}")
-    _assert(provider.low_trust_route_enabled is False, "自动隔离必须关闭低信任路由入口")
     _assert(provider.content_integrity_score <= 20, f"自动隔离必须压低内容完整性分：{provider.content_integrity_score}")
     model = provider.provider_models[0]
     _assert(model.content_integrity_status == "blocked", f"自动隔离必须同步隔离挂载模型：{model.content_integrity_status}")
@@ -375,6 +461,114 @@ def _check_content_guard_auto_isolation() -> None:
 
     changed_again = SystemMetricsService.apply_monitoring_alert_actions(fake_db, events)
     _assert(changed_again is False, "重复刷新已隔离提供商不应反复提交状态变更")
+
+
+def _check_collect_applies_monitoring_actions_without_refresh() -> None:
+    calls: list[dict] = []
+    writes: list[dict] = []
+    originals = {
+        "_database_snapshot": SystemMetricsService._database_snapshot,
+        "_limits_snapshot": SystemMetricsService._limits_snapshot,
+        "_redis_snapshot": SystemMetricsService._redis_snapshot,
+        "_runtime_snapshot": SystemMetricsService._runtime_snapshot,
+        "_host_snapshot": SystemMetricsService._host_snapshot,
+        "_safe_snapshot": SystemMetricsService._safe_snapshot,
+        "_traffic_snapshot": SystemMetricsService._traffic_snapshot,
+        "_bucket_minutes": SystemMetricsService._bucket_minutes,
+        "_provider_snapshot": SystemMetricsService._provider_snapshot,
+        "_content_guard_snapshot": SystemMetricsService._content_guard_snapshot,
+        "_background_snapshot": SystemMetricsService._background_snapshot,
+        "_database_pool_snapshot": SystemMetricsService._database_pool_snapshot,
+        "_resolve_status": SystemMetricsService._resolve_status,
+        "_evaluate_alerts": SystemMetricsService._evaluate_alerts,
+        "apply_monitoring_actions": SystemMetricsService.apply_monitoring_actions,
+        "write_monitoring_alerts": SystemMetricsService.write_monitoring_alerts,
+        "metric_timeseries": LogService.metric_timeseries,
+    }
+    try:
+        SystemMetricsService._database_snapshot = classmethod(lambda cls, db: {"ok": True, "status": "ok"})
+        SystemMetricsService._limits_snapshot = classmethod(lambda cls, db: {})
+        SystemMetricsService._redis_snapshot = classmethod(lambda cls: {"ok": True, "active_requests": 0, "active_streams": 0})
+        SystemMetricsService._runtime_snapshot = classmethod(lambda cls: {})
+        SystemMetricsService._host_snapshot = classmethod(lambda cls: {})
+        SystemMetricsService._safe_snapshot = staticmethod(
+            lambda db, section_errors, section_name, loader, fallback_factory: loader()
+        )
+        LogService.metric_timeseries = staticmethod(lambda db, *, window_minutes, bucket_minutes: [])
+        SystemMetricsService._traffic_snapshot = classmethod(
+            lambda cls, db, *, window_minutes: {"total_requests": 0, "status_5xx_rate": 0, "status_429": 0, "status_429_rate": 0.0}
+        )
+        SystemMetricsService._bucket_minutes = classmethod(lambda cls, window_minutes: 1)
+        SystemMetricsService._provider_snapshot = classmethod(lambda cls, db, *, window_minutes: [])
+        SystemMetricsService._content_guard_snapshot = classmethod(
+            lambda cls, db, *, window_minutes: {
+                **SystemMetricsService._empty_content_guard(),
+                "high_risk_provider_counts": [
+                    {
+                        "provider_id": 3304,
+                        "provider_name": "内容采集自动隔离测试提供商",
+                        "high_risk_count": 3,
+                        "window_minutes": 10,
+                    }
+                ],
+            }
+        )
+        SystemMetricsService._background_snapshot = classmethod(
+            lambda cls, db: {"pending_finalize_logs": 0, "billing_failed_logs": 0, "token_failed_logs": 0}
+        )
+        SystemMetricsService._database_pool_snapshot = classmethod(lambda cls: {})
+        SystemMetricsService._resolve_status = classmethod(lambda cls, **kwargs: "ready")
+        SystemMetricsService._evaluate_alerts = classmethod(lambda cls, metrics: [])
+        SystemMetricsService.apply_monitoring_actions = classmethod(
+            lambda cls, db, metrics: calls.append({"db": db, "metrics": metrics}) or True
+        )
+        SystemMetricsService.write_monitoring_alerts = classmethod(
+            lambda cls, db, metrics: writes.append({"db": db, "metrics": metrics})
+        )
+
+        metrics = SystemMetricsService.collect(object(), window_minutes=5, refresh_alerts=False)
+        _assert(calls, "collect(refresh_alerts=False) 也必须触发监控动作，避免自动隔离依赖手动刷新")
+        _assert(not writes, "refresh_alerts=False 时不应写入告警事件")
+        _assert(metrics["content_guard"]["high_risk_provider_counts"][0]["provider_id"] == 3304, "采集指标应保留内容高风险明细")
+    finally:
+        for name, value in originals.items():
+            if name == "metric_timeseries":
+                setattr(LogService, name, value)
+            else:
+                setattr(SystemMetricsService, name, value)
+
+
+async def _check_distributed_lock_skips_when_redis_unavailable() -> None:
+    from app import tasks as tasks_module
+
+    calls: list[str] = []
+    records: list[dict] = []
+
+    class _UnavailableRedisService:
+        @staticmethod
+        def get_client():
+            raise RuntimeError("redis unavailable for regression")
+
+    original_redis_service = tasks_module.RedisService
+    original_record = tasks_module._safe_record_job_event
+    try:
+        tasks_module.RedisService = _UnavailableRedisService
+        tasks_module._safe_record_job_event = lambda **kwargs: records.append(kwargs) or 3304
+
+        @tasks_module.distributed_job_lock("stage33_lock_unavailable", ttl_seconds=1)
+        async def _job():
+            calls.append("ran")
+            return {"processed_count": 1}
+
+        result = await _job()
+        _assert(result is None, "Redis 锁不可用时后台任务应跳过并返回 None")
+        _assert(not calls, "Redis 锁不可用时禁止无锁执行任务函数体")
+        _assert(records, "Redis 锁不可用跳过必须记录后台任务日志")
+        _assert(records[0]["lock_status"] == "unavailable_skipped", f"锁状态应标记不可用跳过：{records[0]}")
+        _assert(records[0]["status"] == "skipped_lock_unavailable", f"任务状态应标记锁不可用跳过：{records[0]}")
+    finally:
+        tasks_module.RedisService = original_redis_service
+        tasks_module._safe_record_job_event = original_record
 
 
 def _check_content_guard_disabled_mode() -> None:
@@ -407,32 +601,185 @@ def _check_content_guard_disabled_mode() -> None:
     )
 
 
+def _expect_validation_error(factory, message: str) -> None:
+    try:
+        factory()
+    except Exception:
+        return
+    raise AssertionError(message)
+
+
+def _check_external_probe_security_boundaries() -> None:
+    def target(**kwargs):
+        payload = {
+            "base_url": "https://api.example.com/v1",
+            "api_key": "sk-stage33",
+            "model_name": "stage33-model",
+        }
+        payload.update(kwargs)
+        return ContentGuardExternalTarget(**payload)
+
+    _assert(target().base_url == "https://api.example.com/v1", "外部检测应接受公网 HTTPS 地址")
+    for bad_url in (
+        "http://api.example.com/v1",
+        "https://localhost/v1",
+        "https://127.0.0.1/v1",
+        "https://10.0.0.2/v1",
+        "https://172.16.0.2/v1",
+        "https://192.168.1.10/v1",
+        "https://169.254.169.254/latest",
+    ):
+        _expect_validation_error(
+            lambda bad_url=bad_url: target(base_url=bad_url),
+            f"外部检测必须拒绝不安全地址：{bad_url}",
+        )
+    _expect_validation_error(lambda: target(api_key="k" * 4097), "外部检测 API Key 必须限制最大长度")
+    _expect_validation_error(lambda: target(model_name="m" * 257), "外部检测模型名必须限制最大长度")
+
+
+class _FakeSettingsDb:
+    def __init__(self) -> None:
+        self.commit_count = 0
+        self.refreshed = None
+
+    def commit(self) -> None:
+        self.commit_count += 1
+
+    def refresh(self, obj) -> None:
+        self.refreshed = obj
+
+
+def _check_settings_submit_affects_runtime() -> None:
+    setting = type(
+        "Setting",
+        (),
+        {
+            "content_guard_enabled": True,
+            "content_guard_precheck_auto_enabled": True,
+            "content_guard_block_on_high_risk": True,
+            "content_guard_probe_interval_sec": 3600,
+            "content_guard_max_scan_bytes": 16384,
+            "content_guard_stream_buffer_max_bytes": 16384,
+            "content_guard_low_trust_requires_buffer": True,
+            "content_guard_high_risk_strategy": "switch_provider",
+            "content_guard_max_detection_delay_ms": 300,
+            "content_guard_stream_mode": "buffer_300ms",
+            "content_guard_url_check_enabled": True,
+            "content_guard_url_allowlist_json": "",
+            "content_guard_async_review_enabled": True,
+            "content_guard_high_risk_confidence_threshold": 85,
+        },
+    )()
+    fake_db = _FakeSettingsDb()
+    original_get_or_create = content_guard_module_service.SettingService.get_or_create
+    content_guard_module_service.SettingService.get_or_create = staticmethod(lambda db: setting)
+    try:
+        updated = ContentGuardModuleService.update_settings(
+            fake_db,
+            ContentGuardSettingsUpdate(
+                content_guard_enabled=False,
+                content_guard_block_on_high_risk=False,
+                content_guard_high_risk_strategy="record_only",
+                content_guard_max_detection_delay_ms=123,
+            ),
+        )
+    finally:
+        content_guard_module_service.SettingService.get_or_create = original_get_or_create
+    _assert(fake_db.commit_count == 1 and fake_db.refreshed is setting, "内容防护设置提交必须落库并刷新")
+    _assert(updated.content_guard_enabled is False, "设置提交必须更新 content_guard_enabled")
+    _assert(updated.content_guard_high_risk_strategy == "record_only", "设置提交必须更新高风险策略")
+    _assert(updated.content_guard_max_detection_delay_ms == 123, "设置提交必须更新流式检测延迟")
+    _assert(
+        ContentRuntimeGuardService.enabled_for_request(
+            setting=updated,
+            provider=_provider(content_guard_enabled=True),
+            route_context=_context(content_guard_required=True),
+        )
+        is False,
+        "关闭内容防护设置后运行时检测必须立即停用",
+    )
+
+
+def _check_content_guard_migrations_build_typed_tables() -> None:
+    migration = Path("migrations/2026-06-06_add_content_guard_governance.sql").read_text(encoding="utf-8")
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute("CREATE TABLE request_logs (id INTEGER PRIMARY KEY)")
+        for table_name in ("request_content_guard_events", "health_probe_events"):
+            match = re.search(
+                rf"CREATE TABLE IF NOT EXISTS {table_name}\s*\((.*?)\);",
+                migration,
+                re.DOTALL,
+            )
+            _assert(match is not None, f"迁移必须显式创建 typed logging 表：{table_name}")
+            conn.executescript(f"CREATE TABLE IF NOT EXISTS {table_name} ({match.group(1)});")
+            exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (table_name,),
+            ).fetchone()
+            _assert(exists is not None, f"空库执行迁移片段后应存在表：{table_name}")
+    finally:
+        conn.close()
+    strategy_migration = Path("migrations/2026-06-07_extend_content_guard_strategy_metrics.sql").read_text(
+        encoding="utf-8"
+    )
+    for needle in (
+        "ix_request_logs_content_guard_risk_created_provider",
+        "ix_request_logs_content_guard_final_strategy",
+        "ix_request_logs_content_guard_retry_provider_count",
+        "ix_request_logs_content_guard_buffer_wait",
+    ):
+        _assert(
+            needle in migration or needle in strategy_migration,
+            f"内容防护日志治理迁移缺少索引：{needle}",
+        )
+
+
+def _check_content_guard_browser_smoke() -> None:
+    smoke_url = os.environ.get("STAGE33_BROWSER_SMOKE_URL")
+    if not smoke_url:
+        return
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as exc:
+        raise AssertionError("启用 STAGE33_BROWSER_SMOKE_URL 时必须安装 Playwright 并完成浏览器安装") from exc
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        try:
+            page = browser.new_page()
+            page.goto(smoke_url, wait_until="domcontentloaded")
+            page.locator("#content-guard-refresh-btn").click()
+            page.locator("input[name='content_guard_target_type'][value='external']").check(force=True)
+            page.locator("#content-guard-external-base-url").fill("https://api.example.com/v1")
+            page.locator("#content-guard-external-api-key").fill("sk-stage33")
+            page.locator("#content-guard-external-model-name").fill("stage33-model")
+            page.locator("#content-guard-inspect-text").fill("这是一段本地检测文本")
+            _assert(
+                page.locator("#content-guard-probe-form").count() == 1
+                and page.locator("#content-guard-inspect-form").count() == 1,
+                "内容防护页面必须渲染可信探测和本地检测表单",
+            )
+        finally:
+            browser.close()
+
+
 def _check_frontend_and_log_wiring() -> None:
     checks = [
         ("app/templates/providers.html", [
             "provider-trust-level",
             "provider-content-integrity-status",
-            "provider-low-trust-route-enabled",
         ]),
         ("app/templates/api_keys.html", [
-            "api-key-trusted-providers-only",
-            "api-key-allow-low-trust-providers",
             "api-key-content-guard-required",
         ]),
         ("app/templates/user_api_keys.html", [
-            "user-api-key-create-trusted-providers-only",
-            "user-api-key-create-allow-low-trust-providers",
             "user-api-key-create-content-guard-required",
-            "低信任风险提示",
         ]),
         ("app/routers/user_portal.py", [
-            "trusted_providers_only: str | None = Form(default=\"on\")",
-            "allow_low_trust_providers: str | None = Form(default=None)",
             "content_guard_required: str | None = Form(default=\"on\")",
         ]),
         ("app/services/user_portal_service.py", [
-            "allow_low_trust_providers=api_key.allow_low_trust_providers",
-            "require_trusted_provider=api_key.trusted_providers_only",
+            "require_trusted_provider=bool(getattr(route_setting, \"trusted_providers_only\", False))",
             "content_guard_required=api_key.content_guard_required",
         ]),
         ("app/templates/logs.html", [
@@ -449,7 +796,6 @@ def _check_frontend_and_log_wiring() -> None:
         ("app/static/js/app.js", [
             "content_guard_enabled",
             "trusted_providers_only",
-            "allow_low_trust_providers",
             "content_guard_required",
             "content_guard_result",
             "content_guard_risk_level",
@@ -482,7 +828,6 @@ def _check_frontend_and_log_wiring() -> None:
             "content_fixed_answer",
             "content_json",
             "content_sse",
-            "content_refusal",
             "content_tools",
             "ContentGuardProbeService.inspect_probe_json_response",
             "ContentGuardProbeService.inspect_probe_stream_chunk",
@@ -501,9 +846,41 @@ def _check_frontend_and_log_wiring() -> None:
             "provider_trust_level: str | None = None",
             "content_guard_result: str | None = None",
             "content_guard_risk_level: str | None = None",
+            "content_guard_action: str | None = None",
+            "content_guard_final_strategy: str | None = None",
+            "content_guard_retry_count: int | None = Query(default=None, ge=0)",
+            "content_guard_guard_stage: str | None = None",
+        ]),
+        ("app/services/log_service.py", [
+            "content_guard_action: str | None = None",
+            "content_guard_final_strategy: str | None = None",
+            "content_guard_retry_count: int | None = None",
+            "content_guard_guard_stage: str | None = None",
+            "content_guard_retry_provider_count",
+        ]),
+        ("app/schemas/content_guard.py", [
+            "外部渠道接口地址必须使用 https://",
+            "ipaddress.ip_address",
+            "max_length=4096",
+            "max_length=256",
+        ]),
+        ("app/services/proxy_service.py", [
+            "response_payload=client_response",
+            "guard_stage = \"stream_buffer\" if stream_guard_buffering else",
+            "后续仍会按分块滑动窗口执行内容完整性扫描",
+        ]),
+        ("migrations/2026-06-06_add_content_guard_governance.sql", [
+            "CREATE TABLE IF NOT EXISTS request_content_guard_events",
+            "CREATE TABLE IF NOT EXISTS health_probe_events",
+            "ix_request_logs_content_guard_risk_created_provider",
+        ]),
+        ("migrations/2026-06-07_extend_content_guard_strategy_metrics.sql", [
+            "ix_request_logs_content_guard_final_strategy",
+            "ix_request_logs_content_guard_retry_provider_count",
+            "ix_request_logs_content_guard_buffer_wait",
         ]),
         ("app/templates/base.html", [
-            "?v=20260607-",
+            "?v=20260608-",
             "/content-guard",
             "内容防护",
         ]),
@@ -527,6 +904,7 @@ def _check_frontend_and_log_wiring() -> None:
             '"/rules/reset"',
             '"/inspect-text"',
             '"/probe"',
+            '"/trust-probe"',
         ]),
         ("app/services/content_guard_module_service.py", [
             "ContentGuardModuleService",
@@ -535,12 +913,33 @@ def _check_frontend_and_log_wiring() -> None:
             "update_rules",
             "inspect_text",
             "run_probe",
+            "run_trust_probe",
+            "ContentTrustProbeService",
+            "run_capability_probe",
             "external.base_url",
+        ]),
+        ("app/services/content_trust_probe_service.py", [
+            "class ContentTrustProbeService",
+            "REQUIRED_TRUST_PROBE_KEYS = [\"fixed_answer\", \"pollution_rules\", \"sse\"]",
+            "run_trust_probe",
+            "update_provider_model_trust_status",
+            "get_trust_decision_for_route",
+        ]),
+        ("app/services/content_runtime_guard_service.py", [
+            "class ContentRuntimeGuardService",
+            "inspect_non_stream_response",
+            "inspect_stream_prefetch_buffer",
+            "inspect_stream_chunk",
+            "decide_runtime_action",
         ]),
         ("app/static/js/app.js", [
             "/api/content-guard/rules",
             "/api/content-guard/rules/reset",
-            "/api/content-guard/inspect-text",
+            "/api/content-guard/runtime/inspect-text",
+            "/api/content-guard/precheck/probe",
+            "/api/content-guard/trust-probe",
+            "renderContentGuardProbeModalBody",
+            "data-action=\"trust-binding\"",
             "content-guard-rules-body",
             "content-guard-inspect-form",
         ]),
@@ -561,12 +960,21 @@ def main() -> None:
     _check_content_guard_detection()
     _check_response_structure_detection()
     _check_router_content_policy()
+    _check_runtime_guard_request_semantics()
+    _check_low_trust_route_field_hidden()
     _check_high_risk_route_detection()
     _check_error_catalog()
     _check_health_probe_guard_helpers()
+    _check_manual_trust_edit_trace()
     _check_content_guard_metrics_alerts()
     _check_content_guard_auto_isolation()
+    _check_collect_applies_monitoring_actions_without_refresh()
+    asyncio.run(_check_distributed_lock_skips_when_redis_unavailable())
     _check_content_guard_disabled_mode()
+    _check_external_probe_security_boundaries()
+    _check_settings_submit_affects_runtime()
+    _check_content_guard_migrations_build_typed_tables()
+    _check_content_guard_browser_smoke()
     _check_frontend_and_log_wiring()
     print("stage33 content guard regression check passed")
 

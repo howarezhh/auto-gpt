@@ -16,3 +16,12 @@ ALTER TABLE request_logs
 CREATE INDEX IF NOT EXISTS ix_request_logs_content_guard_latency
     ON request_logs (created_at, content_guard_latency_ms)
     WHERE content_guard_latency_ms IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_request_logs_content_guard_final_strategy
+    ON request_logs (content_guard_final_strategy, created_at)
+    WHERE content_guard_final_strategy IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_request_logs_content_guard_retry_provider_count
+    ON request_logs (content_guard_retry_provider_count, created_at)
+    WHERE content_guard_retry_provider_count IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_request_logs_content_guard_buffer_wait
+    ON request_logs (created_at, content_guard_buffer_wait_ms)
+    WHERE content_guard_buffer_wait_ms IS NOT NULL;

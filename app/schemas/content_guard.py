@@ -1,10 +1,20 @@
 import re
+import ipaddress
 from typing import Literal
+from urllib.parse import urlparse
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from app.utils.content_guard_config import (
+    CONTENT_GUARD_RULE_ACTIONS,
+    CONTENT_GUARD_RULE_MATCH_TYPES,
+    CONTENT_GUARD_RULE_RISK_LEVELS,
+    content_guard_default,
+    validate_content_guard_settings,
+)
 
 
-ContentGuardProbeKey = Literal["fixed_answer", "json", "sse", "refusal", "tools"]
+ContentGuardProbeKey = Literal["fixed_answer", "pollution_rules", "json", "sse", "tools"]
 ContentGuardEndpointPath = Literal["/chat/completions", "/responses"]
 ContentGuardRuleMatchType = Literal["keyword_any", "regex", "unexpected_url"]
 ContentGuardRuleRiskLevel = Literal["low", "medium", "high"]
@@ -14,19 +24,29 @@ ContentGuardStreamMode = Literal["pass_through_scan", "buffer_300ms", "full_buff
 
 
 class ContentGuardSettingsUpdate(BaseModel):
-    content_guard_enabled: bool = True
-    content_guard_block_on_high_risk: bool = True
-    content_guard_probe_interval_sec: int = Field(default=3600, ge=300)
-    content_guard_max_scan_bytes: int = Field(default=16384, ge=1024)
-    content_guard_stream_buffer_max_bytes: int = Field(default=16384, ge=1024)
-    content_guard_low_trust_requires_buffer: bool = True
-    content_guard_high_risk_strategy: ContentGuardHighRiskStrategy = "switch_provider"
-    content_guard_max_detection_delay_ms: int = Field(default=300, ge=0, le=3000)
-    content_guard_stream_mode: ContentGuardStreamMode = "buffer_300ms"
-    content_guard_url_check_enabled: bool = True
-    content_guard_url_allowlist_json: str = Field(default="", max_length=10000)
-    content_guard_async_review_enabled: bool = True
-    content_guard_high_risk_confidence_threshold: int = Field(default=85, ge=0, le=100)
+    content_guard_enabled: bool = content_guard_default("content_guard_enabled")
+    content_guard_precheck_auto_enabled: bool = content_guard_default("content_guard_precheck_auto_enabled")
+    content_guard_block_on_high_risk: bool = content_guard_default("content_guard_block_on_high_risk")
+    content_guard_probe_interval_sec: int = Field(default=content_guard_default("content_guard_probe_interval_sec"), ge=300)
+    content_guard_max_scan_bytes: int = Field(default=content_guard_default("content_guard_max_scan_bytes"), ge=1024)
+    content_guard_stream_buffer_max_bytes: int = Field(default=content_guard_default("content_guard_stream_buffer_max_bytes"), ge=1024)
+    content_guard_low_trust_requires_buffer: bool = content_guard_default("content_guard_low_trust_requires_buffer")
+    content_guard_high_risk_strategy: ContentGuardHighRiskStrategy = content_guard_default("content_guard_high_risk_strategy")
+    content_guard_max_detection_delay_ms: int = Field(default=content_guard_default("content_guard_max_detection_delay_ms"), ge=0, le=500)
+    content_guard_stream_mode: ContentGuardStreamMode = content_guard_default("content_guard_stream_mode")
+    content_guard_url_check_enabled: bool = content_guard_default("content_guard_url_check_enabled")
+    content_guard_url_allowlist_json: str = Field(default=content_guard_default("content_guard_url_allowlist_json"), max_length=10000)
+    content_guard_async_review_enabled: bool = content_guard_default("content_guard_async_review_enabled")
+    content_guard_high_risk_confidence_threshold: int = Field(
+        default=content_guard_default("content_guard_high_risk_confidence_threshold"),
+        ge=0,
+        le=100,
+    )
+
+    @model_validator(mode="after")
+    def validate_cross_fields(self) -> "ContentGuardSettingsUpdate":
+        validate_content_guard_settings(self.model_dump())
+        return self
 
 
 class ContentGuardRulePayload(BaseModel):
@@ -50,6 +70,27 @@ class ContentGuardRulePayload(BaseModel):
             raise ValueError("标识不能为空")
         return normalized
 
+    @field_validator("match_type")
+    @classmethod
+    def validate_match_type(cls, value: str) -> str:
+        if value not in CONTENT_GUARD_RULE_MATCH_TYPES:
+            raise ValueError("规则匹配类型无效")
+        return value
+
+    @field_validator("risk_level")
+    @classmethod
+    def validate_risk_level(cls, value: str) -> str:
+        if value not in CONTENT_GUARD_RULE_RISK_LEVELS:
+            raise ValueError("规则风险等级无效")
+        return value
+
+    @field_validator("action")
+    @classmethod
+    def validate_action(cls, value: str) -> str:
+        if value not in CONTENT_GUARD_RULE_ACTIONS:
+            raise ValueError("规则动作无效")
+        return value
+
     @field_validator("name", "reason")
     @classmethod
     def normalize_text(cls, value: str) -> str:
@@ -66,6 +107,20 @@ class ContentGuardRulePayload(BaseModel):
         if not normalized:
             raise ValueError("规则至少需要一个匹配项")
         return normalized
+
+    @model_validator(mode="after")
+    def validate_rule_semantics(self) -> "ContentGuardRulePayload":
+        if self.action == "allow" and self.score_delta != 0:
+            raise ValueError("放行动作的扣分必须为 0")
+        if self.action == "block" and self.risk_level != "high":
+            raise ValueError("阻断动作必须使用高风险等级")
+        if self.match_type == "regex":
+            for pattern in self.patterns:
+                try:
+                    re.compile(pattern)
+                except re.error as exc:
+                    raise ValueError(f"正则规则无效：{pattern}") from exc
+        return self
 
 
 class ContentGuardRulesUpdate(BaseModel):
@@ -90,9 +145,9 @@ class ContentGuardTextInspectRequest(BaseModel):
 
 
 class ContentGuardExternalTarget(BaseModel):
-    base_url: str = Field(..., min_length=1)
-    api_key: str = Field(..., min_length=1)
-    model_name: str = Field(..., min_length=1)
+    base_url: str = Field(..., min_length=1, max_length=2048)
+    api_key: str = Field(..., min_length=1, max_length=4096)
+    model_name: str = Field(..., min_length=1, max_length=256)
     endpoint_path: ContentGuardEndpointPath = "/responses"
 
     @field_validator("base_url")
@@ -101,8 +156,27 @@ class ContentGuardExternalTarget(BaseModel):
         normalized = value.strip().rstrip("/")
         if not normalized:
             raise ValueError("接口地址不能为空")
-        if not normalized.startswith(("http://", "https://")):
-            raise ValueError("接口地址必须以 http:// 或 https:// 开头")
+        parsed = urlparse(normalized)
+        if parsed.scheme != "https":
+            raise ValueError("外部渠道接口地址必须使用 https://")
+        if not parsed.hostname:
+            raise ValueError("接口地址必须包含有效主机名")
+        hostname = parsed.hostname.lower().strip(".")
+        if hostname in {"localhost", "localhost.localdomain"} or hostname.endswith(".localhost"):
+            raise ValueError("外部渠道接口地址禁止使用 localhost")
+        try:
+            host_ip = ipaddress.ip_address(hostname)
+        except ValueError:
+            host_ip = None
+        if host_ip is not None and (
+            host_ip.is_private
+            or host_ip.is_loopback
+            or host_ip.is_link_local
+            or host_ip.is_multicast
+            or host_ip.is_reserved
+            or host_ip.is_unspecified
+        ):
+            raise ValueError("外部渠道接口地址禁止使用内网、回环、链路本地或保留地址")
         return normalized
 
     @field_validator("api_key", "model_name")
@@ -119,7 +193,7 @@ class ContentGuardRunRequest(BaseModel):
     provider_id: int | None = None
     provider_model_id: int | None = None
     external: ContentGuardExternalTarget | None = None
-    probe_keys: list[ContentGuardProbeKey] = Field(default_factory=lambda: ["fixed_answer", "json", "refusal"])
+    probe_keys: list[ContentGuardProbeKey] = Field(default_factory=lambda: ["fixed_answer", "pollution_rules", "sse"])
     persist_internal_result: bool = True
 
     @field_validator("probe_keys")
@@ -129,4 +203,4 @@ class ContentGuardRunRequest(BaseModel):
         for item in value or []:
             if item not in ordered:
                 ordered.append(item)
-        return ordered or ["fixed_answer", "json", "refusal"]
+        return ordered or ["fixed_answer", "pollution_rules", "sse"]

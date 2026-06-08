@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import html
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -26,6 +27,7 @@ class ContentGuardResult:
     excerpt: str | None = None
     score_delta: int = 0
     confidence: float = 0.0
+    matched_rules: list[dict[str, Any]] = field(default_factory=list)
     latency_ms: int | None = None
     buffer_wait_ms: int | None = None
     final_strategy: str | None = None
@@ -42,6 +44,9 @@ class ContentGuardResult:
             "content_guard_buffer_wait_ms": self.buffer_wait_ms,
             "content_guard_final_strategy": self.final_strategy,
         }
+
+    def matched_rules_json(self) -> str:
+        return dumps_json(self.matched_rules or None)
 
 
 @dataclass(slots=True)
@@ -121,7 +126,9 @@ class ContentGuardService:
         "anthropic.com",
     }
     SHORT_LINK_DOMAINS = {
+        "amzn.to",
         "bit.ly",
+        "bitly.com",
         "tinyurl.com",
         "t.co",
         "goo.gl",
@@ -135,6 +142,16 @@ class ContentGuardService:
         "dwz.cn",
         "url.cn",
         "sourl.cn",
+        "lnkd.in",
+        "trib.al",
+        "ift.tt",
+        "soo.gd",
+        "shorturl.at",
+        "rb.gy",
+        "v.gd",
+        "clck.ru",
+        "cutt.us",
+        "u.to",
     }
     AD_INTENT_TERMS = (
         "优惠",
@@ -243,6 +260,26 @@ class ContentGuardService:
     )
 
     @classmethod
+    def requires_trusted_provider(
+        cls,
+        *,
+        payload: dict[str, Any] | None,
+        endpoint_path: str | None = None,
+        has_image: bool = False,
+        require_tools: bool = False,
+    ) -> bool:
+        """判断请求是否应优先走可信提供商，不执行健康探测。"""
+        if not isinstance(payload, dict):
+            return bool(has_image or require_tools)
+        return bool(
+            has_image
+            or require_tools
+            or cls._request_expects_json_response(payload)
+            or cls._payload_contains_file_reference(payload)
+            or cls._payload_has_long_context(payload)
+        )
+
+    @classmethod
     def inspect_response_text(
         cls,
         text: str | None,
@@ -267,6 +304,22 @@ class ContentGuardService:
             url_check_enabled=url_check_enabled,
             rules=rules if rules is not None else cls.parse_rules_json(rules_json),
         )
+        invalid_regex_rules = [rule for rule in matched_rules if rule.category == "rule_configuration_error"]
+        if invalid_regex_rules:
+            return cls._with_latency(
+                ContentGuardResult(
+                    result=cls.RESULT_ERROR,
+                    risk_level="high",
+                    categories=["rule_configuration_error"],
+                    reason=invalid_regex_rules[0].reason or "内容防护正则规则配置无效",
+                    action="record",
+                    excerpt=invalid_regex_rules[0].patterns[0] if invalid_regex_rules[0].patterns else None,
+                    score_delta=0,
+                    confidence=1.0,
+                    matched_rules=[rule.to_dict() for rule in invalid_regex_rules],
+                ),
+                started=started,
+            )
         if not matched_rules:
             return cls._with_latency(
                 ContentGuardResult(result=cls.RESULT_PASS, risk_level="low", reason="未命中内容污染规则"),
@@ -277,9 +330,9 @@ class ContentGuardService:
             if rule.category not in categories:
                 categories.append(rule.category)
         high_risk = any(rule.risk_level == "high" or rule.action == "block" for rule in matched_rules)
-        score_delta = min((int(rule.score_delta or 0) for rule in matched_rules), default=-8)
         score_total = sum(abs(int(rule.score_delta or 0)) for rule in matched_rules)
-        confidence = max((float(rule.confidence or 0) for rule in matched_rules), default=0.0)
+        score_delta = -min(100, max(8, score_total))
+        confidence = cls._combine_rule_confidence(matched_rules)
         tail_boost = cls._tail_risk_boost(sample, matched_rules)
         ad_intent_boost = 0.08 if cls._has_ad_intent(sample) else 0.0
         confidence = max(0.0, min(1.0, confidence + tail_boost + ad_intent_boost))
@@ -293,8 +346,9 @@ class ContentGuardService:
                     reason=reason or "上游输出疑似追加推广、联系方式、二维码或违规引流内容",
                     action="block",
                     excerpt=cls._excerpt(sample),
-                    score_delta=score_delta if score_delta < 0 else -25,
+                    score_delta=score_delta,
                     confidence=confidence,
+                    matched_rules=[rule.to_dict() for rule in matched_rules],
                 ),
                 started=started,
             )
@@ -306,8 +360,9 @@ class ContentGuardService:
                 reason=reason or "上游输出命中可疑推广或外链规则，已记录复核",
                 action="record",
                 excerpt=cls._excerpt(sample),
-                score_delta=score_delta if score_delta < 0 else -8,
+                score_delta=score_delta,
                 confidence=confidence,
+                matched_rules=[rule.to_dict() for rule in matched_rules],
             ),
             started=started,
         )
@@ -325,7 +380,6 @@ class ContentGuardService:
         normalized_rules = cls.normalize_rules(rules)
         normalized_text = cls.normalize_scan_text(text)
         lower_sample = normalized_text.lower()
-        has_url = any(marker in lower_sample for marker in cls._URL_MARKERS)
         response_domains = cls.extract_domains(normalized_text)
         allowed_domains = cls.allowed_domains(request_payload=request_payload, url_allowlist=url_allowlist)
         unexpected_domains = {domain for domain in response_domains if not cls._domain_allowed(domain, allowed_domains)}
@@ -334,7 +388,7 @@ class ContentGuardService:
             if not rule.enabled:
                 continue
             if rule.match_type == "unexpected_url":
-                if url_check_enabled and has_url and unexpected_domains and not cls._request_allows_advertising(request_payload):
+                if url_check_enabled and unexpected_domains and not cls._request_allows_advertising(request_payload):
                     matched.append(rule)
                 continue
             if rule.match_type == "keyword_any":
@@ -348,9 +402,23 @@ class ContentGuardService:
                         if re.search(str(pattern), normalized_text, re.IGNORECASE):
                             matched.append(rule)
                             break
-                    except re.error:
-                        continue
-        if url_check_enabled and cls._has_short_link_domain(unexpected_domains):
+                    except re.error as exc:
+                        matched.append(
+                            ContentGuardRule(
+                                id=f"invalid_regex_{rule.id}",
+                                name=f"无效正则：{rule.name}",
+                                category="rule_configuration_error",
+                                match_type="regex",
+                                patterns=[str(pattern)],
+                                risk_level="high",
+                                action="record",
+                                score_delta=0,
+                                confidence=1.0,
+                                reason=f"内容防护正则规则 `{rule.name}` 无效：{exc}",
+                            )
+                        )
+                        break
+        if url_check_enabled and cls._has_short_link_domain(response_domains):
             matched.append(
                 ContentGuardRule(
                     id="short_link_redirect",
@@ -362,7 +430,22 @@ class ContentGuardService:
                     action="block",
                     score_delta=-25,
                     confidence=0.86,
-                    reason="响应包含未在请求中出现的短链域名",
+                    reason="响应包含短链域名",
+                )
+            )
+        if url_check_enabled and unexpected_domains and cls._has_ad_intent(normalized_text) and not cls._request_allows_advertising(request_payload):
+            matched.append(
+                ContentGuardRule(
+                    id="unexpected_link_with_ad_intent",
+                    name="外链广告引导",
+                    category="advertising_or_promotion",
+                    match_type="unexpected_url",
+                    patterns=[],
+                    risk_level="high",
+                    action="block",
+                    score_delta=-25,
+                    confidence=0.88,
+                    reason="响应包含未授权外链并伴随广告、注册、优惠或导流意图",
                 )
             )
         return matched
@@ -386,7 +469,7 @@ class ContentGuardService:
         structure_result = cls._inspect_response_structure(payload, endpoint_path=endpoint_path, request_payload=request_payload)
         if structure_result.result == cls.RESULT_BLOCK:
             return cls._with_latency(structure_result, started=started)
-        text = cls._extract_scan_text(payload, max_scan_bytes=max_scan_bytes)
+        text = cls._extract_response_scan_text(payload, endpoint_path=endpoint_path, max_scan_bytes=max_scan_bytes)
         text_result = cls.inspect_response_text(
             text,
             provider=provider,
@@ -435,8 +518,29 @@ class ContentGuardService:
                 ),
                 started=started,
             )
+        try:
+            payload = json.loads(stripped)
+        except Exception:
+            return cls._with_latency(
+                ContentGuardResult(
+                    result=cls.RESULT_BLOCK,
+                    risk_level="high",
+                    categories=["invalid_sse_event"],
+                    reason="SSE data 不是合法 JSON 事件",
+                    action="block",
+                    excerpt=cls._excerpt(stripped),
+                    score_delta=-20,
+                ),
+                started=started,
+            )
+        text = cls._extract_response_scan_text(payload, endpoint_path=endpoint_path, max_scan_bytes=max_scan_bytes)
+        if not text:
+            return cls._with_latency(
+                ContentGuardResult(result=cls.RESULT_PASS, risk_level="low", reason="SSE 事件未发现可扫描输出文本"),
+                started=started,
+            )
         return cls.inspect_response_text(
-            stripped,
+            text,
             endpoint_path=endpoint_path,
             request_payload=request_payload,
             max_scan_bytes=max_scan_bytes,
@@ -547,13 +651,14 @@ class ContentGuardService:
             return ""
         normalized = unicodedata.normalize("NFKC", text)
         normalized = cls._ZERO_WIDTH_RE.sub("", normalized)
+        normalized = html.unescape(normalized)
         previous = normalized
         for _ in range(2):
             decoded = unquote(previous)
             if decoded == previous:
                 break
             previous = decoded
-        return previous
+        return cls._normalize_obfuscated_url_text(previous)
 
     @classmethod
     def parse_url_allowlist(cls, value: list[str] | str | None) -> set[str]:
@@ -581,9 +686,7 @@ class ContentGuardService:
         request_payload: dict[str, Any] | None,
         url_allowlist: list[str] | str | None = None,
     ) -> set[str]:
-        domains = cls.parse_url_allowlist(url_allowlist)
-        domains.update(cls.extract_domains(cls._extract_scan_text(request_payload, max_scan_bytes=32768)))
-        return domains
+        return cls.parse_url_allowlist(url_allowlist)
 
     @classmethod
     def extract_domains(cls, text: str | None) -> set[str]:
@@ -613,6 +716,24 @@ class ContentGuardService:
         return domain[:253]
 
     @staticmethod
+    def _normalize_obfuscated_url_text(value: str) -> str:
+        normalized = re.sub(r"\bhxxps://", "https://", value, flags=re.IGNORECASE)
+        normalized = re.sub(r"\bhxxp://", "http://", normalized, flags=re.IGNORECASE)
+        normalized = re.sub(
+            r"(?<=[a-z0-9])\s*(?:\[\.\]|\(\.\)|\{\.\}|\[dot\]|\(dot\)|\{dot\}|dot|点)\s*(?=[a-z0-9])",
+            ".",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        normalized = re.sub(
+            r"\bwww\s*\.\s*([a-z0-9][a-z0-9.-]+\.[a-z]{2,63})\b",
+            r"www.\1",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        return normalized
+
+    @staticmethod
     def _domain_allowed(domain: str, allowed_domains: set[str]) -> bool:
         normalized = ContentGuardService._normalize_domain(domain)
         if not normalized:
@@ -627,6 +748,16 @@ class ContentGuardService:
     def _has_ad_intent(cls, text: str) -> bool:
         lower_text = cls.normalize_scan_text(text).lower()
         return any(term.lower() in lower_text for term in cls.AD_INTENT_TERMS)
+
+    @staticmethod
+    def _combine_rule_confidence(rules: list[ContentGuardRule]) -> float:
+        if not rules:
+            return 0.0
+        clean_values = [max(0.0, min(1.0, float(rule.confidence or 0.0))) for rule in rules]
+        miss_probability = 1.0
+        for value in clean_values:
+            miss_probability *= 1.0 - value
+        return max(clean_values + [1.0 - miss_probability])
 
     @classmethod
     def _tail_risk_boost(cls, sample: str, rules: list[ContentGuardRule]) -> float:
@@ -699,21 +830,6 @@ class ContentGuardService:
         if auto_commit:
             db.commit()
 
-    @staticmethod
-    def requires_trusted_provider(*, payload: dict[str, Any], endpoint_path: str | None, has_image: bool, require_tools: bool) -> bool:
-        if require_tools or has_image:
-            return True
-        if ContentGuardService._payload_contains_file_reference(payload) or ContentGuardService._payload_has_long_context(payload):
-            return True
-        if endpoint_path in {"/responses", "/chat/completions"}:
-            if any(key in payload for key in ("response_format", "tools", "tool_choice", "functions", "function_call")):
-                return True
-            if any(key in payload for key in ("reasoning", "text", "include", "store", "truncation", "previous_response_id")):
-                return True
-        text = ContentGuardService._extract_scan_text(payload, max_scan_bytes=8192).lower()
-        high_risk_terms = ("金融", "医疗", "法律", "合同", "诊断", "处方", "投资", "贷款", "保险", "代码", "script", "python", "javascript")
-        return any(term.lower() in text for term in high_risk_terms)
-
     @classmethod
     def _inspect_response_structure(
         cls,
@@ -767,7 +883,7 @@ class ContentGuardService:
             json_mode_result = cls._inspect_structured_json_mode(payload, endpoint_path=endpoint_path)
             if json_mode_result.result == cls.RESULT_BLOCK:
                 return json_mode_result
-        tool_result = cls._inspect_tool_call_arguments(payload, endpoint_path=endpoint_path)
+        tool_result = cls._inspect_tool_call_arguments(payload, endpoint_path=endpoint_path, request_payload=request_payload)
         if tool_result.result == cls.RESULT_BLOCK:
             return tool_result
         return ContentGuardResult(result=cls.RESULT_PASS, risk_level="low", reason="响应结构通过")
@@ -810,7 +926,13 @@ class ContentGuardService:
         return ContentGuardResult(result=cls.RESULT_PASS, risk_level="low", reason="结构化 JSON 输出通过")
 
     @classmethod
-    def _inspect_tool_call_arguments(cls, payload: dict[str, Any], *, endpoint_path: str | None) -> ContentGuardResult:
+    def _inspect_tool_call_arguments(
+        cls,
+        payload: dict[str, Any],
+        *,
+        endpoint_path: str | None,
+        request_payload: dict[str, Any] | None = None,
+    ) -> ContentGuardResult:
         arguments: list[Any] = []
         if endpoint_path == "/chat/completions":
             for choice in payload.get("choices") or []:
@@ -858,6 +980,20 @@ class ContentGuardService:
                     excerpt=cls._excerpt(dumps_json(parsed)),
                     score_delta=-20,
                 )
+            text = cls._extract_scan_text(parsed, max_scan_bytes=8192)
+            if text:
+                text_result = cls.inspect_response_text(text, request_payload=request_payload, max_scan_bytes=8192)
+                if text_result.result != cls.RESULT_PASS:
+                    return ContentGuardResult(
+                        result=cls.RESULT_BLOCK,
+                        risk_level="high",
+                        categories=["tool_argument_pollution", *text_result.categories],
+                        reason=f"工具调用参数命中内容污染规则：{text_result.reason}",
+                        action="block",
+                        excerpt=text_result.excerpt,
+                        score_delta=min(-20, int(text_result.score_delta or -20)),
+                        confidence=max(0.85, float(text_result.confidence or 0.0)),
+                    )
         return ContentGuardResult(result=cls.RESULT_PASS, risk_level="low", reason="工具调用参数通过")
 
     @classmethod
@@ -950,6 +1086,53 @@ class ContentGuardService:
         return "\n".join(parts)
 
     @classmethod
+    def _extract_response_scan_text(cls, value: Any, *, endpoint_path: str | None, max_scan_bytes: int) -> str:
+        if not isinstance(value, dict):
+            return cls._extract_scan_text(value, max_scan_bytes=max_scan_bytes)
+        parts: list[str] = []
+
+        def add(text: Any) -> None:
+            if isinstance(text, str) and text:
+                parts.append(text)
+
+        if endpoint_path == "/chat/completions":
+            for choice in value.get("choices") or []:
+                if not isinstance(choice, dict):
+                    continue
+                message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+                delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
+                add(message.get("content"))
+                add(delta.get("content"))
+                add(message.get("refusal"))
+                add(delta.get("refusal"))
+                for container in (message, delta):
+                    for tool_call in container.get("tool_calls") or []:
+                        if not isinstance(tool_call, dict):
+                            continue
+                        function = tool_call.get("function") or {}
+                        if isinstance(function, dict):
+                            add(function.get("arguments"))
+                    function_call = container.get("function_call")
+                    if isinstance(function_call, dict):
+                        add(function_call.get("arguments"))
+        elif endpoint_path == "/responses":
+            for item in value.get("output") or []:
+                if not isinstance(item, dict):
+                    continue
+                add(item.get("arguments"))
+                add(item.get("delta"))
+                for content in item.get("content") or []:
+                    if not isinstance(content, dict):
+                        continue
+                    add(content.get("text"))
+                    add(content.get("output_text"))
+                    add(content.get("delta"))
+            add(value.get("output_text"))
+        if not parts:
+            return cls._extract_scan_text(value, max_scan_bytes=max_scan_bytes)
+        return cls._clip_text("\n".join(parts), max_scan_bytes=max_scan_bytes)
+
+    @classmethod
     def _clip_text(cls, text: str | None, *, max_scan_bytes: int) -> str:
         if not text:
             return ""
@@ -971,5 +1154,12 @@ class ContentGuardService:
     @staticmethod
     def _request_allows_advertising(request_payload: dict[str, Any] | None) -> bool:
         text = ContentGuardService._extract_scan_text(request_payload or {}, max_scan_bytes=8192).lower()
-        allow_terms = ("广告", "推广", "营销", "落地页", "优惠", "文案", "链接", "联系方式")
-        return any(term.lower() in text for term in allow_terms)
+        if re.search(r"(不要|禁止|不得|不能|避免|不允许|无|去除|移除).{0,16}(广告|推广|营销|落地页|优惠|链接|联系方式|外链)", text):
+            return False
+        if re.search(r"(广告|推广|营销|落地页|优惠|链接|联系方式|外链).{0,16}(不要|禁止|不得|不能|避免|不允许|无|去除|移除)", text):
+            return False
+        explicit_allow_patterns = (
+            r"(生成|撰写|编写|输出|包含|加入|附带|提供|设计|创建).{0,16}(广告|推广|营销|落地页|优惠|链接|联系方式|外链)",
+            r"(广告|推广|营销|落地页|优惠|链接|联系方式|外链).{0,16}(文案|内容|链接|地址|联系方式|素材)",
+        )
+        return any(re.search(pattern, text) for pattern in explicit_allow_patterns)
