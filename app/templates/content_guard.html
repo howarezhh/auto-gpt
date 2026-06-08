@@ -83,6 +83,20 @@
                     <span class="settings-switch-slider"></span>
                 </span>
             </label>
+            <label class="settings-switch-card" for="content-guard-precheck-auto-enabled">
+                <span class="settings-switch-copy">
+                    <span class="settings-switch-title-row">
+                        <strong>自动预检</strong>
+                        <button class="settings-help-btn" type="button" title="按自动预检间隔运行固定答案、外链广告识别和流式污染检测，并更新提供商模型可信度状态。" aria-label="自动预检说明">
+                            <i class="bi bi-question-circle" aria-hidden="true"></i>
+                        </button>
+                    </span>
+                </span>
+                <span class="settings-switch-control">
+                    <input id="content-guard-precheck-auto-enabled" type="checkbox">
+                    <span class="settings-switch-slider"></span>
+                </span>
+            </label>
             <label class="settings-switch-card" for="content-guard-low-trust-requires-buffer">
                 <span class="settings-switch-copy">
                     <span class="settings-switch-title-row">
@@ -130,12 +144,12 @@
             <label>
                 <span class="content-guard-label">
                     <span>高风险策略</span>
-                    <button class="settings-help-btn" type="button" title="切换渠道仅在响应尚未输出前生效；流式已输出后会发送标准错误事件收尾。" aria-label="高风险策略说明">
+                    <button class="settings-help-btn" type="button" title="切换提供商仅在响应尚未输出前生效；流式已输出后会发送标准错误事件收尾。" aria-label="高风险策略说明">
                         <i class="bi bi-question-circle" aria-hidden="true"></i>
                     </button>
                 </span>
                 <select class="field-input" id="content-guard-high-risk-strategy">
-                    <option value="switch_provider">切换渠道</option>
+                    <option value="switch_provider">切换提供商</option>
                     <option value="block">阻断</option>
                     <option value="safe_error">替换安全错误</option>
                     <option value="record_only">仅记录</option>
@@ -144,29 +158,29 @@
             <label>
                 <span class="content-guard-label">
                     <span>最大延迟（ms）</span>
-                    <button class="settings-help-btn" type="button" title="300ms 缓冲模式下，到达字节阈值或到达该时间就立即检测。" aria-label="最大延迟说明">
+                    <button class="settings-help-btn" type="button" title="流式缓冲检测到达字节阈值或到达该时间就立即检测；上限 500 ms。" aria-label="最大延迟说明">
                         <i class="bi bi-question-circle" aria-hidden="true"></i>
                     </button>
                 </span>
-                <input class="field-input" id="content-guard-max-detection-delay-ms" type="number" min="0" max="3000">
+                <input class="field-input" id="content-guard-max-detection-delay-ms" type="number" min="0" max="500">
             </label>
             <label>
                 <span class="content-guard-label">
                     <span>流式模式</span>
-                    <button class="settings-help-btn" type="button" title="低信任渠道建议使用 300ms 缓冲；完整缓冲延迟最高。" aria-label="流式模式说明">
+                    <button class="settings-help-btn" type="button" title="低信任提供商建议使用 300ms 缓冲；上限缓冲会在 500 ms 内尽量收集更多内容。" aria-label="流式模式说明">
                         <i class="bi bi-question-circle" aria-hidden="true"></i>
                     </button>
                 </span>
                 <select class="field-input" id="content-guard-stream-mode">
                     <option value="pass_through_scan">透传扫描</option>
                     <option value="buffer_300ms">300ms 缓冲</option>
-                    <option value="full_buffer">完整缓冲</option>
+                    <option value="full_buffer">上限缓冲</option>
                 </select>
             </label>
             <label>
                 <span class="content-guard-label">
-                    <span>探针间隔（s）</span>
-                    <button class="settings-help-btn" type="button" title="后台内容探针最小间隔，下限 300 s。" aria-label="探针间隔说明">
+                    <span>自动预检间隔（s）</span>
+                    <button class="settings-help-btn" type="button" title="内容防护自动预检的运行间隔，下限 300 s；不会在正式请求前实时跑探针。" aria-label="自动预检间隔说明">
                         <i class="bi bi-question-circle" aria-hidden="true"></i>
                     </button>
                 </span>
@@ -193,7 +207,7 @@
             <label>
                 <span class="content-guard-label">
                     <span>高风险置信度（%）</span>
-                    <button class="settings-help-btn" type="button" title="达到该置信度的高风险命中才同步阻断或切换渠道。" aria-label="高风险置信度说明">
+                    <button class="settings-help-btn" type="button" title="达到该置信度的高风险命中才同步阻断或切换提供商。" aria-label="高风险置信度说明">
                         <i class="bi bi-question-circle" aria-hidden="true"></i>
                     </button>
                 </span>
@@ -202,7 +216,7 @@
             <label class="content-guard-allowlist-field">
                 <span class="content-guard-label">
                     <span>URL 白名单</span>
-                    <button class="settings-help-btn" type="button" title="一行一个域名或 JSON 数组；用户请求中出现过的域名会自动加入本次白名单。" aria-label="URL 白名单说明">
+                    <button class="settings-help-btn" type="button" title="一行一个域名或 JSON 数组；只有显式配置在此处的域名会被视为允许域名。" aria-label="URL 白名单说明">
                         <i class="bi bi-question-circle" aria-hidden="true"></i>
                     </button>
                 </span>
@@ -214,8 +228,8 @@
     <form class="panel-card content-guard-probe-panel" id="content-guard-probe-form">
         <div class="section-subhead content-guard-panel-head">
             <div>
-                <div class="panel-kicker">检测</div>
-                <h3>渠道检测</h3>
+                <div class="panel-kicker">预请求探测</div>
+                <h3>可信探测</h3>
             </div>
             <button class="topbar-btn interactive-btn" id="content-guard-probe-submit-btn" type="submit">
                 <i class="bi bi-play-fill" aria-hidden="true"></i>
@@ -229,39 +243,41 @@
             </label>
             <label>
                 <input type="radio" name="content_guard_target_type" value="external">
-                <span>外部渠道</span>
+                <span>外部提供商</span>
             </label>
         </div>
-        <div class="content-guard-target-group" id="content-guard-internal-fields">
-            <label>
-                <span>提供商</span>
-                <select class="field-input" id="content-guard-provider-id"></select>
-            </label>
-            <label>
-                <span>模型</span>
-                <select class="field-input" id="content-guard-provider-model-id"></select>
-            </label>
-        </div>
-        <div class="content-guard-target-group hidden" id="content-guard-external-fields">
-            <label>
-                <span>接口地址</span>
-                <input class="field-input" id="content-guard-external-base-url" type="url" placeholder="https://api.example.com/v1">
-            </label>
-            <label>
-                <span>密钥</span>
-                <input class="field-input" id="content-guard-external-api-key" type="password" autocomplete="off">
-            </label>
-            <label>
-                <span>模型名</span>
-                <input class="field-input" id="content-guard-external-model-name" type="text">
-            </label>
-            <label>
-                <span>端点</span>
-                <select class="field-input" id="content-guard-external-endpoint-path">
-                    <option value="/responses">/responses</option>
-                    <option value="/chat/completions">/chat/completions</option>
-                </select>
-            </label>
+        <div class="content-guard-target-stack">
+            <div class="content-guard-target-group" id="content-guard-internal-fields">
+                <label>
+                    <span>提供商</span>
+                    <select class="field-input" id="content-guard-provider-id"></select>
+                </label>
+                <label>
+                    <span>模型</span>
+                    <select class="field-input" id="content-guard-provider-model-id"></select>
+                </label>
+            </div>
+            <div class="content-guard-target-group hidden" id="content-guard-external-fields">
+                <label>
+                    <span>接口地址</span>
+                    <input class="field-input" id="content-guard-external-base-url" type="url" placeholder="https://api.example.com/v1">
+                </label>
+                <label>
+                    <span>密钥</span>
+                    <input class="field-input" id="content-guard-external-api-key" type="password" autocomplete="off">
+                </label>
+                <label>
+                    <span>模型名</span>
+                    <input class="field-input" id="content-guard-external-model-name" type="text">
+                </label>
+                <label>
+                    <span>端点</span>
+                    <select class="field-input" id="content-guard-external-endpoint-path">
+                        <option value="/responses">/responses</option>
+                        <option value="/chat/completions">/chat/completions</option>
+                    </select>
+                </label>
+            </div>
         </div>
         <div class="content-guard-probe-options" id="content-guard-probe-options" aria-label="探针类型"></div>
     </form>
@@ -271,7 +287,7 @@
     <div class="section-subhead content-guard-panel-head">
         <div>
             <div class="panel-kicker">规则</div>
-            <h3 id="content-guard-rules-title">规则管理</h3>
+            <h3 id="content-guard-rules-title">实时内容合法性检测</h3>
         </div>
         <div class="content-guard-actions">
             <button class="topbar-btn interactive-btn" id="content-guard-add-rule-btn" type="button">
@@ -296,6 +312,7 @@
                     <th>规则</th>
                     <th>分类</th>
                     <th>匹配</th>
+                    <th>原因</th>
                     <th>风险</th>
                     <th>动作</th>
                     <th>可信度</th>
@@ -304,7 +321,7 @@
             </thead>
             <tbody id="content-guard-rules-body">
                 <tr>
-                    <td colspan="8" class="table-muted">加载中</td>
+                    <td colspan="9" class="table-muted">加载中</td>
                 </tr>
             </tbody>
         </table>
@@ -312,8 +329,8 @@
     <form class="content-guard-inspect-form" id="content-guard-inspect-form">
         <label>
             <span class="content-guard-label">
-                <span>文本检测</span>
-                <button class="settings-help-btn" type="button" title="使用当前规则检测一段本地文本，不调用外部渠道。" aria-label="文本检测说明">
+                <span>本地内容检测</span>
+                <button class="settings-help-btn" type="button" title="使用当前规则检测一段本地文本，不调用外部提供商。" aria-label="文本检测说明">
                     <i class="bi bi-question-circle" aria-hidden="true"></i>
                 </button>
             </span>

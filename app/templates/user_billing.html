@@ -8,22 +8,22 @@
     </div>
     <div class="cockpit-hero-aside">
         <div class="cockpit-aside-label">当前可用余额</div>
-        <div class="cockpit-aside-value">{{ '%.6f'|format(summary.available_balance) if summary.available_balance is not none else '不限' }}</div>
+        <div class="cockpit-aside-value">{{ summary.available_balance|display_money }}</div>
         <div class="cockpit-aside-copy">共享账户金额池口径</div>
         <div class="cockpit-health-bar"><span class="cockpit-health-fill-full"></span></div>
         <div class="cockpit-aside-meta">
-            <span>24h 扣费 {{ '%.6f'|format(summary.recent_billed_cost) }}</span>
+            <span>24h 扣费 {{ summary.recent_billed_cost|display_money }}</span>
             <span>记录 {{ summary.total_billing_records }}</span>
         </div>
     </div>
 </section>
 
 <section class="stats-grid">
-    <article class="metric-card"><span>共享账户总余额</span><strong>{{ '%.6f'|format(summary.balance_amount) if summary.balance_amount is not none else '不限' }}</strong></article>
-    <article class="metric-card"><span>冻结金额</span><strong>{{ '%.6f'|format(summary.frozen_amount or 0) }}</strong></article>
-    <article class="metric-card"><span>可用余额</span><strong>{{ '%.6f'|format(summary.available_balance) if summary.available_balance is not none else '不限' }}</strong></article>
-    <article class="metric-card"><span>累计充值</span><strong>{{ '%.6f'|format(summary.total_recharge_amount) }}</strong></article>
-    <article class="metric-card"><span>累计费用</span><strong>{{ '%.6f'|format(summary.total_cost_used) }}</strong></article>
+    <article class="metric-card"><span>共享账户总余额</span><strong>{{ summary.balance_amount|display_money }}</strong></article>
+    <article class="metric-card"><span>冻结金额</span><strong>{{ (summary.frozen_amount or 0)|display_money }}</strong></article>
+    <article class="metric-card"><span>可用余额</span><strong>{{ summary.available_balance|display_money }}</strong></article>
+    <article class="metric-card"><span>累计充值</span><strong>{{ summary.total_recharge_amount|display_money }}</strong></article>
+    <article class="metric-card"><span>累计费用</span><strong>{{ summary.total_cost_used|display_money }}</strong></article>
     <article class="metric-card"><span>账单记录</span><strong>{{ summary.total_billing_records }}</strong></article>
 </section>
 
@@ -38,38 +38,38 @@
         <div class="api-key-chip-grid api-key-chip-grid-wide">
             <article class="api-key-chip-card">
                 <strong>余额</strong>
-                <span>{{ '%.6f'|format(summary.balance_amount) if summary.balance_amount is not none else '不限' }}</span>
+                <span>{{ summary.balance_amount|display_money }}</span>
                 <span>共享账户总金额池</span>
             </article>
             <article class="api-key-chip-card">
                 <strong>可用额度</strong>
-                <span>{{ '%.6f'|format(summary.available_balance) if summary.available_balance is not none else '不限' }}</span>
+                <span>{{ summary.available_balance|display_money }}</span>
                 <span>已排除冻结金额后的可继续调用额度</span>
             </article>
             <article class="api-key-chip-card">
                 <strong>累计消费</strong>
-                <span>{{ '%.6f'|format(summary.total_cost_used) }}</span>
+                <span>{{ summary.total_cost_used|display_money }}</span>
                 <span>当前账号下所有 API Key 共用这条消费口径</span>
             </article>
         </div>
         <div class="api-key-chip-grid">
             <article class="api-key-chip-card">
                 <strong>调用次数</strong>
-                <span>总计 {{ account_summary.total_requests }} / {{ account_summary.request_limit_total if account_summary.request_limit_total is not none else '不限' }}</span>
-                <span>今日 {{ account_summary.day_requests }} / {{ account_summary.request_limit_daily if account_summary.request_limit_daily is not none else '不限' }}</span>
-                <span>本月 {{ account_summary.month_requests }} / {{ account_summary.request_limit_monthly if account_summary.request_limit_monthly is not none else '不限' }}</span>
+                <span>总计 {{ account_summary.total_requests }}</span>
+                <span>今日 {{ account_summary.day_requests }}</span>
+                <span>本月 {{ account_summary.month_requests }}</span>
             </article>
             <article class="api-key-chip-card">
-                <strong>Token 配额</strong>
-                <span>总计 {{ account_summary.total_tokens }} / {{ account_summary.token_limit_total if account_summary.token_limit_total is not none else '不限' }}</span>
-                <span>今日 {{ account_summary.day_tokens }} / {{ account_summary.token_limit_daily if account_summary.token_limit_daily is not none else '不限' }}</span>
-                <span>本月 {{ account_summary.month_tokens }} / {{ account_summary.token_limit_monthly if account_summary.token_limit_monthly is not none else '不限' }}</span>
+                <strong>Token 消耗</strong>
+                <span>总计 {{ account_summary.total_tokens|display_tokens }}</span>
+                <span>今日 {{ account_summary.day_tokens|display_tokens }}</span>
+                <span>本月 {{ account_summary.month_tokens|display_tokens }}</span>
             </article>
             <article class="api-key-chip-card">
-                <strong>金额配额</strong>
-                <span>总计 {{ '%.6f'|format(account_summary.total_cost_used or 0) }} / {{ '%.6f'|format(account_summary.cost_limit_total) if account_summary.cost_limit_total is not none else '不限' }}</span>
-                <span>今日 {{ '%.6f'|format(account_summary.day_cost_used or 0) }} / {{ '%.6f'|format(account_summary.cost_limit_daily) if account_summary.cost_limit_daily is not none else '不限' }}</span>
-                <span>本月 {{ '%.6f'|format(account_summary.month_cost_used or 0) }} / {{ '%.6f'|format(account_summary.cost_limit_monthly) if account_summary.cost_limit_monthly is not none else '不限' }}</span>
+                <strong>费用消耗</strong>
+                <span>总计 {{ (account_summary.total_cost_used or 0)|display_money }}</span>
+                <span>今日 {{ (account_summary.day_cost_used or 0)|display_money }}</span>
+                <span>本月 {{ (account_summary.month_cost_used or 0)|display_money }}</span>
             </article>
         </div>
     </div>
@@ -85,7 +85,7 @@
             <div class="dashboard-signal-list">
                 {% if key_summaries %}
                     {% for item in key_summaries[:6] %}
-                    <div><span>{{ item.name }}</span><strong>{{ '%.6f'|format(item.total_cost_used or 0) }} / {{ item.total_tokens_used }} tokens</strong></div>
+                    <div><span>{{ item.name }}</span><strong>{{ (item.total_cost_used or 0)|display_money }} / {{ item.total_tokens_used|display_tokens }}</strong></div>
                     {% endfor %}
                 {% else %}
                     <div><span>暂无 API Key</span><strong>-</strong></div>
@@ -122,7 +122,7 @@
                     <th>金额</th>
                     <th>余额后</th>
                     <th>模型</th>
-                    <th>Tokens</th>
+                    <th>Token</th>
                     <th>备注</th>
                 </tr>
             </thead>
@@ -139,10 +139,10 @@
                             {% endif %}
                         </td>
                         <td>{{ item.api_client_key_name or item.api_client_key_id }}</td>
-                        <td>{{ '%.6f'|format(item.amount) }}</td>
-                        <td>{{ '%.6f'|format(item.balance_after or 0) if item.balance_after is not none else '-' }}</td>
+                        <td>{{ item.amount|display_money }}</td>
+                        <td>{{ item.balance_after|display_money('-') }}</td>
                         <td>{{ item.provider_name or item.model_name or '-' }}</td>
-                        <td>{{ item.total_tokens or 0 }}</td>
+                        <td>{{ (item.total_tokens or 0)|display_tokens }}</td>
                         <td>{{ item.remark or '-' }}</td>
                     </tr>
                     {% endfor %}

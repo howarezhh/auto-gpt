@@ -35,6 +35,7 @@
                         <th>输入价格</th>
                         <th>输出价格</th>
                         <th>缓存价格</th>
+                        <th>缓存写入价格</th>
                         <th>速度</th>
                         <th>可用渠道</th>
                         <th>说明</th>
@@ -48,9 +49,10 @@
                                 <strong>{{ item.display_name or item.model_name }}</strong>
                                 <div class="table-muted">{{ item.model_name }}</div>
                             </td>
-                            <td>{{ '%.4f'|format((item.input_price_per_1k or 0) * 1000) if item.input_price_per_1k is not none else '-' }}/1M</td>
-                            <td>{{ '%.4f'|format((item.output_price_per_1k or 0) * 1000) if item.output_price_per_1k is not none else '-' }}/1M</td>
-                            <td>{{ '%.4f'|format((item.cache_price_per_1k or 0) * 1000) if item.cache_price_per_1k is not none else '-' }}/1M</td>
+                            <td>{{ item.input_price_per_1k|display_price_per_1m }}</td>
+                            <td>{{ item.output_price_per_1k|display_price_per_1m }}</td>
+                            <td>{{ item.cache_price_per_1k|display_price_per_1m }}</td>
+                            <td>{{ item.cache_write_price_per_1k|display_price_per_1m }}</td>
                             <td>{{ item.speed_label or '-' }}</td>
                             <td>
                                 <strong>{{ item.enabled_provider_count }}</strong>
@@ -60,7 +62,7 @@
                         </tr>
                         {% endfor %}
                     {% else %}
-                        <tr><td colspan="7"><div class="empty-state">当前账号下还没有可用模型，请先让管理员为你的 API Key 绑定可用渠道。</div></td></tr>
+                        <tr><td colspan="8"><div class="empty-state">当前账号下还没有可用模型，请先让管理员为你的 API Key 绑定可用渠道。</div></td></tr>
                     {% endif %}
                 </tbody>
             </table>

@@ -23,7 +23,7 @@
 {% endif %}
 {% if success_message %}
 <section class="panel-card"><div class="auth-success">
-    {% if success_message == 'quota_updated' %}账户额度与冻结金额已更新
+    {% if success_message == 'quota_updated' %}冻结金额已更新
     {% elif success_message == 'balance_adjusted' %}账户调账已完成
     {% else %}操作已完成
     {% endif %}
@@ -40,11 +40,11 @@
 <section class="stats-grid user-detail-stats-grid anchor-section-offset" id="user-detail-overview">
     <article class="metric-card"><span>名下 API 密钥</span><strong>{{ owned_api_keys|length }}</strong></article>
     <article class="metric-card"><span>总请求量</span><strong>{{ totals.total_requests }}</strong></article>
-    <article class="metric-card"><span>总 Token</span><strong>{{ totals.total_tokens }}</strong></article>
-    <article class="metric-card"><span>可用余额</span><strong>{{ '%.6f'|format(totals.available_balance) if totals.available_balance is not none else '不限' }}</strong></article>
-    <article class="metric-card"><span>冻结金额</span><strong>{{ '%.6f'|format(account_summary.frozen_amount or 0) }}</strong></article>
-    <article class="metric-card"><span>累计费用</span><strong>{{ '%.6f'|format(account_summary.total_cost_used or 0) }}</strong></article>
-    <article class="metric-card"><span>累计充值</span><strong>{{ '%.6f'|format(account_summary.total_recharge_amount or 0) }}</strong></article>
+    <article class="metric-card"><span>总 Token</span><strong>{{ totals.total_tokens|display_tokens }}</strong></article>
+    <article class="metric-card"><span>可用余额</span><strong>{{ totals.available_balance|display_money }}</strong></article>
+    <article class="metric-card"><span>冻结金额</span><strong>{{ (account_summary.frozen_amount or 0)|display_money }}</strong></article>
+    <article class="metric-card"><span>累计费用</span><strong>{{ (account_summary.total_cost_used or 0)|display_money }}</strong></article>
+    <article class="metric-card"><span>累计充值</span><strong>{{ (account_summary.total_recharge_amount or 0)|display_money }}</strong></article>
 </section>
 
 <section class="dashboard-command-grid user-detail-overview-grid">
@@ -62,12 +62,12 @@
             <article class="api-key-chip-card"><strong>最近登录</strong><span>{{ user.last_login_at or '-' }}</span></article>
             <article class="api-key-chip-card"><strong>创建时间</strong><span>{{ user.created_at }}</span></article>
             <article class="api-key-chip-card"><strong>会话数</strong><span>{{ conversation_count }}</span></article>
-            <article class="api-key-chip-card"><strong>共享账户总余额</strong><span>{{ '%.6f'|format(account_summary.balance_amount) if account_summary.balance_amount is not none else '不限' }}</span></article>
-            <article class="api-key-chip-card"><strong>冻结金额</strong><span>{{ '%.6f'|format(account_summary.frozen_amount or 0) }}</span></article>
-            <article class="api-key-chip-card"><strong>共享账户可用余额</strong><span>{{ '%.6f'|format(account_summary.available_balance) if account_summary.available_balance is not none else '不限' }}</span></article>
+            <article class="api-key-chip-card"><strong>共享账户总余额</strong><span>{{ account_summary.balance_amount|display_money }}</span></article>
+            <article class="api-key-chip-card"><strong>冻结金额</strong><span>{{ (account_summary.frozen_amount or 0)|display_money }}</span></article>
+            <article class="api-key-chip-card"><strong>共享账户可用余额</strong><span>{{ account_summary.available_balance|display_money }}</span></article>
             <article class="api-key-chip-card"><strong>今日请求</strong><span>{{ account_summary.day_requests }}</span></article>
             <article class="api-key-chip-card"><strong>本月请求</strong><span>{{ account_summary.month_requests }}</span></article>
-            <article class="api-key-chip-card"><strong>本月费用</strong><span>{{ '%.6f'|format(account_summary.month_cost_used or 0) }}</span></article>
+            <article class="api-key-chip-card"><strong>本月费用</strong><span>{{ (account_summary.month_cost_used or 0)|display_money }}</span></article>
         </div>
     </div>
 </section>
@@ -103,8 +103,8 @@
         <div class="panel-card section-shell">
             <div class="section-subhead">
                 <div>
-                    <div class="panel-kicker">额度策略</div>
-                    <h3>配额与冻结金额</h3>
+                <div class="panel-kicker">余额策略</div>
+                <h3>冻结金额</h3>
                 </div>
             </div>
             <form class="form-grid user-detail-quota-form" method="post" action="/users/{{ user.id }}/quota-policy">
@@ -112,44 +112,8 @@
                     <span>冻结金额</span>
                     <input class="field-input" name="frozen_amount" type="number" step="0.000001" value="{{ '%.6f'|format(account_summary.frozen_amount or 0) }}">
                 </label>
-                <label>
-                    <span>总调用次数上限</span>
-                    <input class="field-input" name="request_limit_total" type="number" min="0" value="{{ account_summary.request_limit_total if account_summary.request_limit_total is not none else '' }}">
-                </label>
-                <label>
-                    <span>日调用次数上限</span>
-                    <input class="field-input" name="request_limit_daily" type="number" min="0" value="{{ account_summary.request_limit_daily if account_summary.request_limit_daily is not none else '' }}">
-                </label>
-                <label>
-                    <span>月调用次数上限</span>
-                    <input class="field-input" name="request_limit_monthly" type="number" min="0" value="{{ account_summary.request_limit_monthly if account_summary.request_limit_monthly is not none else '' }}">
-                </label>
-                <label>
-                    <span>总 Token 上限</span>
-                    <input class="field-input" name="token_limit_total" type="number" min="0" value="{{ account_summary.token_limit_total if account_summary.token_limit_total is not none else '' }}">
-                </label>
-                <label>
-                    <span>日 Token 上限</span>
-                    <input class="field-input" name="token_limit_daily" type="number" min="0" value="{{ account_summary.token_limit_daily if account_summary.token_limit_daily is not none else '' }}">
-                </label>
-                <label>
-                    <span>月 Token 上限</span>
-                    <input class="field-input" name="token_limit_monthly" type="number" min="0" value="{{ account_summary.token_limit_monthly if account_summary.token_limit_monthly is not none else '' }}">
-                </label>
-                <label>
-                    <span>总金额上限</span>
-                    <input class="field-input" name="cost_limit_total" type="number" step="0.000001" min="0" value="{{ '%.6f'|format(account_summary.cost_limit_total) if account_summary.cost_limit_total is not none else '' }}">
-                </label>
-                <label>
-                    <span>日金额上限</span>
-                    <input class="field-input" name="cost_limit_daily" type="number" step="0.000001" min="0" value="{{ '%.6f'|format(account_summary.cost_limit_daily) if account_summary.cost_limit_daily is not none else '' }}">
-                </label>
-                <label>
-                    <span>月金额上限</span>
-                    <input class="field-input" name="cost_limit_monthly" type="number" step="0.000001" min="0" value="{{ '%.6f'|format(account_summary.cost_limit_monthly) if account_summary.cost_limit_monthly is not none else '' }}">
-                </label>
                 <div class="form-actions">
-                    <button class="btn btn-accent" type="submit">保存账户额度</button>
+                    <button class="btn btn-accent" type="submit">保存冻结金额</button>
                 </div>
             </form>
         </div>
@@ -194,8 +158,8 @@
                             {% else %}{{ item.status }}
                             {% endif %}
                         </td>
-                        <td>{{ item.balance_amount if item.balance_amount is not none else '不限' }}</td>
-                        <td>{{ item.total_tokens_used }}</td>
+                        <td>{{ item.balance_amount|display_money }}</td>
+                        <td>{{ item.total_tokens_used|display_tokens }}</td>
                         <td>{{ item.last_used_at or '-' }}</td>
                     </tr>
                     {% endfor %}
@@ -224,7 +188,7 @@
                         <th>模型映射</th>
                         <th>会话号</th>
                         <th>状态</th>
-                        <th>Tokens</th>
+                        <th>Token</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -250,7 +214,7 @@
                             </td>
                             <td>{{ item.conversation_key or '-' }}</td>
                             <td>{{ '成功' if item.success else '失败' }}</td>
-                            <td>{{ item.total_tokens or 0 }}</td>
+                            <td>{{ (item.total_tokens or 0)|display_tokens }}</td>
                         </tr>
                         {% endfor %}
                     {% else %}
@@ -291,7 +255,7 @@
                                     {% else %}{{ item.record_type }}
                                     {% endif %}
                                 </td>
-                                <td>{{ '%.6f'|format(item.amount) }}</td>
+                                <td>{{ item.amount|display_money }}</td>
                                 <td>{{ item.remark or '-' }}</td>
                             </tr>
                             {% endfor %}

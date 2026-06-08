@@ -31,11 +31,11 @@
 
 <section class="stats-grid anchor-section-offset">
     <article class="metric-card"><span>我的 API Key</span><strong>{{ owned_api_keys|length }}</strong></article>
-    <article class="metric-card"><span>可用余额</span><strong>{{ '%.6f'|format(totals.available_balance) if totals.available_balance is not none else '不限' }}</strong></article>
+    <article class="metric-card"><span>可用余额</span><strong>{{ totals.available_balance|display_money }}</strong></article>
     <article class="metric-card"><span>今日请求</span><strong>{{ account_summary.day_requests }}</strong></article>
     <article class="metric-card"><span>本月请求</span><strong>{{ account_summary.month_requests }}</strong></article>
-    <article class="metric-card"><span>总 Token</span><strong>{{ totals.total_tokens }}</strong></article>
-    <article class="metric-card"><span>累计费用</span><strong>{{ '%.6f'|format(totals.total_cost) }}</strong></article>
+    <article class="metric-card"><span>总 Token</span><strong>{{ totals.total_tokens|display_tokens }}</strong></article>
+    <article class="metric-card"><span>累计费用</span><strong>{{ totals.total_cost|display_money }}</strong></article>
 </section>
 
 <section class="panel-card monitor-panel anchor-section-offset" id="user-home-monitor">

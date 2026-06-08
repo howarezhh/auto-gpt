@@ -243,7 +243,7 @@
                     <td>{{ item.name }}</td>
                     <td>{{ item.owner_user_name or '-' }}</td>
                     <td>{{ item.status }}</td>
-                    <td>{{ '%.6f'|format(item.balance_amount) if item.balance_amount is not none else '不限' }}</td>
+                    <td>{{ item.balance_amount|display_money }}</td>
                     <td>{{ item.last_used_at or '-' }}</td>
                     <td>
                         {% if item.status in ['quota_exhausted', 'cost_quota_exhausted', 'balance_exhausted'] %}

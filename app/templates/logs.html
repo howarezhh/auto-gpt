@@ -12,6 +12,7 @@
     <button class="logs-segment" type="button" data-logging-tab="exceptions">异常事件</button>
     <button class="logs-segment" type="button" data-logging-tab="health-runs">健康检查日志</button>
     <button class="logs-segment" type="button" data-logging-tab="billing-events">计费日志</button>
+    <button class="logs-segment" type="button" data-logging-tab="content-guard-events">内容防护日志</button>
     <button class="logs-segment" type="button" data-logging-tab="background-jobs">后台任务日志</button>
     <button class="logs-segment" type="button" data-logging-tab="asset-events">素材日志</button>
 </nav>
@@ -21,9 +22,9 @@
     <article class="metric-card"><span>成功请求</span><strong data-log-summary="success_requests">0</strong></article>
     <article class="metric-card metric-card-alert"><span>失败请求</span><strong data-log-summary="failed_requests">0</strong></article>
     <article class="metric-card"><span>关联密钥数</span><strong data-log-summary="matched_api_keys">0</strong></article>
-    <article class="metric-card"><span>输入 Token</span><strong data-log-summary="prompt_tokens">0</strong></article>
-    <article class="metric-card"><span>输出 Token</span><strong data-log-summary="completion_tokens">0</strong></article>
-    <article class="metric-card"><span>总 Token</span><strong data-log-summary="total_tokens">0</strong></article>
+    <article class="metric-card"><span>输入 Token</span><strong data-log-summary="prompt_tokens">0 token</strong></article>
+    <article class="metric-card"><span>输出 Token</span><strong data-log-summary="completion_tokens">0 token</strong></article>
+    <article class="metric-card"><span>总 Token</span><strong data-log-summary="total_tokens">0 token</strong></article>
 </section>
 
 <section class="panel-card section-shell" data-logging-panel="request">
@@ -35,9 +36,9 @@
         <div class="data-workspace-actions">
             <div class="table-muted" id="logs-last-refresh" aria-live="polite">最近刷新：-</div>
             <div class="hero-actions">
-                <button class="btn btn-ghost interactive-btn" id="logs-export-btn" type="button">导出 CSV</button>
+                <button class="btn btn-ghost interactive-btn" id="logs-export-btn" type="button">导出请求日志</button>
                 <button class="btn btn-ghost interactive-btn" id="logs-refresh-btn" type="button">刷新</button>
-                <button class="btn btn-danger-soft interactive-btn" id="logs-clear-btn" type="button">清空日志</button>
+                <button class="btn btn-danger-soft interactive-btn" id="logs-clear-btn" type="button">清空请求日志</button>
             </div>
         </div>
     </div>
@@ -51,27 +52,18 @@
                     <option value="responses">响应请求</option>
                     <option value="moderations">内容审核请求</option>
                     <option value="files">文件请求</option>
-                    <option value="health_check_provider">渠道健康检查</option>
+                    <option value="health_check_provider">提供商健康检查</option>
                     <option value="health_check_model">模型健康检查</option>
                     <option value="proxy_generic">通用代理日志</option>
                     <option value="api_client_auth">密钥鉴权失败日志</option>
+                    <option value="unsupported_endpoint">不支持端点日志</option>
+                    <option value="v1_preflight">CORS 预检日志</option>
                 </select>
             </label>
             <label>
-                <span>提供商 ID</span>
+                <span>提供商</span>
                 <select class="field-input" id="logs-provider-id">
                     <option value="">全部</option>
-                </select>
-            </label>
-            <label>
-                <span>提供商信任等级</span>
-                <select class="field-input" id="logs-provider-trust-level">
-                    <option value="">全部</option>
-                    <option value="official">官方</option>
-                    <option value="trusted">可信</option>
-                    <option value="standard">标准</option>
-                    <option value="low">低信任</option>
-                    <option value="blocked">已阻断</option>
                 </select>
             </label>
             <label>
@@ -87,58 +79,8 @@
                 </select>
             </label>
             <label>
-                <span>密钥 ID</span>
+                <span>密钥</span>
                 <select class="field-input" id="logs-api-client-key-id">
-                    <option value="">全部</option>
-                </select>
-            </label>
-            <label>
-                <span>密钥标识</span>
-                <select class="field-input" id="logs-api-client-key-query">
-                    <option value="">全部</option>
-                </select>
-            </label>
-            <div class="form-span-2 logs-filter-group">
-                <div class="panel-kicker">手动筛选</div>
-                <h4>用户 / 模型 / 密钥</h4>
-            </div>
-            <label>
-                <span>手动用户</span>
-                <input class="field-input" id="logs-user-account-query" type="text" placeholder="输入用户名或用户 ID">
-            </label>
-            <label>
-                <span>手动模型</span>
-                <input class="field-input" id="logs-model-query" type="text" placeholder="输入模型名关键字">
-            </label>
-            <label>
-                <span>手动密钥</span>
-                <input class="field-input" id="logs-api-client-key-query-manual" type="text" placeholder="输入密钥名称、前缀或 ID">
-            </label>
-            <div class="form-span-2 logs-filter-group">
-                <div class="panel-kicker">业务字段</div>
-                <h4>租户 / 项目 / 应用 / 环境</h4>
-            </div>
-            <label>
-                <span>租户</span>
-                <select class="field-input" id="logs-tenant-name">
-                    <option value="">全部</option>
-                </select>
-            </label>
-            <label>
-                <span>项目</span>
-                <select class="field-input" id="logs-project-name">
-                    <option value="">全部</option>
-                </select>
-            </label>
-            <label>
-                <span>应用</span>
-                <select class="field-input" id="logs-app-name">
-                    <option value="">全部</option>
-                </select>
-            </label>
-            <label>
-                <span>环境</span>
-                <select class="field-input" id="logs-environment-name">
                     <option value="">全部</option>
                 </select>
             </label>
@@ -150,51 +92,106 @@
                     <option value="false">失败</option>
                 </select>
             </label>
-            <label>
-                <span>内容检测结果</span>
-                <select class="field-input" id="logs-content-guard-result">
-                    <option value="">全部</option>
-                    <option value="pass">通过</option>
-                    <option value="review">需复核</option>
-                    <option value="block">已拦截</option>
-                </select>
-            </label>
-            <label>
-                <span>内容风险等级</span>
-                <select class="field-input" id="logs-content-guard-risk-level">
-                    <option value="">全部</option>
-                    <option value="low">低</option>
-                    <option value="medium">中</option>
-                    <option value="high">高</option>
-                </select>
-            </label>
-            <label>
-                <span>会话键</span>
-                <input class="field-input" id="logs-conversation-key" type="text" placeholder="例如 user-001 或 request_id">
-            </label>
-            <label class="logs-toggle-field" for="logs-exclude-health-checks">
-                <span class="logs-toggle-copy">
-                    <strong>隐藏健康检查日志</strong>
-                </span>
-                <span class="settings-switch-control">
-                    <input id="logs-exclude-health-checks" type="checkbox" checked>
-                    <span class="settings-switch-slider"></span>
-                </span>
-            </label>
         </div>
+        <details class="logs-advanced-filter">
+            <summary>高级筛选</summary>
+            <div class="filter-grid compact-filter-grid">
+                <label>
+                    <span>提供商信任等级</span>
+                    <select class="field-input" id="logs-provider-trust-level">
+                        <option value="">全部</option>
+                        <option value="official">官方</option>
+                        <option value="trusted">可信</option>
+                        <option value="standard">标准</option>
+                        <option value="low">低信任</option>
+                        <option value="blocked">已阻断</option>
+                    </select>
+                </label>
+                <label>
+                    <span>密钥标识</span>
+                    <select class="field-input" id="logs-api-client-key-query">
+                        <option value="">全部</option>
+                    </select>
+                </label>
+                <label>
+                    <span>手动用户</span>
+                    <input class="field-input" id="logs-user-account-query" type="text" placeholder="输入用户名或用户 ID">
+                </label>
+                <label>
+                    <span>手动模型</span>
+                    <input class="field-input" id="logs-model-query" type="text" placeholder="输入模型名关键字">
+                </label>
+                <label>
+                    <span>手动密钥</span>
+                    <input class="field-input" id="logs-api-client-key-query-manual" type="text" placeholder="输入密钥名称、前缀或 ID">
+                </label>
+                <label>
+                    <span>租户</span>
+                    <select class="field-input" id="logs-tenant-name">
+                        <option value="">全部</option>
+                    </select>
+                </label>
+                <label>
+                    <span>项目</span>
+                    <select class="field-input" id="logs-project-name">
+                        <option value="">全部</option>
+                    </select>
+                </label>
+                <label>
+                    <span>应用</span>
+                    <select class="field-input" id="logs-app-name">
+                        <option value="">全部</option>
+                    </select>
+                </label>
+                <label>
+                    <span>环境</span>
+                    <select class="field-input" id="logs-environment-name">
+                        <option value="">全部</option>
+                    </select>
+                </label>
+                <label>
+                    <span>内容检测结果</span>
+                    <select class="field-input" id="logs-content-guard-result">
+                        <option value="">全部</option>
+                        <option value="pass">通过</option>
+                        <option value="review">需复核</option>
+                        <option value="block">已拦截</option>
+                    </select>
+                </label>
+                <label>
+                    <span>内容风险等级</span>
+                    <select class="field-input" id="logs-content-guard-risk-level">
+                        <option value="">全部</option>
+                        <option value="low">低</option>
+                        <option value="medium">中</option>
+                        <option value="high">高</option>
+                    </select>
+                </label>
+                <label>
+                    <span>会话键</span>
+                    <input class="field-input" id="logs-conversation-key" type="text" placeholder="例如 user-001 或 request_id">
+                </label>
+                <label class="logs-toggle-field" for="logs-exclude-health-checks">
+                    <span class="logs-toggle-copy">
+                        <strong>隐藏健康检查日志</strong>
+                    </span>
+                    <span class="settings-switch-control">
+                        <input id="logs-exclude-health-checks" type="checkbox" checked>
+                        <span class="settings-switch-slider"></span>
+                    </span>
+                </label>
+            </div>
+        </details>
         <div class="table-shell">
             <table class="data-table">
                 <thead>
                     <tr>
-                        <th>时间</th>
+                        <th>时间 / 会话</th>
                         <th>类型</th>
                         <th>用户 / 密钥</th>
-                        <th>Session</th>
-                        <th>模型映射</th>
-                        <th>渠道</th>
+                        <th>模型 / 提供商</th>
                         <th>结果</th>
-                        <th>Token / 成本</th>
-                        <th>用时</th>
+                        <th>用量 / 用时</th>
                         <th>详情</th>
                     </tr>
                 </thead>
@@ -227,6 +224,7 @@
         </div>
         <div class="data-workspace-actions">
             <div class="table-muted" id="typed-logs-last-refresh" aria-live="polite">最近刷新：-</div>
+            <button class="btn btn-ghost interactive-btn" id="typed-logs-export-btn" type="button">导出当前类型</button>
             <button class="btn btn-ghost interactive-btn" id="typed-logs-refresh-btn" type="button">刷新</button>
         </div>
     </div>
@@ -263,14 +261,17 @@
     </div>
 </section>
 
-<div class="modal-shell hidden" id="log-trace-modal">
-    <div class="modal-card modal-lg">
+<div class="modal-shell hidden" id="log-trace-modal" aria-hidden="true">
+    <div class="modal-card modal-lg" role="dialog" aria-modal="true" aria-labelledby="log-trace-title" tabindex="-1">
         <div class="modal-head">
-            <h3>请求详情与 Trace</h3>
-            <button class="icon-btn interactive-btn" id="log-trace-close" type="button">×</button>
+            <h3 id="log-trace-title">日志详情与 Trace</h3>
+            <button class="icon-btn interactive-btn" id="log-trace-close" type="button" aria-label="关闭日志详情">×</button>
         </div>
         <div class="log-detail-card-grid" id="log-detail-cards"></div>
-        <pre class="code-block" id="log-trace-content">暂无 Trace</pre>
+        <details class="log-raw-detail">
+            <summary>原始 JSON</summary>
+            <pre class="code-block" id="log-trace-content">暂无 Trace</pre>
+        </details>
     </div>
 </div>
 {% endblock %}

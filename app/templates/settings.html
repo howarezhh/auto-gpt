@@ -19,7 +19,7 @@
         <label>
             <span>路由主策略</span>
             <select class="field-input" id="setting-route-mode">
-                <option value="failover">健康优先 | 同层复用近期会话，随后按负载、权重与得分分发</option>
+                <option value="failover">健康优先 | 同层复用近期会话，随后按负载与得分分发</option>
             </select>
         </label>
         <label>
@@ -56,6 +56,16 @@
             </span>
             <span class="settings-switch-control">
                 <input id="setting-route-exhausted-retry-infinite-enabled" type="checkbox">
+                <span class="settings-switch-slider"></span>
+            </span>
+        </label>
+        <label class="settings-switch-card">
+            <span class="settings-switch-copy">
+                <strong>只走可信提供商</strong>
+                <small>开启后，正式路由仅允许官方或可信等级提供商；默认关闭。</small>
+            </span>
+            <span class="settings-switch-control">
+                <input id="setting-trusted-providers-only" type="checkbox">
                 <span class="settings-switch-slider"></span>
             </span>
         </label>
@@ -264,9 +274,9 @@
                 <label>
                     <span>会话存储</span>
                     <select class="field-input" id="setting-responses-chat-adapter-storage-type">
-                        <option value="memory">内存</option>
-                        <option value="redis">Redis</option>
                         <option value="database">数据库</option>
+                        <option value="redis">Redis</option>
+                        <option value="memory">内存（仅开发）</option>
                     </select>
                 </label>
                 <label>

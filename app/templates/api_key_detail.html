@@ -4,16 +4,16 @@
     <div class="cockpit-hero-copy">
         <div class="eyebrow">API 密钥详情</div>
         <h2 id="api-key-detail-title">API 密钥详情</h2>
-        <p id="api-key-detail-subtitle">正在加载密钥状态、额度、授权策略和调用留痕...</p>
+        <p id="api-key-detail-subtitle">正在加载密钥状态、余额、授权策略和调用留痕...</p>
         <div class="hero-actions">
             <a class="btn btn-ghost interactive-btn" href="/api-keys" data-shell-link>返回列表</a>
             <button class="btn btn-accent interactive-btn" id="api-key-detail-refresh-btn" type="button">刷新详情</button>
         </div>
     </div>
     <div class="cockpit-hero-aside api-key-detail-aside" id="api-key-detail-signal">
-        <div class="cockpit-aside-label">额度脉冲</div>
+        <div class="cockpit-aside-label">余额脉冲</div>
         <div class="cockpit-aside-value">-</div>
-        <div class="cockpit-aside-copy">剩余 Token 配额与最近调用强度</div>
+        <div class="cockpit-aside-copy">共享账户余额与最近调用强度</div>
         <div class="cockpit-health-bar"><span class="cockpit-health-fill-empty"></span></div>
         <div class="cockpit-aside-meta">
             <span>状态 -</span>
@@ -24,17 +24,17 @@
 
 <section class="stats-grid api-key-detail-stats">
     <article class="metric-card"><span>累计请求量</span><strong id="api-key-detail-total-requests">0</strong></article>
-    <article class="metric-card"><span>累计输入 Token</span><strong id="api-key-detail-prompt-tokens">0</strong></article>
-    <article class="metric-card"><span>累计输出 Token</span><strong id="api-key-detail-completion-tokens">0</strong></article>
-    <article class="metric-card"><span>累计总 Token</span><strong id="api-key-detail-total-tokens">0</strong></article>
-    <article class="metric-card"><span>累计消费</span><strong id="api-key-detail-total-cost-used">0</strong></article>
-    <article class="metric-card"><span>账户余额</span><strong id="api-key-detail-balance-amount">0</strong></article>
+    <article class="metric-card"><span>累计输入 Token</span><strong id="api-key-detail-prompt-tokens">0 token</strong></article>
+    <article class="metric-card"><span>累计输出 Token</span><strong id="api-key-detail-completion-tokens">0 token</strong></article>
+    <article class="metric-card"><span>累计总 Token</span><strong id="api-key-detail-total-tokens">0 token</strong></article>
+    <article class="metric-card"><span>累计消费</span><strong id="api-key-detail-total-cost-used">0 $</strong></article>
+    <article class="metric-card"><span>账户余额</span><strong id="api-key-detail-balance-amount">0 $</strong></article>
     <article class="metric-card"><span>24h 请求量</span><strong id="api-key-detail-recent-requests">0</strong></article>
     <article class="metric-card metric-card-alert"><span>24h 失败数</span><strong id="api-key-detail-recent-failures">0</strong></article>
 </section>
 
 <nav class="page-anchor-bar">
-    <a class="page-anchor-link" href="#api-key-section-core">状态与配额</a>
+    <a class="page-anchor-link" href="#api-key-section-core">状态与余额</a>
     <a class="page-anchor-link" href="#api-key-section-analytics">调用分析</a>
     <a class="page-anchor-link" href="#api-key-section-billing">账单台账</a>
     <a class="page-anchor-link" href="#api-key-section-logs">请求日志</a>
@@ -45,7 +45,7 @@
         <div class="section-subhead">
             <div>
                 <div class="panel-kicker">核心状态</div>
-                <h3>基础信息与额度进度</h3>
+                <h3>基础信息与消耗进度</h3>
             </div>
         </div>
         <div class="api-key-detail-info-grid">
@@ -61,8 +61,8 @@
             <div class="panel-card api-key-inline-card">
                 <div class="panel-head">
                     <div>
-                        <div class="panel-kicker">额度进度</div>
-                        <h3>额度进度</h3>
+                        <div class="panel-kicker">消耗进度</div>
+                        <h3>Token 与费用</h3>
                     </div>
                 </div>
                 <div class="api-key-quota-shell">

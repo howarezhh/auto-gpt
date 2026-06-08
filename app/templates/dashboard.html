@@ -46,9 +46,9 @@
     </div>
     <div class="dashboard-usage-summary detail-list" id="dashboard-usage-summary">
         <div><span>总请求数</span><strong>{{ stats.usage_overview.summary.total_requests or 0 }}</strong></div>
-        <div><span>总 Token</span><strong>{{ stats.usage_overview.summary.total_tokens or 0 }}</strong></div>
-        <div><span>输入 / 输出 Token</span><strong>{{ stats.usage_overview.summary.prompt_tokens or 0 }} / {{ stats.usage_overview.summary.completion_tokens or 0 }}</strong></div>
-        <div><span>总价格成本</span><strong>{{ '%.6f'|format(stats.usage_overview.summary.total_cost or 0) }}</strong></div>
+        <div><span>总 Token</span><strong>{{ (stats.usage_overview.summary.total_tokens or 0)|display_tokens }}</strong></div>
+        <div><span>输入 / 输出 Token</span><strong>{{ (stats.usage_overview.summary.prompt_tokens or 0)|display_tokens }} / {{ (stats.usage_overview.summary.completion_tokens or 0)|display_tokens }}</strong></div>
+        <div><span>总价格成本</span><strong>{{ (stats.usage_overview.summary.total_cost or 0)|display_money }}</strong></div>
     </div>
     <div class="dashboard-usage-grid">
         <article class="summary-list-card">
@@ -69,8 +69,8 @@
                         <tr>
                             <td>{{ item.model_name }}</td>
                             <td>{{ item.total_requests }}</td>
-                            <td>{{ item.total_tokens }}</td>
-                            <td>{{ '%.6f'|format(item.total_cost or 0) }}</td>
+                            <td>{{ item.total_tokens|display_tokens }}</td>
+                            <td>{{ (item.total_cost or 0)|display_money }}</td>
                         </tr>
                         {% else %}
                         <tr><td colspan="4"><div class="empty-state">暂无模型成本数据</div></td></tr>
@@ -97,8 +97,8 @@
                         <tr>
                             <td>{{ item.provider_name }}</td>
                             <td>{{ item.total_requests }}</td>
-                            <td>{{ item.total_tokens }}</td>
-                            <td>{{ '%.6f'|format(item.total_cost or 0) }}</td>
+                            <td>{{ item.total_tokens|display_tokens }}</td>
+                            <td>{{ (item.total_cost or 0)|display_money }}</td>
                         </tr>
                         {% else %}
                         <tr><td colspan="4"><div class="empty-state">暂无提供商成本数据</div></td></tr>
@@ -127,8 +127,8 @@
                             <td>{{ item.provider_name }}</td>
                             <td>{{ item.model_name }}</td>
                             <td>{{ item.total_requests }}</td>
-                            <td>{{ item.total_tokens }}</td>
-                            <td>{{ '%.6f'|format(item.total_cost or 0) }}</td>
+                            <td>{{ item.total_tokens|display_tokens }}</td>
+                            <td>{{ (item.total_cost or 0)|display_money }}</td>
                         </tr>
                         {% else %}
                         <tr><td colspan="5"><div class="empty-state">暂无提供商模型成本数据</div></td></tr>
@@ -226,9 +226,9 @@
                 <div><span>启用中</span><strong data-stat="api_key_enabled">{{ stats.api_key_enabled or 0 }}</strong></div>
                 <div><span>禁用中</span><strong data-stat="api_key_disabled">{{ stats.api_key_disabled or 0 }}</strong></div>
                 <div><span>总请求量</span><strong data-stat="api_key_total_requests">{{ stats.api_key_total_requests or 0 }}</strong></div>
-                <div><span>输入 Token</span><strong data-stat="api_key_total_prompt_tokens">{{ stats.api_key_total_prompt_tokens or 0 }}</strong></div>
-                <div><span>输出 Token</span><strong data-stat="api_key_total_completion_tokens">{{ stats.api_key_total_completion_tokens or 0 }}</strong></div>
-                <div><span>总 Token</span><strong data-stat="api_key_total_tokens">{{ stats.api_key_total_tokens or 0 }}</strong></div>
+                <div><span>输入 Token</span><strong data-stat="api_key_total_prompt_tokens">{{ (stats.api_key_total_prompt_tokens or 0)|display_tokens }}</strong></div>
+                <div><span>输出 Token</span><strong data-stat="api_key_total_completion_tokens">{{ (stats.api_key_total_completion_tokens or 0)|display_tokens }}</strong></div>
+                <div><span>总 Token</span><strong data-stat="api_key_total_tokens">{{ (stats.api_key_total_tokens or 0)|display_tokens }}</strong></div>
             </div>
         </div>
         <div class="summary-list-card">
@@ -266,7 +266,7 @@
                     <h4>{{ provider.name }}</h4>
                     <span class="status-badge status-{{ provider.health_status }}">{{ health_labels.get(provider.health_status, provider.health_status) }}</span>
                 </div>
-                <div class="provider-meta">优先级 {{ provider.priority }} / 权重 {{ provider.weight }}</div>
+                <div class="provider-meta">优先级 {{ provider.priority }}</div>
                 <div class="provider-models">{{ provider.models|join(', ') or '-' }}</div>
                 <div class="provider-foot">
                     <span>延迟 {{ provider.last_latency_ms or '-' }} ms</span>

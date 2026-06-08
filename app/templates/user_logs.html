@@ -4,7 +4,6 @@
     <div>
         <div class="eyebrow">我的日志</div>
         <h2>请求记录与排障入口</h2>
-        <p>只展示当前账号名下 API Key 的模型调用记录，用同一套交互页完成筛选、详情查看、CSV 导出和会话跳转。</p>
     </div>
 </section>
 
@@ -13,10 +12,10 @@
     <article class="metric-card"><span>成功请求</span><strong data-log-summary="success_requests">0</strong></article>
     <article class="metric-card metric-card-alert"><span>失败请求</span><strong data-log-summary="failed_requests">0</strong></article>
     <article class="metric-card"><span>关联密钥数</span><strong data-log-summary="matched_api_keys">0</strong></article>
-    <article class="metric-card"><span>输入 Token</span><strong data-log-summary="prompt_tokens">0</strong></article>
-    <article class="metric-card"><span>输出 Token</span><strong data-log-summary="completion_tokens">0</strong></article>
-    <article class="metric-card"><span>总 Token</span><strong data-log-summary="total_tokens">0</strong></article>
-    <article class="metric-card"><span>总费用</span><strong data-log-summary-cost="total_cost">0.000000</strong></article>
+    <article class="metric-card"><span>输入 Token</span><strong data-log-summary="prompt_tokens">0 token</strong></article>
+    <article class="metric-card"><span>输出 Token</span><strong data-log-summary="completion_tokens">0 token</strong></article>
+    <article class="metric-card"><span>总 Token</span><strong data-log-summary="total_tokens">0 token</strong></article>
+    <article class="metric-card"><span>总费用</span><strong data-log-summary-cost="total_cost">0 $</strong></article>
 </section>
 
 <section class="panel-card section-shell">
@@ -26,7 +25,7 @@
                 <h3>筛选条件</h3>
             </div>
         </div>
-        <div class="filter-grid">
+        <div class="filter-grid compact-filter-grid">
             <label>
                 <span>日志类型</span>
                 <select class="field-input" id="logs-log-type">
@@ -38,7 +37,7 @@
                 </select>
             </label>
             <label>
-                <span>提供商 ID</span>
+                <span>提供商</span>
                 <select class="field-input" id="logs-provider-id">
                     <option value="">全部</option>
                 </select>
@@ -50,7 +49,7 @@
                 </select>
             </label>
             <label>
-                <span>密钥 ID</span>
+                <span>密钥</span>
                 <select class="field-input" id="logs-api-client-key-id">
                     <option value="">全部</option>
                 </select>
@@ -58,46 +57,6 @@
             <label>
                 <span>密钥标识</span>
                 <select class="field-input" id="logs-api-client-key-query">
-                    <option value="">全部</option>
-                </select>
-            </label>
-            <div class="form-span-2 logs-filter-group">
-                <div class="panel-kicker">手动筛选</div>
-                <h4>模型 / 密钥</h4>
-            </div>
-            <label>
-                <span>手动模型</span>
-                <input class="field-input" id="logs-model-query" type="text" placeholder="输入模型名关键字">
-            </label>
-            <label>
-                <span>手动密钥</span>
-                <input class="field-input" id="logs-api-client-key-query-manual" type="text" placeholder="输入密钥名称、前缀或 ID">
-            </label>
-            <div class="form-span-2 logs-filter-group">
-                <div class="panel-kicker">业务字段</div>
-                <h4>租户 / 项目 / 应用 / 环境</h4>
-            </div>
-            <label>
-                <span>租户</span>
-                <select class="field-input" id="logs-tenant-name">
-                    <option value="">全部</option>
-                </select>
-            </label>
-            <label>
-                <span>项目</span>
-                <select class="field-input" id="logs-project-name">
-                    <option value="">全部</option>
-                </select>
-            </label>
-            <label>
-                <span>应用</span>
-                <select class="field-input" id="logs-app-name">
-                    <option value="">全部</option>
-                </select>
-            </label>
-            <label>
-                <span>环境</span>
-                <select class="field-input" id="logs-environment-name">
                     <option value="">全部</option>
                 </select>
             </label>
@@ -109,21 +68,57 @@
                     <option value="false">失败</option>
                 </select>
             </label>
-            <label>
-                <span>会话键</span>
-                <input class="field-input" id="logs-conversation-key" type="text" placeholder="例如 conversation_key / session_id">
-            </label>
-            <label class="logs-toggle-field" for="logs-exclude-health-checks">
-                <span class="logs-toggle-copy">
-                    <strong>隐藏健康检查日志</strong>
-                    <small>开启后自动排除后台健康检查与测试产生的日志。</small>
-                </span>
-                <span class="settings-switch-control">
-                    <input id="logs-exclude-health-checks" type="checkbox" checked>
-                    <span class="settings-switch-slider"></span>
-                </span>
-            </label>
         </div>
+        <details class="logs-advanced-filter">
+            <summary>高级筛选</summary>
+            <div class="filter-grid compact-filter-grid">
+                <label>
+                    <span>手动模型</span>
+                    <input class="field-input" id="logs-model-query" type="text" placeholder="输入模型名关键字">
+                </label>
+                <label>
+                    <span>手动密钥</span>
+                    <input class="field-input" id="logs-api-client-key-query-manual" type="text" placeholder="输入密钥名称、前缀或 ID">
+                </label>
+                <label>
+                    <span>租户</span>
+                    <select class="field-input" id="logs-tenant-name">
+                        <option value="">全部</option>
+                    </select>
+                </label>
+                <label>
+                    <span>项目</span>
+                    <select class="field-input" id="logs-project-name">
+                        <option value="">全部</option>
+                    </select>
+                </label>
+                <label>
+                    <span>应用</span>
+                    <select class="field-input" id="logs-app-name">
+                        <option value="">全部</option>
+                    </select>
+                </label>
+                <label>
+                    <span>环境</span>
+                    <select class="field-input" id="logs-environment-name">
+                        <option value="">全部</option>
+                    </select>
+                </label>
+                <label>
+                    <span>会话键</span>
+                    <input class="field-input" id="logs-conversation-key" type="text" placeholder="例如 conversation_key / session_id">
+                </label>
+                <label class="logs-toggle-field" for="logs-exclude-health-checks">
+                    <span class="logs-toggle-copy">
+                        <strong>隐藏健康检查日志</strong>
+                    </span>
+                    <span class="settings-switch-control">
+                        <input id="logs-exclude-health-checks" type="checkbox" checked>
+                        <span class="settings-switch-slider"></span>
+                    </span>
+                </label>
+            </div>
+        </details>
 </section>
 
 <section class="panel-card section-shell">
@@ -133,7 +128,7 @@
             <h3>关键列请求记录</h3>
         </div>
         <div class="hero-actions">
-            <button class="btn btn-ghost interactive-btn" id="logs-export-btn" type="button">导出 CSV</button>
+            <button class="btn btn-ghost interactive-btn" id="logs-export-btn" type="button">导出请求日志</button>
             <button class="btn btn-ghost interactive-btn" id="logs-refresh-btn" type="button">刷新</button>
         </div>
     </div>
@@ -142,15 +137,12 @@
         <table class="data-table">
             <thead>
                 <tr>
-                    <th>时间</th>
+                    <th>时间 / 会话</th>
                     <th>类型</th>
                     <th>密钥</th>
-                    <th>Session</th>
-                    <th>模型映射</th>
-                    <th>渠道</th>
+                    <th>模型 / 提供商</th>
                     <th>结果</th>
-                    <th>Token / 成本</th>
-                    <th>用时</th>
+                    <th>用量 / 用时</th>
                     <th>详情</th>
                 </tr>
             </thead>
@@ -175,13 +167,17 @@
     </div>
 </section>
 
-<div class="modal-shell hidden" id="log-trace-modal">
-    <div class="modal-card modal-lg">
+<div class="modal-shell hidden" id="log-trace-modal" aria-hidden="true">
+    <div class="modal-card modal-lg" role="dialog" aria-modal="true" aria-labelledby="log-trace-title" tabindex="-1">
         <div class="modal-head">
-            <h3>请求详情与 Trace</h3>
-            <button class="icon-btn interactive-btn" id="log-trace-close" type="button">×</button>
+            <h3 id="log-trace-title">请求详情与 Trace</h3>
+            <button class="icon-btn interactive-btn" id="log-trace-close" type="button" aria-label="关闭日志详情">×</button>
         </div>
-        <pre class="code-block" id="log-trace-content">暂无 Trace</pre>
+        <div class="log-detail-card-grid" id="log-detail-cards"></div>
+        <details class="log-raw-detail">
+            <summary>原始 JSON</summary>
+            <pre class="code-block" id="log-trace-content">暂无 Trace</pre>
+        </details>
     </div>
 </div>
 {% endblock %}

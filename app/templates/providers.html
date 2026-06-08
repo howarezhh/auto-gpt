@@ -56,7 +56,7 @@
                     <th>模型</th>
                     <th>容量</th>
                     <th>质量</th>
-                    <th>优先 / 权重</th>
+                    <th>优先级</th>
                     <th>操作</th>
                 </tr>
             </thead>
@@ -165,10 +165,27 @@
                     <option value="openrouter" label="OpenRouter"></option>
                     <option value="siliconflow" label="SiliconFlow"></option>
                     <option value="modelscope" label="ModelScope"></option>
+                    <option value="perplexity" label="Perplexity"></option>
+                    <option value="cloudflare_workers_ai" label="Cloudflare Workers AI"></option>
+                    <option value="nvidia_nim" label="NVIDIA NIM"></option>
+                    <option value="cerebras" label="Cerebras"></option>
+                    <option value="sambanova" label="SambaNova"></option>
+                    <option value="nebius_ai" label="Nebius AI"></option>
+                    <option value="lepton_ai" label="Lepton AI"></option>
+                    <option value="novita_ai" label="Novita AI"></option>
+                    <option value="baseten" label="Baseten"></option>
+                    <option value="modal" label="Modal"></option>
+                    <option value="fal_ai" label="fal.ai"></option>
                     <option value="replicate" label="Replicate"></option>
                     <option value="huggingface" label="Hugging Face"></option>
+                    <option value="ai_gateway" label="AI 网关"></option>
+                    <option value="model_router" label="模型路由器"></option>
+                    <option value="serverless_inference" label="Serverless 推理"></option>
+                    <option value="gpu_cloud_inference" label="GPU 云推理"></option>
                     <option value="ollama" label="Ollama"></option>
                     <option value="vllm_self_hosted" label="自建 vLLM"></option>
+                    <option value="llama_cpp_self_hosted" label="自建 llama.cpp"></option>
+                    <option value="xinference_self_hosted" label="自建 Xinference"></option>
                     <option value="litellm_gateway" label="LiteLLM 网关"></option>
                     <option value="other" label="其它"></option>
                 </datalist>
@@ -202,10 +219,6 @@
             <label for="provider-priority">
                 <span>优先级</span>
                 <input class="field-input" id="provider-priority" type="number" inputmode="numeric" value="100">
-            </label>
-            <label for="provider-weight">
-                <span>权重</span>
-                <input class="field-input" id="provider-weight" type="number" inputmode="numeric" value="100">
             </label>
             <label for="provider-timeout-ms">
                 <span>超时毫秒</span>
@@ -281,20 +294,6 @@
                         </span>
                         <span class="settings-switch-control">
                             <input id="provider-content-guard-enabled" type="checkbox" checked>
-                            <span class="settings-switch-slider" aria-hidden="true"></span>
-                        </span>
-                    </label>
-                    <label class="settings-switch-card" for="provider-low-trust-route-enabled">
-                        <span class="settings-switch-copy">
-                            <span class="settings-switch-title-row">
-                                <strong>允许低信任路由</strong>
-                                <button class="settings-help-btn" type="button" title="仅当提供商为低信任，且 API Key 也允许低信任时才会进入候选。" aria-label="允许低信任路由说明">
-                                    <i class="bi bi-question-circle" aria-hidden="true"></i>
-                                </button>
-                            </span>
-                        </span>
-                        <span class="settings-switch-control">
-                            <input id="provider-low-trust-route-enabled" type="checkbox">
                             <span class="settings-switch-slider" aria-hidden="true"></span>
                         </span>
                     </label>

@@ -60,10 +60,29 @@
             </select>
         </label>
     </div>
+    <div class="provider-model-page-actions">
+        <button class="btn btn-ghost interactive-btn" id="provider-model-test-page-btn" type="button">测试本页</button>
+        <button class="btn btn-ghost interactive-btn" id="provider-model-trust-page-btn" type="button">可信检测本页</button>
+    </div>
+    <div class="provider-model-batch-toolbar" id="provider-model-batch-toolbar" hidden>
+        <div class="provider-model-batch-meta">
+            <strong id="provider-model-batch-count">已选 0 个挂载</strong>
+            <span id="provider-model-batch-scope">当前选择可跨页保留</span>
+        </div>
+        <div class="provider-model-batch-actions">
+            <button class="btn btn-ghost interactive-btn" id="provider-model-select-visible-btn" type="button">选择本页</button>
+            <button class="btn btn-ghost interactive-btn" id="provider-model-clear-selection-btn" type="button">清空</button>
+            <button class="btn btn-ghost interactive-btn" id="provider-model-test-selected-btn" type="button">测试选中</button>
+            <button class="btn btn-ghost interactive-btn" id="provider-model-trust-selected-btn" type="button">可信检测选中</button>
+        </div>
+    </div>
     <div class="table-shell provider-table-shell provider-model-matrix-shell">
         <table class="data-table provider-data-table">
             <thead>
                 <tr>
+                    <th class="provider-model-select-col">
+                        <input id="provider-model-select-page" type="checkbox" aria-label="选择当前页模型挂载">
+                    </th>
                     <th>提供商</th>
                     <th>模型</th>
                     <th>模型健康</th>
@@ -72,7 +91,6 @@
                     <th>能力</th>
                     <th>倍率 / 价格</th>
                     <th>质量</th>
-                    <th>启用</th>
                     <th>操作</th>
                 </tr>
             </thead>
@@ -87,6 +105,65 @@
         </div>
     </div>
 </section>
+
+<div class="modal-shell hidden" id="provider-model-edit-modal" aria-hidden="true">
+    <div class="modal-card provider-model-edit-card" role="dialog" aria-modal="true" aria-labelledby="provider-model-edit-title" tabindex="-1">
+        <div class="modal-head">
+            <div>
+                <div class="panel-kicker">挂载编辑</div>
+                <h2 id="provider-model-edit-title">编辑模型挂载</h2>
+                <div class="table-muted" id="provider-model-edit-subtitle">调整可信度、端点协议、倍率和价格。</div>
+            </div>
+            <button class="icon-btn interactive-btn" id="provider-model-edit-close" type="button" aria-label="关闭模型挂载编辑">×</button>
+        </div>
+        <form class="provider-model-edit-form" id="provider-model-edit-form">
+            <input type="hidden" id="provider-model-edit-provider-id">
+            <input type="hidden" id="provider-model-edit-model-id">
+            <div class="provider-model-edit-grid">
+                <label>
+                    <span>可信度</span>
+                    <select class="field-input" id="provider-model-edit-trust">
+                        <option value="passed">可信</option>
+                        <option value="degraded">异常</option>
+                        <option value="unknown">未检测</option>
+                    </select>
+                </label>
+                <label>
+                    <span>端点协议</span>
+                    <select class="field-input" id="provider-model-edit-protocol">
+                        <option value="responses">Responses</option>
+                        <option value="chat_completions">Chat</option>
+                        <option value="both">双协议</option>
+                    </select>
+                </label>
+                <label>
+                    <span>倍率</span>
+                    <input class="field-input" id="provider-model-edit-multiplier" type="number" min="0.0001" step="0.0001" placeholder="例如 1">
+                </label>
+                <label>
+                    <span>输入单价 $/1M</span>
+                    <input class="field-input" id="provider-model-edit-input-price" type="number" min="0" step="0.0001" placeholder="留空表示未设置">
+                </label>
+                <label>
+                    <span>输出单价 $/1M</span>
+                    <input class="field-input" id="provider-model-edit-output-price" type="number" min="0" step="0.0001" placeholder="留空表示未设置">
+                </label>
+                <label>
+                    <span>缓存单价 $/1M</span>
+                    <input class="field-input" id="provider-model-edit-cache-price" type="number" min="0" step="0.0001" placeholder="留空表示未设置">
+                </label>
+                <label>
+                    <span>缓存写入单价 $/1M</span>
+                    <input class="field-input" id="provider-model-edit-cache-write-price" type="number" min="0" step="0.0001" placeholder="留空表示沿用输入单价">
+                </label>
+            </div>
+            <div class="form-actions">
+                <button class="btn btn-ghost interactive-btn" id="provider-model-edit-cancel" type="button">取消</button>
+                <button class="btn btn-accent interactive-btn" id="provider-model-edit-submit" type="submit">保存</button>
+            </div>
+        </form>
+    </div>
+</div>
 
 <div class="modal-shell hidden" id="provider-test-result-modal" aria-hidden="true">
     <div class="modal-card modal-lg provider-modal-card" role="dialog" aria-modal="true" aria-labelledby="provider-test-result-modal-title" tabindex="-1">

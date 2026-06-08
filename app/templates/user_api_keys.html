@@ -32,7 +32,7 @@
         <div class="cockpit-health-bar"><span style="width: {{ 0 if not owned_api_keys else ((ns.active / (owned_api_keys|length)) * 100)|round(0, 'floor') }}%"></span></div>
         <div class="cockpit-aside-meta">
             <span>24h 请求 {{ totals.total_requests }}</span>
-            <span>累计 Token {{ totals.total_tokens }}</span>
+        <span>累计 Token {{ totals.total_tokens|display_tokens }}</span>
         </div>
     </div>
 </section>
@@ -78,8 +78,8 @@
     </article>
     <article class="metric-card user-key-summary-card">
         <span>共享可用余额</span>
-        <strong>{{ '%.6f'|format(totals.available_balance) if totals.available_balance is not none else '不限' }}</strong>
-        <small>冻结 {{ '%.6f'|format(totals.frozen_amount or 0) }}</small>
+        <strong>{{ totals.available_balance|display_money }}</strong>
+        <small>冻结 {{ (totals.frozen_amount or 0)|display_money }}</small>
     </article>
 </section>
 
@@ -124,20 +124,10 @@
                     else '未绑定渠道' if item.status == 'unbound'
                     else item.status
                 ) %}
-                {% set route_mode_label = '健康优先' %}
-                {% set default_provider = namespace(name='未指定') %}
-                {% if item.default_provider_id %}
-                    {% set default_provider.name = 'ID ' ~ item.default_provider_id %}
-                    {% for provider in providers %}
-                        {% if provider.id == item.default_provider_id %}
-                            {% set default_provider.name = provider.name %}
-                        {% endif %}
-                    {% endfor %}
-                {% endif %}
                 <article
                     class="user-key-object-card {% if editing_api_key_id == item.id %}is-editing{% endif %}"
                     data-user-key-card
-                    data-filter-text="{{ (item.name ~ ' ' ~ (item.remark or '') ~ ' ' ~ item.key_masked ~ ' ' ~ route_mode_label ~ ' ' ~ status_label)|lower }}"
+                    data-filter-text="{{ (item.name ~ ' ' ~ (item.remark or '') ~ ' ' ~ item.key_masked ~ ' 健康优先 ' ~ status_label)|lower }}"
                     data-status="{{ item.status }}"
                     data-has-raw="{{ 'true' if item.raw_api_key else 'false' }}"
                 >
@@ -180,11 +170,7 @@
                     <div class="user-key-object-meta">
                         <div>
                             <span>路由主策略</span>
-                            <strong>{{ route_mode_label }}</strong>
-                        </div>
-                        <div>
-                            <span>默认提供商</span>
-                            <strong>{{ default_provider.name }}</strong>
+                            <strong>健康优先</strong>
                         </div>
                         <div>
                             <span>授权提供商</span>
@@ -192,27 +178,11 @@
                         </div>
                         <div>
                             <span>累计 Token</span>
-                            <strong>{{ item.total_tokens_used }}</strong>
+                            <strong>{{ item.total_tokens_used|display_tokens }}</strong>
                         </div>
                         <div>
                             <span>共享余额</span>
-                            <strong>{{ '%.6f'|format(item.balance_amount) if item.balance_amount is not none else '不限' }}</strong>
-                        </div>
-                        <div>
-                            <span>默认提供商回退</span>
-                            <strong>{{ '开启' if item.manual_allow_fallback else '关闭' }}</strong>
-                        </div>
-                        <div>
-                            <span>重试模式</span>
-                            <strong>{{ '无限重试' if item.route_exhausted_retry_infinite_enabled else '正常重试' }}</strong>
-                        </div>
-                        <div>
-                            <span>可信限定</span>
-                            <strong>{{ '开启' if item.trusted_providers_only else '关闭' }}</strong>
-                        </div>
-                        <div>
-                            <span>低信任路由</span>
-                            <strong>{{ '允许' if item.allow_low_trust_providers else '禁止' }}</strong>
+                            <strong>{{ item.balance_amount|display_money }}</strong>
                         </div>
                         <div>
                             <span>内容检测</span>
@@ -243,7 +213,7 @@
 
                     <details class="user-key-editor-shell" data-user-key-editor {% if editing_api_key_id == item.id %}open{% endif %}>
                         <summary>
-                            <span>编辑路由与备注</span>
+                            <span>编辑密钥与备注</span>
                             <small>仅在需要变更配置时展开</small>
                         </summary>
                         <div class="user-key-editor-body">
@@ -262,62 +232,13 @@
                                     <input class="field-input" name="remark" value="{{ item.remark or '' }}">
                                 </label>
                                 <label>
-                                    <span>路由主策略</span>
-                                    <select class="field-input" name="route_mode">
-                                        <option value="failover">健康优先</option>
-                                    </select>
-                                </label>
-                                <label>
-                                    <span>默认提供商</span>
-                                    <select class="field-input" name="default_provider_id">
-                                        <option value="">不指定</option>
-                                        {% for provider in providers %}
-                                        <option value="{{ provider.id }}" {% if item.default_provider_id == provider.id %}selected{% endif %}>{{ provider.name }}</option>
-                                        {% endfor %}
-                                    </select>
-                                </label>
-                                <label>
                                     <span>启用状态</span>
                                     <div class="field-checkbox">
                                         <input id="user-api-key-enabled-{{ item.id }}" name="enabled" type="checkbox" {% if item.enabled %}checked{% endif %}>
                                         <label for="user-api-key-enabled-{{ item.id }}">启用此密钥</label>
                                     </div>
                                 </label>
-                                <label>
-                                    <span>默认提供商不可用时允许回退</span>
-                                    <div class="field-checkbox">
-                                        <input id="user-api-key-fallback-{{ item.id }}" name="manual_allow_fallback" type="checkbox" {% if item.manual_allow_fallback %}checked{% endif %}>
-                                        <label for="user-api-key-fallback-{{ item.id }}">开启</label>
-                                    </div>
-                                </label>
-                                <label>
-                                    <span>候选耗尽无限重试</span>
-                                    <div class="field-checkbox">
-                                        <input id="user-api-key-infinite-retry-{{ item.id }}" name="route_exhausted_retry_infinite_enabled" type="checkbox" {% if item.route_exhausted_retry_infinite_enabled %}checked{% endif %}>
-                                        <label for="user-api-key-infinite-retry-{{ item.id }}">开启</label>
-                                    </div>
-                                </label>
                                 <div class="form-span-2 settings-switch-grid">
-                                    <label class="settings-switch-card" for="user-api-key-trusted-providers-only-{{ item.id }}">
-                                        <span class="settings-switch-copy">
-                                            <strong>只走可信提供商</strong>
-                                            <small>默认仅允许官方或可信等级提供商承接普通用户流量。</small>
-                                        </span>
-                                        <span class="settings-switch-control">
-                                            <input id="user-api-key-trusted-providers-only-{{ item.id }}" name="trusted_providers_only" type="checkbox" {% if item.trusted_providers_only %}checked{% endif %}>
-                                            <span class="settings-switch-slider"></span>
-                                        </span>
-                                    </label>
-                                    <label class="settings-switch-card" for="user-api-key-allow-low-trust-providers-{{ item.id }}">
-                                        <span class="settings-switch-copy">
-                                            <strong>允许低信任提供商</strong>
-                                            <small>开启后可能使用低价但内容完整性风险更高的渠道，仅在你确认可接受风险时使用。</small>
-                                        </span>
-                                        <span class="settings-switch-control">
-                                            <input id="user-api-key-allow-low-trust-providers-{{ item.id }}" name="allow_low_trust_providers" type="checkbox" {% if item.allow_low_trust_providers %}checked{% endif %}>
-                                            <span class="settings-switch-slider"></span>
-                                        </span>
-                                    </label>
                                     <label class="settings-switch-card" for="user-api-key-content-guard-required-{{ item.id }}">
                                         <span class="settings-switch-copy">
                                             <strong>要求内容检测</strong>
@@ -328,10 +249,6 @@
                                             <span class="settings-switch-slider"></span>
                                         </span>
                                     </label>
-                                </div>
-                                <div class="settings-note form-span-2">
-                                    <strong>低信任风险提示</strong>
-                                    <span>低信任提供商可能追加推广、导流链接或破坏结构化输出；即使开启此项，也必须同时由管理员允许该提供商低信任路由后才会进入候选。</span>
                                 </div>
                                 <div class="form-span-2">
                                     <span>渠道授权</span>
@@ -390,62 +307,13 @@
                     <input class="field-input" name="remark" placeholder="例如：Web 生产、内部测试、移动端灰度">
                 </label>
                 <label>
-                    <span>路由主策略</span>
-                    <select class="field-input" name="route_mode">
-                        <option value="failover">健康优先</option>
-                    </select>
-                </label>
-                <label>
-                    <span>默认提供商</span>
-                    <select class="field-input" name="default_provider_id">
-                        <option value="">不指定</option>
-                        {% for provider in providers %}
-                        <option value="{{ provider.id }}">{{ provider.name }}</option>
-                        {% endfor %}
-                    </select>
-                </label>
-                <label>
                     <span>启用状态</span>
                     <div class="field-checkbox">
                         <input id="user-api-key-create-enabled" name="enabled" type="checkbox" checked>
                         <label for="user-api-key-create-enabled">创建后立即启用</label>
                     </div>
                 </label>
-                <label>
-                    <span>默认提供商不可用时允许回退</span>
-                    <div class="field-checkbox">
-                        <input id="user-api-key-create-fallback" name="manual_allow_fallback" type="checkbox" checked>
-                        <label for="user-api-key-create-fallback">开启</label>
-                    </div>
-                </label>
-                <label>
-                    <span>候选耗尽无限重试</span>
-                    <div class="field-checkbox">
-                        <input id="user-api-key-create-infinite-retry" name="route_exhausted_retry_infinite_enabled" type="checkbox">
-                        <label for="user-api-key-create-infinite-retry">开启</label>
-                    </div>
-                </label>
                 <div class="form-span-2 settings-switch-grid">
-                    <label class="settings-switch-card" for="user-api-key-create-trusted-providers-only">
-                        <span class="settings-switch-copy">
-                            <strong>只走可信提供商</strong>
-                            <small>新密钥默认仅允许官方或可信等级提供商。</small>
-                        </span>
-                        <span class="settings-switch-control">
-                            <input id="user-api-key-create-trusted-providers-only" name="trusted_providers_only" type="checkbox" checked>
-                            <span class="settings-switch-slider"></span>
-                        </span>
-                    </label>
-                    <label class="settings-switch-card" for="user-api-key-create-allow-low-trust-providers">
-                        <span class="settings-switch-copy">
-                            <strong>允许低信任提供商</strong>
-                            <small>低价模式可能带来输出污染风险，需你显式开启。</small>
-                        </span>
-                        <span class="settings-switch-control">
-                            <input id="user-api-key-create-allow-low-trust-providers" name="allow_low_trust_providers" type="checkbox">
-                            <span class="settings-switch-slider"></span>
-                        </span>
-                    </label>
                     <label class="settings-switch-card" for="user-api-key-create-content-guard-required">
                         <span class="settings-switch-copy">
                             <strong>要求内容检测</strong>
@@ -456,10 +324,6 @@
                             <span class="settings-switch-slider"></span>
                         </span>
                     </label>
-                </div>
-                <div class="settings-note form-span-2">
-                    <strong>低信任风险提示</strong>
-                    <span>只有你显式允许、且管理员也开放对应提供商低信任路由时，低信任渠道才会进入候选；否则普通用户默认走可信路由。</span>
                 </div>
                 <div class="form-span-2">
                     <span>渠道授权</span>

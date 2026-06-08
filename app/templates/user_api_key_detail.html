@@ -44,11 +44,11 @@
 </nav>
 
 <section class="stats-grid anchor-section-offset">
-    <article class="metric-card"><span>累计 Token</span><strong>{{ api_key.total_tokens_used }}</strong></article>
-    <article class="metric-card"><span>累计费用</span><strong>{{ '%.6f'|format(api_key.total_cost_used or 0) }}</strong></article>
-    <article class="metric-card"><span>共享账户余额</span><strong>{{ '%.6f'|format(api_key.balance_amount) if api_key.balance_amount is not none else '不限' }}</strong></article>
+    <article class="metric-card"><span>累计 Token</span><strong>{{ api_key.total_tokens_used|display_tokens }}</strong></article>
+    <article class="metric-card"><span>累计费用</span><strong>{{ (api_key.total_cost_used or 0)|display_money }}</strong></article>
+    <article class="metric-card"><span>共享账户余额</span><strong>{{ api_key.balance_amount|display_money('归属用户异常') }}</strong></article>
     <article class="metric-card"><span>24h 请求</span><strong>{{ api_key.recent_usage.recent_requests }}</strong></article>
-    <article class="metric-card"><span>24h 费用</span><strong>{{ '%.6f'|format(api_key.recent_usage.recent_total_cost or 0) }}</strong></article>
+    <article class="metric-card"><span>24h 费用</span><strong>{{ (api_key.recent_usage.recent_total_cost or 0)|display_money }}</strong></article>
     <article class="metric-card"><span>授权提供商</span><strong>{{ api_key.allowed_providers|length }}</strong></article>
 </section>
 
@@ -231,13 +231,7 @@ print(resp.output_text)</pre>
             <article class="api-key-chip-card">
                 <strong>路由主策略</strong>
                 <span>健康优先</span>
-                <span>默认提供商回退：{{ '开启' if api_key.manual_allow_fallback else '关闭' }}</span>
-                <span>重试模式：{{ '无限重试' if api_key.route_exhausted_retry_infinite_enabled else '正常重试' }}</span>
-            </article>
-            <article class="api-key-chip-card">
-                <strong>默认提供商</strong>
-                <span>{{ api_key.default_provider_name or api_key.default_provider_id or '未指定' }}</span>
-                <span>未指定时按当前路由规则选择候选线路</span>
+                <span>候选由授权范围、健康状态、容量和全局路由设置共同决定</span>
             </article>
             <article class="api-key-chip-card">
                 <strong>授权提供商</strong>
@@ -245,19 +239,19 @@ print(resp.output_text)</pre>
                 <span>{{ api_key.allowed_providers | map(attribute='name') | join('、') if api_key.allowed_providers else '未授权' }}</span>
             </article>
             <article class="api-key-chip-card">
-                <strong>剩余 Token</strong>
-                <span>{{ api_key.remaining_tokens if api_key.remaining_tokens is not none else '不限' }}</span>
-                <span>累计 Token {{ api_key.total_tokens_used }}</span>
+                <strong>累计 Token</strong>
+                <span>{{ api_key.total_tokens_used|display_tokens }}</span>
+                <span>Token 仅用于统计与计费</span>
             </article>
             <article class="api-key-chip-card">
                 <strong>共享账户余额</strong>
-                <span>{{ '%.6f'|format(api_key.balance_amount) if api_key.balance_amount is not none else '不限' }}</span>
+                <span>{{ api_key.balance_amount|display_money('归属用户异常') }}</span>
                 <span>费用口径统一以账户共享金额池为准</span>
             </article>
             <article class="api-key-chip-card">
                 <strong>最近费用</strong>
-                <span>24h {{ '%.6f'|format(api_key.recent_usage.recent_total_cost or 0) }}</span>
-                <span>累计 {{ '%.6f'|format(api_key.total_cost_used or 0) }}</span>
+                <span>24h {{ (api_key.recent_usage.recent_total_cost or 0)|display_money }}</span>
+                <span>累计 {{ (api_key.total_cost_used or 0)|display_money }}</span>
             </article>
         </div>
     </div>
@@ -272,7 +266,7 @@ print(resp.output_text)</pre>
             </div>
             <div class="dashboard-signal-list">
                 {% for item in analytics.model_distribution %}
-                <div><span>{{ item.model_name }}</span><strong>{{ item.total_requests }} 次 / {{ item.total_tokens }} tokens</strong></div>
+                <div><span>{{ item.model_name }}</span><strong>{{ item.total_requests }} 次 / {{ item.total_tokens|display_tokens }}</strong></div>
                 {% else %}
                 <div><span>暂无数据</span><strong>-</strong></div>
                 {% endfor %}
@@ -297,7 +291,7 @@ print(resp.output_text)</pre>
                         <th>模型映射</th>
                         <th>渠道</th>
                         <th>结果</th>
-                        <th>Tokens</th>
+                        <th>Token</th>
                         <th>详情</th>
                     </tr>
                 </thead>
@@ -313,7 +307,7 @@ print(resp.output_text)</pre>
                         </td>
                         <td>{{ item.provider_name or '-' }}</td>
                         <td>{{ '成功' if item.success else '失败' }}</td>
-                        <td>{{ item.total_tokens or 0 }}</td>
+                        <td>{{ (item.total_tokens or 0)|display_tokens }}</td>
                         <td><a href="/user/logs/{{ item.id }}" data-shell-link>查看日志</a></td>
                     </tr>
                     {% else %}
@@ -367,8 +361,8 @@ print(resp.output_text)</pre>
                 <tr>
                     <td>{{ item.created_at }}</td>
                     <td>{{ item.record_type }}</td>
-                    <td>{{ '%.6f'|format(item.amount) }}</td>
-                    <td>{{ '%.6f'|format(item.balance_after or 0) if item.balance_after is not none else '-' }}</td>
+                    <td>{{ item.amount|display_money }}</td>
+                    <td>{{ item.balance_after|display_money('-') }}</td>
                     <td>{{ item.remark or '-' }}</td>
                 </tr>
                 {% else %}

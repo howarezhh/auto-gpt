@@ -44,9 +44,9 @@
 <section class="stats-grid anchor-section-offset" id="user-profile-overview">
     <article class="metric-card"><span>我的 API 密钥</span><strong>{{ owned_api_keys|length }}</strong></article>
     <article class="metric-card"><span>总请求量</span><strong>{{ totals.total_requests }}</strong></article>
-    <article class="metric-card"><span>总 Token</span><strong>{{ totals.total_tokens }}</strong></article>
-    <article class="metric-card"><span>可用余额</span><strong>{{ '%.6f'|format(totals.available_balance) if totals.available_balance is not none else '不限' }}</strong></article>
-    <article class="metric-card"><span>累计费用</span><strong>{{ '%.6f'|format(totals.total_cost) }}</strong></article>
+    <article class="metric-card"><span>总 Token</span><strong>{{ totals.total_tokens|display_tokens }}</strong></article>
+    <article class="metric-card"><span>可用余额</span><strong>{{ totals.available_balance|display_money }}</strong></article>
+    <article class="metric-card"><span>累计费用</span><strong>{{ totals.total_cost|display_money }}</strong></article>
     <article class="metric-card"><span>会话数</span><strong>{{ totals.conversation_count }}</strong></article>
 </section>
 
@@ -83,8 +83,8 @@
             </div>
             <div class="dashboard-signal-list">
                 <div><span>账号角色</span><strong>普通用户</strong></div>
-                <div><span>当前余额</span><strong>{{ '%.6f'|format(totals.available_balance) if totals.available_balance is not none else '不限' }}</strong></div>
-                <div><span>累计费用</span><strong>{{ '%.6f'|format(totals.total_cost) }}</strong></div>
+                <div><span>当前余额</span><strong>{{ totals.available_balance|display_money }}</strong></div>
+                <div><span>累计费用</span><strong>{{ totals.total_cost|display_money }}</strong></div>
                 <div><span>今日请求</span><strong>{{ account_summary.day_requests }}</strong></div>
                 <div><span>本月请求</span><strong>{{ account_summary.month_requests }}</strong></div>
                 <div><span>密钥管理</span><strong><a href="/user/api-keys" data-shell-link>前往独立页面</a></strong></div>
