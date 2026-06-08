@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="page-heading">
+    <div>
+        <div class="eyebrow">IP 管理</div>
+        <h2>来源 IP 治理</h2>
+    </div>
+</section>
+
+<section class="content-guard-metrics" aria-label="IP 管理概览">
+    <div class="metric-card">
+        <span>模块状态</span>
+        <strong>默认关闭</strong>
+    </div>
+    <div class="metric-card">
+        <span>可信代理</span>
+        <strong>按 CIDR 启用</strong>
+    </div>
+    <div class="metric-card">
+        <span>规则处置</span>
+        <strong>记录 / 限流 / 阻断</strong>
+    </div>
+    <div class="metric-card">
+        <span>事件审计</span>
+        <strong>独立事件表</strong>
+    </div>
+</section>
+
+<section class="content-guard-layout">
+    <article class="panel-card">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">接口</div>
+                <h3>模块能力已接入</h3>
+            </div>
+        </div>
+        <div class="usage-doc-list">
+            <div class="usage-doc-item">
+                <strong>配置接口</strong>
+                <span class="code-inline">/api/ip-management/settings</span>
+            </div>
+            <div class="usage-doc-item">
+                <strong>规则接口</strong>
+                <span class="code-inline">/api/ip-management/rules</span>
+            </div>
+            <div class="usage-doc-item">
+                <strong>事件接口</strong>
+                <span class="code-inline">/api/ip-management/events</span>
+            </div>
+            <div class="usage-doc-item">
+                <strong>测试接口</strong>
+                <span class="code-inline">/api/ip-management/test-resolution</span>
+            </div>
+        </div>
+    </article>
+    <article class="panel-card">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">边界</div>
+                <h3>默认不改变现有流量</h3>
+            </div>
+        </div>
+        <p class="table-muted">IP 管理模块默认关闭。启用后仅在对应作用域开关、规则引擎、限流或阻断开关同时满足时才执行处置；可信代理解析只在直连来源命中可信代理 CIDR 后读取转发头。</p>
+    </article>
+</section>
+{% endblock %}

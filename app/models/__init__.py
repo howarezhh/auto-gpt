@@ -6,6 +6,7 @@ from app.models.admin_audit_log import AdminAuditLog
 from app.models.app_setting import AppSetting
 from app.models.api_client_key import ApiClientKey
 from app.models.api_client_key_provider_binding import ApiClientKeyProviderBinding
+from app.models.ip_management import IpAccessRule, IpManagementEvent, IpManagementSetting
 from app.models.model_catalog import ModelCatalog
 from app.models.model_mapping import ModelMapping
 from app.models.provider import Provider
@@ -45,6 +46,9 @@ __all__ = [
     "ApiKeyPolicyTemplate",
     "ApiClientKey",
     "ApiClientKeyProviderBinding",
+    "IpAccessRule",
+    "IpManagementEvent",
+    "IpManagementSetting",
     "ModelCatalog",
     "ModelMapping",
     "Provider",

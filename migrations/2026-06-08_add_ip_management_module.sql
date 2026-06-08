@@ -1,0 +1,82 @@
+CREATE TABLE IF NOT EXISTS ip_management_settings (
+    id INTEGER PRIMARY KEY,
+    enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    observe_only_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    trusted_proxy_resolution_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    trusted_proxy_cidrs_json TEXT NOT NULL DEFAULT '[]',
+    trusted_header_order_json TEXT NOT NULL DEFAULT '[]',
+    apply_external_v1_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    apply_internal_api_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    apply_user_pages_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    rule_engine_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    block_action_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    rate_limit_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    event_logging_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    event_sample_rate INTEGER NOT NULL DEFAULT 100,
+    event_retention_days INTEGER NOT NULL DEFAULT 30,
+    store_raw_headers_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    ip_masking_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    fail_open_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT INTO ip_management_settings (id)
+SELECT 1
+WHERE NOT EXISTS (SELECT 1 FROM ip_management_settings WHERE id = 1);
+
+CREATE TABLE IF NOT EXISTS ip_access_rules (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    priority INTEGER NOT NULL DEFAULT 100,
+    scope TEXT NOT NULL DEFAULT 'external_v1',
+    match_type TEXT NOT NULL DEFAULT 'cidr',
+    match_value TEXT NOT NULL,
+    normalized_value TEXT NOT NULL,
+    action TEXT NOT NULL DEFAULT 'record',
+    rate_qps_limit INTEGER NOT NULL DEFAULT 0,
+    rate_rpm_limit INTEGER NOT NULL DEFAULT 0,
+    expires_at TIMESTAMP,
+    reason TEXT,
+    created_by_user_id INTEGER,
+    created_by_username TEXT,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS ip_management_events (
+    id INTEGER PRIMARY KEY,
+    trace_id TEXT,
+    request_log_id INTEGER,
+    request_path TEXT,
+    http_method TEXT,
+    scope TEXT,
+    direct_client_ip TEXT,
+    resolved_client_ip TEXT,
+    display_client_ip TEXT,
+    resolution_source TEXT,
+    resolution_status TEXT,
+    trusted_proxy_matched BOOLEAN NOT NULL DEFAULT FALSE,
+    forwarded_chain_json TEXT,
+    matched_rule_id INTEGER,
+    matched_rule_name TEXT,
+    decision TEXT NOT NULL DEFAULT 'allow',
+    decision_reason TEXT,
+    enforced BOOLEAN NOT NULL DEFAULT FALSE,
+    status_code INTEGER,
+    api_client_key_id INTEGER,
+    api_client_key_prefix TEXT,
+    user_account_id INTEGER,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS ix_ip_access_rules_enabled_scope_priority ON ip_access_rules (enabled, scope, priority, id);
+CREATE INDEX IF NOT EXISTS ix_ip_access_rules_action_enabled ON ip_access_rules (action, enabled);
+CREATE INDEX IF NOT EXISTS ix_ip_access_rules_expires_at ON ip_access_rules (expires_at);
+CREATE INDEX IF NOT EXISTS ix_ip_management_events_created_at ON ip_management_events (created_at, id);
+CREATE INDEX IF NOT EXISTS ix_ip_management_events_resolved_ip_created_at ON ip_management_events (resolved_client_ip, created_at);
+CREATE INDEX IF NOT EXISTS ix_ip_management_events_decision_created_at ON ip_management_events (decision, created_at);
+CREATE INDEX IF NOT EXISTS ix_ip_management_events_rule_created_at ON ip_management_events (matched_rule_id, created_at);
+CREATE INDEX IF NOT EXISTS ix_ip_management_events_trace_id ON ip_management_events (trace_id);
+CREATE INDEX IF NOT EXISTS ix_ip_management_events_api_key_created_at ON ip_management_events (api_client_key_id, created_at);

@@ -14,6 +14,7 @@ from sqlalchemy import String, Text, inspect, text
 from app.config import get_settings
 from app.database import Base, SessionLocal, engine
 from app.models import AppSetting
+from app.middleware.ip_management_middleware import IpManagementMiddleware
 from app.models.request_log import RequestLog
 from app.routers.auth import router as auth_router
 from app.routers.api_keys import router as api_keys_router
@@ -24,6 +25,7 @@ from app.routers.playground_api import router as playground_api_router
 from app.routers.dashboard import router as dashboard_router
 from app.routers.conversations import router as conversations_router
 from app.routers.health import router as health_router
+from app.routers.ip_management import router as ip_management_router
 from app.routers.logs import router as logs_router
 from app.routers.logging_api import router as logging_api_router
 from app.routers.metrics import router as metrics_router
@@ -89,6 +91,7 @@ def init_database(*, allow_production_ddl: bool = False) -> None:
         _migrate_cache_price_columns(db)
         _migrate_model_mapping_table(db)
         _migrate_responses_chat_adapter_session_table(db)
+        _migrate_ip_management_tables(db)
         if _is_sqlite_session(db):
             _migrate_request_log_columns(db)
         else:
@@ -545,6 +548,15 @@ def _migrate_responses_chat_adapter_session_table(db) -> None:
     if "responses_chat_adapter_sessions" in inspector.get_table_names():
         return
     Base.metadata.tables["responses_chat_adapter_sessions"].create(bind=db.get_bind(), checkfirst=True)
+    db.commit()
+
+
+def _migrate_ip_management_tables(db) -> None:
+    """补齐 IP 管理模块独立表。"""
+    for table_name in ("ip_management_settings", "ip_access_rules", "ip_management_events"):
+        table = Base.metadata.tables.get(table_name)
+        if table is not None:
+            table.create(bind=db.get_bind(), checkfirst=True)
     db.commit()
 
 
@@ -1150,6 +1162,7 @@ app = FastAPI(
     openapi_url="/openapi.json",
 )
 app.add_middleware(SessionMiddleware, secret_key=settings.session_secret_key, same_site="lax")
+app.add_middleware(IpManagementMiddleware)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 app.mount("/uploaded-assets", StaticFiles(directory=settings.uploads_dir), name="uploaded-assets")
 
@@ -1874,6 +1887,7 @@ app.include_router(providers_router, dependencies=[Depends(require_admin_api_use
 app.include_router(provider_models_router, dependencies=[Depends(require_admin_api_user)])
 app.include_router(models_router)
 app.include_router(content_guard_router, dependencies=[Depends(require_admin_api_user)])
+app.include_router(ip_management_router, dependencies=[Depends(require_admin_api_user)])
 app.include_router(settings_router, dependencies=[Depends(require_admin_api_user)])
 app.include_router(logs_router, dependencies=[Depends(require_admin_api_user)])
 app.include_router(logging_api_router, dependencies=[Depends(require_admin_api_user)])

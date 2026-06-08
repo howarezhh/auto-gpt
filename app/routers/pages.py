@@ -168,6 +168,23 @@ def content_guard_page(request: Request, db: Session = Depends(get_db)) -> HTMLR
     )
 
 
+@router.get("/ip-management", response_class=HTMLResponse)
+def ip_management_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
+    current_user = require_admin_html(request, db)
+    if isinstance(current_user, RedirectResponse):
+        return current_user
+    return templates.TemplateResponse(
+        "ip_management.html",
+        {
+            "request": request,
+            "page_name": "ip-management",
+            "title": "IP 管理",
+            "portal_type": "admin",
+            "current_user": current_user,
+        },
+    )
+
+
 @router.get("/playground", response_class=HTMLResponse)
 def playground_page(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
     current_user = require_admin_html(request, db)
