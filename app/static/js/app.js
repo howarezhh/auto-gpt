@@ -9245,6 +9245,9 @@
                 externalFields.classList.toggle("hidden", !external);
             });
         });
+        tabButtons.forEach((button) => {
+            button.addEventListener("click", () => activateContentGuardTab(button.dataset.contentGuardTab || "settings"));
+        });
         providerSelect.addEventListener("change", renderProviderModelOptions);
         refreshBtn?.addEventListener("click", () => loadOverview({ manual: true }));
         addRuleBtn?.addEventListener("click", () => {
@@ -9270,6 +9273,25 @@
             const index = Number(button.dataset.contentGuardDeleteRule);
             state.rules = collectRules().filter((_rule, ruleIndex) => ruleIndex !== index);
             renderRules();
+        });
+        governanceBody?.addEventListener("click", async (event) => {
+            const button = event.target.closest("[data-content-guard-provider-action]");
+            if (!button) return;
+            const providerId = Number(button.dataset.providerId || 0);
+            const action = button.dataset.contentGuardProviderAction;
+            if (!providerId || !action) return;
+            try {
+                setButtonLoading(button, true);
+                await api.post(`/api/content-guard/providers/${providerId}/${action}`, {});
+                setButtonTransientFeedback(button, "success", { successText: action === "restore" ? "已恢复" : "已隔离" });
+                showToast(action === "restore" ? "提供商已恢复" : "提供商已隔离");
+                await loadOverview();
+            } catch (error) {
+                setButtonTransientFeedback(button, "error", { errorText: "失败" });
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(button, false);
+            }
         });
         saveRulesBtn?.addEventListener("click", async () => {
             try {
@@ -9353,6 +9375,7 @@
                 setButtonLoading(probeSubmitBtn, true);
                 const result = await api.post("/api/content-guard/precheck/probe", buildProbePayload());
                 renderProbeResult(result);
+                activateContentGuardTab("results");
                 setButtonTransientFeedback(probeSubmitBtn, result?.summary?.status === "passed" ? "success" : "error", {
                     successText: "已通过",
                     errorText: "需复核",
@@ -9367,6 +9390,7 @@
             }
         });
 
+        activateContentGuardTab(state.activeTab);
         await loadOverview();
     }
 
