@@ -760,6 +760,9 @@ class _FakeSettingsDb:
     def commit(self) -> None:
         self.commit_count += 1
 
+    def refresh(self, obj) -> None:
+        self.refreshed = obj
+
 
 class _ProbeHealthSession:
     def __init__(self) -> None:
