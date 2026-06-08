@@ -8834,7 +8834,10 @@
         const inspectSubmitBtn = document.getElementById("content-guard-inspect-submit-btn");
         const inspectText = document.getElementById("content-guard-inspect-text");
         const inspectResult = document.getElementById("content-guard-inspect-result");
-        const state = { overview: null, rules: [] };
+        const tabButtons = Array.from(document.querySelectorAll("[data-content-guard-tab]"));
+        const tabPanels = Array.from(document.querySelectorAll("[data-content-guard-panel]"));
+        const governanceBody = document.getElementById("content-guard-governance-body");
+        const state = { overview: null, rules: [], activeTab: "settings" };
         const ruleMatchTypeLabels = {
             keyword_any: "关键词",
             regex: "正则",
@@ -8862,6 +8865,38 @@
         const setText = (id, value) => {
             const node = document.getElementById(id);
             if (node) node.textContent = value;
+        };
+
+        const activateContentGuardTab = (tabName) => {
+            const normalized = tabName || "settings";
+            state.activeTab = normalized;
+            tabButtons.forEach((button) => {
+                const active = button.dataset.contentGuardTab === normalized;
+                button.classList.toggle("is-active", active);
+                button.setAttribute("aria-selected", active ? "true" : "false");
+            });
+            tabPanels.forEach((panel) => {
+                panel.hidden = panel.dataset.contentGuardPanel !== normalized;
+            });
+        };
+
+        const compactReason = (value, fallback = "查看原因") => {
+            const text = String(value || "").trim();
+            if (!text || text === "-") return "-";
+            return text.length > 18 ? `${text.slice(0, 18)}...` : text;
+        };
+
+        const renderReasonHelp = (reason, title = "异常原因") => {
+            const text = String(reason || "").trim();
+            if (!text || text === "-") return '<span class="table-muted">-</span>';
+            return `
+                <span class="content-guard-reason-inline">
+                    <span>${escapeHtml(compactReason(text))}</span>
+                    <button class="settings-help-btn" type="button" aria-label="${escapeHtml(title)}" data-settings-tooltip-trigger="true" data-settings-tooltip-title="${escapeHtml(title)}" data-settings-tooltip-copy="${escapeHtml(text)}">
+                        <i class="bi bi-question-circle" aria-hidden="true"></i>
+                    </button>
+                </span>
+            `;
         };
 
         const renderRuleSelectOptions = (labels, selected, fallbackLabel = "自定义") => {
@@ -9007,6 +9042,51 @@
             }
         };
 
+        const renderProviderGovernance = () => {
+            if (!governanceBody) return;
+            const providers = Array.isArray(state.overview?.providers) ? state.overview.providers : [];
+            if (!providers.length) {
+                governanceBody.innerHTML = '<tr><td colspan="6" class="table-muted">暂无提供商</td></tr>';
+                return;
+            }
+            governanceBody.innerHTML = providers.map((provider) => {
+                const models = Array.isArray(provider.models) ? provider.models : [];
+                const abnormalModels = models.filter((model) => ["blocked", "degraded"].includes(String(model.content_integrity_status || "")));
+                const latestEvent = Array.isArray(provider.recent_events) ? provider.recent_events[0] : null;
+                const reason = provider.trust_status_reason || latestEvent?.content_guard_reason || "暂无最近内容防护异常";
+                const latestEventText = latestEvent
+                    ? `${formatDate(latestEvent.created_at)} · ${formatContentGuardResultLabel(latestEvent.content_guard_result)}`
+                    : "暂无最近事件";
+                return `
+                    <tr>
+                        <td>
+                            <strong>${escapeHtml(provider.name || "-")}</strong>
+                            <div class="table-muted">${escapeHtml(provider.base_url || "-")}</div>
+                        </td>
+                        <td>
+                            <span class="status-badge ${resultStatusClass(provider.content_integrity_status)}">${escapeHtml(provider.content_integrity_status_label || formatContentIntegrityStatusLabel(provider.content_integrity_status))}</span>
+                            <div class="table-muted">${escapeHtml(provider.trust_level_label || provider.trust_level || "-")}</div>
+                        </td>
+                        <td>${escapeHtml(String(provider.content_integrity_score ?? "-"))}</td>
+                        <td>
+                            ${renderReasonHelp(reason, "治理原因")}
+                            <div class="table-muted">${escapeHtml(latestEventText)}</div>
+                        </td>
+                        <td>
+                            <strong>${formatNumber(models.length)}</strong>
+                            <div class="table-muted">异常 ${formatNumber(abnormalModels.length)} 个</div>
+                        </td>
+                        <td>
+                            <div class="content-guard-governance-actions">
+                                <button class="table-action-btn" type="button" data-content-guard-provider-action="restore" data-provider-id="${provider.id}">恢复</button>
+                                <button class="table-action-btn danger" type="button" data-content-guard-provider-action="isolate" data-provider-id="${provider.id}">隔离</button>
+                            </div>
+                        </td>
+                    </tr>
+                `;
+            }).join("");
+        };
+
         const renderProbeOptions = () => {
             const defaults = new Set(CONTENT_TRUST_PROBE_KEYS);
             const options = Array.isArray(state.overview?.probe_options) ? state.overview.probe_options : [];
@@ -9049,6 +9129,7 @@
             state.rules = Array.isArray(state.overview.rules) ? state.overview.rules.map(normalizeRuleForView) : [];
             renderRules();
             renderProviderOptions();
+            renderProviderGovernance();
             renderProbeOptions();
         };
 
@@ -9118,7 +9199,7 @@
                 provider_id: Number(providerSelect.value),
                 provider_model_id: Number(providerModelSelect.value),
                 probe_keys: probeKeys,
-                persist_internal_result: true,
+                persist_internal_result: CONTENT_TRUST_PROBE_KEYS.every((key) => probeKeys.includes(key)),
             };
         };
 
@@ -9150,7 +9231,7 @@
                         <td><span class="status-badge ${resultStatusClass(guardResult)}">${escapeHtml(formatContentGuardResultLabel(guardResult))}</span></td>
                         <td>${escapeHtml(formatContentGuardRiskLabel(guard.content_guard_risk_level))}</td>
                         <td>${escapeHtml(String(item.latency_ms ?? 0))} ms</td>
-                        <td class="content-guard-reason-cell">${escapeHtml(reason)}</td>
+                        <td class="content-guard-reason-cell">${renderReasonHelp(reason, "探针原因")}</td>
                     </tr>
                 `;
             }).join("") : '<tr><td colspan="5" class="table-muted">未返回检测结果</td></tr>';
