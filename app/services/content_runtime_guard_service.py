@@ -226,8 +226,8 @@ class ContentRuntimeGuardService:
     def enabled_for_request(*, setting: Any, provider: Provider, route_context: Any) -> bool:
         if not bool(getattr(setting, "content_guard_enabled", True)):
             return False
-        if route_context is not None and bool(getattr(route_context, "content_guard_required", True)):
-            return True
+        if route_context is not None and not bool(getattr(route_context, "content_guard_required", True)):
+            return False
         return bool(getattr(provider, "content_guard_enabled", True))
 
     @staticmethod

@@ -1020,7 +1020,6 @@ class RouterService:
                     str(route_context.success_rate_bias),
                     str(route_context.cost_bias),
                     "trusted" if route_context.require_trusted_provider else "any-trust",
-                    "guard" if route_context.content_guard_required else "guard-optional",
                 ]
             )
         return "|".join(parts)
@@ -1076,17 +1075,6 @@ class RouterService:
         region_bonus = 0.0
         if route_context and route_context.preferred_region_tags and provider.region_tag in set(route_context.preferred_region_tags):
             region_bonus = 20.0
-        integrity_score = max(0.0, min(100.0, float(getattr(provider, "content_integrity_score", 80) or 0)))
-        integrity_bonus = (integrity_score - 50.0) * 0.35
-        trust_bonus = {
-            "official": 18.0,
-            "trusted": 12.0,
-            "standard": 0.0,
-            "low": -35.0,
-            "blocked": -100.0,
-        }.get(str(getattr(provider, "trust_level", "standard") or "standard"), 0.0)
-        violation_penalty = min(35.0, float(getattr(provider, "content_violation_count", 0) or 0) * 5.0)
-
         return (
             health_score
             + priority_score
@@ -1094,13 +1082,10 @@ class RouterService:
             + success_score
             + cost_score
             + region_bonus
-            + integrity_bonus
-            + trust_bonus
             - latency_penalty
             - ttfb_penalty
             - saturation_penalty
             - recent_error_penalty
-            - violation_penalty
         )
 
     @staticmethod
