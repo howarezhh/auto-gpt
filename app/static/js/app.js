@@ -6,7 +6,7 @@
         userRole: document.body.dataset.userRole || "",
     };
     const PUBLIC_ROUTE_PREFIXES = ["/login", "/register", "/setup-admin"];
-    const ADMIN_ROUTE_PREFIXES = ["/providers", "/provider-models", "/models", "/settings", "/content-guard", "/playground", "/benchmark", "/operations", "/docs", "/api-keys", "/logs", "/alerts", "/conversations", "/users", "/audit-logs"];
+    const ADMIN_ROUTE_PREFIXES = ["/providers", "/provider-models", "/models", "/settings", "/content-guard", "/ip-management", "/playground", "/benchmark", "/operations", "/docs", "/api-keys", "/logs", "/alerts", "/conversations", "/users", "/audit-logs"];
     const FIXED_ROUTE_MODE = "failover";
 
     const ROUTE_MODE_LABELS = {
@@ -885,6 +885,83 @@
         node.textContent = message;
         stack.appendChild(node);
         setTimeout(() => node.remove(), 2800);
+    }
+
+    function showActionToast(message, { type = "success", actionText = "", onAction = null, duration = 5200 } = {}) {
+        const stack = document.getElementById("toast-stack");
+        if (!stack) return;
+        while (stack.children.length >= 3) {
+            stack.firstElementChild?.remove();
+        }
+        const node = document.createElement("div");
+        node.className = `toast toast-${type} toast-with-action`;
+        node.setAttribute("role", "status");
+        const messageNode = document.createElement("span");
+        messageNode.textContent = message;
+        node.appendChild(messageNode);
+        if (actionText && typeof onAction === "function") {
+            const button = document.createElement("button");
+            button.className = "toast-action-btn";
+            button.type = "button";
+            button.textContent = actionText;
+            button.addEventListener("click", () => {
+                window.clearTimeout(Number(node.dataset.toastTimer || 0));
+                node.remove();
+                onAction();
+            });
+            node.appendChild(button);
+        }
+        stack.appendChild(node);
+        node.dataset.toastTimer = String(window.setTimeout(() => node.remove(), duration));
+    }
+
+    function confirmDangerAction({ title, message, confirmText = "确认" }) {
+        return new Promise((resolve) => {
+            const modal = document.createElement("div");
+            modal.className = "modal-shell";
+            modal.setAttribute("aria-hidden", "true");
+            modal.innerHTML = `
+                <div class="modal-card modal-sm" role="dialog" aria-modal="true" aria-labelledby="danger-confirm-title" tabindex="-1">
+                    <div class="modal-head">
+                        <h3 id="danger-confirm-title">${escapeHtml(title)}</h3>
+                        <button class="icon-btn interactive-btn" type="button" data-confirm-cancel aria-label="关闭确认弹窗">×</button>
+                    </div>
+                    <div class="modal-body-stack">
+                        <p class="table-muted">${escapeHtml(message)}</p>
+                        <div class="hero-actions">
+                            <button class="btn btn-ghost interactive-btn" type="button" data-confirm-cancel>取消</button>
+                            <button class="btn btn-danger-soft interactive-btn" type="button" data-confirm-ok>${escapeHtml(confirmText)}</button>
+                        </div>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(modal);
+            const dialog = modal.querySelector('[role="dialog"]');
+            let settled = false;
+            const controller = modalManager.register({
+                modal,
+                dialog,
+                getInitialFocus: () => modal.querySelector("[data-confirm-cancel]"),
+                afterClose: () => {
+                    if (!settled) {
+                        settled = true;
+                        resolve(false);
+                    }
+                    modal.remove();
+                },
+            });
+            const finish = (value) => {
+                if (settled) return;
+                settled = true;
+                resolve(value);
+                controller.close({ force: true });
+            };
+            modal.querySelectorAll("[data-confirm-cancel]").forEach((button) => {
+                button.addEventListener("click", () => finish(false));
+            });
+            modal.querySelector("[data-confirm-ok]")?.addEventListener("click", () => finish(true));
+            controller.open();
+        });
     }
 
     function setButtonTransientFeedback(button, status = "success", options = {}) {
