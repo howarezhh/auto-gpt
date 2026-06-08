@@ -960,3 +960,114 @@ Before writing assertions against private helpers, use `rg` to confirm the actua
 - **Notes**: Switched the verification script to call `_normalize_batch_provider_item` after inspecting the service.
 
 ---
+## [ERR-20260608-001] powershell-variable-expansion
+
+**Logged**: 2026-06-08T21:20:00+08:00
+**Priority**: low
+**Status**: pending
+**Area**: infra
+
+### Summary
+PowerShell command passed through an outer shell lost `$lines` during parsing and caused a slice expression parser error.
+
+### Error
+```text
+ParserError: Missing type name after '['.
+```
+
+### Context
+- Command attempted to read a file slice with `$lines = Get-Content ...; $lines[8950..9225]`.
+- The outer command string expanded `$lines` before PowerShell 7 received it.
+
+### Suggested Fix
+Escape `$` as `` `$ `` or use a script block / shorter command when passing PowerShell variables through another shell boundary.
+
+### Metadata
+- Reproducible: yes
+- Related Files: app/static/js/app.js
+
+---
+
+## [ERR-20260608-002] ripgrep-pattern-starting-with-dash
+
+**Logged**: 2026-06-08T21:24:00+08:00
+**Priority**: low
+**Status**: pending
+**Area**: infra
+
+### Summary
+`rg` treated a regex beginning with `--yellow` as command options instead of a search pattern.
+
+### Error
+```text
+rg: unrecognized flag --yellow|--amber|warning|var\(--yellow|var\(--orange|var\(--amber
+```
+
+### Context
+- Command attempted to search CSS custom properties and warning colors.
+- Pattern began with `--`, which ripgrep parsed as an option.
+
+### Suggested Fix
+Pass `--` before regex patterns that can begin with a dash, for example `rg -n -- '--yellow|--amber' app.css`.
+
+### Metadata
+- Reproducible: yes
+- Related Files: app/static/css/app.css
+
+---
+
+## [ERR-20260608-003] ripgrep-overescaped-pattern
+
+**Logged**: 2026-06-08T21:31:00+08:00
+**Priority**: low
+**Status**: pending
+**Area**: infra
+
+### Summary
+An over-combined `rg` regex with escaped quotes, Chinese text, and template literals failed during verification.
+
+### Error
+```text
+rg: regex parse error: unrecognized escape sequence
+```
+
+### Context
+- Command tried to verify many unrelated strings in one regex.
+- Escapes were interpreted differently across PowerShell and ripgrep.
+
+### Suggested Fix
+Use separate fixed-string searches (`rg -F`) or simpler single-purpose regexes for verification checks.
+
+### Metadata
+- Reproducible: yes
+- Related Files: app/static/js/app.js, app/static/css/app.css
+
+---
+## [ERR-20260608-001] powershell-variable-expansion
+
+**Logged**: 2026-06-08T00:00:00+08:00
+**Priority**: medium
+**Status**: pending
+**Area**: infra
+
+### Summary
+PowerShell command passed through an outer double-quoted `pwsh -Command` string expanded `$_` too early and broke `Select-Object` / `Where-Object` pipeline usage.
+
+### Error
+```text
+.Name: The term '.Name' is not recognized as a name of a cmdlet, function, script file, or executable program.
+```
+
+### Context
+- Command attempted inside `pwsh -NoLogo -NoProfile -Command "..."`.
+- The inner script contained `Where-Object { $_.Name -match ... }`.
+- Outer PowerShell parsing consumed `$_`, leaving `.Name`.
+
+### Suggested Fix
+Use single quotes around the outer `-Command` argument when the inner script contains `$`, or escape `$` as `` `$ ``. For simple file enumeration, prefer `Select-Object -ExpandProperty Name` without `$_` when possible.
+
+### Metadata
+- Reproducible: yes
+- Related Files: 项目全局规范.md
+
+---
