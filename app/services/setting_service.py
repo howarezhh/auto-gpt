@@ -23,6 +23,7 @@ DEFAULT_SETTING = {
     "global_max_retries": 2,
     "route_exhausted_retry_max_wait_seconds": 600,
     "route_exhausted_retry_infinite_enabled": False,
+    "trusted_providers_only": False,
     "max_candidate_count": 10,
     "global_max_request_tokens": 0,
     "max_v1_request_body_bytes": 20971520,
@@ -33,6 +34,7 @@ DEFAULT_SETTING = {
     "stream_token_capture_max_bytes": 1048576,
     "max_logged_metadata_bytes": 1024,
     "content_guard_enabled": True,
+    "content_guard_precheck_auto_enabled": False,
     "content_guard_block_on_high_risk": True,
     "content_guard_probe_interval_sec": 3600,
     "content_guard_max_scan_bytes": 16384,
@@ -117,6 +119,10 @@ class SettingService:
             if int(setting.global_max_retries or 0) < 2:
                 setting.global_max_retries = 2
                 changed = True
+            normalized_guard_delay_ms = min(500, max(0, int(setting.content_guard_max_detection_delay_ms or 300)))
+            if setting.content_guard_max_detection_delay_ms != normalized_guard_delay_ms:
+                setting.content_guard_max_detection_delay_ms = normalized_guard_delay_ms
+                changed = True
             if changed:
                 db.commit()
                 db.refresh(setting)
@@ -177,6 +183,7 @@ class SettingService:
         SettingService.invalidate_runtime_cache()
         CacheService.invalidate_prefix("providers-runtime")
         CacheService.invalidate_prefix("route-candidates")
+        CacheService.invalidate_prefix("v1-models")
         return setting
 
     @staticmethod
@@ -185,11 +192,16 @@ class SettingService:
 
     @staticmethod
     def _to_runtime_payload(setting: AppSetting) -> dict:
-        return {
+        payload = {
             column.name: getattr(setting, column.name)
             for column in AppSetting.__table__.columns
             if column.name not in {"created_at", "updated_at"}
         }
+        payload["content_guard_max_detection_delay_ms"] = min(
+            500,
+            max(0, int(payload.get("content_guard_max_detection_delay_ms") or 300)),
+        )
+        return payload
 
     @staticmethod
     def _validate_route_configuration(

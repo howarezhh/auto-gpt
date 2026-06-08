@@ -9,7 +9,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
-from sqlalchemy import inspect, text
+from sqlalchemy import String, Text, inspect, text
 
 from app.config import get_settings
 from app.database import Base, SessionLocal, engine
@@ -82,6 +82,7 @@ def init_database(*, allow_production_ddl: bool = False) -> None:
     try:
         _migrate_provider_capacity_columns(db)
         _migrate_provider_metadata_columns(db)
+        _drop_legacy_provider_weight_columns(db)
         _migrate_app_setting_concurrency_columns(db)
         _migrate_admin_audit_log_columns(db)
         api_key_columns_changed = _migrate_api_client_key_columns(db)
@@ -92,12 +93,16 @@ def init_database(*, allow_production_ddl: bool = False) -> None:
             _migrate_request_log_columns(db)
         else:
             _backfill_user_shared_wallet(db)
+        _backfill_api_key_owner_users(db)
+        _backfill_user_shared_wallet(db)
+        _backfill_missing_user_billing_records(db)
         setting = db.get(AppSetting, 1)
         if setting is None:
             setting = AppSetting(id=1)
             db.add(setting)
             db.commit()
             db.refresh(setting)
+        _backfill_provider_terminology(db)
         _backfill_provider_max_retries(db)
         if api_key_columns_changed:
             ApiKeyAdminService.backfill_all_api_keys_to_all_providers(db)
@@ -106,6 +111,9 @@ def init_database(*, allow_production_ddl: bool = False) -> None:
         ProviderService.sync_legacy_provider_models(db)
         ResponsesChatAdapterService.sync_env_upstreams(db)
         ModelCatalogService.sync_model_catalogs(db)
+        ModelCatalogService.invalidate_model_runtime_cache()
+        ProviderService.invalidate_provider_runtime_cache()
+        ModelCatalogService.invalidate_model_runtime_cache()
     finally:
         db.close()
 
@@ -121,6 +129,19 @@ def _get_table_columns(db, table_name: str) -> set[str]:
     if table_name not in inspector.get_table_names():
         return set()
     return {column["name"] for column in inspector.get_columns(table_name)}
+
+
+def _drop_legacy_provider_weight_columns(db) -> None:
+    """删除提供商和挂载模型旧 weight 列；不支持 DROP COLUMN 的数据库保留为冗余列。"""
+    for table_name in ("providers", "provider_models"):
+        if "weight" not in _get_table_columns(db, table_name):
+            continue
+        try:
+            db.execute(text(f"ALTER TABLE {table_name} DROP COLUMN weight"))
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            logging.warning("%s 旧 weight 列删除失败，保留为数据库历史冗余列: %s", table_name, exc)
 
 
 def _migrate_provider_capacity_columns(db) -> None:
@@ -165,6 +186,40 @@ def _backfill_provider_max_retries(db) -> None:
     db.commit()
 
 
+def _backfill_provider_terminology(db) -> None:
+    """将数据库文本字段中的历史中文对象名称统一为“提供商”。"""
+    inspector = inspect(db.get_bind())
+    preparer = db.get_bind().dialect.identifier_preparer
+    legacy_full = "\u4e2d\u8f6c\u7ad9"
+    legacy_short = "\u4e2d\u8f6c"
+    current_name = "提供商"
+    changed = False
+    for table_name in inspector.get_table_names():
+        quoted_table = preparer.quote(table_name)
+        for column in inspector.get_columns(table_name):
+            column_type = column.get("type")
+            if not isinstance(column_type, (String, Text)):
+                continue
+            column_name = str(column["name"])
+            quoted_column = preparer.quote(column_name)
+            db.execute(
+                text(
+                    f"UPDATE {quoted_table} "
+                    f"SET {quoted_column} = replace(replace({quoted_column}, :legacy_full, :current), :legacy_short, :current) "
+                    f"WHERE {quoted_column} LIKE :legacy_pattern"
+                ),
+                {
+                    "legacy_full": legacy_full,
+                    "legacy_short": legacy_short,
+                    "current": current_name,
+                    "legacy_pattern": f"%{legacy_short}%",
+                },
+            )
+            changed = True
+    if changed:
+        db.commit()
+
+
 def _migrate_provider_metadata_columns(db) -> None:
     """为 providers 表补充路由、协议与运维治理字段。"""
     existing_columns = _get_table_columns(db, "providers")
@@ -192,7 +247,6 @@ def _migrate_provider_metadata_columns(db) -> None:
         "content_violation_count": "ALTER TABLE providers ADD COLUMN content_violation_count INTEGER NOT NULL DEFAULT 0",
         "last_content_violation_at": f"ALTER TABLE providers ADD COLUMN last_content_violation_at {datetime_type}",
         "content_guard_enabled": f"ALTER TABLE providers ADD COLUMN content_guard_enabled BOOLEAN NOT NULL DEFAULT {true_default}",
-        "low_trust_route_enabled": f"ALTER TABLE providers ADD COLUMN low_trust_route_enabled BOOLEAN NOT NULL DEFAULT {false_default}",
         "buffer_stream_for_guard": f"ALTER TABLE providers ADD COLUMN buffer_stream_for_guard BOOLEAN NOT NULL DEFAULT {true_default}",
     }
     changed = False
@@ -224,6 +278,7 @@ def _migrate_app_setting_concurrency_columns(db) -> None:
         "global_max_request_tokens": "ALTER TABLE app_settings ADD COLUMN global_max_request_tokens INTEGER DEFAULT 0",
         "route_exhausted_retry_max_wait_seconds": "ALTER TABLE app_settings ADD COLUMN route_exhausted_retry_max_wait_seconds INTEGER DEFAULT 600",
         "route_exhausted_retry_infinite_enabled": f"ALTER TABLE app_settings ADD COLUMN route_exhausted_retry_infinite_enabled BOOLEAN DEFAULT {false_default}",
+        "trusted_providers_only": f"ALTER TABLE app_settings ADD COLUMN trusted_providers_only BOOLEAN DEFAULT {false_default}",
         "max_candidate_count": "ALTER TABLE app_settings ADD COLUMN max_candidate_count INTEGER DEFAULT 10",
         "max_v1_request_body_bytes": "ALTER TABLE app_settings ADD COLUMN max_v1_request_body_bytes INTEGER DEFAULT 20971520",
         "max_v1_chat_request_body_bytes": "ALTER TABLE app_settings ADD COLUMN max_v1_chat_request_body_bytes INTEGER DEFAULT 0",
@@ -233,6 +288,7 @@ def _migrate_app_setting_concurrency_columns(db) -> None:
         "stream_token_capture_max_bytes": "ALTER TABLE app_settings ADD COLUMN stream_token_capture_max_bytes INTEGER DEFAULT 1048576",
         "max_logged_metadata_bytes": "ALTER TABLE app_settings ADD COLUMN max_logged_metadata_bytes INTEGER DEFAULT 1024",
         "content_guard_enabled": f"ALTER TABLE app_settings ADD COLUMN content_guard_enabled BOOLEAN DEFAULT {true_default}",
+        "content_guard_precheck_auto_enabled": f"ALTER TABLE app_settings ADD COLUMN content_guard_precheck_auto_enabled BOOLEAN DEFAULT {false_default}",
         "content_guard_block_on_high_risk": f"ALTER TABLE app_settings ADD COLUMN content_guard_block_on_high_risk BOOLEAN DEFAULT {true_default}",
         "content_guard_probe_interval_sec": "ALTER TABLE app_settings ADD COLUMN content_guard_probe_interval_sec INTEGER DEFAULT 3600",
         "content_guard_max_scan_bytes": "ALTER TABLE app_settings ADD COLUMN content_guard_max_scan_bytes INTEGER DEFAULT 16384",
@@ -260,7 +316,7 @@ def _migrate_app_setting_concurrency_columns(db) -> None:
         "stream_idle_timeout_seconds": f"ALTER TABLE app_settings ADD COLUMN stream_idle_timeout_seconds INTEGER DEFAULT {runtime_settings.stream_idle_timeout_seconds}",
         "stream_max_duration_seconds": f"ALTER TABLE app_settings ADD COLUMN stream_max_duration_seconds INTEGER DEFAULT {runtime_settings.stream_max_duration_seconds}",
         "responses_chat_adapter_enabled": f"ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_enabled BOOLEAN DEFAULT {true_default if runtime_settings.responses_chat_adapter_enabled else false_default}",
-        "responses_chat_adapter_storage_type": "ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_storage_type TEXT DEFAULT 'memory'",
+        "responses_chat_adapter_storage_type": "ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_storage_type TEXT DEFAULT 'database'",
         "responses_chat_adapter_ttl_seconds": f"ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_ttl_seconds INTEGER DEFAULT {runtime_settings.responses_chat_adapter_ttl_seconds}",
         "responses_chat_adapter_model_map_json": "ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_model_map_json TEXT DEFAULT ''",
         "responses_chat_adapter_max_tool_rounds": f"ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_max_tool_rounds INTEGER DEFAULT {runtime_settings.responses_chat_adapter_max_tool_rounds}",
@@ -342,7 +398,9 @@ def _migrate_cache_price_columns(db) -> None:
     additions_by_table = {
         "provider_models": {
             "cache_price_per_1k": f"ALTER TABLE provider_models ADD COLUMN cache_price_per_1k {price_type}",
+            "cache_write_price_per_1k": f"ALTER TABLE provider_models ADD COLUMN cache_write_price_per_1k {price_type}",
             "supports_tools": f"ALTER TABLE provider_models ADD COLUMN supports_tools BOOLEAN NOT NULL DEFAULT {false_default}",
+            "supports_image_generation": f"ALTER TABLE provider_models ADD COLUMN supports_image_generation BOOLEAN NOT NULL DEFAULT {false_default}",
             "supports_chat_completions": f"ALTER TABLE provider_models ADD COLUMN supports_chat_completions BOOLEAN NOT NULL DEFAULT {true_default}",
             "supports_responses": f"ALTER TABLE provider_models ADD COLUMN supports_responses BOOLEAN NOT NULL DEFAULT {true_default}",
             "content_integrity_status": "ALTER TABLE provider_models ADD COLUMN content_integrity_status TEXT NOT NULL DEFAULT 'unknown'",
@@ -373,6 +431,14 @@ def _migrate_cache_price_columns(db) -> None:
             "model_reasoning_effort": "ALTER TABLE request_logs ADD COLUMN model_reasoning_effort TEXT",
             "pricing_tier_key": "ALTER TABLE request_logs ADD COLUMN pricing_tier_key TEXT",
             "pricing_tier_name": "ALTER TABLE request_logs ADD COLUMN pricing_tier_name TEXT",
+            "reasoning_tokens": "ALTER TABLE request_logs ADD COLUMN reasoning_tokens INTEGER",
+            "prompt_audio_tokens": "ALTER TABLE request_logs ADD COLUMN prompt_audio_tokens INTEGER",
+            "completion_audio_tokens": "ALTER TABLE request_logs ADD COLUMN completion_audio_tokens INTEGER",
+            "accepted_prediction_tokens": "ALTER TABLE request_logs ADD COLUMN accepted_prediction_tokens INTEGER",
+            "rejected_prediction_tokens": "ALTER TABLE request_logs ADD COLUMN rejected_prediction_tokens INTEGER",
+            "token_source": "ALTER TABLE request_logs ADD COLUMN token_source TEXT",
+            "upstream_usage_missing": "ALTER TABLE request_logs ADD COLUMN upstream_usage_missing BOOLEAN",
+            "usage_details_json": "ALTER TABLE request_logs ADD COLUMN usage_details_json TEXT",
             "content_guard_result": "ALTER TABLE request_logs ADD COLUMN content_guard_result TEXT",
             "content_guard_risk_level": "ALTER TABLE request_logs ADD COLUMN content_guard_risk_level TEXT",
             "content_guard_categories_json": "ALTER TABLE request_logs ADD COLUMN content_guard_categories_json TEXT",
@@ -383,6 +449,18 @@ def _migrate_cache_price_columns(db) -> None:
             "content_guard_buffer_wait_ms": "ALTER TABLE request_logs ADD COLUMN content_guard_buffer_wait_ms INTEGER",
             "content_guard_retry_provider_count": "ALTER TABLE request_logs ADD COLUMN content_guard_retry_provider_count INTEGER",
             "content_guard_final_strategy": "ALTER TABLE request_logs ADD COLUMN content_guard_final_strategy TEXT",
+        },
+        "api_client_billing_records": {
+            "cache_read_tokens": "ALTER TABLE api_client_billing_records ADD COLUMN cache_read_tokens INTEGER",
+            "cache_write_tokens": "ALTER TABLE api_client_billing_records ADD COLUMN cache_write_tokens INTEGER",
+            "unit_cache_read_price_per_1k": f"ALTER TABLE api_client_billing_records ADD COLUMN unit_cache_read_price_per_1k {price_type}",
+            "unit_cache_write_price_per_1k": f"ALTER TABLE api_client_billing_records ADD COLUMN unit_cache_write_price_per_1k {price_type}",
+        },
+        "user_account_billing_records": {
+            "cache_read_tokens": "ALTER TABLE user_account_billing_records ADD COLUMN cache_read_tokens INTEGER",
+            "cache_write_tokens": "ALTER TABLE user_account_billing_records ADD COLUMN cache_write_tokens INTEGER",
+            "unit_cache_read_price_per_1k": f"ALTER TABLE user_account_billing_records ADD COLUMN unit_cache_read_price_per_1k {price_type}",
+            "unit_cache_write_price_per_1k": f"ALTER TABLE user_account_billing_records ADD COLUMN unit_cache_write_price_per_1k {price_type}",
         },
     }
     changed = False
@@ -429,10 +507,7 @@ def _migrate_api_client_key_columns(db) -> bool:
     false_default = "FALSE" if dialect_name == "postgresql" else "0"
     true_default = "TRUE" if dialect_name == "postgresql" else "1"
     additions = {
-        "route_exhausted_retry_infinite_enabled": f"ALTER TABLE api_client_keys ADD COLUMN route_exhausted_retry_infinite_enabled BOOLEAN NOT NULL DEFAULT {false_default}",
         "auto_sync_provider_bindings": f"ALTER TABLE api_client_keys ADD COLUMN auto_sync_provider_bindings BOOLEAN NOT NULL DEFAULT {true_default}",
-        "trusted_providers_only": f"ALTER TABLE api_client_keys ADD COLUMN trusted_providers_only BOOLEAN NOT NULL DEFAULT {false_default}",
-        "allow_low_trust_providers": f"ALTER TABLE api_client_keys ADD COLUMN allow_low_trust_providers BOOLEAN NOT NULL DEFAULT {false_default}",
         "content_guard_required": f"ALTER TABLE api_client_keys ADD COLUMN content_guard_required BOOLEAN NOT NULL DEFAULT {true_default}",
     }
     changed = False
@@ -527,6 +602,14 @@ def _migrate_request_log_columns(db) -> None:
         "total_tokens": "ALTER TABLE request_logs ADD COLUMN total_tokens INTEGER",
         "cache_read_tokens": "ALTER TABLE request_logs ADD COLUMN cache_read_tokens INTEGER",
         "cache_write_tokens": "ALTER TABLE request_logs ADD COLUMN cache_write_tokens INTEGER",
+        "reasoning_tokens": "ALTER TABLE request_logs ADD COLUMN reasoning_tokens INTEGER",
+        "prompt_audio_tokens": "ALTER TABLE request_logs ADD COLUMN prompt_audio_tokens INTEGER",
+        "completion_audio_tokens": "ALTER TABLE request_logs ADD COLUMN completion_audio_tokens INTEGER",
+        "accepted_prediction_tokens": "ALTER TABLE request_logs ADD COLUMN accepted_prediction_tokens INTEGER",
+        "rejected_prediction_tokens": "ALTER TABLE request_logs ADD COLUMN rejected_prediction_tokens INTEGER",
+        "token_source": "ALTER TABLE request_logs ADD COLUMN token_source TEXT",
+        "upstream_usage_missing": "ALTER TABLE request_logs ADD COLUMN upstream_usage_missing BOOLEAN",
+        "usage_details_json": "ALTER TABLE request_logs ADD COLUMN usage_details_json TEXT",
         "finish_reason": "ALTER TABLE request_logs ADD COLUMN finish_reason TEXT",
         "upstream_request_id": "ALTER TABLE request_logs ADD COLUMN upstream_request_id TEXT",
         "request_body_json": "ALTER TABLE request_logs ADD COLUMN request_body_json TEXT",
@@ -541,9 +624,6 @@ def _migrate_request_log_columns(db) -> None:
         "user_account_id": "ALTER TABLE request_logs ADD COLUMN user_account_id INTEGER",
         "user_account_name": "ALTER TABLE request_logs ADD COLUMN user_account_name TEXT",
         "api_client_auth_result": "ALTER TABLE request_logs ADD COLUMN api_client_auth_result TEXT",
-        "api_client_remaining_tokens": "ALTER TABLE request_logs ADD COLUMN api_client_remaining_tokens INTEGER",
-        "api_client_remaining_requests_daily": "ALTER TABLE request_logs ADD COLUMN api_client_remaining_requests_daily INTEGER",
-        "api_client_remaining_cost_daily": f"ALTER TABLE request_logs ADD COLUMN api_client_remaining_cost_daily {money_type}",
         "api_client_policy_snapshot_json": "ALTER TABLE request_logs ADD COLUMN api_client_policy_snapshot_json TEXT",
         "content_guard_result": "ALTER TABLE request_logs ADD COLUMN content_guard_result TEXT",
         "content_guard_risk_level": "ALTER TABLE request_logs ADD COLUMN content_guard_risk_level TEXT",
@@ -576,7 +656,9 @@ def _migrate_request_log_columns(db) -> None:
         "input_price_per_1k": f"ALTER TABLE provider_models ADD COLUMN input_price_per_1k {price_type}",
         "output_price_per_1k": f"ALTER TABLE provider_models ADD COLUMN output_price_per_1k {price_type}",
         "cache_price_per_1k": f"ALTER TABLE provider_models ADD COLUMN cache_price_per_1k {price_type}",
+        "cache_write_price_per_1k": f"ALTER TABLE provider_models ADD COLUMN cache_write_price_per_1k {price_type}",
         "supports_tools": "ALTER TABLE provider_models ADD COLUMN supports_tools BOOLEAN NOT NULL DEFAULT 0",
+        "supports_image_generation": "ALTER TABLE provider_models ADD COLUMN supports_image_generation BOOLEAN NOT NULL DEFAULT 0",
         "supports_chat_completions": "ALTER TABLE provider_models ADD COLUMN supports_chat_completions BOOLEAN NOT NULL DEFAULT 1",
         "supports_responses": "ALTER TABLE provider_models ADD COLUMN supports_responses BOOLEAN NOT NULL DEFAULT 1",
         "content_integrity_status": "ALTER TABLE provider_models ADD COLUMN content_integrity_status TEXT NOT NULL DEFAULT 'unknown'",
@@ -630,16 +712,9 @@ def _migrate_request_log_columns(db) -> None:
         "project_name": "ALTER TABLE api_client_keys ADD COLUMN project_name TEXT",
         "app_name": "ALTER TABLE api_client_keys ADD COLUMN app_name TEXT",
         "environment_name": "ALTER TABLE api_client_keys ADD COLUMN environment_name TEXT",
-        "request_limit_daily": "ALTER TABLE api_client_keys ADD COLUMN request_limit_daily INTEGER",
-        "token_limit_daily": "ALTER TABLE api_client_keys ADD COLUMN token_limit_daily INTEGER",
-        "cost_limit_daily": f"ALTER TABLE api_client_keys ADD COLUMN cost_limit_daily {money_type}",
         "qps_limit": "ALTER TABLE api_client_keys ADD COLUMN qps_limit INTEGER DEFAULT 20",
         "rpm_limit": "ALTER TABLE api_client_keys ADD COLUMN rpm_limit INTEGER DEFAULT 20",
-        "tpm_limit": "ALTER TABLE api_client_keys ADD COLUMN tpm_limit INTEGER",
-        "cost_limit_total": f"ALTER TABLE api_client_keys ADD COLUMN cost_limit_total {money_type}",
         "total_cost_used": f"ALTER TABLE api_client_keys ADD COLUMN total_cost_used {money_type} NOT NULL DEFAULT 0",
-        "balance_amount": f"ALTER TABLE api_client_keys ADD COLUMN balance_amount {money_type}",
-        "total_recharge_amount": f"ALTER TABLE api_client_keys ADD COLUMN total_recharge_amount {money_type} NOT NULL DEFAULT 0",
         "owner_user_id": "ALTER TABLE api_client_keys ADD COLUMN owner_user_id INTEGER",
         "raw_key_encrypted": "ALTER TABLE api_client_keys ADD COLUMN raw_key_encrypted TEXT",
         "allowed_model_names_json": "ALTER TABLE api_client_keys ADD COLUMN allowed_model_names_json TEXT NOT NULL DEFAULT '[]'",
@@ -647,13 +722,9 @@ def _migrate_request_log_columns(db) -> None:
         "allowed_source_ips_json": "ALTER TABLE api_client_keys ADD COLUMN allowed_source_ips_json TEXT NOT NULL DEFAULT '[]'",
         "preferred_provider_ids_json": "ALTER TABLE api_client_keys ADD COLUMN preferred_provider_ids_json TEXT NOT NULL DEFAULT '[]'",
         "preferred_region_tags_json": "ALTER TABLE api_client_keys ADD COLUMN preferred_region_tags_json TEXT NOT NULL DEFAULT '[]'",
-        "max_candidate_count": "ALTER TABLE api_client_keys ADD COLUMN max_candidate_count INTEGER",
         "latency_bias": "ALTER TABLE api_client_keys ADD COLUMN latency_bias INTEGER NOT NULL DEFAULT 1",
         "success_rate_bias": "ALTER TABLE api_client_keys ADD COLUMN success_rate_bias INTEGER NOT NULL DEFAULT 1",
         "cost_bias": "ALTER TABLE api_client_keys ADD COLUMN cost_bias INTEGER NOT NULL DEFAULT 0",
-        "route_exhausted_retry_infinite_enabled": "ALTER TABLE api_client_keys ADD COLUMN route_exhausted_retry_infinite_enabled BOOLEAN NOT NULL DEFAULT 0",
-        "trusted_providers_only": "ALTER TABLE api_client_keys ADD COLUMN trusted_providers_only BOOLEAN NOT NULL DEFAULT 0",
-        "allow_low_trust_providers": "ALTER TABLE api_client_keys ADD COLUMN allow_low_trust_providers BOOLEAN NOT NULL DEFAULT 0",
         "content_guard_required": "ALTER TABLE api_client_keys ADD COLUMN content_guard_required BOOLEAN NOT NULL DEFAULT 1",
     }
     changed_api_keys = False
@@ -703,7 +774,6 @@ def _migrate_request_log_columns(db) -> None:
         "content_violation_count": "ALTER TABLE providers ADD COLUMN content_violation_count INTEGER NOT NULL DEFAULT 0",
         "last_content_violation_at": "ALTER TABLE providers ADD COLUMN last_content_violation_at DATETIME",
         "content_guard_enabled": "ALTER TABLE providers ADD COLUMN content_guard_enabled BOOLEAN NOT NULL DEFAULT 1",
-        "low_trust_route_enabled": "ALTER TABLE providers ADD COLUMN low_trust_route_enabled BOOLEAN NOT NULL DEFAULT 0",
         "buffer_stream_for_guard": "ALTER TABLE providers ADD COLUMN buffer_stream_for_guard BOOLEAN NOT NULL DEFAULT 1",
     }
     changed_providers = False
@@ -736,6 +806,7 @@ def _migrate_request_log_columns(db) -> None:
         "global_max_request_tokens": "ALTER TABLE app_settings ADD COLUMN global_max_request_tokens INTEGER NOT NULL DEFAULT 0",
         "route_exhausted_retry_max_wait_seconds": "ALTER TABLE app_settings ADD COLUMN route_exhausted_retry_max_wait_seconds INTEGER NOT NULL DEFAULT 600",
         "route_exhausted_retry_infinite_enabled": "ALTER TABLE app_settings ADD COLUMN route_exhausted_retry_infinite_enabled BOOLEAN NOT NULL DEFAULT 0",
+        "trusted_providers_only": "ALTER TABLE app_settings ADD COLUMN trusted_providers_only BOOLEAN NOT NULL DEFAULT 0",
         "max_candidate_count": "ALTER TABLE app_settings ADD COLUMN max_candidate_count INTEGER NOT NULL DEFAULT 10",
         "max_v1_request_body_bytes": "ALTER TABLE app_settings ADD COLUMN max_v1_request_body_bytes INTEGER NOT NULL DEFAULT 20971520",
         "max_v1_chat_request_body_bytes": "ALTER TABLE app_settings ADD COLUMN max_v1_chat_request_body_bytes INTEGER NOT NULL DEFAULT 0",
@@ -745,6 +816,7 @@ def _migrate_request_log_columns(db) -> None:
         "stream_token_capture_max_bytes": "ALTER TABLE app_settings ADD COLUMN stream_token_capture_max_bytes INTEGER NOT NULL DEFAULT 1048576",
         "max_logged_metadata_bytes": "ALTER TABLE app_settings ADD COLUMN max_logged_metadata_bytes INTEGER NOT NULL DEFAULT 1024",
         "content_guard_enabled": "ALTER TABLE app_settings ADD COLUMN content_guard_enabled BOOLEAN NOT NULL DEFAULT 1",
+        "content_guard_precheck_auto_enabled": "ALTER TABLE app_settings ADD COLUMN content_guard_precheck_auto_enabled BOOLEAN NOT NULL DEFAULT 0",
         "content_guard_block_on_high_risk": "ALTER TABLE app_settings ADD COLUMN content_guard_block_on_high_risk BOOLEAN NOT NULL DEFAULT 1",
         "content_guard_probe_interval_sec": "ALTER TABLE app_settings ADD COLUMN content_guard_probe_interval_sec INTEGER NOT NULL DEFAULT 3600",
         "content_guard_max_scan_bytes": "ALTER TABLE app_settings ADD COLUMN content_guard_max_scan_bytes INTEGER NOT NULL DEFAULT 16384",
@@ -777,7 +849,7 @@ def _migrate_request_log_columns(db) -> None:
         "stream_idle_timeout_seconds": "ALTER TABLE app_settings ADD COLUMN stream_idle_timeout_seconds INTEGER NOT NULL DEFAULT 120",
         "stream_max_duration_seconds": "ALTER TABLE app_settings ADD COLUMN stream_max_duration_seconds INTEGER NOT NULL DEFAULT 600",
         "responses_chat_adapter_enabled": "ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_enabled BOOLEAN NOT NULL DEFAULT 0",
-        "responses_chat_adapter_storage_type": "ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_storage_type TEXT NOT NULL DEFAULT 'memory'",
+        "responses_chat_adapter_storage_type": "ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_storage_type TEXT NOT NULL DEFAULT 'database'",
         "responses_chat_adapter_ttl_seconds": "ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_ttl_seconds INTEGER NOT NULL DEFAULT 86400",
         "responses_chat_adapter_model_map_json": "ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_model_map_json TEXT NOT NULL DEFAULT ''",
         "responses_chat_adapter_max_tool_rounds": "ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_max_tool_rounds INTEGER NOT NULL DEFAULT 10",
@@ -857,6 +929,9 @@ def _backfill_user_shared_wallet(db) -> None:
     user_columns = _get_table_columns(db, "user_accounts")
     if "balance_amount" not in user_columns or "total_recharge_amount" not in user_columns:
         return
+    api_key_columns = _get_table_columns(db, "api_client_keys")
+    if not {"owner_user_id", "balance_amount", "total_recharge_amount"}.issubset(api_key_columns):
+        return
     rows = db.execute(
         text(
             """
@@ -895,6 +970,151 @@ def _backfill_user_shared_wallet(db) -> None:
         if result.rowcount:
             changed = True
     if changed:
+        db.commit()
+
+
+def _backfill_api_key_owner_users(db) -> None:
+    api_key_columns = _get_table_columns(db, "api_client_keys")
+    user_columns = _get_table_columns(db, "user_accounts")
+    if "owner_user_id" not in api_key_columns or "id" not in user_columns or "enabled" not in user_columns:
+        return
+    dialect_name = db.get_bind().dialect.name
+    enabled_expr = "enabled IS TRUE" if dialect_name == "postgresql" else "COALESCE(enabled, 0) = 1"
+    default_owner_id = db.scalar(
+        text(
+            f"""
+            SELECT id
+            FROM user_accounts
+            WHERE {enabled_expr}
+            ORDER BY id ASC
+            LIMIT 1
+            """
+        )
+    )
+    if default_owner_id is None:
+        null_count = db.scalar(text("SELECT COUNT(*) FROM api_client_keys WHERE owner_user_id IS NULL")) or 0
+        if int(null_count):
+            logging.warning("存在未绑定归属用户的 API Key，但当前没有可用于回填的启用用户")
+        return
+    result = db.execute(
+        text("UPDATE api_client_keys SET owner_user_id = :owner_user_id WHERE owner_user_id IS NULL"),
+        {"owner_user_id": default_owner_id},
+    )
+    if result.rowcount:
+        db.commit()
+
+
+def _backfill_missing_user_billing_records(db) -> None:
+    required_columns = {
+        "api_client_billing_records": {
+            "api_client_key_id",
+            "request_log_id",
+            "record_type",
+            "amount",
+            "balance_after",
+            "provider_id",
+            "provider_name",
+            "model_name",
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+            "unit_input_price_per_1k",
+            "unit_output_price_per_1k",
+            "unit_cache_read_price_per_1k",
+            "unit_cache_write_price_per_1k",
+            "remark",
+            "created_at",
+        },
+        "api_client_keys": {"id", "owner_user_id"},
+        "user_account_billing_records": {
+            "user_account_id",
+            "api_client_key_id",
+            "request_log_id",
+            "record_type",
+            "amount",
+            "balance_after",
+            "provider_id",
+            "provider_name",
+            "model_name",
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+            "unit_input_price_per_1k",
+            "unit_output_price_per_1k",
+            "unit_cache_read_price_per_1k",
+            "unit_cache_write_price_per_1k",
+            "remark",
+            "created_at",
+        },
+    }
+    for table_name, columns in required_columns.items():
+        existing_columns = _get_table_columns(db, table_name)
+        if not columns.issubset(existing_columns):
+            return
+    result = db.execute(
+        text(
+            """
+            INSERT INTO user_account_billing_records (
+                user_account_id,
+                api_client_key_id,
+                request_log_id,
+                record_type,
+                amount,
+                balance_after,
+                provider_id,
+                provider_name,
+                model_name,
+                prompt_tokens,
+                completion_tokens,
+                total_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+                unit_input_price_per_1k,
+                unit_output_price_per_1k,
+                unit_cache_read_price_per_1k,
+                unit_cache_write_price_per_1k,
+                remark,
+                created_at
+            )
+            SELECT
+                api_key.owner_user_id,
+                record.api_client_key_id,
+                record.request_log_id,
+                record.record_type,
+                record.amount,
+                record.balance_after,
+                record.provider_id,
+                record.provider_name,
+                record.model_name,
+                record.prompt_tokens,
+                record.completion_tokens,
+                record.total_tokens,
+                record.cache_read_tokens,
+                record.cache_write_tokens,
+                record.unit_input_price_per_1k,
+                record.unit_output_price_per_1k,
+                record.unit_cache_read_price_per_1k,
+                record.unit_cache_write_price_per_1k,
+                record.remark,
+                record.created_at
+            FROM api_client_billing_records record
+            JOIN api_client_keys api_key ON api_key.id = record.api_client_key_id
+            WHERE record.record_type = 'request_charge'
+              AND record.request_log_id IS NOT NULL
+              AND api_key.owner_user_id IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM user_account_billing_records existing
+                  WHERE existing.request_log_id = record.request_log_id
+              )
+            """
+        )
+    )
+    if result.rowcount:
         db.commit()
 
 
@@ -1082,7 +1302,7 @@ async def request_validation_exception_handler(request: Request, exc: RequestVal
         detail={"errors": _make_json_safe(exc.errors())},
         severity="warning",
     )
-    if not (_is_external_v1_path(request.url.path) or request.url.path.startswith("/api/")):
+    if not _is_external_v1_path(request.url.path):
         return JSONResponse(status_code=422, content={"detail": exc.errors()})
     trace_id = getattr(request.state, "trace_id", None)
     detail = {"errors": _make_json_safe(exc.errors())}
@@ -1126,7 +1346,7 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         detail=detail_payload,
         severity="warning" if exc.status_code < 500 else "danger",
     )
-    if not (_is_external_v1_path(request.url.path) or request.url.path.startswith("/api/")):
+    if not _is_external_v1_path(request.url.path):
         return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
     trace_id = getattr(request.state, "trace_id", None)
     error_object = ErrorCatalogService.build_error_object(
@@ -1340,7 +1560,7 @@ def _log_v1_request_rejected_before_route(
         ]
         LogService.create_log(
             db,
-            log_type="api_client_auth",
+            log_type="proxy",
             trace_id=trace_id,
             request_path=request.url.path,
             source_ip=ProxySafeHelpers.extract_source_ip(request),
@@ -1432,9 +1652,6 @@ async def _log_api_client_auth_failure(request: Request, exc: ApiClientAuthError
                     "api_client_key_id": exc.api_client_key_id,
                     "api_client_key_prefix": exc.api_client_key_prefix,
                     "user_account_id": exc.user_account_id,
-                    "remaining_tokens": exc.remaining_tokens,
-                    "remaining_requests_daily": exc.remaining_requests_daily,
-                    "remaining_cost_daily": float(exc.remaining_cost_daily) if exc.remaining_cost_daily is not None else None,
                     "policy_snapshot_json": exc.policy_snapshot_json,
                     "error_code": exc.code,
                 },
@@ -1494,9 +1711,6 @@ async def _log_api_client_auth_failure(request: Request, exc: ApiClientAuthError
             user_account_id=exc.user_account_id,
             user_account_name=exc.user_account_name,
             api_client_auth_result=exc.code,
-            api_client_remaining_tokens=exc.remaining_tokens,
-            api_client_remaining_requests_daily=exc.remaining_requests_daily,
-            api_client_remaining_cost_daily=exc.remaining_cost_daily,
             api_client_policy_snapshot_json=exc.policy_snapshot_json,
             trace=trace,
             attempt_count=1,

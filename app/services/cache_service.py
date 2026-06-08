@@ -101,6 +101,13 @@ class CacheService:
         cls._redis_invalidate_prefix(prefix)
 
     @classmethod
+    def invalidate(cls, key: str) -> None:
+        """失效内存与 Redis 中的单条缓存项。"""
+        cls._record_stat("invalidations")
+        cls._memory_delete(key)
+        cls._redis_delete(key)
+
+    @classmethod
     def _memory_delete(cls, key: str) -> None:
         """删除进程内存中的单条缓存。"""
         with cls._lock:
@@ -174,6 +181,14 @@ class CacheService:
             return True
         except Exception:
             return False
+
+    @classmethod
+    def _redis_delete(cls, key: str) -> None:
+        """删除 Redis 中的单条缓存。"""
+        try:
+            RedisService.get_sync_client().delete(cls._redis_key(key))
+        except Exception:
+            return
 
     @classmethod
     def _redis_invalidate_prefix(cls, prefix: str) -> None:

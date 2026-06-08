@@ -226,7 +226,7 @@ class AlertService:
         items: list[dict] = []
         for api_key, status in rows:
             owner = db.get(UserAccount, api_key.owner_user_id) if api_key.owner_user_id else None
-            balance_amount = owner.balance_amount if owner is not None else api_key.balance_amount
+            balance_amount = owner.balance_amount if owner is not None else None
             items.append(
                 {
                     "id": api_key.id,
@@ -265,7 +265,7 @@ class AlertService:
             .where(
                 RequestLog.user_account_id.in_(user_ids),
                 LogService._route_traffic_expr(),
-                RequestLog.request_path != "/v1/models",
+                LogService._non_model_list_request_expr(),
             )
             .group_by(RequestLog.user_account_id)
         ).all()
@@ -307,10 +307,6 @@ class AlertService:
                 "month_requests": usage.get("month_requests", 0),
                 "day_tokens": usage.get("day_tokens", 0),
                 "month_tokens": usage.get("month_tokens", 0),
-                "request_limit_daily": user.request_limit_daily,
-                "request_limit_monthly": user.request_limit_monthly,
-                "token_limit_daily": user.token_limit_daily,
-                "token_limit_monthly": user.token_limit_monthly,
             }
             warnings = AlertService._build_account_warnings(
                 account_summary=account_summary,
@@ -349,17 +345,6 @@ class AlertService:
             and available_balance / balance_amount <= 0.2
         ):
             warnings.append({"level": "warning", "message": "账户可用余额已低于 20%，建议尽快补充额度。"})
-
-        for current_field, limit_field, label in (
-            ("day_requests", "request_limit_daily", "日调用次数"),
-            ("month_requests", "request_limit_monthly", "月调用次数"),
-            ("day_tokens", "token_limit_daily", "日 Token"),
-            ("month_tokens", "token_limit_monthly", "月 Token"),
-        ):
-            limit = account_summary.get(limit_field)
-            current = account_summary.get(current_field) or 0
-            if limit is not None and limit > 0 and current / limit >= 0.8:
-                warnings.append({"level": "warning", "message": f"{label}已使用 {current}/{limit}，接近上限。"})
 
         if abnormal_key_count > 0:
             warnings.append({"level": "warning", "message": f"当前有 {abnormal_key_count} 个 API Key 处于非正常状态，建议及时处理。"})
@@ -475,6 +460,8 @@ class AlertService:
                 "window_minutes": payload.get("window_minutes"),
                 "auto_isolated": payload.get("auto_isolated"),
                 "isolation_status": payload.get("isolation_status"),
+                "isolation_failed": payload.get("isolation_failed"),
+                "isolation_error": payload.get("isolation_error"),
             })
         elif alert_key == "monitoring:billing_failed":
             normalized_type = "billing"

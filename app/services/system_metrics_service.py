@@ -160,8 +160,10 @@ class SystemMetricsService:
             "section_errors": section_errors,
         }
         metrics["alerts"] = cls._evaluate_alerts(metrics)
-        if refresh_alerts and database["ok"]:
-            cls.write_monitoring_alerts(db, metrics)
+        if database["ok"]:
+            cls.apply_monitoring_actions(db, metrics)
+            if refresh_alerts:
+                cls.write_monitoring_alerts(db, metrics)
         return metrics
 
     @staticmethod
@@ -175,7 +177,8 @@ class SystemMetricsService:
         try:
             return loader()
         except Exception as exc:
-            db.rollback()
+            if db is not None:
+                db.rollback()
             section_errors[section_name] = str(exc)
             return fallback_factory()
 
@@ -249,7 +252,16 @@ class SystemMetricsService:
         for alert_key, event in active_events.items():
             if not alert_key.startswith(cls.CONTENT_GUARD_HIGH_RISK_PROVIDER_ALERT_PREFIX):
                 continue
-            changed = cls._auto_isolate_high_risk_content_provider(db, event, now=now) or changed
+            try:
+                changed = cls._auto_isolate_high_risk_content_provider(db, event, now=now) or changed
+            except Exception as exc:
+                payload = event.setdefault("payload", {})
+                if isinstance(payload, dict):
+                    payload["auto_isolated"] = False
+                    payload["isolation_failed"] = True
+                    payload["isolation_status"] = "failed"
+                    payload["isolation_error"] = str(exc)
+                event["message"] = f"{event.get('message') or '内容高风险自动隔离'}；自动隔离失败：{exc}"
         if changed:
             ProviderService.invalidate_provider_runtime_cache()
         return changed
@@ -290,7 +302,7 @@ class SystemMetricsService:
             "low_trust_route_enabled": False,
         }
         for field, value in updates.items():
-            if getattr(provider, field) == value:
+            if getattr(provider, field, None) == value:
                 continue
             setattr(provider, field, value)
             changed = True
@@ -1053,11 +1065,7 @@ class SystemMetricsService:
         pending_finalize = int(
             db.scalar(
                 select(func.count()).select_from(RequestLog).where(
-                    RequestLog.request_path.is_not(None),
-                    RequestLog.request_path != "/v1/models",
-                    RequestLog.log_type.in_(cls.TRAFFIC_LOG_TYPES),
-                    LogService._non_health_check_expr(),
-                    RequestLog.api_client_key_id.is_not(None),
+                    LogService._token_billing_finalize_candidate_expr(),
                     RequestLog.billing_finalized_at.is_(None),
                 )
             ) or 0
@@ -1065,9 +1073,7 @@ class SystemMetricsService:
         billing_failed = int(
             db.scalar(
                 select(func.count()).select_from(RequestLog).where(
-                    RequestLog.log_type.in_(cls.TRAFFIC_LOG_TYPES),
-                    LogService._non_health_check_expr(),
-                    RequestLog.api_client_key_id.is_not(None),
+                    LogService._token_billing_finalize_candidate_expr(),
                     RequestLog.billing_error.is_not(None),
                     RequestLog.billing_finalized_at.is_(None),
                 )
@@ -1076,9 +1082,7 @@ class SystemMetricsService:
         token_failed = int(
             db.scalar(
                 select(func.count()).select_from(RequestLog).where(
-                    RequestLog.log_type.in_(cls.TRAFFIC_LOG_TYPES),
-                    LogService._non_health_check_expr(),
-                    RequestLog.api_client_key_id.is_not(None),
+                    LogService._token_billing_finalize_candidate_expr(),
                     RequestLog.token_finalize_error.is_not(None),
                     RequestLog.billing_finalized_at.is_(None),
                 )
@@ -1284,7 +1288,7 @@ class SystemMetricsService:
                     "provider",
                     "danger",
                     f"提供商内容高风险命中突增 · {provider.get('provider_name') or provider_id}",
-                    f"最近 {provider.get('window_minutes', cls.CONTENT_GUARD_HIGH_RISK_PROVIDER_WINDOW_MINUTES)} 分钟内容高风险命中 {provider.get('high_risk_count')} 次，已自动隔离并从路由候选排除",
+                    f"最近 {provider.get('window_minutes', cls.CONTENT_GUARD_HIGH_RISK_PROVIDER_WINDOW_MINUTES)} 分钟内容高风险命中 {provider.get('high_risk_count')} 次，将执行自动隔离并从路由候选排除",
                     provider,
                 )
         pending_finalize = background.get("pending_finalize_logs")

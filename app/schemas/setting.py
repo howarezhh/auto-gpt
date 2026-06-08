@@ -3,6 +3,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from app.utils.content_guard_config import content_guard_default
+
 
 RouteMode = Literal["manual", "failover", "weighted", "sticky"]
 
@@ -15,6 +17,7 @@ class SettingUpdate(BaseModel):
     global_max_retries: int = Field(default=2, ge=2)
     route_exhausted_retry_max_wait_seconds: int = Field(default=600, ge=0, le=600)
     route_exhausted_retry_infinite_enabled: bool = False
+    trusted_providers_only: bool = False
     max_candidate_count: int = Field(default=10, ge=1, le=500)
     global_max_request_tokens: int = Field(default=0, ge=0)
     max_v1_request_body_bytes: int = Field(default=20971520, ge=0)
@@ -24,19 +27,24 @@ class SettingUpdate(BaseModel):
     max_non_stream_response_body_bytes: int = Field(default=20971520, ge=0)
     stream_token_capture_max_bytes: int = Field(default=1048576, ge=0)
     max_logged_metadata_bytes: int = Field(default=1024, ge=0)
-    content_guard_enabled: bool = True
-    content_guard_block_on_high_risk: bool = True
-    content_guard_probe_interval_sec: int = Field(default=3600, ge=300)
-    content_guard_max_scan_bytes: int = Field(default=16384, ge=1024)
-    content_guard_stream_buffer_max_bytes: int = Field(default=16384, ge=1024)
-    content_guard_low_trust_requires_buffer: bool = True
-    content_guard_high_risk_strategy: Literal["switch_provider", "block", "safe_error", "record_only"] = "switch_provider"
-    content_guard_max_detection_delay_ms: int = Field(default=300, ge=0, le=3000)
-    content_guard_stream_mode: Literal["pass_through_scan", "buffer_300ms", "full_buffer"] = "buffer_300ms"
-    content_guard_url_check_enabled: bool = True
-    content_guard_url_allowlist_json: str = ""
-    content_guard_async_review_enabled: bool = True
-    content_guard_high_risk_confidence_threshold: int = Field(default=85, ge=0, le=100)
+    content_guard_enabled: bool = content_guard_default("content_guard_enabled")
+    content_guard_precheck_auto_enabled: bool = content_guard_default("content_guard_precheck_auto_enabled")
+    content_guard_block_on_high_risk: bool = content_guard_default("content_guard_block_on_high_risk")
+    content_guard_probe_interval_sec: int = Field(default=content_guard_default("content_guard_probe_interval_sec"), ge=300)
+    content_guard_max_scan_bytes: int = Field(default=content_guard_default("content_guard_max_scan_bytes"), ge=1024)
+    content_guard_stream_buffer_max_bytes: int = Field(default=content_guard_default("content_guard_stream_buffer_max_bytes"), ge=1024)
+    content_guard_low_trust_requires_buffer: bool = content_guard_default("content_guard_low_trust_requires_buffer")
+    content_guard_high_risk_strategy: Literal["switch_provider", "block", "safe_error", "record_only"] = content_guard_default("content_guard_high_risk_strategy")
+    content_guard_max_detection_delay_ms: int = Field(default=content_guard_default("content_guard_max_detection_delay_ms"), ge=0, le=500)
+    content_guard_stream_mode: Literal["pass_through_scan", "buffer_300ms", "full_buffer"] = content_guard_default("content_guard_stream_mode")
+    content_guard_url_check_enabled: bool = content_guard_default("content_guard_url_check_enabled")
+    content_guard_url_allowlist_json: str = content_guard_default("content_guard_url_allowlist_json")
+    content_guard_async_review_enabled: bool = content_guard_default("content_guard_async_review_enabled")
+    content_guard_high_risk_confidence_threshold: int = Field(
+        default=content_guard_default("content_guard_high_risk_confidence_threshold"),
+        ge=0,
+        le=100,
+    )
     circuit_breaker_threshold: int = Field(default=3, ge=0)
     auto_health_check: bool = False
     health_check_interval_sec: int = Field(default=300, ge=300)
@@ -74,7 +82,7 @@ class SettingUpdate(BaseModel):
     stream_idle_timeout_seconds: int = Field(default=120, ge=0)
     stream_max_duration_seconds: int = Field(default=600, ge=0)
     responses_chat_adapter_enabled: bool = False
-    responses_chat_adapter_storage_type: Literal["memory", "redis", "database", "postgresql", "postgres"] = "memory"
+    responses_chat_adapter_storage_type: Literal["memory", "redis", "database", "postgresql", "postgres"] = "database"
     responses_chat_adapter_ttl_seconds: int = Field(default=86400, ge=0)
     responses_chat_adapter_model_map_json: str = ""
     responses_chat_adapter_max_tool_rounds: int = Field(default=10, ge=1, le=100)

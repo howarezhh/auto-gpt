@@ -79,7 +79,7 @@ class Settings(BaseSettings):
     external_base_url: str = ""
     uploads_dir: str = str(UPLOADS_DIR)
     responses_chat_adapter_enabled: bool = False
-    responses_chat_adapter_storage_type: str = "memory"
+    responses_chat_adapter_storage_type: str = "database"
     responses_chat_adapter_ttl_seconds: int = 86400
     responses_chat_adapter_model_map_json: str = ""
     responses_chat_adapter_max_tool_rounds: int = 10
