@@ -85,6 +85,7 @@ def _record_provider_audit(
 
 async def _stream_health_check_events(
     worker: Callable[[Callable[[dict], Awaitable[None]]], Awaitable[object]],
+    on_finished: Callable[[], None] | None = None,
 ):
     queue: asyncio.Queue[dict | None] = asyncio.Queue()
 
@@ -108,7 +109,11 @@ async def _stream_health_check_events(
                 break
             yield _health_stream_line(item)
     finally:
-        await task
+        try:
+            await task
+        finally:
+            if on_finished is not None:
+                on_finished()
 
 
 @router.get("", response_model=list[ProviderOut])
@@ -377,8 +382,9 @@ async def test_provider(provider_id: int, request: Request, payload: dict | None
     provider = ProviderService.get_provider(db, provider_id)
     if not provider:
         raise HTTPException(status_code=404, detail="Provider not found")
+    slot_key = f"provider:{provider.id}"
     try:
-        HealthService.claim_manual_check_slot(f"provider:{provider.id}", f"提供商 {provider.name}")
+        HealthService.claim_manual_check_slot(slot_key, f"提供商 {provider.name}")
     except ValueError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
     features = normalize_test_features(payload)
@@ -392,15 +398,18 @@ async def test_provider(provider_id: int, request: Request, payload: dict | None
         detail={"features": features},
         risk_level="medium",
     )
-    return await HealthService.check_provider(
-        db,
-        provider,
-        phase_keys=phase_keys_from_test_features(features),
-        text_probe_max_tokens=HealthService.INTERACTIVE_TEXT_PROBE_MAX_TOKENS,
-        capability_probe_max_tokens=HealthService.SCHEDULED_CAPABILITY_PROBE_MAX_TOKENS,
-        interactive_mode=True,
-        single_endpoint_mode=True,
-    )
+    try:
+        return await HealthService.check_provider(
+            db,
+            provider,
+            phase_keys=phase_keys_from_test_features(features),
+            text_probe_max_tokens=HealthService.INTERACTIVE_TEXT_PROBE_MAX_TOKENS,
+            capability_probe_max_tokens=HealthService.SCHEDULED_CAPABILITY_PROBE_MAX_TOKENS,
+            interactive_mode=True,
+            single_endpoint_mode=True,
+        )
+    finally:
+        HealthService.release_manual_check_slot(slot_key)
 
 
 @router.post("/{provider_id}/test-stream")
@@ -408,8 +417,9 @@ async def test_provider_stream(provider_id: int, request: Request, payload: dict
     provider = ProviderService.get_provider(db, provider_id)
     if not provider:
         raise HTTPException(status_code=404, detail="Provider not found")
+    slot_key = f"provider:{provider.id}"
     try:
-        HealthService.claim_manual_check_slot(f"provider:{provider.id}", f"提供商 {provider.name}")
+        HealthService.claim_manual_check_slot(slot_key, f"提供商 {provider.name}")
     except ValueError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
 
@@ -445,7 +455,7 @@ async def test_provider_stream(provider_id: int, request: Request, payload: dict
             stream_db.close()
 
     return StreamingResponse(
-        _stream_health_check_events(worker),
+        _stream_health_check_events(worker, on_finished=lambda: HealthService.release_manual_check_slot(slot_key)),
         media_type="application/x-ndjson",
         headers=_health_stream_headers(),
     )
@@ -494,8 +504,9 @@ async def test_provider_model(
 
 @router.post("/test-all")
 async def test_all_providers(request: Request, payload: dict | None = None, db: Session = Depends(get_db)) -> list[dict]:
+    slot_key = "all"
     try:
-        HealthService.claim_manual_check_slot("all", "全部提供商")
+        HealthService.claim_manual_check_slot(slot_key, "全部提供商")
     except ValueError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
     features = normalize_test_features(payload)
@@ -509,21 +520,25 @@ async def test_all_providers(request: Request, payload: dict | None = None, db: 
         detail={"features": features},
         risk_level="medium",
     )
-    return await HealthService.check_all(
-        db,
-        selective=False,
-        phase_keys=phase_keys_from_test_features(features),
-        text_probe_max_tokens=HealthService.INTERACTIVE_TEXT_PROBE_MAX_TOKENS,
-        capability_probe_max_tokens=HealthService.SCHEDULED_CAPABILITY_PROBE_MAX_TOKENS,
-        interactive_mode=True,
-        single_endpoint_mode=True,
-    )
+    try:
+        return await HealthService.check_all(
+            db,
+            selective=False,
+            phase_keys=phase_keys_from_test_features(features),
+            text_probe_max_tokens=HealthService.INTERACTIVE_TEXT_PROBE_MAX_TOKENS,
+            capability_probe_max_tokens=HealthService.SCHEDULED_CAPABILITY_PROBE_MAX_TOKENS,
+            interactive_mode=True,
+            single_endpoint_mode=True,
+        )
+    finally:
+        HealthService.release_manual_check_slot(slot_key)
 
 
 @router.post("/test-all-stream")
 async def test_all_providers_stream(request: Request, payload: dict | None = None, db: Session = Depends(get_db)) -> StreamingResponse:
+    slot_key = "all"
     try:
-        HealthService.claim_manual_check_slot("all", "全部提供商")
+        HealthService.claim_manual_check_slot(slot_key, "全部提供商")
     except ValueError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
 
@@ -556,7 +571,7 @@ async def test_all_providers_stream(request: Request, payload: dict | None = Non
             stream_db.close()
 
     return StreamingResponse(
-        _stream_health_check_events(worker),
+        _stream_health_check_events(worker, on_finished=lambda: HealthService.release_manual_check_slot(slot_key)),
         media_type="application/x-ndjson",
         headers=_health_stream_headers(),
     )

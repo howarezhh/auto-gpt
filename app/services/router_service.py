@@ -1,6 +1,5 @@
 import hashlib
 import math
-import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from threading import Lock
@@ -22,6 +21,7 @@ from app.services.provider_capacity_service import ProviderCapacityService, Prov
 from app.services.provider_health_state_service import ProviderHealthStateService
 from app.services.provider_service import ProviderService
 from app.services.setting_service import SettingService
+from app.services.content_trust_probe_service import ContentTrustProbeService
 
 
 @dataclass(slots=True)
@@ -33,8 +33,8 @@ class RouteCandidate:
     recent_failure_rate: float = 0.0
     recent_success_rate: float = 1.0
     recent_avg_latency_ms: float | None = None
-    dynamic_weight: float = 1.0
     route_score: float = 0.0
+    dynamic_weight: float = 100.0
     health_tier: int = 1
     sticky_affinity: float = 0.0
     load_factor: float = 0.0
@@ -53,38 +53,26 @@ class RecentSessionRoute:
 class RoutePolicyContext:
     """描述一次路由决策的策略上下文。"""
 
-    route_mode: str
-    default_provider_id: int | None
-    manual_allow_fallback: bool
     allowed_provider_ids: list[int] | None = None
     forced_provider_id: int | None = None
     preferred_provider_ids: list[int] | None = None
     preferred_region_tags: list[str] | None = None
-    max_candidate_count: int | None = None
     latency_bias: int = 1
     success_rate_bias: int = 1
     cost_bias: int = 0
-    route_exhausted_retry_infinite_enabled: bool = False
-    allow_low_trust_providers: bool = False
     require_trusted_provider: bool = False
     content_guard_required: bool = True
 
     def with_forced_provider_id(self, forced_provider_id: int | None) -> "RoutePolicyContext":
         """返回一个仅修改强制 provider 配置的新上下文对象。"""
         return RoutePolicyContext(
-            route_mode=self.route_mode,
-            default_provider_id=self.default_provider_id,
-            manual_allow_fallback=self.manual_allow_fallback,
             allowed_provider_ids=list(self.allowed_provider_ids) if self.allowed_provider_ids is not None else None,
             forced_provider_id=forced_provider_id,
             preferred_provider_ids=list(self.preferred_provider_ids) if self.preferred_provider_ids is not None else None,
             preferred_region_tags=list(self.preferred_region_tags) if self.preferred_region_tags is not None else None,
-            max_candidate_count=self.max_candidate_count,
             latency_bias=self.latency_bias,
             success_rate_bias=self.success_rate_bias,
             cost_bias=self.cost_bias,
-            route_exhausted_retry_infinite_enabled=self.route_exhausted_retry_infinite_enabled,
-            allow_low_trust_providers=self.allow_low_trust_providers,
             require_trusted_provider=self.require_trusted_provider,
             content_guard_required=self.content_guard_required,
         )
@@ -197,35 +185,6 @@ class RouterService:
         return [capability]
 
     @staticmethod
-    def _endpoint_probe_key(endpoint_path: str, *, stream: bool) -> str | None:
-        if endpoint_path == "/chat/completions":
-            return "chat_completions_stream" if stream else "chat_completions"
-        if endpoint_path == "/responses":
-            return "responses_stream" if stream else "responses"
-        return None
-
-    @staticmethod
-    def _endpoint_probe_failed(
-        provider: Provider,
-        provider_model: ProviderModel,
-        endpoint_path: str,
-        *,
-        stream: bool = False,
-    ) -> bool:
-        probe_key = RouterService._endpoint_probe_key(endpoint_path, stream=stream)
-        if not probe_key:
-            return False
-        capability_state = ProviderHealthStateService.get_model_capability_state(provider.id, provider_model.id)
-        if isinstance(capability_state, dict):
-            payload = capability_state.get(probe_key)
-            if isinstance(payload, dict):
-                return payload.get("success") is False
-        payload = CacheService.get(RouterService._capability_probe_cache_key(provider.id, provider_model.id, probe_key))
-        if isinstance(payload, dict):
-            return payload.get("success") is False
-        return False
-
-    @staticmethod
     def _required_endpoint_path(*, require_chat_completions: bool, require_responses: bool) -> str | None:
         if require_chat_completions and not require_responses:
             return "/chat/completions"
@@ -276,7 +235,7 @@ class RouterService:
             for provider_model in provider.provider_models:
                 if not provider_model.enabled:
                     continue
-                if RouterService._provider_model_blocked_by_content_policy(provider_model):
+                if RouterService._provider_model_blocked_by_content_policy(provider_model, provider=provider, route_context=route_context):
                     continue
                 if provider_model.model_name not in enabled_model_names:
                     continue
@@ -301,20 +260,6 @@ class RouterService:
                     continue
                 if require_image_generation and RouterService._capability_probe_failed(provider, provider_model, "image_generation"):
                     continue
-                if require_chat_completions and RouterService._endpoint_probe_failed(
-                    provider,
-                    provider_model,
-                    "/chat/completions",
-                    stream=require_stream,
-                ):
-                    continue
-                if require_responses and RouterService._endpoint_probe_failed(
-                    provider,
-                    provider_model,
-                    "/responses",
-                    stream=require_stream,
-                ):
-                    continue
                 if provider_model.circuit_state == "open":
                     if not RouterService._should_probe_open_model(
                         provider=provider,
@@ -332,7 +277,6 @@ class RouterService:
                 recent_avg_latency_ms = metric.get("avg_latency_ms")
                 model_health_state = ProviderHealthStateService.get_model_state(provider.id, provider_model.id)
                 provider_health_state = ProviderHealthStateService.get_provider_state(provider.id)
-                dynamic_weight = RouterService._dynamic_weight(provider_model.weight, recent_failure_rate)
                 health_tier = RouterService._health_tier(
                     provider=provider,
                     provider_model=provider_model,
@@ -357,7 +301,6 @@ class RouterService:
                         recent_failure_rate=recent_failure_rate,
                         recent_success_rate=recent_success_rate,
                         recent_avg_latency_ms=recent_avg_latency_ms,
-                        dynamic_weight=dynamic_weight,
                         route_score=route_score,
                         health_tier=health_tier,
                     )
@@ -642,7 +585,7 @@ class RouterService:
                 if not provider_model.enabled:
                     RouterService._record_diagnostic_reason(diagnostics, "model_disabled", provider=provider, provider_model=provider_model)
                     continue
-                if RouterService._provider_model_blocked_by_content_policy(provider_model):
+                if RouterService._provider_model_blocked_by_content_policy(provider_model, provider=provider, route_context=route_context):
                     RouterService._record_diagnostic_reason(diagnostics, "model_content_integrity_blocked", provider=provider, provider_model=provider_model)
                     continue
                 if provider_model.model_name not in enabled_model_names:
@@ -676,22 +619,6 @@ class RouterService:
                     continue
                 if require_image_generation and RouterService._capability_probe_failed(provider, provider_model, "image_generation"):
                     RouterService._record_diagnostic_reason(diagnostics, "image_generation_probe_unhealthy", provider=provider, provider_model=provider_model)
-                    continue
-                if require_chat_completions and RouterService._endpoint_probe_failed(
-                    provider,
-                    provider_model,
-                    "/chat/completions",
-                    stream=require_stream,
-                ):
-                    RouterService._record_diagnostic_reason(diagnostics, "chat_probe_unhealthy", provider=provider, provider_model=provider_model)
-                    continue
-                if require_responses and RouterService._endpoint_probe_failed(
-                    provider,
-                    provider_model,
-                    "/responses",
-                    stream=require_stream,
-                ):
-                    RouterService._record_diagnostic_reason(diagnostics, "responses_probe_unhealthy", provider=provider, provider_model=provider_model)
                     continue
                 if provider_model.circuit_state == "open" and not RouterService._should_probe_open_model(
                     provider=provider,
@@ -837,7 +764,7 @@ class RouterService:
                 if candidate.health_tier == health_tier
                 and (candidate.provider.id, candidate.provider_model.id) not in seen
             ]
-            balanced = RouterService._balanced_shuffle(tier_candidates, sticky_key=sticky_key)
+            balanced = RouterService._balanced_order(tier_candidates)
             for candidate in balanced:
                 key = (candidate.provider.id, candidate.provider_model.id)
                 if key in seen:
@@ -877,13 +804,11 @@ class RouterService:
 
     @staticmethod
     def _effective_max_candidate_count(route_context: RoutePolicyContext | None) -> int:
-        value = route_context.max_candidate_count if route_context and route_context.max_candidate_count is not None else None
-        if value is None:
-            try:
-                setting = SettingService.get_cached()
-                value = getattr(setting, "max_candidate_count", 10)
-            except Exception:
-                value = 10
+        try:
+            setting = SettingService.get_cached()
+            value = getattr(setting, "max_candidate_count", 10)
+        except Exception:
+            value = 10
         try:
             parsed = int(value)
         except (TypeError, ValueError):
@@ -1039,8 +964,6 @@ class RouterService:
             "image_generation_probe_unhealthy": "图片生成探针不可用",
             "chat_not_supported": "模型不支持 chat/completions",
             "responses_not_supported": "模型不支持 responses",
-            "chat_probe_unhealthy": "chat/completions 端点探针不可用",
-            "responses_probe_unhealthy": "responses 端点探针不可用",
             "model_circuit_open": "模型已熔断",
             "model_unhealthy": "模型健康状态异常",
             "capacity_snapshot_unavailable": "未获取到容量快照",
@@ -1049,7 +972,6 @@ class RouterService:
             "provider_trust_blocked": "提供商信任等级已阻断",
             "provider_content_integrity_blocked": "提供商内容完整性已隔离",
             "provider_content_integrity_score_too_low": "提供商内容完整性评分过低",
-            "provider_low_trust_route_disabled": "低信任提供商未允许普通路由",
             "provider_trusted_required": "当前策略要求可信及以上提供商",
             "model_content_integrity_blocked": "模型内容完整性已隔离",
         }.get(reason_code, reason_code)
@@ -1090,8 +1012,6 @@ class RouterService:
         if route_context is not None:
             parts.extend(
                 [
-                    route_context.route_mode,
-                    str(route_context.default_provider_id or 0),
                     ",".join(str(item) for item in (route_context.allowed_provider_ids or [])),
                     ",".join(str(item) for item in (route_context.preferred_provider_ids or [])),
                     ",".join(item for item in (route_context.preferred_region_tags or [])),
@@ -1099,7 +1019,6 @@ class RouterService:
                     str(route_context.latency_bias),
                     str(route_context.success_rate_bias),
                     str(route_context.cost_bias),
-                    "low-trust" if route_context.allow_low_trust_providers else "no-low-trust",
                     "trusted" if route_context.require_trusted_provider else "any-trust",
                     "guard" if route_context.content_guard_required else "guard-optional",
                 ]
@@ -1190,26 +1109,26 @@ class RouterService:
 
     @staticmethod
     def _content_policy_diagnostic_reason(provider: Provider, *, route_context: RoutePolicyContext | None) -> str | None:
-        trust_level = str(getattr(provider, "trust_level", "standard") or "standard")
-        integrity_status = str(getattr(provider, "content_integrity_status", "unknown") or "unknown")
-        if trust_level == "blocked":
-            return "provider_trust_blocked"
-        if integrity_status == "blocked":
-            return "provider_content_integrity_blocked"
-        integrity_score = int(getattr(provider, "content_integrity_score", 80) or 0)
-        if integrity_score <= RouterService.MIN_CONTENT_INTEGRITY_SCORE:
-            return "provider_content_integrity_score_too_low"
-        if route_context and route_context.require_trusted_provider and trust_level not in {"official", "trusted"}:
-            return "provider_trusted_required"
-        if trust_level == "low":
-            if not bool(getattr(provider, "low_trust_route_enabled", False)):
-                return "provider_low_trust_route_disabled"
-            if not (route_context and route_context.allow_low_trust_providers):
-                return "provider_low_trust_route_disabled"
-        return None
+        decision = ContentTrustProbeService.get_trust_decision_for_route(
+            provider,
+            route_context=route_context,
+        )
+        return None if decision.get("allowed") else str(decision.get("reason") or "provider_content_integrity_blocked")
 
     @staticmethod
-    def _provider_model_blocked_by_content_policy(provider_model: ProviderModel) -> bool:
+    def _provider_model_blocked_by_content_policy(
+        provider_model: ProviderModel,
+        *,
+        provider: Provider | None = None,
+        route_context: RoutePolicyContext | None = None,
+    ) -> bool:
+        if provider is not None:
+            decision = ContentTrustProbeService.get_trust_decision_for_route(
+                provider,
+                provider_model=provider_model,
+                route_context=route_context,
+            )
+            return not bool(decision.get("allowed"))
         return str(getattr(provider_model, "content_integrity_status", "unknown") or "unknown") == "blocked"
 
     @staticmethod
@@ -1264,16 +1183,6 @@ class RouterService:
         return sum(values) / len(values)
 
     @staticmethod
-    def _dynamic_weight(base_weight: int, recent_failure_rate: float) -> float:
-        if recent_failure_rate >= 0.8:
-            return max(1.0, base_weight * 0.15)
-        if recent_failure_rate >= 0.5:
-            return max(1.0, base_weight * 0.35)
-        if recent_failure_rate >= 0.2:
-            return max(1.0, base_weight * 0.6)
-        return float(base_weight)
-
-    @staticmethod
     def _should_probe_open_model(provider: Provider, provider_model: ProviderModel, recovery_interval_sec: int, now: datetime) -> bool:
         if not provider.auto_recover_enabled:
             return False
@@ -1305,33 +1214,9 @@ class RouterService:
         return True
 
     @staticmethod
-    def _weighted_shuffle(candidates: list[RouteCandidate]) -> list[RouteCandidate]:
-        remaining = list(candidates)
-        ordered: list[RouteCandidate] = []
-        while remaining:
-            weighted_candidates = [item for item in remaining if item.dynamic_weight > 0]
-            if not weighted_candidates:
-                ordered.extend(remaining)
-                break
-            chosen = random.choices(
-                weighted_candidates,
-                weights=[item.dynamic_weight for item in weighted_candidates],
-                k=1,
-            )[0]
-            ordered.append(chosen)
-            remaining.remove(chosen)
-        return ordered
-
-    @staticmethod
-    def _route_selection_weight(candidate: RouteCandidate) -> float:
-        load_multiplier = max(0.05, 1.0 - max(0.0, min(1.0, float(candidate.load_factor or 0.0))))
-        score_multiplier = max(1.0, float(candidate.route_score or 0.0))
-        return max(0.0, float(candidate.dynamic_weight or 0.0)) * score_multiplier * load_multiplier
-
-    @staticmethod
-    def _balanced_shuffle(candidates: list[RouteCandidate], *, sticky_key: str | None) -> list[RouteCandidate]:
-        remaining = sorted(
-            list(candidates),
+    def _balanced_order(candidates: list[RouteCandidate]) -> list[RouteCandidate]:
+        return sorted(
+            candidates,
             key=lambda item: (
                 item.load_factor,
                 -item.route_score,
@@ -1341,34 +1226,19 @@ class RouterService:
                 item.provider_model.id,
             ),
         )
-        ordered: list[RouteCandidate] = []
-        while remaining:
-            weights = [RouterService._route_selection_weight(item) for item in remaining]
-            if not any(value > 0 for value in weights):
-                ordered.extend(remaining)
-                break
-            rng = random if sticky_key is None else random.Random(
-                f"{sticky_key}:{len(ordered)}:{','.join(str(item.provider_model.id) for item in remaining)}"
-            )
-            chosen = rng.choices(remaining, weights=weights, k=1)[0]
-            ordered.append(chosen)
-            remaining.remove(chosen)
-        return ordered
 
     @staticmethod
-    def _weighted_shuffle_by_health(candidates: list[RouteCandidate], *, sticky_key: str | None) -> list[RouteCandidate]:
-        ordered: list[RouteCandidate] = []
-        for health_tier in sorted({candidate.health_tier for candidate in candidates}):
-            tier_candidates = [candidate for candidate in candidates if candidate.health_tier == health_tier]
-            if sticky_key:
-                # Stable session affinity is applied inside each health bucket, but never
-                # allows an unhealthy bucket to leapfrog a healthy one.
-                tier_candidates = RouterService._sticky_order(tier_candidates, sticky_key)
-                if tier_candidates:
-                    ordered.append(tier_candidates[0])
-                    tier_candidates = tier_candidates[1:]
-            ordered.extend(RouterService._weighted_shuffle(tier_candidates))
-        return ordered
+    def _route_selection_weight(candidate: RouteCandidate) -> float:
+        health_multiplier = {
+            0: 1.0,
+            1: 0.35,
+            2: 0.05,
+            3: 0.01,
+        }.get(int(candidate.health_tier or 0), 0.05)
+        load_multiplier = max(0.01, 1.0 - max(0.0, min(1.0, float(candidate.load_factor or 0.0))))
+        dynamic_weight = max(0.0, float(candidate.dynamic_weight or 0.0))
+        route_score = max(1.0, float(candidate.route_score or 0.0))
+        return dynamic_weight * route_score * health_multiplier * load_multiplier
 
     @staticmethod
     def _sticky_order(candidates: list[RouteCandidate], sticky_key: str | None) -> list[RouteCandidate]:
@@ -1397,5 +1267,5 @@ class RouterService:
         ).hexdigest()
         raw_value = int(digest[:16], 16)
         normalized = max(raw_value / 0xFFFFFFFFFFFFFFFF, 1e-12)
-        effective_weight = max(1.0, candidate.dynamic_weight * max(candidate.route_score, 1.0))
-        return effective_weight / -math.log(normalized)
+        effective_score = max(candidate.route_score, 1.0)
+        return effective_score / -math.log(normalized)

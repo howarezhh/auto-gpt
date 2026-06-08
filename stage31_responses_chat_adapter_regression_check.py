@@ -9,7 +9,7 @@ from unittest.mock import patch
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.database import Base, SessionLocal, engine
 from app.main import app
 from app.models.responses_chat_adapter_session import ResponsesChatAdapterSession
@@ -72,10 +72,7 @@ def _fake_auth_context():
             app_name=None,
             environment_name=None,
         ),
-        remaining_tokens=None,
         remaining_balance=None,
-        remaining_requests_daily=None,
-        remaining_cost_daily=None,
         policy_snapshot_json="{}",
     )
 
@@ -556,6 +553,11 @@ def _env_upstream_specs_should_drive_model_mapping() -> None:
 
 def _settings_schema_should_accept_and_validate_adapter_fields() -> None:
     from app.schemas.setting import SettingUpdate
+
+    default_settings = Settings()
+    default_payload = SettingUpdate(route_mode="failover")
+    _assert(default_settings.responses_chat_adapter_storage_type == "database", "runtime default adapter storage should be database")
+    _assert(default_payload.responses_chat_adapter_storage_type == "database", "settings schema default adapter storage should be database")
 
     payload = SettingUpdate(
         route_mode="failover",

@@ -105,7 +105,6 @@ def ensure_fixture(
         provider.provider_type = "openai_compatible"
         provider.enabled = True
         provider.priority = 1
-        provider.weight = 100
         provider.timeout_ms = 60000
         provider.max_retries = 1
         provider.max_active_requests = 30
@@ -127,7 +126,6 @@ def ensure_fixture(
             db.flush()
         provider_model.enabled = True
         provider_model.priority = 1
-        provider_model.weight = 100
         provider_model.supports_stream = True
         provider_model.supports_vision = True
         provider_model.supports_tools = False

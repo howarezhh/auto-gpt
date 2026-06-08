@@ -45,7 +45,7 @@ from app.services.provider_capacity_service import (
 )
 from app.services.setting_service import SettingService
 from app.services.upstream_client import UpstreamClientService
-from app.utils.decimal_utils import to_multiplier_decimal
+from app.utils.decimal_utils import to_multiplier_decimal, to_price_decimal
 from app.utils.json_utils import dumps_json, loads_json
 
 
@@ -111,7 +111,6 @@ API Key: sk-xxxx
 分组: 第三方聚合
 地区: hk
 优先级: 100
-权重: 100
 超时毫秒: 30000
 最大重试次数: 2
 最大活跃请求: 20
@@ -192,25 +191,16 @@ API Key: sk-yyyy
         return any(prefix in normalized for prefix in ProviderService.TOOL_CAPABLE_MODEL_HINTS)
 
     @staticmethod
-    def _model_name_supports_responses(normalized: str) -> bool:
-        # 挂载级协议由管理员配置；新挂载默认 Responses，不能从模型名前缀可靠推断。
-        return True
-
-    @staticmethod
     def _infer_model_capabilities(model_name: str) -> dict[str, bool]:
-        """根据模型名启发式推断非协议能力；新增挂载协议默认 Responses。"""
+        """根据模型名启发式推断非协议能力。"""
         normalized = (model_name or "").strip().lower()
         supports_vision = ProviderService._model_name_supports_vision(normalized)
         supports_tools = ProviderService._model_name_supports_tools(normalized)
-        supports_image_generation = any(prefix in normalized for prefix in ProviderService.IMAGE_GENERATION_MODEL_HINTS)
-        supports_responses = ProviderService._model_name_supports_responses(normalized)
         return {
             "supports_stream": True,
             "supports_vision": supports_vision,
             "supports_tools": supports_tools,
-            "supports_image_generation": supports_image_generation,
-            "supports_chat_completions": False,
-            "supports_responses": supports_responses,
+            "supports_image_generation": False,
         }
 
     @staticmethod
@@ -225,19 +215,13 @@ API Key: sk-yyyy
 
     @staticmethod
     def provider_model_supports_tools(provider_model: ProviderModel) -> bool:
-        """结合显式配置和模型名推断 provider model 的工具能力。"""
-        inferred = ProviderService._infer_model_capabilities(provider_model.model_name)
-        return bool(provider_model.supports_tools or inferred.get("supports_tools", False))
+        """判断 provider model 是否显式支持工具能力。"""
+        return bool(provider_model.supports_tools)
 
     @staticmethod
     def provider_model_supports_image_generation(provider_model: ProviderModel) -> bool:
         """判断 provider model 是否可用于图像生成链路。"""
-        inferred = ProviderService._infer_model_capabilities(provider_model.model_name)
-        return bool(
-            provider_model.supports_responses
-            and ProviderService.provider_model_supports_tools(provider_model)
-            and (provider_model.supports_vision or inferred.get("supports_image_generation", False))
-        )
+        return bool(provider_model.supports_image_generation)
 
     @staticmethod
     def provider_model_protocol_type(provider_model: ProviderModel) -> str:
@@ -252,15 +236,16 @@ API Key: sk-yyyy
 
     @staticmethod
     def _build_model_config_input_from_name(model_name: str) -> ProviderModelConfigInput:
-        """根据模型名生成默认的模型配置输入对象。"""
+        """根据模型名生成默认模型配置；端点协议只给管理员可编辑默认值。"""
         capabilities = ProviderService._infer_model_capabilities(model_name)
         return ProviderModelConfigInput(
             model_name=model_name,
             supports_stream=capabilities["supports_stream"],
             supports_vision=capabilities["supports_vision"],
             supports_tools=capabilities["supports_tools"],
-            supports_chat_completions=capabilities["supports_chat_completions"],
-            supports_responses=capabilities["supports_responses"],
+            supports_image_generation=False,
+            supports_chat_completions=True,
+            supports_responses=True,
         )
 
     @staticmethod
@@ -514,7 +499,6 @@ API Key: sk-yyyy
             region_tag=payload.region_tag,
             enabled=payload.enabled,
             priority=payload.priority,
-            weight=payload.weight,
             timeout_ms=payload.timeout_ms,
             max_retries=payload.max_retries,
             max_active_requests=payload.max_active_requests,
@@ -533,7 +517,7 @@ API Key: sk-yyyy
             content_integrity_status=payload.content_integrity_status,
             content_integrity_score=payload.content_integrity_score,
             content_guard_enabled=payload.content_guard_enabled,
-            low_trust_route_enabled=payload.low_trust_route_enabled,
+            low_trust_route_enabled=False,
             buffer_stream_for_guard=payload.buffer_stream_for_guard,
             credential_rotated_at=datetime.utcnow(),
             remark=payload.remark,
@@ -729,8 +713,6 @@ API Key: sk-yyyy
             "region_tag": "region_tag",
             "优先级": "priority",
             "priority": "priority",
-            "权重": "weight",
-            "weight": "weight",
             "超时毫秒": "timeout_ms",
             "timeout": "timeout_ms",
             "timeoutms": "timeout_ms",
@@ -823,7 +805,6 @@ API Key: sk-yyyy
             "region_tag": ProviderService._clean_optional_text(normalized.get("region_tag")),
             "enabled": ProviderService._parse_batch_bool(normalized.get("enabled"), default=True),
             "priority": ProviderService._parse_batch_int(normalized.get("priority"), default=100, minimum=0),
-            "weight": ProviderService._parse_batch_int(normalized.get("weight"), default=100, minimum=0),
             "timeout_ms": ProviderService._parse_batch_int(normalized.get("timeout_ms"), default=30000, minimum=1000),
             "max_retries": ProviderService._parse_batch_int(normalized.get("max_retries"), default=2, minimum=0),
             "max_active_requests": ProviderService._parse_batch_nullable_int(normalized.get("max_active_requests"), default=20),
@@ -871,6 +852,7 @@ API Key: sk-yyyy
             "supports_stream": True,
             "supports_vision": True,
             "supports_tools": True,
+            "supports_image_generation": False,
             "supports_chat_completions": False,
             "supports_responses": True,
         }
@@ -889,11 +871,13 @@ API Key: sk-yyyy
                 "supports_stream": False,
                 "supports_vision": False,
                 "supports_tools": False,
+                "supports_image_generation": False,
             }
         stream_tokens = {"流式", "stream", "streaming", "sse"}
         vision_tokens = {"图像理解", "图片理解", "视觉", "vision", "image", "vl", "多模态"}
         tools_tokens = {"工具调用", "工具", "tools", "tool", "function", "functioncalling", "函数调用"}
-        recognized = tokens & (stream_tokens | vision_tokens | tools_tokens | {"仅文本", "文本", "text"})
+        image_generation_tokens = {"生图", "图片生成", "文生图", "imagegeneration", "image_generation", "generate"}
+        recognized = tokens & (stream_tokens | vision_tokens | tools_tokens | image_generation_tokens | {"仅文本", "文本", "text"})
         if not recognized:
             return defaults
         return {
@@ -901,6 +885,7 @@ API Key: sk-yyyy
             "supports_stream": bool(tokens & stream_tokens),
             "supports_vision": bool(tokens & vision_tokens),
             "supports_tools": bool(tokens & tools_tokens),
+            "supports_image_generation": bool(tokens & image_generation_tokens),
         }
 
     @staticmethod
@@ -910,6 +895,7 @@ API Key: sk-yyyy
             supports_stream=capabilities["supports_stream"],
             supports_vision=capabilities["supports_vision"],
             supports_tools=capabilities["supports_tools"],
+            supports_image_generation=capabilities.get("supports_image_generation", False),
             supports_chat_completions=capabilities["supports_chat_completions"],
             supports_responses=capabilities["supports_responses"],
         )
@@ -1003,22 +989,12 @@ API Key: sk-yyyy
                 .where(ApiClientKeyProviderBinding.provider_id == provider_id)
             )
         )
-        affected_default_keys = list(
-            db.scalars(
-                select(ApiClientKey).where(ApiClientKey.default_provider_id == provider_id)
-            )
-        )
         affected_key_refs = [
             (binding.api_client_key.id, binding.api_client_key.key_hash, binding.api_client_key.owner_user_id)
             for binding in affected_bindings
             if binding.api_client_key is not None
         ]
-        affected_key_refs.extend(
-            (api_key.id, api_key.key_hash, api_key.owner_user_id)
-            for api_key in affected_default_keys
-        )
         db.execute(update(AppSetting).where(AppSetting.default_provider_id == provider_id).values(default_provider_id=None))
-        db.execute(update(ApiClientKey).where(ApiClientKey.default_provider_id == provider_id).values(default_provider_id=None))
         db.execute(update(RequestLog).where(RequestLog.provider_id == provider_id).values(provider_id=None))
         db.execute(delete(ApiClientKeyProviderBinding).where(ApiClientKeyProviderBinding.provider_id == provider_id))
         db.delete(provider)
@@ -1050,15 +1026,13 @@ API Key: sk-yyyy
                 provider_model.supports_responses = supports_responses
                 continue
             if field in {
-                "supports_stream",
-                "supports_vision",
-                "supports_tools",
                 "context_window_tokens",
                 "max_input_tokens",
                 "max_output_tokens",
                 "input_price_per_1k",
                 "output_price_per_1k",
                 "cache_price_per_1k",
+                "cache_write_price_per_1k",
             }:
                 continue
             if field == "price_multiplier" and value is None:
@@ -1082,28 +1056,62 @@ API Key: sk-yyyy
     def _ensure_manual_content_probe_reason(provider_model: ProviderModel) -> None:
         status = str(provider_model.content_integrity_status or "unknown")
         existing = ProviderService._parse_content_probe_results(provider_model.content_probe_results_json)
-        if status == "passed":
-            return
         now = datetime.utcnow()
         reason = {
+            "passed": "管理员手动标记为可信。",
             "blocked": "管理员手动标记为异常，未填写检测明细。",
             "degraded": "管理员手动标记为异常，未填写检测明细。",
             "unknown": "管理员手动标记为未检测。",
         }.get(status, "管理员手动更新可信度状态。")
+        if status == "passed":
+            provider_model.content_probe_last_passed_at = now
+            provider_model.content_probe_failure_count = 0
+        elif status in {"degraded", "blocked"}:
+            provider_model.content_probe_last_failed_at = now
+            provider_model.content_probe_failure_count = max(1, int(provider_model.content_probe_failure_count or 0))
+        if status == "passed":
+            manual_results = [
+                {
+                    "phase_key": "content_fixed_answer",
+                    "endpoint_label": "固定答案",
+                    "success": True,
+                    "content_guard_result": "pass",
+                    "content_guard_reason": "管理员手动确认固定答案探针通过。",
+                    "message": "管理员手动确认固定答案探针通过。",
+                },
+                {
+                    "phase_key": "content_pollution_rules",
+                    "endpoint_label": "外链广告识别",
+                    "success": True,
+                    "content_guard_result": "pass",
+                    "content_guard_reason": "管理员手动确认短链/外链/广告意图识别通过。",
+                    "message": "管理员手动确认短链/外链/广告意图识别通过。",
+                },
+                {
+                    "phase_key": "content_sse",
+                    "endpoint_label": "流式污染检测",
+                    "success": True,
+                    "content_guard_result": "pass",
+                    "content_guard_reason": "管理员手动确认流式污染检测通过。",
+                    "message": "管理员手动确认流式污染检测通过。",
+                },
+            ]
+        else:
+            manual_results = [
+                {
+                    "phase_key": "manual",
+                    "endpoint_label": "管理员手动标记",
+                    "success": False,
+                    "content_guard_result": "review",
+                    "content_guard_reason": reason,
+                    "message": reason,
+                }
+            ]
         provider_model.content_probe_results_json = dumps_json(
             {
                 "updated_at": now,
                 "status": status,
-                "results": existing or [
-                    {
-                        "phase_key": "manual",
-                        "endpoint_label": "管理员手动标记",
-                        "success": status == "passed",
-                        "content_guard_result": "pass" if status == "passed" else "review",
-                        "content_guard_reason": reason,
-                        "message": reason,
-                    }
-                ],
+                "results": manual_results + existing[:20],
                 "last_result": {
                     "phase_key": "manual",
                     "endpoint_label": "管理员手动标记",
@@ -1206,7 +1214,6 @@ API Key: sk-yyyy
             "region_tag": provider.region_tag,
             "enabled": provider.enabled,
             "priority": provider.priority,
-            "weight": provider.weight,
             "timeout_ms": provider.timeout_ms,
             "max_retries": provider.max_retries,
             "max_active_requests": provider.max_active_requests,
@@ -1237,7 +1244,6 @@ API Key: sk-yyyy
             "last_content_violation_at": provider.last_content_violation_at,
             "recent_content_guard_events": recent_content_guard_events or [],
             "content_guard_enabled": provider.content_guard_enabled,
-            "low_trust_route_enabled": provider.low_trust_route_enabled,
             "buffer_stream_for_guard": provider.buffer_stream_for_guard,
             "models": [item.model_name for item in provider.provider_models],
             "model_configs": [
@@ -1307,7 +1313,6 @@ API Key: sk-yyyy
             "region_tag": provider.region_tag,
             "enabled": provider.enabled,
             "priority": provider.priority,
-            "weight": provider.weight,
             "health_status": provider.health_status,
             "protocol_type": ProviderService.provider_protocol_type(provider),
             "protocol_label": ProviderService.provider_protocol_label(getattr(provider, "protocol_type", None)),
@@ -1408,8 +1413,7 @@ API Key: sk-yyyy
                 supports_stream=ProviderService._infer_model_capabilities(model_name)["supports_stream"],
                 supports_vision=ProviderService._infer_model_capabilities(model_name)["supports_vision"],
                 supports_tools=ProviderService._infer_model_capabilities(model_name)["supports_tools"],
-                supports_chat_completions=ProviderService._infer_model_capabilities(model_name)["supports_chat_completions"],
-                supports_responses=ProviderService._infer_model_capabilities(model_name)["supports_responses"],
+                supports_image_generation=False,
                 already_configured=model_name in existing_names,
             )
             for model_name in discovered_names
@@ -1492,7 +1496,6 @@ API Key: sk-yyyy
             "model_name": provider_model.model_name,
             "enabled": provider_model.enabled,
             "priority": provider_model.priority,
-            "weight": provider_model.weight,
             "health_status": provider_model.health_status,
             "circuit_state": provider_model.circuit_state,
             "circuit_opened_at": provider_model.circuit_opened_at,
@@ -1525,6 +1528,7 @@ API Key: sk-yyyy
             "input_price_per_1k": provider_model.input_price_per_1k,
             "output_price_per_1k": provider_model.output_price_per_1k,
             "cache_price_per_1k": provider_model.cache_price_per_1k,
+            "cache_write_price_per_1k": provider_model.cache_write_price_per_1k,
             "recent_request_count": metrics.get("recent_request_count", 0),
             "success_rate": metrics.get("success_rate"),
             "avg_first_token_latency_ms": metrics.get("avg_first_token_latency_ms"),
@@ -1654,24 +1658,62 @@ API Key: sk-yyyy
         if not provider.enabled or not enabled_models:
             provider.health_status = "unknown"
             provider.circuit_state = "closed"
+            ProviderService._refresh_provider_content_integrity_state(provider, enabled_models)
             return
 
         statuses = {item.health_status for item in enabled_models}
         if statuses == {"healthy"}:
             provider.health_status = "healthy"
             provider.circuit_state = "closed"
+            ProviderService._refresh_provider_content_integrity_state(provider, enabled_models)
             return
         if statuses == {"unhealthy"}:
             provider.health_status = "unhealthy"
             provider.circuit_state = "open" if all(item.circuit_state == "open" for item in enabled_models) else "closed"
+            ProviderService._refresh_provider_content_integrity_state(provider, enabled_models)
             return
         if "healthy" in statuses or "degraded" in statuses:
             provider.health_status = "degraded"
             provider.circuit_state = "closed"
+            ProviderService._refresh_provider_content_integrity_state(provider, enabled_models)
             return
 
         provider.health_status = "unknown"
         provider.circuit_state = "closed"
+        ProviderService._refresh_provider_content_integrity_state(provider, enabled_models)
+
+    @staticmethod
+    def _refresh_provider_content_integrity_state(provider: Provider, enabled_models: list[ProviderModel]) -> None:
+        if not enabled_models:
+            provider.content_integrity_status = "unknown"
+            provider.trust_level = "standard"
+            provider.content_integrity_score = max(80, int(provider.content_integrity_score or 80))
+            return
+
+        statuses = {str(item.content_integrity_status or "unknown") for item in enabled_models}
+        if statuses == {"passed"}:
+            provider.content_integrity_status = "passed"
+            provider.trust_level = "trusted"
+            provider.content_integrity_score = max(80, int(provider.content_integrity_score or 80))
+            if provider.circuit_state == "open" and provider.health_status != "unhealthy":
+                provider.circuit_state = "closed"
+            return
+        if "blocked" in statuses:
+            provider.content_integrity_status = "blocked"
+            provider.trust_level = "blocked"
+            provider.content_integrity_score = min(20, int(provider.content_integrity_score or 20))
+            provider.circuit_state = "open"
+            return
+        if "degraded" in statuses:
+            provider.content_integrity_status = "degraded"
+            if provider.trust_level == "blocked":
+                provider.trust_level = "low"
+            provider.content_integrity_score = max(21, min(79, int(provider.content_integrity_score or 60)))
+            return
+        provider.content_integrity_status = "unknown"
+        if provider.trust_level == "blocked":
+            provider.trust_level = "standard"
+        provider.content_integrity_score = max(60, int(provider.content_integrity_score or 80))
 
     @staticmethod
     def _resolve_model_configs(payload: ProviderCreate | ProviderUpdate, provider: Provider | None = None) -> list[ProviderModelConfigInput]:
@@ -1687,10 +1729,10 @@ API Key: sk-yyyy
                 model_name=item.model_name,
                 enabled=item.enabled,
                 priority=item.priority,
-                weight=item.weight,
                 supports_stream=item.supports_stream,
                 supports_vision=item.supports_vision,
                 supports_tools=item.supports_tools,
+                supports_image_generation=item.supports_image_generation,
                 supports_chat_completions=item.supports_chat_completions,
                 supports_responses=item.supports_responses,
                 context_window_tokens=item.context_window_tokens,
@@ -1700,6 +1742,7 @@ API Key: sk-yyyy
                 input_price_per_1k=item.input_price_per_1k,
                 output_price_per_1k=item.output_price_per_1k,
                 cache_price_per_1k=item.cache_price_per_1k,
+                cache_write_price_per_1k=item.cache_write_price_per_1k,
             )
             for item in provider.provider_models
         ]
@@ -1718,13 +1761,21 @@ API Key: sk-yyyy
                 db.add(provider_model)
             provider_model.enabled = config.enabled
             provider_model.priority = config.priority
-            provider_model.weight = config.weight
             provider_model.price_multiplier = to_multiplier_decimal(config.price_multiplier)
             catalog = catalogs_by_name.get(config.model_name)
             if catalog is not None:
                 ProviderService._sync_provider_model_from_catalog(provider_model, catalog)
+            else:
+                provider_model.input_price_per_1k = to_price_decimal(config.input_price_per_1k)
+                provider_model.output_price_per_1k = to_price_decimal(config.output_price_per_1k)
+                provider_model.cache_price_per_1k = to_price_decimal(config.cache_price_per_1k)
+                provider_model.cache_write_price_per_1k = to_price_decimal(config.cache_write_price_per_1k)
             provider_model.supports_chat_completions = bool(config.supports_chat_completions)
             provider_model.supports_responses = bool(config.supports_responses)
+            provider_model.supports_stream = bool(config.supports_stream)
+            provider_model.supports_vision = bool(config.supports_vision)
+            provider_model.supports_tools = bool(config.supports_tools)
+            provider_model.supports_image_generation = bool(config.supports_image_generation)
             if provider_model.health_status not in {"healthy", "degraded", "unhealthy"}:
                 provider_model.health_status = "unknown"
             if not provider_model.circuit_state:
@@ -1790,9 +1841,6 @@ API Key: sk-yyyy
 
     @staticmethod
     def _sync_provider_model_from_catalog(provider_model: ProviderModel, catalog: ModelCatalog) -> None:
-        provider_model.supports_stream = catalog.supports_stream
-        provider_model.supports_vision = catalog.supports_vision
-        provider_model.supports_tools = catalog.supports_tools
         provider_model.context_window_tokens = catalog.context_window_tokens
         provider_model.max_input_tokens = catalog.max_input_tokens
         provider_model.max_output_tokens = catalog.max_output_tokens
@@ -1807,6 +1855,11 @@ API Key: sk-yyyy
         provider_model.input_price_per_1k = resolved_prices["input_price_per_1k"]
         provider_model.output_price_per_1k = resolved_prices["output_price_per_1k"]
         provider_model.cache_price_per_1k = resolved_prices["cache_price_per_1k"]
+        provider_model.cache_write_price_per_1k = (
+            resolved_prices.get("cache_write_price_per_1k")
+            if resolved_prices.get("cache_write_price_per_1k") is not None
+            else provider_model.input_price_per_1k
+        )
 
     @staticmethod
     def _sync_models_json(provider: Provider) -> None:

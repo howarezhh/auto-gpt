@@ -150,6 +150,17 @@ def main() -> None:
         ),
         "model-specific failure may fail over mapped targets",
     )
+    global_retry_off = type("Setting", (), {"route_exhausted_retry_infinite_enabled": False})()
+    global_retry_on = type("Setting", (), {"route_exhausted_retry_infinite_enabled": True})()
+    api_key_context = RoutePolicyContext()
+    _assert(
+        not ProxyService._route_exhausted_retry_infinite_enabled(global_retry_off, api_key_context),
+        "infinite retry must be disabled when the global infinite retry switch is off",
+    )
+    _assert(
+        ProxyService._route_exhausted_retry_infinite_enabled(global_retry_on, api_key_context),
+        "infinite retry should be controlled by the global switch only",
+    )
 
     healthy_low_score = _candidate(1, 11, health_tier=0, route_score=10.0)
     unhealthy_high_score = _candidate(2, 22, health_tier=2, route_score=999.0)
@@ -157,11 +168,7 @@ def main() -> None:
         None,
         [unhealthy_high_score, healthy_low_score],
         sticky_key=None,
-        route_context=RoutePolicyContext(
-            route_mode="auto",
-            default_provider_id=None,
-            manual_allow_fallback=True,
-        ),
+        route_context=RoutePolicyContext(),
     )
     _assert(ordered[0].provider.id == 1, "healthy route candidate must outrank unhealthy high-score fallback")
 
@@ -176,11 +183,7 @@ def main() -> None:
             None,
             [sticky_b, sticky_a],
             sticky_key="stage25-session",
-            route_context=RoutePolicyContext(
-                route_mode="auto",
-                default_provider_id=None,
-                manual_allow_fallback=True,
-            ),
+            route_context=RoutePolicyContext(),
         )
     _assert(sticky_ordered[0].provider.id == 3, "same health tier should prefer recent session candidate")
 
@@ -190,20 +193,16 @@ def main() -> None:
         None,
         [default_unhealthy, fallback_healthy],
         sticky_key=None,
-        route_context=RoutePolicyContext(
-            route_mode="failover",
-            default_provider_id=5,
-            manual_allow_fallback=True,
-        ),
+        route_context=RoutePolicyContext(),
     )
-    _assert(failover_ordered[0].provider.id == 6, "unhealthy default provider must not leapfrog healthy fallback")
+    _assert(failover_ordered[0].provider.id == 6, "unhealthy provider must not leapfrog healthy fallback")
 
     mapped_targets = [
         {"model_name": "unhealthy-target", "available": True, "health_tier": 2, "score": 999, "priority": 1, "weight": 100, "order": 0},
         {"model_name": "healthy-target", "available": True, "health_tier": 0, "score": 10, "priority": 99, "weight": 100, "order": 1},
     ]
     mapped_ordered = ModelMappingService._order_targets(mapped_targets, strategy="auto", sticky_key="stage25-session")
-    _assert(mapped_ordered[0]["model_name"] == "healthy-target", "model mapping must choose healthy target first")
+    _assert(mapped_ordered[0]["model_name"] == "unhealthy-target", "model mapping must preserve target config order; provider health is handled later")
 
     asyncio.run(_check_request_log_idle_wait_counts_ingress())
     print("stage25 error retry routing realtime regression check passed")

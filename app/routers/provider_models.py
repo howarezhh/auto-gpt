@@ -9,6 +9,7 @@ from app.services.health_service import HealthService
 from app.services.admin_audit_service import AdminAuditService
 from app.services.provider_service import ProviderService
 from app.services.user_auth_service import UserAuthService
+from app.utils.test_features import normalize_test_features, phase_keys_from_test_features
 
 
 router = APIRouter(prefix="/api/provider-models", tags=["provider-models"])
@@ -66,6 +67,7 @@ async def test_provider_model(
     if provider is None:
         raise HTTPException(status_code=404, detail="Provider not found")
     body = payload or {}
+    features = normalize_test_features(body, single_model=True)
     _record_provider_model_audit(
         db,
         request=request,
@@ -75,8 +77,7 @@ async def test_provider_model(
         summary=f"触发单模型测试：{provider.name} / {provider_model.model_name}",
         detail={
             "provider_id": provider.id,
-            "stream_probe": body.get("stream_probe") is True,
-            "vision_probe": body.get("vision_probe") is True,
+            "features": features,
         },
     )
     return await HealthService.check_provider_model(
@@ -85,6 +86,12 @@ async def test_provider_model(
         provider_model,
         stream_probe=body.get("stream_probe") is True,
         vision_probe=body.get("vision_probe") is True,
+        phase_keys=phase_keys_from_test_features(features),
+        text_probe_max_tokens=HealthService.INTERACTIVE_TEXT_PROBE_MAX_TOKENS,
+        capability_probe_max_tokens=HealthService.INTERACTIVE_CAPABILITY_PROBE_MAX_TOKENS,
+        interactive_mode=True,
+        parallel_phases=True,
+        single_endpoint_mode=True,
     )
 
 
@@ -112,7 +119,19 @@ async def test_all_provider_models(request: Request, db: Session = Depends(get_d
                     "provider_name": provider.name,
                     "provider_model_id": provider_model.id,
                     "model_name": provider_model.model_name,
-                    **(await HealthService.check_provider_model(db, provider, provider_model)),
+                    **(
+                        await HealthService.check_provider_model(
+                            db,
+                            provider,
+                            provider_model,
+                            phase_keys=HealthService.INTERACTIVE_TEXT_PROBE_PHASE_KEYS,
+                            text_probe_max_tokens=HealthService.INTERACTIVE_TEXT_PROBE_MAX_TOKENS,
+                            capability_probe_max_tokens=HealthService.INTERACTIVE_CAPABILITY_PROBE_MAX_TOKENS,
+                            interactive_mode=True,
+                            parallel_phases=True,
+                            single_endpoint_mode=True,
+                        )
+                    ),
                 }
             )
     return results

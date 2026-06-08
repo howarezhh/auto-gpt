@@ -58,18 +58,27 @@ class ModelCatalogService:
         return changed
 
     @staticmethod
-    def _catalog_supports_tools(catalog: ModelCatalog) -> bool:
-        """判断目录模型是否支持工具调用。"""
-        return bool(catalog.supports_tools or ProviderService.model_name_supports_tools(catalog.model_name))
+    def _catalog_default_capabilities(catalog: ModelCatalog) -> dict[str, bool]:
+        """未挂载任何提供商模型时，使用目录模型的默认能力。"""
+        return {
+            "supports_stream": bool(catalog.supports_stream),
+            "supports_tools": bool(catalog.supports_tools),
+            "supports_vision": bool(catalog.supports_vision),
+            "supports_image_generation": False,
+        }
 
     @staticmethod
-    def _catalog_supports_image_generation(catalog: ModelCatalog) -> bool:
-        """判断目录模型是否适合图像生成链路。"""
-        return bool(
-            catalog.supports_responses
-            and ModelCatalogService._catalog_supports_tools(catalog)
-            and (catalog.supports_vision or ProviderService.model_name_supports_image_generation(catalog.model_name))
-        )
+    def _aggregate_capabilities_from_bindings(catalog: ModelCatalog, bindings: list[dict]) -> dict[str, bool]:
+        """模型展示能力由所有已挂载提供商模型能力 OR 聚合而来。"""
+        active_bindings = [item for item in bindings if item.get("bound")]
+        if not active_bindings:
+            return ModelCatalogService._catalog_default_capabilities(catalog)
+        return {
+            "supports_stream": any(bool(item.get("supports_stream")) for item in active_bindings),
+            "supports_tools": any(bool(item.get("supports_tools")) for item in active_bindings),
+            "supports_vision": any(bool(item.get("supports_vision")) for item in active_bindings),
+            "supports_image_generation": any(bool(item.get("supports_image_generation")) for item in active_bindings),
+        }
 
     @staticmethod
     def list_catalogs(db: Session) -> list[ModelCatalog]:
@@ -90,7 +99,7 @@ class ModelCatalogService:
     @staticmethod
     def list_model_option_dicts(db: Session) -> list[dict]:
         """返回适合下拉框与引用型页面的轻量模型列表。"""
-        cache_key = "model-options:list"
+        cache_key = "model-options:v2:list"
         cached = CacheService.get(cache_key)
         if isinstance(cached, list):
             return cached
@@ -248,9 +257,6 @@ class ModelCatalogService:
         if changed_price_fields:
             ModelCatalogService._sync_provider_prices_from_catalog(db, catalog, price_fields=changed_price_fields)
         if {
-            "supports_stream",
-            "supports_vision",
-            "supports_tools",
             "context_window_tokens",
             "max_input_tokens",
             "max_output_tokens",
@@ -399,15 +405,6 @@ class ModelCatalogService:
                 changed = True
 
             for item in items:
-                if item.supports_stream != catalog.supports_stream:
-                    item.supports_stream = catalog.supports_stream
-                    changed = True
-                if item.supports_vision != catalog.supports_vision:
-                    item.supports_vision = catalog.supports_vision
-                    changed = True
-                if item.supports_tools != catalog.supports_tools:
-                    item.supports_tools = catalog.supports_tools
-                    changed = True
                 for field in ("context_window_tokens", "max_input_tokens", "max_output_tokens"):
                     if getattr(item, field) != getattr(catalog, field):
                         setattr(item, field, getattr(catalog, field))
@@ -473,18 +470,24 @@ class ModelCatalogService:
                 for binding in allowed_bindings
                 if binding["effective_cache_price_per_1k"] is not None
             ]
+            filtered_cache_write_prices = [
+                binding["effective_cache_write_price_per_1k"]
+                for binding in allowed_bindings
+                if binding["effective_cache_write_price_per_1k"] is not None
+            ]
             if not filtered_names:
                 continue
+            capability_summary = ModelCatalogService._aggregate_capabilities_from_bindings(catalog, allowed_bindings)
             payloads.append(
                 {
                     "model_name": catalog.model_name,
                     "display_name": catalog.display_name,
                     "speed_label": catalog.speed_label,
                     "remark": catalog.remark,
-                    "supports_stream": catalog.supports_stream,
-                    "supports_vision": catalog.supports_vision,
-                    "supports_tools": ModelCatalogService._catalog_supports_tools(catalog),
-                    "supports_image_generation": ModelCatalogService._catalog_supports_image_generation(catalog),
+                    "supports_stream": capability_summary["supports_stream"],
+                    "supports_vision": capability_summary["supports_vision"],
+                    "supports_tools": capability_summary["supports_tools"],
+                    "supports_image_generation": capability_summary["supports_image_generation"],
                     "supports_chat_completions": catalog.supports_chat_completions,
                     "supports_responses": catalog.supports_responses,
                     "context_window_tokens": catalog.context_window_tokens,
@@ -502,6 +505,11 @@ class ModelCatalogService:
                             if catalog.cache_price_per_1k is not None
                             else catalog.input_price_per_1k
                         )
+                    ),
+                    "cache_write_price_per_1k": (
+                        min(filtered_cache_write_prices)
+                        if filtered_cache_write_prices
+                        else catalog.input_price_per_1k
                     ),
                     "available_provider_names": filtered_names,
                     "enabled_provider_count": len(filtered_names),
@@ -595,6 +603,7 @@ class ModelCatalogService:
         bindings = []
         for provider in providers:
             provider_model = provider_model_map.get(provider.id)
+            provider_model_payload = ProviderService.provider_model_to_dict(provider_model) if provider_model else {}
             if provider_model is None and not include_all_providers:
                 continue
             effective_input = ModelCatalogService._effective_price_per_1k(
@@ -616,6 +625,11 @@ class ModelCatalogService:
                 direct_price_per_1k=provider_model.cache_price_per_1k if provider_model else None,
                 price_multiplier=provider_model.price_multiplier if provider_model else 1.0,
             )
+            effective_cache_write = ModelCatalogService._effective_price_per_1k(
+                base_price_per_1k=catalog.input_price_per_1k,
+                direct_price_per_1k=provider_model.cache_write_price_per_1k if provider_model else None,
+                price_multiplier=provider_model.price_multiplier if provider_model else 1.0,
+            )
             bindings.append(
                 {
                     "provider_id": provider.id,
@@ -625,18 +639,30 @@ class ModelCatalogService:
                     "provider_circuit_state": provider.circuit_state,
                     "provider_maintenance_mode_enabled": provider.maintenance_mode_enabled,
                     "bound": provider_model is not None,
+                    "provider_model_id": provider_model.id if provider_model else None,
                     "enabled": provider_model.enabled if provider_model else False,
                     "priority": provider_model.priority if provider_model else 100,
-                    "weight": provider_model.weight if provider_model else 100,
                     "price_multiplier": provider_model.price_multiplier if provider_model else 1.0,
                     "model_health_status": provider_model.health_status if provider_model else None,
                     "model_circuit_state": provider_model.circuit_state if provider_model else None,
+                    "supports_stream": provider_model_payload.get("supports_stream", False),
+                    "supports_tools": provider_model_payload.get("supports_tools", False),
+                    "supports_vision": provider_model_payload.get("supports_vision", False),
+                    "supports_image_generation": provider_model_payload.get("supports_image_generation", False),
                     "effective_input_price_per_1k": effective_input,
                     "effective_output_price_per_1k": effective_output,
                     "effective_cache_price_per_1k": effective_cache,
+                    "effective_cache_write_price_per_1k": effective_cache_write,
                     "direct_input_price_per_1k": provider_model.input_price_per_1k if provider_model else None,
                     "direct_output_price_per_1k": provider_model.output_price_per_1k if provider_model else None,
                     "direct_cache_price_per_1k": provider_model.cache_price_per_1k if provider_model else None,
+                    "direct_cache_write_price_per_1k": provider_model.cache_write_price_per_1k if provider_model else None,
+                    "trust_status": provider_model_payload.get("trust_status", "unknown"),
+                    "trust_status_label": provider_model_payload.get("trust_status_label", "未检测"),
+                    "trust_status_reason": provider_model_payload.get("trust_status_reason"),
+                    "content_integrity_status": provider_model_payload.get("content_integrity_status", "unknown"),
+                    "content_probe_last_passed_at": provider_model_payload.get("content_probe_last_passed_at"),
+                    "content_probe_last_failed_at": provider_model_payload.get("content_probe_last_failed_at"),
                 }
             )
 
@@ -645,23 +671,26 @@ class ModelCatalogService:
             item for item in active_bindings if ModelCatalogService._is_binding_available_for_catalog_display(item)
         ]
         enabled_bindings = [item for item in active_bindings if ModelCatalogService._is_binding_routable(item)]
+        trusted_bindings = [item for item in active_bindings if item.get("trust_status") == "trusted"]
         health_status = "healthy" if enabled_bindings else "unhealthy"
         input_prices = [item["effective_input_price_per_1k"] for item in enabled_bindings if item["effective_input_price_per_1k"] is not None]
         output_prices = [item["effective_output_price_per_1k"] for item in enabled_bindings if item["effective_output_price_per_1k"] is not None]
         cache_prices = [item["effective_cache_price_per_1k"] for item in enabled_bindings if item["effective_cache_price_per_1k"] is not None]
+        cache_write_prices = [item["effective_cache_write_price_per_1k"] for item in enabled_bindings if item["effective_cache_write_price_per_1k"] is not None]
         bound_multipliers = [item["price_multiplier"] for item in active_bindings]
         routable_multipliers = [item["price_multiplier"] for item in enabled_bindings]
         avg_bound_price_multiplier = ModelCatalogService._average_multiplier(bound_multipliers)
         avg_routable_price_multiplier = ModelCatalogService._average_multiplier(routable_multipliers)
+        capability_summary = ModelCatalogService._aggregate_capabilities_from_bindings(catalog, active_bindings)
         return {
             "id": catalog.id,
             "model_name": catalog.model_name,
             "display_name": catalog.display_name,
             "enabled": catalog.enabled,
-            "supports_stream": catalog.supports_stream,
-            "supports_vision": catalog.supports_vision,
-            "supports_tools": ModelCatalogService._catalog_supports_tools(catalog),
-            "supports_image_generation": ModelCatalogService._catalog_supports_image_generation(catalog),
+            "supports_stream": capability_summary["supports_stream"],
+            "supports_vision": capability_summary["supports_vision"],
+            "supports_tools": capability_summary["supports_tools"],
+            "supports_image_generation": capability_summary["supports_image_generation"],
             "supports_chat_completions": catalog.supports_chat_completions,
             "supports_responses": catalog.supports_responses,
             "context_window_tokens": catalog.context_window_tokens,
@@ -678,6 +707,7 @@ class ModelCatalogService:
             "bound_provider_count": len(active_bindings),
             "available_provider_count": len(available_bindings),
             "enabled_provider_count": len(enabled_bindings),
+            "trusted_provider_count": len(trusted_bindings),
             "health_status": health_status,
             "healthy_provider_count": len(enabled_bindings),
             "unhealthy_provider_count": max(0, len(active_bindings) - len(enabled_bindings)),
@@ -692,6 +722,7 @@ class ModelCatalogService:
                     else catalog.input_price_per_1k
                 )
             ),
+            "lowest_cache_write_price_per_1k": min(cache_write_prices) if cache_write_prices else catalog.input_price_per_1k,
             "avg_price_multiplier": avg_bound_price_multiplier,
             "avg_bound_price_multiplier": avg_bound_price_multiplier,
             "avg_routable_price_multiplier": avg_routable_price_multiplier,
@@ -758,16 +789,16 @@ class ModelCatalogService:
 
             if provider_model is None:
                 provider_model = ProviderModel(provider=provider, model_name=catalog.model_name)
+                provider_model.supports_stream = catalog.supports_stream
+                provider_model.supports_vision = catalog.supports_vision
+                provider_model.supports_tools = catalog.supports_tools
+                provider_model.supports_image_generation = False
                 db.add(provider_model)
             provider_model.enabled = binding.enabled
-            provider_model.supports_stream = catalog.supports_stream
-            provider_model.supports_vision = catalog.supports_vision
-            provider_model.supports_tools = catalog.supports_tools
             provider_model.context_window_tokens = catalog.context_window_tokens
             provider_model.max_input_tokens = catalog.max_input_tokens
             provider_model.max_output_tokens = catalog.max_output_tokens
             provider_model.priority = binding.priority
-            provider_model.weight = binding.weight
             provider_model.price_multiplier = to_multiplier_decimal(binding.price_multiplier)
             resolved_prices = ModelPricingService.resolve_catalog_prices_for_provider(
                 pricing_mode=catalog.pricing_mode,
@@ -780,6 +811,11 @@ class ModelCatalogService:
             provider_model.input_price_per_1k = resolved_prices["input_price_per_1k"]
             provider_model.output_price_per_1k = resolved_prices["output_price_per_1k"]
             provider_model.cache_price_per_1k = resolved_prices["cache_price_per_1k"]
+            provider_model.cache_write_price_per_1k = (
+                resolved_prices.get("cache_write_price_per_1k")
+                if resolved_prices.get("cache_write_price_per_1k") is not None
+                else provider_model.input_price_per_1k
+            )
             ProviderService.refresh_provider_state(provider)
 
         for provider in providers:
@@ -811,19 +847,15 @@ class ModelCatalogService:
             provider_model.input_price_per_1k = resolved_prices["input_price_per_1k"]
             provider_model.output_price_per_1k = resolved_prices["output_price_per_1k"]
             provider_model.cache_price_per_1k = resolved_prices["cache_price_per_1k"]
+            provider_model.cache_write_price_per_1k = (
+                resolved_prices.get("cache_write_price_per_1k")
+                if resolved_prices.get("cache_write_price_per_1k") is not None
+                else provider_model.input_price_per_1k
+            )
 
     @staticmethod
     def _sync_provider_model_shared_fields(provider_model: ProviderModel, catalog: ModelCatalog) -> bool:
         changed = False
-        if provider_model.supports_stream != catalog.supports_stream:
-            provider_model.supports_stream = catalog.supports_stream
-            changed = True
-        if provider_model.supports_vision != catalog.supports_vision:
-            provider_model.supports_vision = catalog.supports_vision
-            changed = True
-        if provider_model.supports_tools != catalog.supports_tools:
-            provider_model.supports_tools = catalog.supports_tools
-            changed = True
         for field in (
             "context_window_tokens",
             "max_input_tokens",
@@ -1090,9 +1122,6 @@ class ModelCatalogService:
             )
         )
         for provider_model in provider_models:
-            provider_model.supports_stream = catalog.supports_stream
-            provider_model.supports_vision = catalog.supports_vision
-            provider_model.supports_tools = catalog.supports_tools
             provider_model.context_window_tokens = catalog.context_window_tokens
             provider_model.max_input_tokens = catalog.max_input_tokens
             provider_model.max_output_tokens = catalog.max_output_tokens
@@ -1159,8 +1188,6 @@ class ModelCatalogService:
         scopes = []
         for item in owned_keys:
             provider_ids = {binding.provider_id for binding in item.provider_bindings}
-            if item.default_provider_id is not None:
-                provider_ids.add(item.default_provider_id)
             if not provider_ids:
                 continue
             scopes.append(

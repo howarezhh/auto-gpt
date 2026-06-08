@@ -1071,8 +1071,8 @@ class ResponsesChatAdapterService:
 
     @staticmethod
     def _storage_type() -> str:
-        value = str(ResponsesChatAdapterService._setting_value("responses_chat_adapter_storage_type", "memory") or "memory").strip().lower()
-        return value or "memory"
+        value = str(ResponsesChatAdapterService._setting_value("responses_chat_adapter_storage_type", "database") or "database").strip().lower()
+        return value or "database"
 
     @staticmethod
     def _ttl_seconds() -> int:

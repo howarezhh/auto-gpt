@@ -7,7 +7,9 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.datastructures import FormData, Headers
 from starlette.concurrency import run_in_threadpool
+from starlette.formparsers import MultiPartParser
 
 from app.database import SessionLocal
 from app.services.asset_service import AssetService
@@ -66,10 +68,7 @@ async def _acquire_request_concurrency(
             api_client_key_prefix=api_key.key_prefix,
             user_account_id=api_key.owner_user_id,
             user_account_name=api_key.owner_user.username if api_key.owner_user else None,
-            remaining_tokens=api_client_auth.remaining_tokens,
             remaining_balance=api_client_auth.remaining_balance,
-            remaining_requests_daily=api_client_auth.remaining_requests_daily,
-            remaining_cost_daily=api_client_auth.remaining_cost_daily,
             policy_snapshot_json=api_client_auth.policy_snapshot_json,
         ) from exc
     except Exception as exc:
@@ -83,10 +82,7 @@ async def _acquire_request_concurrency(
             api_client_key_prefix=api_key.key_prefix,
             user_account_id=api_key.owner_user_id,
             user_account_name=api_key.owner_user.username if api_key.owner_user else None,
-            remaining_tokens=api_client_auth.remaining_tokens,
             remaining_balance=api_client_auth.remaining_balance,
-            remaining_requests_daily=api_client_auth.remaining_requests_daily,
-            remaining_cost_daily=api_client_auth.remaining_cost_daily,
             policy_snapshot_json=api_client_auth.policy_snapshot_json,
         ) from exc
 
@@ -255,10 +251,57 @@ async def _prepare_v1_body_limit_context(request: Request, *, endpoint_path: str
     return setting, limit, max_logged_body_bytes
 
 
+async def _read_limited_v1_raw_body(request: Request, *, endpoint_path: str) -> tuple[bytes, int]:
+    """按应用层上限流式读取非 JSON 请求体，避免 multipart 绕过 Content-Length。"""
+    setting, limit, max_logged_body_bytes = await _prepare_v1_body_limit_context(request, endpoint_path=endpoint_path)
+    body = bytearray()
+    async for chunk in request.stream():
+        if not chunk:
+            continue
+        if limit > 0 and len(body) + len(chunk) > limit:
+            request.state.v1_request_body_structure_json = _truncate_json_for_log(
+                {
+                    "_summary": "request body structure omitted because streamed multipart body exceeds application limit",
+                    "structure": {
+                        "type": "bytes",
+                        "bytes_read": len(body),
+                        "max_v1_request_body_bytes": limit,
+                    },
+                },
+                max_logged_body_bytes,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail={
+                    "message": f"请求体大小超过应用层上限 {limit} 字节",
+                    "code": "request_body_too_large",
+                    "max_v1_request_body_bytes": limit,
+                    "endpoint_path": f"/v1{endpoint_path}",
+                },
+            )
+        body.extend(chunk)
+    return bytes(body), max_logged_body_bytes
+
+
+async def _parse_limited_v1_multipart_form(request: Request, *, endpoint_path: str) -> tuple[FormData, int]:
+    body, max_logged_body_bytes = await _read_limited_v1_raw_body(request, endpoint_path=endpoint_path)
+
+    async def stream() -> AsyncIterator[bytes]:
+        yield body
+
+    parser = MultiPartParser(Headers(raw=request.headers.raw), stream())
+    try:
+        return await parser.parse(), max_logged_body_bytes
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"message": "multipart 请求体解析失败", "code": "invalid_multipart_body"},
+        ) from exc
+
+
 async def _read_v1_multipart_payload(request: Request, *, endpoint_path: str) -> tuple[list[tuple[str, str]], list[tuple[str, tuple[str, bytes, str]]]]:
     """读取 OpenAI 兼容 multipart 请求并生成安全日志摘要。"""
-    _setting, _limit, max_logged_body_bytes = await _prepare_v1_body_limit_context(request, endpoint_path=endpoint_path)
-    form = await request.form()
+    form, max_logged_body_bytes = await _parse_limited_v1_multipart_form(request, endpoint_path=endpoint_path)
     fields: list[tuple[str, str]] = []
     files: list[tuple[str, tuple[str, bytes, str]]] = []
     summary_items: list[dict[str, object]] = []
@@ -355,8 +398,7 @@ def _normalize_legacy_image_values(value, *, field_name: str) -> list[dict[str, 
 
 
 async def _read_legacy_image_edit_form_payload(request: Request) -> tuple[dict, list[str], list[str], str]:
-    _setting, _limit, max_logged_body_bytes = await _prepare_v1_body_limit_context(request, endpoint_path="/images/edits")
-    form = await request.form()
+    form, max_logged_body_bytes = await _parse_limited_v1_multipart_form(request, endpoint_path="/images/edits")
     image_items = list(form.getlist("image")) or list(form.getlist("image[]"))
     mask_items = list(form.getlist("mask")) or list(form.getlist("mask[]"))
     image_entries: list[dict[str, object]] = []
@@ -1708,7 +1750,7 @@ def _log_unsupported_v1_endpoint(
     try:
         LogService.create_log(
             db,
-            log_type="api_client_auth",
+            log_type="unsupported_endpoint",
             trace_id=trace_id,
             request_path=request_path,
             source_ip=source_ip,
@@ -1725,9 +1767,6 @@ def _log_unsupported_v1_endpoint(
             user_account_id=api_key.owner_user_id,
             user_account_name=api_key.owner_user.username if api_key.owner_user else None,
             api_client_auth_result="authenticated",
-            api_client_remaining_tokens=api_client_auth.remaining_tokens,
-            api_client_remaining_requests_daily=api_client_auth.remaining_requests_daily,
-            api_client_remaining_cost_daily=api_client_auth.remaining_cost_daily,
             api_client_policy_snapshot_json=api_client_auth.policy_snapshot_json,
             request_body_json=request_body_json,
             response_body_json=dumps_json({"error": detail}),
@@ -1749,7 +1788,7 @@ def _log_v1_preflight(
     try:
         LogService.create_log(
             db,
-            log_type="api_client_auth",
+            log_type="v1_preflight",
             trace_id=trace_id,
             request_path=request_path,
             source_ip=source_ip,
@@ -1793,9 +1832,6 @@ def _log_v1_models_request(
             user_account_id=api_key.owner_user_id,
             user_account_name=api_key.owner_user.username if api_key.owner_user else None,
             api_client_auth_result="authenticated",
-            api_client_remaining_tokens=api_client_auth.remaining_tokens,
-            api_client_remaining_requests_daily=api_client_auth.remaining_requests_daily,
-            api_client_remaining_cost_daily=api_client_auth.remaining_cost_daily,
             api_client_policy_snapshot_json=api_client_auth.policy_snapshot_json,
             response_body_json=dumps_json({"object": "list", "model_count": model_count}),
             trace=[{"result": "models_list_success", "model_count": model_count, "latency_ms": 0}],
@@ -1841,9 +1877,6 @@ def _log_v1_model_retrieve_request(
             user_account_id=api_key.owner_user_id,
             user_account_name=api_key.owner_user.username if api_key.owner_user else None,
             api_client_auth_result="authenticated",
-            api_client_remaining_tokens=api_client_auth.remaining_tokens,
-            api_client_remaining_requests_daily=api_client_auth.remaining_requests_daily,
-            api_client_remaining_cost_daily=api_client_auth.remaining_cost_daily,
             api_client_policy_snapshot_json=api_client_auth.policy_snapshot_json,
             response_body_json=dumps_json({"object": "model", "id": model_id} if success else {"error": {"code": error_code, "model": model_id}}),
             trace=[{"result": "model_retrieve_success" if success else "model_retrieve_failed", "model": model_id, "latency_ms": 0}],

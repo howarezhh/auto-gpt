@@ -319,8 +319,7 @@ def main() -> None:
                     route_context=RoutePolicyContext(
                         route_mode="failover",
                         default_provider_id=no_tools_provider["id"],
-                        manual_allow_fallback=True,
-                        allowed_provider_ids=[no_tools_provider["id"], glm_provider["id"]],
+                                        allowed_provider_ids=[no_tools_provider["id"], glm_provider["id"]],
                     ),
                     require_tools=True,
                     require_chat_completions=True,
@@ -334,8 +333,7 @@ def main() -> None:
                     route_context=RoutePolicyContext(
                         route_mode="failover",
                         default_provider_id=no_tools_provider["id"],
-                        manual_allow_fallback=True,
-                        allowed_provider_ids=[no_tools_provider["id"], glm_provider["id"]],
+                                        allowed_provider_ids=[no_tools_provider["id"], glm_provider["id"]],
                     ),
                     require_tools=True,
                     require_chat_completions=True,

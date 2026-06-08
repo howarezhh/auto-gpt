@@ -8,7 +8,6 @@ class ModelProviderBindingBase(BaseModel):
     bound: bool = True
     enabled: bool = True
     priority: int = 100
-    weight: int = 100
     price_multiplier: float = Field(default=1.0, gt=0)
 
 
@@ -27,9 +26,11 @@ class ModelProviderBindingOut(ModelProviderBindingBase):
     effective_input_price_per_1k: float | None = None
     effective_output_price_per_1k: float | None = None
     effective_cache_price_per_1k: float | None = None
+    effective_cache_write_price_per_1k: float | None = None
     direct_input_price_per_1k: float | None = None
     direct_output_price_per_1k: float | None = None
     direct_cache_price_per_1k: float | None = None
+    direct_cache_write_price_per_1k: float | None = None
 
 
 class ModelCatalogBase(BaseModel):
@@ -124,6 +125,7 @@ class ModelCatalogOut(ModelCatalogBase):
     lowest_input_price_per_1k: float | None = None
     lowest_output_price_per_1k: float | None = None
     lowest_cache_price_per_1k: float | None = None
+    lowest_cache_write_price_per_1k: float | None = None
     avg_price_multiplier: float | None = None
     avg_bound_price_multiplier: float | None = None
     avg_routable_price_multiplier: float | None = None
@@ -194,5 +196,6 @@ class UserModelOut(BaseModel):
     input_price_per_1k: float | None = None
     output_price_per_1k: float | None = None
     cache_price_per_1k: float | None = None
+    cache_write_price_per_1k: float | None = None
     available_provider_names: list[str] = Field(default_factory=list)
     enabled_provider_count: int = 0

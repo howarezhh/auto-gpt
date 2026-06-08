@@ -87,12 +87,6 @@ class ModelMappingOut(ModelMappingBase):
 
 class ModelMappingSelectionProbe(BaseModel):
     source_model_name: str = Field(..., min_length=1)
-    require_vision: bool = False
-    require_stream: bool = False
-    require_tools: bool = False
-    require_image_generation: bool = False
-    require_chat_completions: bool = False
-    require_responses: bool = False
 
     @field_validator("source_model_name")
     @classmethod

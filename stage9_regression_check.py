@@ -149,9 +149,7 @@ def _assert_stream_routing_uses_supported_provider(*, expected_provider_id: int)
             model_name="stream-model",
             route_context=RoutePolicyContext(
                 route_mode="failover",
-                default_provider_id=expected_provider_id,
-                manual_allow_fallback=True,
-                allowed_provider_ids=[expected_provider_id],
+                        allowed_provider_ids=[expected_provider_id],
             ),
             require_stream=True,
         )
@@ -170,9 +168,7 @@ def _assert_non_stream_model_is_filtered(*, provider_id: int) -> None:
             model_name="nonstream-model",
             route_context=RoutePolicyContext(
                 route_mode="failover",
-                default_provider_id=provider_id,
-                manual_allow_fallback=True,
-                allowed_provider_ids=[provider_id],
+                        allowed_provider_ids=[provider_id],
             ),
             require_stream=True,
         )

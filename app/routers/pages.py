@@ -12,11 +12,13 @@ from app.routers.dashboard import build_dashboard_payload
 from app.services.provider_service import ProviderService
 from app.services.setting_service import SettingService
 from app.services.user_auth_service import USER_ROLE_ADMIN, UserAuthService
+from app.utils.display_format import register_display_filters
 from app.utils.json_utils import to_jsonable
 
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
+register_display_filters(templates)
 
 
 def _build_dashboard_stat_cards(stats: dict) -> list[dict]:

@@ -19,7 +19,6 @@ class Provider(Base):
     region_tag: Mapped[str | None] = mapped_column(Text, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
-    weight: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
     timeout_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=30000)
     max_retries: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
     max_active_requests: Mapped[int | None] = mapped_column(Integer, nullable=True, default=20)
@@ -62,3 +61,11 @@ class Provider(Base):
         cascade="all, delete-orphan",
         order_by="ProviderModel.priority.asc(), ProviderModel.id.asc()",
     )
+
+    @property
+    def weight(self) -> int:
+        return int(self.priority or 100)
+
+    @weight.setter
+    def weight(self, value: int | None) -> None:
+        self.priority = int(value or 100)

@@ -21,7 +21,6 @@ class ProviderModel(Base):
     model_name: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
-    weight: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
     health_status: Mapped[str] = mapped_column(Text, nullable=False, default="unknown")
     last_check_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -33,6 +32,7 @@ class ProviderModel(Base):
     supports_stream: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     supports_vision: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     supports_tools: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    supports_image_generation: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     supports_chat_completions: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     supports_responses: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     protocol_type: Mapped[str] = mapped_column(Text, nullable=False, default="responses")
@@ -48,9 +48,18 @@ class ProviderModel(Base):
     input_price_per_1k: Mapped[Decimal | None] = mapped_column(Numeric(DB_PRICE_PRECISION, DB_PRICE_SCALE), nullable=True)
     output_price_per_1k: Mapped[Decimal | None] = mapped_column(Numeric(DB_PRICE_PRECISION, DB_PRICE_SCALE), nullable=True)
     cache_price_per_1k: Mapped[Decimal | None] = mapped_column(Numeric(DB_PRICE_PRECISION, DB_PRICE_SCALE), nullable=True)
+    cache_write_price_per_1k: Mapped[Decimal | None] = mapped_column(Numeric(DB_PRICE_PRECISION, DB_PRICE_SCALE), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
     )
 
     provider = relationship("Provider", back_populates="provider_models")
+
+    @property
+    def weight(self) -> int:
+        return int(self.priority or 100)
+
+    @weight.setter
+    def weight(self, value: int | None) -> None:
+        self.priority = int(value or 100)

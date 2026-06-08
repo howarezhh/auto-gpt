@@ -137,11 +137,11 @@ class ProviderModelConfigBase(BaseModel):
     model_name: str = Field(..., min_length=1)
     enabled: bool = True
     priority: int = 100
-    weight: int = 100
     protocol_type: str = "responses"
     supports_stream: bool = True
     supports_vision: bool = True
     supports_tools: bool = True
+    supports_image_generation: bool = False
     supports_chat_completions: bool = False
     supports_responses: bool = True
     context_window_tokens: int | None = Field(default=None, ge=1)
@@ -151,6 +151,7 @@ class ProviderModelConfigBase(BaseModel):
     input_price_per_1k: float | None = Field(default=None, ge=0)
     output_price_per_1k: float | None = Field(default=None, ge=0)
     cache_price_per_1k: float | None = Field(default=None, ge=0)
+    cache_write_price_per_1k: float | None = Field(default=None, ge=0)
 
     @field_validator("model_name")
     @classmethod
@@ -171,7 +172,6 @@ class ProviderModelConfigOut(ProviderModelConfigBase):
     id: int
     protocol_type: str = "responses"
     protocol_label: str = "Responses API"
-    supports_image_generation: bool = False
     health_status: str
     circuit_state: str
     circuit_opened_at: datetime | None
@@ -230,11 +230,11 @@ class ProviderModelMountListResponse(BaseModel):
 class ProviderModelConfigUpdate(BaseModel):
     enabled: bool | None = None
     priority: int | None = None
-    weight: int | None = None
     protocol_type: str | None = None
     supports_stream: bool | None = None
     supports_vision: bool | None = None
     supports_tools: bool | None = None
+    supports_image_generation: bool | None = None
     supports_chat_completions: bool | None = None
     supports_responses: bool | None = None
     context_window_tokens: int | None = Field(default=None, ge=1)
@@ -244,6 +244,7 @@ class ProviderModelConfigUpdate(BaseModel):
     input_price_per_1k: float | None = Field(default=None, ge=0)
     output_price_per_1k: float | None = Field(default=None, ge=0)
     cache_price_per_1k: float | None = Field(default=None, ge=0)
+    cache_write_price_per_1k: float | None = Field(default=None, ge=0)
     content_integrity_status: str | None = None
 
     @field_validator("protocol_type")
@@ -309,7 +310,6 @@ class ProviderBase(BaseModel):
     region_tag: str | None = None
     enabled: bool = True
     priority: int = 100
-    weight: int = 100
     timeout_ms: int = 30000
     max_retries: int = 2
     max_active_requests: int | None = Field(default=20, ge=0)
@@ -328,7 +328,6 @@ class ProviderBase(BaseModel):
     content_integrity_status: str = "unknown"
     content_integrity_score: int = Field(default=80, ge=0, le=100)
     content_guard_enabled: bool = True
-    low_trust_route_enabled: bool = False
     buffer_stream_for_guard: bool = True
     models: list[str] = Field(default_factory=list)
     model_configs: list[ProviderModelConfigInput] = Field(default_factory=list)
@@ -381,7 +380,6 @@ class ProviderUpdate(BaseModel):
     region_tag: str | None = None
     enabled: bool | None = None
     priority: int | None = None
-    weight: int | None = None
     timeout_ms: int | None = None
     max_retries: int | None = None
     max_active_requests: int | None = Field(default=None, ge=0)
@@ -400,7 +398,6 @@ class ProviderUpdate(BaseModel):
     content_integrity_status: str | None = None
     content_integrity_score: int | None = Field(default=None, ge=0, le=100)
     content_guard_enabled: bool | None = None
-    low_trust_route_enabled: bool | None = None
     buffer_stream_for_guard: bool | None = None
     models: list[str] | None = None
     model_configs: list[ProviderModelConfigInput] | None = None
@@ -462,7 +459,6 @@ class ProviderOut(BaseModel):
     region_tag: str | None
     enabled: bool
     priority: int
-    weight: int
     timeout_ms: int
     max_retries: int
     max_active_requests: int | None
@@ -493,7 +489,6 @@ class ProviderOut(BaseModel):
     last_content_violation_at: datetime | None
     recent_content_guard_events: list[dict[str, Any]] = Field(default_factory=list)
     content_guard_enabled: bool
-    low_trust_route_enabled: bool
     buffer_stream_for_guard: bool
     models: list[str]
     model_configs: list[ProviderModelConfigOut]
@@ -574,7 +569,6 @@ class ProviderSummaryOut(BaseModel):
     region_tag: str | None = None
     enabled: bool
     priority: int
-    weight: int
     health_status: str
     protocol_type: str = "both"
     protocol_label: str = "双协议"
@@ -637,8 +631,6 @@ class ProviderDiscoveredModelOut(BaseModel):
     supports_vision: bool = True
     supports_tools: bool = True
     supports_image_generation: bool = False
-    supports_chat_completions: bool = True
-    supports_responses: bool = True
     context_window_tokens: int | None = None
     max_input_tokens: int | None = None
     max_output_tokens: int | None = None

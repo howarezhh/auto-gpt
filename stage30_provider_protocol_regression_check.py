@@ -25,7 +25,6 @@ class _FakeProviderModel:
         self.model_name = model_name
         self.enabled = True
         self.priority = 100
-        self.weight = 100
         self.health_status = "healthy"
         self.circuit_state = "closed"
         self.supports_stream = True
@@ -55,7 +54,6 @@ class _FakeProvider:
         self.region_tag = None
         self.enabled = True
         self.priority = 100
-        self.weight = 100
         self.timeout_ms = 30000
         self.max_retries = 1
         self.max_error_rate = 80.0

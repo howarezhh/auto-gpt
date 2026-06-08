@@ -95,7 +95,6 @@ def ensure_benchmark_data(*, mock_base_url: str, model_name: str, provider_name:
         provider.provider_type = "openai_compatible"
         provider.enabled = True
         provider.priority = 1
-        provider.weight = 100
         provider.timeout_ms = 30000
         provider.max_retries = 1
         provider.max_active_requests = 10000
@@ -117,7 +116,6 @@ def ensure_benchmark_data(*, mock_base_url: str, model_name: str, provider_name:
             db.flush()
         provider_model.enabled = True
         provider_model.priority = 1
-        provider_model.weight = 100
         provider_model.supports_stream = True
         provider_model.supports_vision = True
         provider_model.supports_tools = False

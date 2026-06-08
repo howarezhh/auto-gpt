@@ -290,16 +290,8 @@ def delete_model_mapping(
 async def select_model_mapping_target(payload: ModelMappingSelectionProbe) -> ModelMappingSelectionOut:
     resolution = await ModelMappingService.resolve_for_request(
         source_model_name=payload.source_model_name,
-        route_context=None,
         api_client_auth=None,
         sticky_key=payload.source_model_name,
-        forced_provider_id=None,
-        require_vision=payload.require_vision,
-        require_stream=payload.require_stream,
-        require_tools=payload.require_tools,
-        require_image_generation=payload.require_image_generation,
-        require_chat_completions=payload.require_chat_completions,
-        require_responses=payload.require_responses,
     )
     if resolution is None:
         return ModelMappingSelectionOut(
