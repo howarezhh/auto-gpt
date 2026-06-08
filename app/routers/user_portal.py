@@ -709,7 +709,6 @@ def create_user_api_key(
     raw_api_key: str | None = Form(default=None),
     remark: str | None = Form(default=None),
     enabled: str | None = Form(default=None),
-    content_guard_required: str | None = Form(default="on"),
     db: Session = Depends(get_db),
 ):
     current_user = require_user_html(request, db)
@@ -725,7 +724,7 @@ def create_user_api_key(
                 raw_api_key=raw_api_key,
                 remark=remark,
                 enabled=enabled == "on",
-                content_guard_required=content_guard_required == "on",
+                content_guard_required=True,
             )
         )
         ApiKeyAdminService.create_api_key(db, payload)
@@ -766,7 +765,6 @@ def update_user_api_key(
     raw_api_key: str | None = Form(default=None),
     remark: str | None = Form(default=None),
     enabled: str | None = Form(default=None),
-    content_guard_required: str | None = Form(default="on"),
     db: Session = Depends(get_db),
 ):
     current_user = require_user_html(request, db)
@@ -785,7 +783,7 @@ def update_user_api_key(
                 raw_api_key=raw_api_key,
                 remark=remark,
                 enabled=enabled == "on",
-                content_guard_required=content_guard_required == "on",
+                content_guard_required=True,
             )
         )
         ApiKeyAdminService.update_api_key(db, api_key, payload)
