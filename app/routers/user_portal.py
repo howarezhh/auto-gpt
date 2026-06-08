@@ -123,7 +123,6 @@ def _build_user_api_key_payload(
     raw_api_key: str | None,
     remark: str | None,
     enabled: bool,
-    content_guard_required: bool = True,
 ) -> dict:
     return {
         "name": name,
@@ -131,7 +130,6 @@ def _build_user_api_key_payload(
         "remark": remark,
         "enabled": enabled,
         "owner_user_id": current_user_id,
-        "content_guard_required": content_guard_required,
         "auto_sync_provider_bindings": True,
         "allowed_provider_ids": [],
     }
@@ -724,7 +722,6 @@ def create_user_api_key(
                 raw_api_key=raw_api_key,
                 remark=remark,
                 enabled=enabled == "on",
-                content_guard_required=True,
             )
         )
         ApiKeyAdminService.create_api_key(db, payload)
@@ -783,7 +780,6 @@ def update_user_api_key(
                 raw_api_key=raw_api_key,
                 remark=remark,
                 enabled=enabled == "on",
-                content_guard_required=True,
             )
         )
         ApiKeyAdminService.update_api_key(db, api_key, payload)

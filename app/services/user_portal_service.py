@@ -582,7 +582,6 @@ class UserPortalService:
                 route_context=RoutePolicyContext(
                     allowed_provider_ids=sorted(provider_ids),
                     require_trusted_provider=bool(getattr(route_setting, "trusted_providers_only", False)),
-                    content_guard_required=api_key.content_guard_required,
                 ),
             ):
                 if model.provider.id not in provider_ids:
@@ -622,7 +621,6 @@ class UserPortalService:
                 route_context = RoutePolicyContext(
                     allowed_provider_ids=[binding.provider_id for binding in selected_key.provider_bindings],
                     require_trusted_provider=bool(getattr(SettingService.get_cached(), "trusted_providers_only", False)),
-                    content_guard_required=selected_key.content_guard_required,
                 )
                 candidates = RouterService.order_candidates(
                     db,

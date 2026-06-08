@@ -476,7 +476,6 @@ class ApiKeyService:
         route_context = RoutePolicyContext(
             allowed_provider_ids=allowed_provider_ids,
             require_trusted_provider=bool(getattr(route_setting, "trusted_providers_only", False)),
-            content_guard_required=True,
             preferred_provider_ids=loads_json(api_client_key.preferred_provider_ids_json, []),
             preferred_region_tags=loads_json(api_client_key.preferred_region_tags_json, []),
             latency_bias=api_client_key.latency_bias,

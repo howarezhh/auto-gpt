@@ -174,7 +174,6 @@ class ApiKeyAdminService:
         keyword: str | None,
         status: str | None,
         enabled: bool | None,
-        content_guard_required: bool | None,
         owner_user_id: int | None,
         page: int,
         page_size: int,
@@ -202,8 +201,6 @@ class ApiKeyAdminService:
             filters.append(keyword_filter)
         if enabled is not None:
             filters.append(ApiClientKey.enabled == enabled)
-        if content_guard_required is not None:
-            filters.append(ApiClientKey.content_guard_required == content_guard_required)
         if owner_user_id is not None:
             filters.append(ApiClientKey.owner_user_id == owner_user_id)
         if status:
@@ -280,7 +277,6 @@ class ApiKeyAdminService:
             total_cost_used=BillingService.to_decimal(0),
             owner_user_id=owner_user_id,
             auto_sync_provider_bindings=auto_sync_provider_bindings,
-            content_guard_required=payload.content_guard_required,
             allowed_model_names_json=dumps_json(payload.allowed_model_names),
             allowed_endpoint_paths_json=dumps_json(payload.allowed_endpoint_paths),
             allowed_source_ips_json=dumps_json(payload.allowed_source_ips),
@@ -770,7 +766,6 @@ class ApiKeyAdminService:
             "owner_user_id": api_key.owner_user_id,
             "owner_user_name": api_key.owner_user.username if api_key.owner_user else None,
             "auto_sync_provider_bindings": api_key.auto_sync_provider_bindings,
-            "content_guard_required": api_key.content_guard_required,
             "allowed_provider_ids": [binding.provider_id for binding in api_key.provider_bindings],
             "allowed_model_names": loads_json(api_key.allowed_model_names_json, []),
             "allowed_endpoint_paths": loads_json(api_key.allowed_endpoint_paths_json, []),

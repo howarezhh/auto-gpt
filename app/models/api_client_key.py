@@ -32,7 +32,6 @@ class ApiClientKey(Base):
     total_cost_used: Mapped[Decimal] = mapped_column(Numeric(DB_MONEY_PRECISION, DB_MONEY_SCALE), nullable=False, default=Decimal("0"))
     owner_user_id: Mapped[int] = mapped_column(ForeignKey("user_accounts.id"), nullable=False, index=True)
     auto_sync_provider_bindings: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    content_guard_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     allowed_model_names_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     allowed_endpoint_paths_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     allowed_source_ips_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")

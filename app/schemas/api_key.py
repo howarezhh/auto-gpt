@@ -28,7 +28,6 @@ class ApiKeyBase(BaseModel):
     rpm_limit: int | None = Field(default=20, ge=0)
     owner_user_id: int | None = None
     auto_sync_provider_bindings: bool = True
-    content_guard_required: bool = True
     allowed_provider_ids: list[int] = Field(default_factory=list)
     allowed_model_names: list[str] = Field(default_factory=list)
     allowed_endpoint_paths: list[str] = Field(default_factory=list)
@@ -125,7 +124,6 @@ class ApiKeyUpdate(BaseModel):
     rpm_limit: int | None = Field(default=None, ge=0)
     owner_user_id: int | None = None
     auto_sync_provider_bindings: bool | None = None
-    content_guard_required: bool | None = None
     allowed_provider_ids: list[int] | None = None
     allowed_model_names: list[str] | None = None
     allowed_endpoint_paths: list[str] | None = None
@@ -215,7 +213,6 @@ class ApiKeyOut(BaseModel):
     owner_user_id: int | None
     owner_user_name: str | None
     auto_sync_provider_bindings: bool
-    content_guard_required: bool
     allowed_provider_ids: list[int]
     allowed_model_names: list[str]
     allowed_endpoint_paths: list[str]

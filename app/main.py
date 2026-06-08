@@ -508,7 +508,6 @@ def _migrate_api_client_key_columns(db) -> bool:
     true_default = "TRUE" if dialect_name == "postgresql" else "1"
     additions = {
         "auto_sync_provider_bindings": f"ALTER TABLE api_client_keys ADD COLUMN auto_sync_provider_bindings BOOLEAN NOT NULL DEFAULT {true_default}",
-        "content_guard_required": f"ALTER TABLE api_client_keys ADD COLUMN content_guard_required BOOLEAN NOT NULL DEFAULT {true_default}",
     }
     changed = False
     for column, ddl in additions.items():
@@ -725,7 +724,6 @@ def _migrate_request_log_columns(db) -> None:
         "latency_bias": "ALTER TABLE api_client_keys ADD COLUMN latency_bias INTEGER NOT NULL DEFAULT 1",
         "success_rate_bias": "ALTER TABLE api_client_keys ADD COLUMN success_rate_bias INTEGER NOT NULL DEFAULT 1",
         "cost_bias": "ALTER TABLE api_client_keys ADD COLUMN cost_bias INTEGER NOT NULL DEFAULT 0",
-        "content_guard_required": "ALTER TABLE api_client_keys ADD COLUMN content_guard_required BOOLEAN NOT NULL DEFAULT 1",
     }
     changed_api_keys = False
     for column, ddl in api_key_additions.items():
@@ -742,7 +740,6 @@ def _migrate_request_log_columns(db) -> None:
     }
     policy_template_additions = {
         "allowed_model_names_json": "ALTER TABLE api_key_policy_templates ADD COLUMN allowed_model_names_json TEXT NOT NULL DEFAULT '[]'",
-        "content_guard_required": "ALTER TABLE api_key_policy_templates ADD COLUMN content_guard_required BOOLEAN NOT NULL DEFAULT 1",
     }
     changed_policy_templates = False
     for column, ddl in policy_template_additions.items():

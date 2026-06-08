@@ -192,7 +192,6 @@ class ApiKeyAuthCache:
                 "total_tokens_used": api_key.total_tokens_used,
                 "total_cost_used": cls._to_float(api_key.total_cost_used) or 0,
                 "owner_user_id": api_key.owner_user_id,
-                "content_guard_required": api_key.content_guard_required,
                 "allowed_model_names_json": api_key.allowed_model_names_json,
                 "allowed_endpoint_paths_json": api_key.allowed_endpoint_paths_json,
                 "allowed_source_ips_json": api_key.allowed_source_ips_json,
@@ -253,7 +252,6 @@ class ApiKeyAuthCache:
         route_context = RoutePolicyContext(
             allowed_provider_ids=allowed_provider_ids,
             require_trusted_provider=bool(getattr(route_setting, "trusted_providers_only", False)),
-            content_guard_required=bool(getattr(api_key, "content_guard_required", True)),
             preferred_provider_ids=loads_json(api_key.preferred_provider_ids_json, []),
             preferred_region_tags=loads_json(api_key.preferred_region_tags_json, []),
             latency_bias=api_key.latency_bias,

@@ -61,7 +61,6 @@ class RoutePolicyContext:
     success_rate_bias: int = 1
     cost_bias: int = 0
     require_trusted_provider: bool = False
-    content_guard_required: bool = True
 
     def with_forced_provider_id(self, forced_provider_id: int | None) -> "RoutePolicyContext":
         """返回一个仅修改强制 provider 配置的新上下文对象。"""
@@ -74,7 +73,6 @@ class RoutePolicyContext:
             success_rate_bias=self.success_rate_bias,
             cost_bias=self.cost_bias,
             require_trusted_provider=self.require_trusted_provider,
-            content_guard_required=self.content_guard_required,
         )
 
 

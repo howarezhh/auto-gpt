@@ -1,4 +1,4 @@
--- 迁移说明：新增提供商内容完整性防护、信任等级、日志留证和 API Key 策略字段。
+-- 迁移说明：新增提供商内容完整性防护、信任等级和日志留证字段。
 -- 执行前请按生产规范完成数据库备份。
 
 ALTER TABLE providers
@@ -33,13 +33,6 @@ ALTER TABLE app_settings
     ADD COLUMN IF NOT EXISTS content_guard_stream_buffer_max_bytes INTEGER NOT NULL DEFAULT 16384,
     ADD COLUMN IF NOT EXISTS content_guard_low_trust_requires_buffer BOOLEAN NOT NULL DEFAULT TRUE,
     ADD COLUMN IF NOT EXISTS content_guard_rules_json TEXT NOT NULL DEFAULT '';
-
-ALTER TABLE api_client_keys
-    ADD COLUMN IF NOT EXISTS trusted_providers_only BOOLEAN NOT NULL DEFAULT FALSE,
-    ADD COLUMN IF NOT EXISTS content_guard_required BOOLEAN NOT NULL DEFAULT TRUE;
-
-ALTER TABLE api_key_policy_templates
-    ADD COLUMN IF NOT EXISTS content_guard_required BOOLEAN NOT NULL DEFAULT TRUE;
 
 UPDATE providers
 SET trust_level = 'standard'
