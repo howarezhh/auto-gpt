@@ -512,6 +512,10 @@ def configure_scheduler() -> None:
             300,
             int(getattr(setting, "content_guard_probe_interval_sec", 3600) or 3600),
         )
+        content_guard_precheck_enabled = bool(
+            getattr(setting, "content_guard_enabled", True)
+            and getattr(setting, "content_guard_precheck_auto_enabled", False)
+        )
     finally:
         db.close()
     try:
@@ -539,13 +543,19 @@ def configure_scheduler() -> None:
         id="model_l2_capability_health_check",
         replace_existing=True,
     )
-    scheduler.add_job(
-        scheduled_model_l3_content_integrity_health_check,
-        "interval",
-        seconds=content_guard_probe_interval,
-        id="model_l3_content_integrity_health_check",
-        replace_existing=True,
-    )
+    if content_guard_precheck_enabled:
+        scheduler.add_job(
+            scheduled_model_l3_content_integrity_health_check,
+            "interval",
+            seconds=content_guard_probe_interval,
+            id="model_l3_content_integrity_health_check",
+            replace_existing=True,
+        )
+    else:
+        try:
+            scheduler.remove_job("model_l3_content_integrity_health_check")
+        except Exception:
+            pass
     scheduler.add_job(
         scheduled_token_usage_backfill,
         "interval",
