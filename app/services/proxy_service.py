@@ -2064,33 +2064,6 @@ class ProxyService:
                                 error=guard_result.reason,
                             )
                         )
-                        await ProxyService._log_content_guard_violation(
-                            db=db,
-                            provider=provider,
-                            provider_model=provider_model,
-                            guard_result=guard_result,
-                            log_type=log_type,
-                            trace_id=trace_id,
-                            model_name=model_name,
-                            requested_model=requested_model_name,
-                            api_client_auth=api_client_auth,
-                            request_id=request_id,
-                            conversation_key=conversation_key,
-                            session_id=session_id,
-                            request_path=effective_log_request_path,
-                            source_ip=source_ip,
-                            is_stream=False,
-                            has_image=has_image,
-                            latency_ms=latency_ms,
-                            duration_ms=latency_ms,
-                            reasoning_level=reasoning_level,
-                            model_reasoning_effort=model_reasoning_effort,
-                            attempt_count=attempt_count,
-                            request_body_json=request_body_json,
-                            response_body_json=response_body_json,
-                            trace=trace,
-                            request_payload=payload,
-                        )
                         if ProxyService._content_guard_should_switch_provider(setting):
                             raise ContentGuardBlockedError(
                                 guard_result=guard_result,
@@ -2976,33 +2949,6 @@ class ProxyService:
                                     error=prefetch_guard_result.reason,
                                 )
                             )
-                            await ProxyService._log_content_guard_violation(
-                                db=db,
-                                provider=provider,
-                                provider_model=provider_model,
-                                guard_result=prefetch_guard_result,
-                                log_type=log_type,
-                                trace_id=trace_id,
-                                model_name=model_name,
-                                requested_model=requested_model_name,
-                                api_client_auth=api_client_auth,
-                                request_id=request_id,
-                                conversation_key=conversation_key,
-                                session_id=session_id,
-                                request_path=effective_log_request_path,
-                                source_ip=source_ip,
-                                is_stream=True,
-                                has_image=has_image,
-                                latency_ms=latency_ms,
-                                duration_ms=duration_ms,
-                                reasoning_level=reasoning_level,
-                                model_reasoning_effort=model_reasoning_effort,
-                                attempt_count=attempt_count,
-                                request_body_json=request_body_json,
-                                response_body_json=None,
-                                trace=trace,
-                                request_payload=payload,
-                            )
                             await stream_context.__aexit__(None, None, None)
                             stream_context = None
                             if capacity_lease is not None and capacity_lease_entered:
@@ -3470,7 +3416,7 @@ class ProxyService:
                             else:
                                 terminal_result = "client_cancelled" if client_cancelled else ("interrupted" if interrupted else "finished")
                                 terminal_status_code = 499 if client_cancelled else (502 if interrupted or not success else 200)
-                                if not client_cancelled:
+                                if not client_cancelled and error_code != "content_integrity_violation":
                                     await ProxyService._mark_failure_async(
                                         provider,
                                         provider_model,
