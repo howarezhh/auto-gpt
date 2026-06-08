@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import httpx
@@ -49,6 +50,13 @@ class ContentGuardProbeService:
     RESULT_PASS = ContentGuardService.RESULT_PASS
     STREAM_CONNECT_TIMEOUT_SECONDS = 4
     STREAM_FIRST_TOKEN_TIMEOUT_SECONDS = 4
+    PROBE_FAILURE_WINDOW_SECONDS = 600
+    SSE_PROBE_MAX_CHUNKS = 64
+    SSE_PROBE_MAX_BYTES = 65536
+    SSE_PROBE_MAX_DURATION_SECONDS = 12
+    POLLUTION_PROBE_SCENARIO_TIMEOUT_SECONDS = 8
+    POLLUTION_PROBE_TOTAL_TIMEOUT_SECONDS = 24
+    DETECTION_TRAFFIC_TYPE = "content_guard_probe"
 
     @staticmethod
     def content_probe_endpoint_path(provider: Provider, provider_model: ProviderModel) -> str | None:
@@ -176,14 +184,24 @@ class ContentGuardProbeService:
                 started=started,
                 setting=setting,
             )
-            return response, int((time.perf_counter() - started) * 1000), 200, fallback_trace, None
+            return (
+                response,
+                int((time.perf_counter() - started) * 1000),
+                200,
+                ContentGuardProbeService.mark_detection_trace(
+                    fallback_trace,
+                    endpoint_path=endpoint_path,
+                    endpoint_label=endpoint_label,
+                ),
+                None,
+            )
         except httpx.HTTPStatusError as exc:
             status_code = exc.response.status_code
             ProxyService = _proxy_service()
             error_body = await ProxyService._extract_response_error(exc.response)
             detail = ProxyService._normalize_error_detail(error_body)
             message = ProxyService._error_message_for_log(detail)
-            return None, int((time.perf_counter() - started) * 1000), status_code, [], {
+            return None, int((time.perf_counter() - started) * 1000), status_code, [], ContentGuardProbeService.mark_detection_result({
                 "endpoint_path": endpoint_path,
                 "endpoint_label": endpoint_label,
                 "success": False,
@@ -197,12 +215,12 @@ class ContentGuardProbeService:
                 "trace": [],
                 "retryable": False,
                 "error_detail": detail,
-            }
+            })
         except Exception as exc:
             status_code = getattr(exc, "status_code", None)
             detail = getattr(exc, "detail", None)
             message = ProxyService._error_message_for_log(detail) if detail is not None else str(exc)
-            return None, int((time.perf_counter() - started) * 1000), status_code, [], {
+            return None, int((time.perf_counter() - started) * 1000), status_code, [], ContentGuardProbeService.mark_detection_result({
                 "endpoint_path": endpoint_path,
                 "endpoint_label": endpoint_label,
                 "success": False,
@@ -215,7 +233,50 @@ class ContentGuardProbeService:
                 "message": message,
                 "trace": [],
                 "retryable": False,
-            }
+            })
+
+    @staticmethod
+    def detection_trace_marker(*, endpoint_path: str, endpoint_label: str) -> dict[str, Any]:
+        return {
+            "result": "content_guard_detection_traffic",
+            "endpoint": endpoint_path,
+            "endpoint_label": endpoint_label,
+            "traffic_type": ContentGuardProbeService.DETECTION_TRAFFIC_TYPE,
+            "is_detection_traffic": True,
+        }
+
+    @staticmethod
+    def mark_detection_trace(
+        trace: list[dict[str, Any]] | None,
+        *,
+        endpoint_path: str,
+        endpoint_label: str,
+    ) -> list[dict[str, Any]]:
+        marked_trace: list[dict[str, Any]] = []
+        for item in trace or []:
+            if not isinstance(item, dict):
+                continue
+            marked = dict(item)
+            marked.setdefault("traffic_type", ContentGuardProbeService.DETECTION_TRAFFIC_TYPE)
+            marked.setdefault("is_detection_traffic", True)
+            marked_trace.append(marked)
+        if not any(item.get("result") == "content_guard_detection_traffic" for item in marked_trace):
+            marked_trace.append(
+                ContentGuardProbeService.detection_trace_marker(endpoint_path=endpoint_path, endpoint_label=endpoint_label)
+            )
+        return marked_trace
+
+    @staticmethod
+    def mark_detection_result(result: dict[str, Any]) -> dict[str, Any]:
+        result["traffic_type"] = ContentGuardProbeService.DETECTION_TRAFFIC_TYPE
+        result["is_detection_traffic"] = True
+        trace = result.get("trace") if isinstance(result.get("trace"), list) else []
+        result["trace"] = ContentGuardProbeService.mark_detection_trace(
+            trace,
+            endpoint_path=str(result.get("endpoint_path") or ""),
+            endpoint_label=str(result.get("endpoint_label") or ""),
+        )
+        return result
 
     @staticmethod
     def probe_success(
@@ -234,7 +295,7 @@ class ContentGuardProbeService:
             reason=f"{endpoint_label} 通过",
             action="allow",
         )
-        return {
+        return ContentGuardProbeService.mark_detection_result({
             "endpoint_path": endpoint_path,
             "endpoint_label": endpoint_label,
             "success": True,
@@ -248,7 +309,7 @@ class ContentGuardProbeService:
             "trace": trace or [],
             "retryable": False,
             "content_guard": guard_result.to_log_kwargs(),
-        }
+        })
 
     @staticmethod
     def summarize_probe_result(endpoint_result: dict[str, Any]) -> dict[str, Any]:
@@ -535,7 +596,9 @@ class ContentGuardProbeService:
             chunk_iterator = response.aiter_bytes().__aiter__()
             buffer = bytearray()
             chunks: list[str] = []
-            for _ in range(6):
+            max_chunks = 64
+            max_buffer_bytes = 65536
+            for _ in range(max_chunks):
                 try:
                     chunk = await ProxyService._read_next_stream_chunk(
                         chunk_iterator,
@@ -546,10 +609,10 @@ class ContentGuardProbeService:
                 except StopAsyncIteration:
                     break
                 if not chunk:
-                    break
+                    continue
                 buffer.extend(chunk)
                 chunks.append(chunk.decode("utf-8", errors="ignore"))
-                if b"[DONE]" in chunk:
+                if b"[DONE]" in buffer or len(buffer) >= max_buffer_bytes:
                     break
             events = ProxyService._consume_sse_event_texts(buffer)
             if not events:
@@ -590,6 +653,7 @@ class ContentGuardProbeService:
                     result = ContentGuardService.inspect_sse_event(
                         data,
                         endpoint_path=endpoint_path,
+                        rules_json=ContentGuardProbeService.rules_json(),
                         url_check_enabled=ContentGuardProbeService.url_check_enabled(),
                     )
                     if result.result != ContentGuardService.RESULT_PASS:
@@ -873,8 +937,6 @@ class ContentGuardProbeService:
         endpoint_path: str,
         request_payload: dict[str, Any],
     ) -> ContentGuardResult:
-        if not ContentGuardProbeService.enabled():
-            return ContentGuardResult(result=ContentGuardService.RESULT_PASS, risk_level="low", reason="内容完整性防护未启用")
         return ContentGuardService.inspect_json_response(
             response,
             provider=provider,
@@ -892,8 +954,6 @@ class ContentGuardProbeService:
         *,
         endpoint_path: str,
     ) -> ContentGuardResult:
-        if not ContentGuardProbeService.enabled():
-            return ContentGuardResult(result=ContentGuardService.RESULT_PASS, risk_level="low", reason="内容完整性防护未启用")
         if not chunk:
             return ContentGuardResult(result=ContentGuardService.RESULT_PASS, risk_level="low", reason="流式探针未返回可扫描内容")
         text = chunk.decode("utf-8", errors="ignore") if isinstance(chunk, bytes) else str(chunk)
@@ -956,7 +1016,7 @@ class ContentGuardProbeService:
         guard_result: ContentGuardResult,
     ) -> dict[str, Any]:
         message = f"内容完整性探针失败：{guard_result.reason or guard_result.result}"
-        return {
+        return ContentGuardProbeService.mark_detection_result({
             "endpoint_path": endpoint_path,
             "endpoint_label": endpoint_label,
             "success": False,
@@ -977,7 +1037,7 @@ class ContentGuardProbeService:
             ],
             "retryable": False,
             "content_guard": guard_result.to_log_kwargs(),
-        }
+        })
 
     @staticmethod
     def first_content_guard_result(endpoint_results: list[dict[str, Any]]) -> dict[str, Any] | None:
