@@ -12730,6 +12730,7 @@
             const template = state.templates.find((item) => String(item.id) === String(templateId));
             if (!template) return;
             enabledInput.checked = template.enabled ?? true;
+            contentGuardRequiredInput.checked = template.content_guard_required ?? true;
             expiresAtInput.value = template.expires_in_days ? toDatetimeLocalInputValue(new Date(Date.now() + (Number(template.expires_in_days) * 86400000)).toISOString()) : "";
             renderApiKeyProviderSelector(providerSelector, state.providers, getProviderSelectionForTemplate(template));
             renderApiKeyModelSelector(modelSelector, state.models, template.allowed_model_names || []);
@@ -12761,6 +12762,9 @@
                             <div class="table-muted">${escapeHtml((item.allowed_model_names || []).join(", ") || "全部可路由模型")}</div>
                         </td>
                         <td>
+                            <strong>${formatSwitchText(item.content_guard_required ?? true, "要求", "可选")}</strong>
+                        </td>
+                        <td>
                             <strong>${item.expires_in_days == null ? "不自动过期" : `${formatNumber(item.expires_in_days)} 天后过期`}</strong>
                         </td>
                         <td>${statusBadge(item.enabled ? "healthy" : "disabled")}</td>
@@ -12772,7 +12776,7 @@
                         </td>
                     </tr>
                 `;
-            }).join("") || '<tr><td colspan="6"><div class="empty-state">当前还没有策略模板</div></td></tr>';
+            }).join("") || '<tr><td colspan="7"><div class="empty-state">当前还没有策略模板</div></td></tr>';
             enhanceInteractiveButtons(templateTableBody);
         }
 
@@ -12783,6 +12787,7 @@
             templateNameInput.value = template?.name ?? "";
             templateExpiresInDaysInput.value = template?.expires_in_days ?? "";
             templateEnabledInput.checked = template?.enabled ?? true;
+            templateContentGuardRequiredInput.checked = template?.content_guard_required ?? true;
             templateRemarkInput.value = template?.remark ?? "";
             renderApiKeyProviderSelector(templateProviderSelector, state.providers, getProviderSelectionForTemplate(template));
             renderApiKeyModelSelector(templateModelSelector, state.models, template?.allowed_model_names || []);
@@ -12794,6 +12799,7 @@
             templateModal.classList.add("hidden");
             templateForm.reset();
             templateEditIdInput.value = "";
+            templateContentGuardRequiredInput.checked = true;
             renderApiKeyProviderSelector(templateProviderSelector, state.providers, getAllProviderIds());
             renderApiKeyModelSelector(templateModelSelector, state.models, []);
         }
@@ -13172,6 +13178,14 @@
                 showToast(error.message, "error");
             }
         });
+        contentGuardFilter?.addEventListener("change", async () => {
+            state.page = 1;
+            try {
+                await loadTableData({ silent: true });
+            } catch (error) {
+                showToast(error.message, "error");
+            }
+        });
         ownerFilter.addEventListener("change", async () => {
             state.page = 1;
             try {
@@ -13344,6 +13358,7 @@
                 name: templateNameInput.value.trim(),
                 remark: templateRemarkInput.value.trim() || null,
                 enabled: templateEnabledInput.checked,
+                content_guard_required: templateContentGuardRequiredInput.checked,
                 expires_in_days: templateExpiresInDaysInput.value === "" ? null : Number(templateExpiresInDaysInput.value),
                 allowed_provider_ids: providerAuthorizationPayload.allowed_provider_ids,
                 allowed_model_names: getTemplateSelectedModelNames(),
