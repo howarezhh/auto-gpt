@@ -1,66 +1,136 @@
 {% extends "base.html" %}
+
 {% block content %}
-<section class="page-heading">
+<section class="page-heading ip-management-heading">
     <div>
-        <div class="eyebrow">IP 管理</div>
-        <h2>来源 IP 治理</h2>
+        <div class="panel-kicker">访问治理</div>
+        <h1>IP 管理</h1>
     </div>
+    <button class="topbar-btn interactive-btn" id="ip-management-refresh-btn" type="button">
+        <i class="bi bi-arrow-clockwise" aria-hidden="true"></i>
+        <span>刷新</span>
+    </button>
 </section>
 
-<section class="content-guard-metrics" aria-label="IP 管理概览">
-    <div class="metric-card">
-        <span>模块状态</span>
-        <strong>默认关闭</strong>
-    </div>
-    <div class="metric-card">
-        <span>可信代理</span>
-        <strong>按 CIDR 启用</strong>
-    </div>
-    <div class="metric-card">
-        <span>规则处置</span>
-        <strong>记录 / 限流 / 阻断</strong>
-    </div>
-    <div class="metric-card">
-        <span>事件审计</span>
-        <strong>独立事件表</strong>
-    </div>
+<section class="ip-management-metrics" aria-label="IP 管理概览">
+    <div class="metric-card"><span>模块状态</span><strong id="ip-metric-enabled">关闭</strong></div>
+    <div class="metric-card"><span>规则总数</span><strong id="ip-metric-rule-count">-</strong></div>
+    <div class="metric-card"><span>启用规则</span><strong id="ip-metric-enabled-rule-count">-</strong></div>
+    <div class="metric-card"><span>事件总数</span><strong id="ip-metric-event-count">-</strong></div>
+    <div class="metric-card"><span>近 1h 阻断</span><strong id="ip-metric-block-count">-</strong></div>
+    <div class="metric-card"><span>近 1h 限流</span><strong id="ip-metric-rate-count">-</strong></div>
+    <div class="metric-card"><span>可信代理命中</span><strong id="ip-metric-trusted-count">-</strong></div>
+    <div class="metric-card"><span>无效头忽略</span><strong id="ip-metric-invalid-count">-</strong></div>
 </section>
 
-<section class="content-guard-layout">
-    <article class="panel-card">
-        <div class="section-subhead">
-            <div>
-                <div class="panel-kicker">接口</div>
-                <h3>模块能力已接入</h3>
-            </div>
+<nav class="content-guard-tabs ip-management-tabs" role="tablist" aria-label="IP 管理分区">
+    <button class="content-guard-tab is-active" type="button" role="tab" aria-selected="true" data-ip-tab="settings">设置</button>
+    <button class="content-guard-tab" type="button" role="tab" aria-selected="false" data-ip-tab="rules">规则</button>
+    <button class="content-guard-tab" type="button" role="tab" aria-selected="false" data-ip-tab="events">事件</button>
+    <button class="content-guard-tab" type="button" role="tab" aria-selected="false" data-ip-tab="test">测试</button>
+</nav>
+
+<section class="panel-card ip-management-panel" data-ip-panel="settings">
+    <form id="ip-settings-form">
+        <div class="section-subhead content-guard-panel-head">
+            <div><h2>模块设置</h2></div>
+            <button class="topbar-btn interactive-btn" id="ip-settings-save-btn" type="submit"><i class="bi bi-check2" aria-hidden="true"></i><span>保存</span></button>
         </div>
-        <div class="usage-doc-list">
-            <div class="usage-doc-item">
-                <strong>配置接口</strong>
-                <span class="code-inline">/api/ip-management/settings</span>
-            </div>
-            <div class="usage-doc-item">
-                <strong>规则接口</strong>
-                <span class="code-inline">/api/ip-management/rules</span>
-            </div>
-            <div class="usage-doc-item">
-                <strong>事件接口</strong>
-                <span class="code-inline">/api/ip-management/events</span>
-            </div>
-            <div class="usage-doc-item">
-                <strong>测试接口</strong>
-                <span class="code-inline">/api/ip-management/test-resolution</span>
-            </div>
+        <div class="settings-switch-grid ip-management-switch-grid">
+            {% for item in [
+                ("enabled", "模块总开关", "关闭时不解析、不记录、不处置。"),
+                ("observe_only_enabled", "仅观察", "启用后只记录决策，不执行阻断或限流。"),
+                ("trusted_proxy_resolution_enabled", "可信代理解析", "仅信任命中 CIDR 的代理转发头。"),
+                ("apply_external_v1_enabled", "/v1/* 生效", "作用于外部 OpenAI 兼容入口。"),
+                ("apply_internal_api_enabled", "/api/* 生效", "作用于内部管理 API。"),
+                ("apply_user_pages_enabled", "用户端生效", "作用于用户端页面请求。"),
+                ("rule_engine_enabled", "规则引擎", "启用后按规则匹配动作。"),
+                ("block_action_enabled", "允许阻断", "命中 block 规则时才真正拒绝请求。"),
+                ("rate_limit_enabled", "IP 限流", "命中限流规则后使用 Redis 计数。"),
+                ("event_logging_enabled", "事件记录", "记录解析、规则和处置结果。"),
+                ("store_raw_headers_enabled", "头摘要", "保留转发头摘要用于排查。"),
+                ("ip_masking_enabled", "IP 掩码", "事件展示时隐藏部分 IP。"),
+                ("fail_open_enabled", "失败放行", "模块异常时继续放行请求。")
+            ] %}
+            <label class="settings-switch-card" for="ip-setting-{{ item[0] }}">
+                <span class="settings-switch-copy"><strong>{{ item[1] }}</strong><small>{{ item[2] }}</small></span>
+                <span class="settings-switch-control">
+                    <input id="ip-setting-{{ item[0] }}" name="{{ item[0] }}" type="checkbox">
+                    <span class="settings-switch-slider"></span>
+                </span>
+            </label>
+            {% endfor %}
         </div>
-    </article>
-    <article class="panel-card">
-        <div class="section-subhead">
-            <div>
-                <div class="panel-kicker">边界</div>
-                <h3>默认不改变现有流量</h3>
-            </div>
+        <div class="ip-management-settings-grid">
+            <label class="content-guard-label"><span>可信代理 CIDR</span><textarea class="field-input" id="ip-setting-trusted-proxy-cidrs" rows="4" placeholder="127.0.0.1/32&#10;10.0.0.0/8"></textarea></label>
+            <label class="content-guard-label"><span>可信头优先级</span><select class="field-input" id="ip-setting-trusted-header-order" multiple size="3"><option value="forwarded">Forwarded</option><option value="x_forwarded_for">X-Forwarded-For</option><option value="cf_connecting_ip">CF-Connecting-IP</option></select></label>
+            <label class="content-guard-label"><span>事件采样 %</span><input class="field-input" id="ip-setting-event-sample-rate" type="number" min="0" max="100"></label>
+            <label class="content-guard-label"><span>事件保留 d</span><input class="field-input" id="ip-setting-event-retention-days" type="number" min="1" max="3650"></label>
         </div>
-        <p class="table-muted">IP 管理模块默认关闭。启用后仅在对应作用域开关、规则引擎、限流或阻断开关同时满足时才执行处置；可信代理解析只在直连来源命中可信代理 CIDR 后读取转发头。</p>
-    </article>
+    </form>
 </section>
+
+<section class="panel-card ip-management-panel" data-ip-panel="rules" hidden>
+    <div class="section-subhead content-guard-panel-head"><div><h2>IP 规则</h2></div><button class="topbar-btn interactive-btn" id="ip-rule-new-btn" type="button"><i class="bi bi-plus-lg" aria-hidden="true"></i><span>新建</span></button></div>
+    <form class="ip-management-filter-grid" id="ip-rule-filter-form">
+        <input class="field-input" id="ip-rule-keyword" type="search" placeholder="搜索规则名">
+        <select class="field-input" id="ip-rule-scope"><option value="">全部作用域</option><option value="external_v1">/v1/*</option><option value="internal_api">/api/*</option><option value="user_pages">用户端</option><option value="all">全部</option></select>
+        <select class="field-input" id="ip-rule-action"><option value="">全部动作</option><option value="allow">放行</option><option value="record">记录</option><option value="rate_limit">限流</option><option value="block">阻断</option></select>
+        <select class="field-input" id="ip-rule-enabled"><option value="">全部状态</option><option value="true">启用</option><option value="false">停用</option></select>
+        <button class="topbar-btn interactive-btn" type="submit"><i class="bi bi-search" aria-hidden="true"></i><span>查询</span></button>
+    </form>
+    <div class="table-shell"><table class="data-table"><thead><tr><th>规则</th><th>状态</th><th>作用域</th><th>匹配</th><th>动作</th><th>限流</th><th>优先级</th><th>操作</th></tr></thead><tbody id="ip-rule-body"></tbody></table></div>
+</section>
+
+<section class="panel-card ip-management-panel" data-ip-panel="events" hidden>
+    <div class="section-subhead content-guard-panel-head"><div><h2>处置事件</h2></div><button class="topbar-btn interactive-btn" id="ip-event-cleanup-btn" type="button"><i class="bi bi-trash3" aria-hidden="true"></i><span>清理</span></button></div>
+    <form class="ip-management-filter-grid" id="ip-event-filter-form">
+        <input class="field-input" id="ip-event-keyword" type="search" placeholder="路径 / Trace / 规则"><input class="field-input" id="ip-event-ip" type="text" placeholder="解析 IP">
+        <select class="field-input" id="ip-event-scope"><option value="">全部作用域</option><option value="external_v1">/v1/*</option><option value="internal_api">/api/*</option><option value="user_pages">用户端</option></select>
+        <select class="field-input" id="ip-event-decision"><option value="">全部动作</option><option value="allow">放行</option><option value="record">记录</option><option value="rate_limit">限流</option><option value="block">阻断</option></select>
+        <button class="topbar-btn interactive-btn" type="submit"><i class="bi bi-search" aria-hidden="true"></i><span>查询</span></button>
+    </form>
+    <div class="table-shell"><table class="data-table"><thead><tr><th>时间</th><th>解析 IP</th><th>直连 IP</th><th>路径</th><th>动作</th><th>执行</th><th>规则</th><th>Trace</th></tr></thead><tbody id="ip-event-body"></tbody></table></div>
+</section>
+
+<section class="ip-management-test-grid ip-management-panel" data-ip-panel="test" hidden>
+    <form class="panel-card" id="ip-resolution-test-form">
+        <div class="section-subhead"><h2>解析测试</h2></div>
+        <label class="content-guard-label"><span>直连 IP</span><input class="field-input" id="ip-test-direct-ip" type="text" placeholder="10.0.0.1"></label>
+        <label class="content-guard-label"><span>X-Forwarded-For</span><input class="field-input" id="ip-test-xff" type="text"></label>
+        <label class="content-guard-label"><span>Forwarded</span><input class="field-input" id="ip-test-forwarded" type="text"></label>
+        <label class="content-guard-label"><span>CF-Connecting-IP</span><input class="field-input" id="ip-test-cf" type="text"></label>
+        <label class="content-guard-label"><span>可信代理 CIDR</span><textarea class="field-input" id="ip-test-cidrs" rows="3"></textarea></label>
+        <button class="topbar-btn interactive-btn" type="submit"><i class="bi bi-play" aria-hidden="true"></i><span>测试</span></button>
+        <pre class="ip-management-result" id="ip-resolution-test-result">等待测试</pre>
+    </form>
+    <form class="panel-card" id="ip-rule-test-form">
+        <div class="section-subhead"><h2>规则测试</h2></div>
+        <label class="content-guard-label"><span>IP</span><input class="field-input" id="ip-rule-test-ip" type="text"></label>
+        <label class="content-guard-label"><span>作用域</span><select class="field-input" id="ip-rule-test-scope"><option value="external_v1">/v1/*</option><option value="internal_api">/api/*</option><option value="user_pages">用户端</option></select></label>
+        <label class="content-guard-label"><span>路径</span><input class="field-input" id="ip-rule-test-path" type="text" value="/v1/chat/completions"></label>
+        <button class="topbar-btn interactive-btn" type="submit"><i class="bi bi-play" aria-hidden="true"></i><span>测试</span></button>
+        <pre class="ip-management-result" id="ip-rule-test-result">等待测试</pre>
+    </form>
+</section>
+
+<div class="modal-shell hidden" id="ip-rule-modal" aria-hidden="true">
+    <form class="modal-card ip-rule-modal-card" id="ip-rule-form" role="dialog" aria-modal="true" aria-labelledby="ip-rule-modal-title" tabindex="-1">
+        <div class="modal-head"><div><div class="panel-kicker">IP 规则</div><h2 id="ip-rule-modal-title">新建规则</h2></div><button class="icon-btn interactive-btn" id="ip-rule-modal-close" type="button" aria-label="关闭">×</button></div>
+        <input id="ip-rule-id" type="hidden">
+        <div class="ip-rule-form-grid">
+            <label class="content-guard-label"><span>规则名</span><input class="field-input" id="ip-rule-name" required></label>
+            <label class="content-guard-label"><span>状态</span><select class="field-input" id="ip-rule-form-enabled"><option value="false">停用</option><option value="true">启用</option></select></label>
+            <label class="content-guard-label"><span>作用域</span><select class="field-input" id="ip-rule-form-scope"><option value="external_v1">/v1/*</option><option value="internal_api">/api/*</option><option value="user_pages">用户端</option><option value="all">全部</option></select></label>
+            <label class="content-guard-label"><span>匹配类型</span><select class="field-input" id="ip-rule-match-type"><option value="cidr">CIDR</option><option value="exact_ip">精确 IP</option><option value="range">IP 范围</option></select></label>
+            <label class="content-guard-label form-span-2"><span>匹配值</span><input class="field-input" id="ip-rule-match-value" required placeholder="203.0.113.0/24"></label>
+            <label class="content-guard-label"><span>动作</span><select class="field-input" id="ip-rule-form-action"><option value="record">记录</option><option value="allow">放行</option><option value="rate_limit">限流</option><option value="block">阻断</option></select></label>
+            <label class="content-guard-label"><span>优先级</span><input class="field-input" id="ip-rule-priority" type="number" min="1" value="100"></label>
+            <label class="content-guard-label"><span>QPS</span><input class="field-input" id="ip-rule-qps" type="number" min="0" value="0"></label>
+            <label class="content-guard-label"><span>RPM</span><input class="field-input" id="ip-rule-rpm" type="number" min="0" value="0"></label>
+            <label class="content-guard-label form-span-2"><span>原因</span><input class="field-input" id="ip-rule-reason"></label>
+        </div>
+        <div class="modal-actions"><button class="topbar-btn interactive-btn" id="ip-rule-submit-btn" type="submit"><i class="bi bi-check2" aria-hidden="true"></i><span>保存</span></button></div>
+    </form>
+</div>
 {% endblock %}
