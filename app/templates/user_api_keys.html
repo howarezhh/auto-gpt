@@ -238,17 +238,12 @@
                                         <label for="user-api-key-enabled-{{ item.id }}">启用此密钥</label>
                                     </div>
                                 </label>
-                                <div class="form-span-2 settings-switch-grid">
-                                    <label class="settings-switch-card" for="user-api-key-content-guard-required-{{ item.id }}">
-                                        <span class="settings-switch-copy">
-                                            <strong>要求内容检测</strong>
-                                            <small>该密钥调用默认进入内容完整性检测，污染命中会被记录或拦截。</small>
-                                        </span>
-                                        <span class="settings-switch-control">
-                                            <input id="user-api-key-content-guard-required-{{ item.id }}" name="content_guard_required" type="checkbox" {% if item.content_guard_required %}checked{% endif %}>
-                                            <span class="settings-switch-slider"></span>
-                                        </span>
-                                    </label>
+                                <div class="form-span-2">
+                                    <span>内容检测</span>
+                                    <div class="settings-note">
+                                        <strong>管理员统一要求</strong>
+                                        <span>普通用户侧不能关闭内容完整性治理；如需调整策略，请联系管理员。</span>
+                                    </div>
                                 </div>
                                 <div class="form-span-2">
                                     <span>渠道授权</span>
@@ -313,17 +308,12 @@
                         <label for="user-api-key-create-enabled">创建后立即启用</label>
                     </div>
                 </label>
-                <div class="form-span-2 settings-switch-grid">
-                    <label class="settings-switch-card" for="user-api-key-create-content-guard-required">
-                        <span class="settings-switch-copy">
-                            <strong>要求内容检测</strong>
-                            <small>默认检测提供商回复中的推广、导流和结构污染。</small>
-                        </span>
-                        <span class="settings-switch-control">
-                            <input id="user-api-key-create-content-guard-required" name="content_guard_required" type="checkbox" checked>
-                            <span class="settings-switch-slider"></span>
-                        </span>
-                    </label>
+                <div class="form-span-2">
+                    <span>内容检测</span>
+                    <div class="settings-note">
+                        <strong>管理员统一要求</strong>
+                        <span>新建密钥默认进入内容完整性治理链路，普通用户侧不能关闭。</span>
+                    </div>
                 </div>
                 <div class="form-span-2">
                     <span>渠道授权</span>

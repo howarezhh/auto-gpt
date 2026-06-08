@@ -38,6 +38,9 @@ ALTER TABLE api_client_keys
     ADD COLUMN IF NOT EXISTS trusted_providers_only BOOLEAN NOT NULL DEFAULT FALSE,
     ADD COLUMN IF NOT EXISTS content_guard_required BOOLEAN NOT NULL DEFAULT TRUE;
 
+ALTER TABLE api_key_policy_templates
+    ADD COLUMN IF NOT EXISTS content_guard_required BOOLEAN NOT NULL DEFAULT TRUE;
+
 UPDATE providers
 SET trust_level = 'standard'
 WHERE trust_level IS NULL OR trust_level NOT IN ('official', 'trusted', 'standard', 'low', 'blocked');

@@ -742,6 +742,7 @@ def _migrate_request_log_columns(db) -> None:
     }
     policy_template_additions = {
         "allowed_model_names_json": "ALTER TABLE api_key_policy_templates ADD COLUMN allowed_model_names_json TEXT NOT NULL DEFAULT '[]'",
+        "content_guard_required": "ALTER TABLE api_key_policy_templates ADD COLUMN content_guard_required BOOLEAN NOT NULL DEFAULT 1",
     }
     changed_policy_templates = False
     for column, ddl in policy_template_additions.items():
