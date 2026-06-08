@@ -591,19 +591,25 @@ class ContentGuardProbeService:
             timeout_policy = StreamTimeoutPolicy(
                 first_token_timeout_seconds=ContentGuardProbeService.STREAM_FIRST_TOKEN_TIMEOUT_SECONDS,
                 idle_timeout_seconds=max(0, int(getattr(setting, "stream_idle_timeout_seconds", 0) or 0)),
-                max_duration_seconds=max(0, int(getattr(setting, "stream_max_duration_seconds", 0) or 0)),
+                max_duration_seconds=(
+                    max(0, int(getattr(setting, "stream_max_duration_seconds", 0) or 0))
+                    or ContentGuardProbeService.SSE_PROBE_MAX_DURATION_SECONDS
+                ),
             )
             chunk_iterator = response.aiter_bytes().__aiter__()
             buffer = bytearray()
             chunks: list[str] = []
-            max_chunks = 64
-            max_buffer_bytes = 65536
-            for _ in range(max_chunks):
+            stream_started = time.perf_counter()
+            while (
+                len(chunks) < ContentGuardProbeService.SSE_PROBE_MAX_CHUNKS
+                and len(buffer) < ContentGuardProbeService.SSE_PROBE_MAX_BYTES
+                and time.perf_counter() - stream_started < ContentGuardProbeService.SSE_PROBE_MAX_DURATION_SECONDS
+            ):
                 try:
                     chunk = await ProxyService._read_next_stream_chunk(
                         chunk_iterator,
                         first_chunk_latency_ms=None if not chunks else 0,
-                        stream_started=time.perf_counter(),
+                        stream_started=stream_started,
                         timeout_policy=timeout_policy,
                     )
                 except StopAsyncIteration:
@@ -612,7 +618,7 @@ class ContentGuardProbeService:
                     continue
                 buffer.extend(chunk)
                 chunks.append(chunk.decode("utf-8", errors="ignore"))
-                if b"[DONE]" in buffer or len(buffer) >= max_buffer_bytes:
+                if b"[DONE]" in buffer:
                     break
             events = ProxyService._consume_sse_event_texts(buffer)
             if not events:
@@ -690,7 +696,7 @@ class ContentGuardProbeService:
             latency_ms = int((time.perf_counter() - started) * 1000)
             status_code = getattr(exc, "status_code", None)
             message = str(exc)
-            return {
+            return ContentGuardProbeService.mark_detection_result({
                 "endpoint_path": endpoint_path,
                 "endpoint_label": endpoint_label,
                 "success": False,
@@ -703,7 +709,7 @@ class ContentGuardProbeService:
                 "message": message,
                 "trace": [],
                 "retryable": False,
-            }
+            })
         finally:
             if stream_context is not None:
                 await stream_context.__aexit__(exc_type, exc_value, exc_traceback)
@@ -732,19 +738,57 @@ class ContentGuardProbeService:
         ]
         detections: list[dict[str, Any]] = []
         trace: list[dict[str, Any]] = []
+        total_deadline = started + ContentGuardProbeService.POLLUTION_PROBE_TOTAL_TIMEOUT_SECONDS
         for scenario in scenarios:
+            remaining_seconds = total_deadline - time.perf_counter()
+            if remaining_seconds <= 0:
+                failure = ContentGuardProbeService.probe_failure(
+                    endpoint_path=endpoint_path,
+                    endpoint_label=endpoint_label,
+                    support_label="外链广告识别探针超时",
+                    latency_ms=int((time.perf_counter() - started) * 1000),
+                    status_code=None,
+                    guard_result=ContentGuardProbeService.review_result(
+                        "外链广告识别探针总耗时超过限制",
+                        category="pollution_probe_timeout",
+                    ),
+                )
+                failure["detections"] = detections
+                return failure
             payload = ContentGuardProbeService.build_pollution_probe_payload(
                 provider_model,
                 endpoint_path=endpoint_path,
                 prompt=scenario["prompt"],
             )
-            response, _latency_ms, status_code, fallback_trace, error_result = await ContentGuardProbeService.send_content_probe_json(
-                provider,
-                provider_model,
-                endpoint_path=endpoint_path,
-                payload=payload,
-                endpoint_label=endpoint_label,
+            scenario_timeout = max(
+                0.1,
+                min(ContentGuardProbeService.POLLUTION_PROBE_SCENARIO_TIMEOUT_SECONDS, remaining_seconds),
             )
+            try:
+                response, _latency_ms, status_code, fallback_trace, error_result = await asyncio.wait_for(
+                    ContentGuardProbeService.send_content_probe_json(
+                        provider,
+                        provider_model,
+                        endpoint_path=endpoint_path,
+                        payload=payload,
+                        endpoint_label=endpoint_label,
+                    ),
+                    timeout=scenario_timeout,
+                )
+            except asyncio.TimeoutError:
+                failure = ContentGuardProbeService.probe_failure(
+                    endpoint_path=endpoint_path,
+                    endpoint_label=endpoint_label,
+                    support_label="外链广告识别探针超时",
+                    latency_ms=int((time.perf_counter() - started) * 1000),
+                    status_code=None,
+                    guard_result=ContentGuardProbeService.review_result(
+                        f"{scenario['label']}检测超过 {scenario_timeout:.1f}s 限制",
+                        category="pollution_probe_timeout",
+                    ),
+                )
+                failure["detections"] = detections
+                return failure
             trace.extend(fallback_trace or [])
             if error_result is not None:
                 error_result["detections"] = detections
@@ -1143,15 +1187,26 @@ class ContentGuardProbeService:
             provider_model.content_probe_last_passed_at = now
             provider_model.content_probe_failure_count = 0
             provider_model.content_integrity_status = "passed"
+            provider_model.circuit_state = "closed"
+            provider_model.circuit_opened_at = None
             serialized_results["status"] = provider_model.content_integrity_status
             provider_model.content_probe_results_json = dumps_json(serialized_results)
             ProviderService.refresh_provider_state(provider)
             ProviderService.invalidate_provider_runtime_cache()
             db.commit()
             return
+        previous_failed_at = provider_model.content_probe_last_failed_at
+        within_failure_window = (
+            previous_failed_at is not None
+            and now - previous_failed_at <= timedelta(seconds=ContentGuardProbeService.PROBE_FAILURE_WINDOW_SECONDS)
+        )
         provider_model.content_probe_last_failed_at = now
-        provider_model.content_probe_failure_count = int(provider_model.content_probe_failure_count or 0) + 1
-        if result == ContentGuardService.RESULT_BLOCK or provider_model.content_probe_failure_count >= 3:
+        provider_model.content_probe_failure_count = (
+            int(provider_model.content_probe_failure_count or 0) + 1
+            if within_failure_window
+            else 1
+        )
+        if provider_model.content_probe_failure_count >= 3:
             provider_model.content_integrity_status = "blocked"
             provider_model.circuit_state = "open"
             provider_model.circuit_opened_at = now
