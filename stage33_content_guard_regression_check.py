@@ -18,11 +18,14 @@ from app.services.content_guard_service import ContentGuardService
 from app.services.content_runtime_guard_service import ContentRuntimeGuardService
 from app.services.content_trust_probe_service import ContentTrustProbeService
 from app.services.error_catalog_service import ErrorCatalogService
+from app.services.health_service import HealthService
 from app.services.log_service import LogService
 from app.services.provider_service import ProviderService
+from app.services.proxy_service import ProxyService
 from app.services.router_service import RoutePolicyContext, RouterService
 from app.services.system_metrics_service import SystemMetricsService
 from app.schemas.provider import ProviderBase, ProviderOut, ProviderUpdate
+import app.tasks as app_tasks
 
 
 def _assert(condition: bool, message: str) -> None:
@@ -239,15 +242,15 @@ def _check_runtime_guard_request_semantics() -> None:
             provider=provider_disabled,
             route_context=optional_context,
         ) is False,
-        "API Key 内容检测为可选时应回落到提供商内容检测开关",
+        "API Key 内容检测为可选时不得回落到提供商开关继续检测",
     )
     _assert(
         ContentRuntimeGuardService.enabled_for_request(
             setting=setting_enabled,
             provider=provider_enabled,
             route_context=optional_context,
-        ) is True,
-        "API Key 内容检测为可选且提供商开启检测时仍应执行检测",
+        ) is False,
+        "API Key 内容检测为可选时必须关闭运行时检测，避免前端语义误导",
     )
     _assert(
         ContentRuntimeGuardService.enabled_for_request(
