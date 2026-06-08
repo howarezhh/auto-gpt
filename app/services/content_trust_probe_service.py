@@ -27,13 +27,23 @@ class ContentTrustProbeService:
 
     @staticmethod
     async def run_trust_probe(db: Session, payload: ContentGuardRunRequest) -> dict[str, Any]:
+        probe_keys = ContentTrustProbeService.merge_required_probe_keys(payload.probe_keys)
         forced_payload = payload.model_copy(
             update={
-                "probe_keys": list(ContentTrustProbeService.REQUIRED_TRUST_PROBE_KEYS),
+                "probe_keys": probe_keys,
                 "persist_internal_result": payload.target_type == "internal",
             }
         )
         return await ContentTrustProbeService.run_capability_probe(db, forced_payload)
+
+    @staticmethod
+    def merge_required_probe_keys(probe_keys: list[str]) -> list[str]:
+        merged: list[str] = []
+        for probe_key in list(probe_keys or []) + list(ContentTrustProbeService.REQUIRED_TRUST_PROBE_KEYS):
+            key = str(probe_key or "").strip()
+            if key and key not in merged:
+                merged.append(key)
+        return merged
 
     @staticmethod
     async def run_capability_probe(db: Session, payload: ContentGuardRunRequest) -> dict[str, Any]:
@@ -209,7 +219,7 @@ class ContentTrustProbeService:
         elif probe_key == "tools":
             result = await ContentGuardProbeService.probe_tools(provider, provider_model, endpoint_path=endpoint_path)
         else:
-            result = ContentTrustProbeService.skipped_probe(
+            result = ContentTrustProbeService.invalid_probe(
                 probe_key=probe_key,
                 endpoint_path=endpoint_path,
                 message="未知探针",
@@ -221,7 +231,7 @@ class ContentTrustProbeService:
 
     @staticmethod
     def skipped_probe(*, probe_key: str, endpoint_path: str, message: str) -> dict[str, Any]:
-        return {
+        return ContentGuardProbeService.mark_detection_result({
             "capability_key": f"content_{probe_key}",
             "probe_key": probe_key,
             "probe_label": ContentTrustProbeService.PROBE_LABELS.get(probe_key, probe_key),
@@ -237,7 +247,33 @@ class ContentTrustProbeService:
             "message": message,
             "trace": [],
             "retryable": False,
-        }
+        })
+
+    @staticmethod
+    def invalid_probe(*, probe_key: str, endpoint_path: str, message: str) -> dict[str, Any]:
+        return ContentGuardProbeService.mark_detection_result({
+            "capability_key": f"content_{probe_key}",
+            "probe_key": probe_key,
+            "probe_label": ContentTrustProbeService.PROBE_LABELS.get(probe_key, probe_key),
+            "endpoint_path": endpoint_path,
+            "endpoint_label": ContentTrustProbeService.PROBE_LABELS.get(probe_key, probe_key),
+            "success": False,
+            "native_success": False,
+            "adapted_success": False,
+            "support_mode": "invalid_probe",
+            "support_label": "未知探针",
+            "latency_ms": 0,
+            "status_code": None,
+            "message": message,
+            "trace": [],
+            "retryable": False,
+            "content_guard": {
+                "content_guard_result": ContentGuardRuleService.RESULT_REVIEW,
+                "content_guard_risk_level": "medium",
+                "content_guard_reason": message,
+                "content_guard_action": "record",
+            },
+        })
 
     @staticmethod
     def summarize_probe_results(results: list[dict[str, Any]]) -> dict[str, Any]:
@@ -291,4 +327,3 @@ class ContentTrustProbeService:
             ContentGuardRuleService.RESULT_PASS: 1,
         }
         return max(candidates, key=lambda item: priority.get(str(item.get("content_guard_result") or ""), 0))
-
