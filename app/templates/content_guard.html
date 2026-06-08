@@ -42,7 +42,14 @@
     </div>
 </section>
 
-<section class="content-guard-layout">
+<nav class="content-guard-tabs" role="tablist" aria-label="内容防护分区">
+    <button class="content-guard-tab is-active" type="button" role="tab" aria-selected="true" data-content-guard-tab="settings">配置探测</button>
+    <button class="content-guard-tab" type="button" role="tab" aria-selected="false" data-content-guard-tab="governance">提供商治理</button>
+    <button class="content-guard-tab" type="button" role="tab" aria-selected="false" data-content-guard-tab="rules">规则检测</button>
+    <button class="content-guard-tab" type="button" role="tab" aria-selected="false" data-content-guard-tab="results">检测结果</button>
+</nav>
+
+<section class="content-guard-layout content-guard-tab-panel" data-content-guard-panel="settings">
     <form class="panel-card content-guard-settings-panel" id="content-guard-settings-form">
         <div class="section-subhead content-guard-panel-head">
             <div>
@@ -283,7 +290,35 @@
     </form>
 </section>
 
-<section class="panel-card content-guard-rules-panel" aria-labelledby="content-guard-rules-title">
+<section class="panel-card content-guard-governance-panel content-guard-tab-panel" data-content-guard-panel="governance" aria-labelledby="content-guard-governance-title" hidden>
+    <div class="section-subhead content-guard-panel-head">
+        <div>
+            <div class="panel-kicker">治理</div>
+            <h3 id="content-guard-governance-title">提供商处置</h3>
+        </div>
+    </div>
+    <div class="table-shell content-guard-governance-table-shell">
+        <table class="data-table content-guard-governance-table">
+            <thead>
+                <tr>
+                    <th>提供商</th>
+                    <th>状态</th>
+                    <th>评分</th>
+                    <th>异常原因</th>
+                    <th>模型</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody id="content-guard-governance-body">
+                <tr>
+                    <td colspan="6" class="table-muted">加载中</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<section class="panel-card content-guard-rules-panel content-guard-tab-panel" data-content-guard-panel="rules" aria-labelledby="content-guard-rules-title" hidden>
     <div class="section-subhead content-guard-panel-head">
         <div>
             <div class="panel-kicker">规则</div>
@@ -346,7 +381,7 @@
     </form>
 </section>
 
-<section class="panel-card content-guard-result-panel" aria-labelledby="content-guard-result-title">
+<section class="panel-card content-guard-result-panel content-guard-tab-panel" data-content-guard-panel="results" aria-labelledby="content-guard-result-title" hidden>
     <div class="section-subhead content-guard-panel-head">
         <div>
             <div class="panel-kicker">结果</div>
