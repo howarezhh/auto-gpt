@@ -4,6 +4,7 @@ import asyncio
 import os
 import re
 import sqlite3
+from datetime import datetime, timedelta
 from pathlib import Path
 from app.utils.json_utils import loads_json
 
@@ -15,6 +16,7 @@ import app.services.content_guard_module_service as content_guard_module_service
 from app.services.content_guard_module_service import ContentGuardModuleService
 from app.services.content_guard_service import ContentGuardService
 from app.services.content_runtime_guard_service import ContentRuntimeGuardService
+from app.services.content_trust_probe_service import ContentTrustProbeService
 from app.services.error_catalog_service import ErrorCatalogService
 from app.services.log_service import LogService
 from app.services.provider_service import ProviderService
@@ -641,6 +643,14 @@ class _FakeSettingsDb:
     def __init__(self) -> None:
         self.commit_count = 0
         self.refreshed = None
+
+    def commit(self) -> None:
+        self.commit_count += 1
+
+
+class _ProbeHealthSession:
+    def __init__(self) -> None:
+        self.commit_count = 0
 
     def commit(self) -> None:
         self.commit_count += 1

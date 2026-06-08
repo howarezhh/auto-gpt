@@ -1206,7 +1206,7 @@ class ContentGuardProbeService:
             if within_failure_window
             else 1
         )
-        if provider_model.content_probe_failure_count >= 3:
+        if result == ContentGuardService.RESULT_BLOCK or provider_model.content_probe_failure_count >= 3:
             provider_model.content_integrity_status = "blocked"
             provider_model.circuit_state = "open"
             provider_model.circuit_opened_at = now
