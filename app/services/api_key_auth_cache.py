@@ -165,11 +165,7 @@ class ApiKeyAuthCache:
         key_hash: str,
         api_key: ApiClientKey,
         allowed_provider_ids: list[int],
-        default_provider_id: int | None,
-        remaining_tokens: int | None,
         remaining_balance: float | None,
-        remaining_requests_daily: int | None,
-        remaining_cost_daily: float | None,
         policy_snapshot_json: str,
         owner_user: UserAccount | None = None,
         owner_quota_snapshot: dict | None = None,
@@ -191,27 +187,17 @@ class ApiKeyAuthCache:
                 "expires_at": cls._serialize_datetime(api_key.expires_at),
                 "qps_limit": api_key.qps_limit,
                 "rpm_limit": api_key.rpm_limit,
-                "tpm_limit": api_key.tpm_limit,
                 "prompt_tokens_used": api_key.prompt_tokens_used,
                 "completion_tokens_used": api_key.completion_tokens_used,
                 "total_tokens_used": api_key.total_tokens_used,
                 "total_cost_used": cls._to_float(api_key.total_cost_used) or 0,
-                "balance_amount": cls._to_float(api_key.balance_amount),
-                "total_recharge_amount": cls._to_float(api_key.total_recharge_amount) or 0,
-                "route_mode": api_key.route_mode,
-                "default_provider_id": default_provider_id,
                 "owner_user_id": api_key.owner_user_id,
-                "manual_allow_fallback": api_key.manual_allow_fallback,
-                "route_exhausted_retry_infinite_enabled": api_key.route_exhausted_retry_infinite_enabled,
-                "trusted_providers_only": api_key.trusted_providers_only,
-                "allow_low_trust_providers": api_key.allow_low_trust_providers,
                 "content_guard_required": api_key.content_guard_required,
                 "allowed_model_names_json": api_key.allowed_model_names_json,
                 "allowed_endpoint_paths_json": api_key.allowed_endpoint_paths_json,
                 "allowed_source_ips_json": api_key.allowed_source_ips_json,
                 "preferred_provider_ids_json": api_key.preferred_provider_ids_json,
                 "preferred_region_tags_json": api_key.preferred_region_tags_json,
-                "max_candidate_count": api_key.max_candidate_count,
                 "latency_bias": api_key.latency_bias,
                 "success_rate_bias": api_key.success_rate_bias,
                 "cost_bias": api_key.cost_bias,
@@ -230,10 +216,7 @@ class ApiKeyAuthCache:
             ),
             "owner_quota_snapshot": owner_quota_snapshot,
             "allowed_provider_ids": allowed_provider_ids,
-            "remaining_tokens": None,
-            "remaining_balance": None,
-            "remaining_requests_daily": None,
-            "remaining_cost_daily": None,
+            "remaining_balance": remaining_balance,
             "policy_snapshot_json": policy_snapshot_json,
         }
         try:
@@ -252,6 +235,7 @@ class ApiKeyAuthCache:
     @classmethod
     def build_auth_context(cls, data: dict[str, Any]):
         from app.services.router_service import RoutePolicyContext
+        from app.services.setting_service import SettingService
 
         api_key_data = data.get("api_key") or {}
         owner_user_data = data.get("owner_user")
@@ -265,18 +249,13 @@ class ApiKeyAuthCache:
             }
         )
         allowed_provider_ids = [int(item) for item in data.get("allowed_provider_ids") or []]
+        route_setting = SettingService.get_cached()
         route_context = RoutePolicyContext(
-            route_mode=api_key.route_mode,
-            default_provider_id=api_key.default_provider_id,
-            manual_allow_fallback=api_key.manual_allow_fallback,
             allowed_provider_ids=allowed_provider_ids,
-            route_exhausted_retry_infinite_enabled=bool(getattr(api_key, "route_exhausted_retry_infinite_enabled", False)),
-            allow_low_trust_providers=bool(getattr(api_key, "allow_low_trust_providers", False)),
-            require_trusted_provider=bool(getattr(api_key, "trusted_providers_only", False)),
+            require_trusted_provider=bool(getattr(route_setting, "trusted_providers_only", False)),
             content_guard_required=bool(getattr(api_key, "content_guard_required", True)),
             preferred_provider_ids=loads_json(api_key.preferred_provider_ids_json, []),
             preferred_region_tags=loads_json(api_key.preferred_region_tags_json, []),
-            max_candidate_count=api_key.max_candidate_count,
             latency_bias=api_key.latency_bias,
             success_rate_bias=api_key.success_rate_bias,
             cost_bias=api_key.cost_bias,

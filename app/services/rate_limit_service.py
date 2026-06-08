@@ -125,26 +125,8 @@ class RateLimitService:
         api_key_id: int,
         qps_limit: int | None = None,
         rpm_limit: int | None = None,
-        daily_request_limit: int | None = None,
-        total_token_limit: int | None = None,
-        daily_token_limit: int | None = None,
-        total_cost_limit: Decimal | float | int | str | None = None,
-        daily_cost_limit: Decimal | float | int | str | None = None,
-        tpm_limit: int | None = None,
-        account_id: int | None = None,
-        account_request_limit_total: int | None = None,
-        account_request_limit_daily: int | None = None,
-        account_request_limit_monthly: int | None = None,
-        account_token_limit_total: int | None = None,
-        account_token_limit_daily: int | None = None,
-        account_token_limit_monthly: int | None = None,
-        account_cost_limit_total: Decimal | float | int | str | None = None,
-        account_cost_limit_daily: Decimal | float | int | str | None = None,
-        account_cost_limit_monthly: Decimal | float | int | str | None = None,
     ) -> None:
         try:
-            day_key = datetime.utcnow().strftime("%Y%m%d")
-            month_key = datetime.utcnow().strftime("%Y%m")
             if qps_limit and qps_limit > 0:
                 current_second = int(time.time())
                 key = f"rate:qps:{api_key_id}:{current_second}"
@@ -164,117 +146,6 @@ class RateLimitService:
                     limit=rpm_limit,
                     code="rate_limit_exceeded",
                     message="Api key RPM limit exceeded",
-                )
-            if daily_request_limit and daily_request_limit > 0:
-                key = f"quota:api_key:{api_key_id}:requests:{day_key}"
-                await RateLimitService._increment_and_check(
-                    key=key,
-                    ttl_seconds=60 * 60 * 26,
-                    limit=daily_request_limit,
-                    code="daily_request_quota_exhausted",
-                    message="Api key daily request quota exhausted",
-                )
-            if total_token_limit and total_token_limit > 0:
-                await RateLimitService._get_and_check(
-                    key=f"quota:api_key:{api_key_id}:tokens:total",
-                    limit=total_token_limit,
-                    code="api_key_token_quota_exhausted",
-                    message="Api key token quota exhausted",
-                )
-            if daily_token_limit and daily_token_limit > 0:
-                await RateLimitService._get_and_check(
-                    key=f"quota:api_key:{api_key_id}:tokens:{day_key}",
-                    limit=daily_token_limit,
-                    code="daily_token_quota_exhausted",
-                    message="Api key daily token quota exhausted",
-                )
-            if total_cost_limit and total_cost_limit > 0:
-                await RateLimitService._get_and_check_cost(
-                    key=f"quota:api_key:{api_key_id}:cost:total",
-                    limit=total_cost_limit,
-                    code="api_key_cost_quota_exhausted",
-                    message="Api key billing quota exhausted",
-                )
-            if daily_cost_limit and daily_cost_limit > 0:
-                await RateLimitService._get_and_check_cost(
-                    key=f"quota:api_key:{api_key_id}:cost:{day_key}",
-                    limit=daily_cost_limit,
-                    code="daily_cost_quota_exhausted",
-                    message="Api key daily cost quota exhausted",
-                )
-            if tpm_limit and tpm_limit > 0:
-                minute_key = datetime.utcnow().strftime("%Y%m%d%H%M")
-                await RateLimitService._get_and_check(
-                    key=f"quota:api_key:{api_key_id}:tpm:{minute_key}",
-                    limit=tpm_limit,
-                    code="tpm_limit_exceeded",
-                    message="Api key TPM limit exceeded",
-                )
-            if account_id is not None and account_request_limit_total and account_request_limit_total > 0:
-                await RateLimitService._increment_and_check(
-                    key=f"quota:account:{account_id}:requests:total",
-                    ttl_seconds=None,
-                    limit=account_request_limit_total,
-                    code="account_request_quota_exhausted",
-                    message="Owner account total request quota exhausted",
-                )
-            if account_id is not None and account_request_limit_daily and account_request_limit_daily > 0:
-                await RateLimitService._increment_and_check(
-                    key=f"quota:account:{account_id}:requests:{day_key}",
-                    ttl_seconds=60 * 60 * 26,
-                    limit=account_request_limit_daily,
-                    code="account_daily_request_quota_exhausted",
-                    message="Owner account daily request quota exhausted",
-                )
-            if account_id is not None and account_request_limit_monthly and account_request_limit_monthly > 0:
-                await RateLimitService._increment_and_check(
-                    key=f"quota:account:{account_id}:requests:{month_key}",
-                    ttl_seconds=60 * 60 * 24 * 33,
-                    limit=account_request_limit_monthly,
-                    code="account_monthly_request_quota_exhausted",
-                    message="Owner account monthly request quota exhausted",
-                )
-            if account_id is not None and account_token_limit_total and account_token_limit_total > 0:
-                await RateLimitService._get_and_check(
-                    key=f"quota:account:{account_id}:tokens:total",
-                    limit=account_token_limit_total,
-                    code="account_token_quota_exhausted",
-                    message="Owner account total token quota exhausted",
-                )
-            if account_id is not None and account_token_limit_daily and account_token_limit_daily > 0:
-                await RateLimitService._get_and_check(
-                    key=f"quota:account:{account_id}:tokens:{day_key}",
-                    limit=account_token_limit_daily,
-                    code="account_daily_token_quota_exhausted",
-                    message="Owner account daily token quota exhausted",
-                )
-            if account_id is not None and account_token_limit_monthly and account_token_limit_monthly > 0:
-                await RateLimitService._get_and_check(
-                    key=f"quota:account:{account_id}:tokens:{month_key}",
-                    limit=account_token_limit_monthly,
-                    code="account_monthly_token_quota_exhausted",
-                    message="Owner account monthly token quota exhausted",
-                )
-            if account_id is not None and account_cost_limit_total and account_cost_limit_total > 0:
-                await RateLimitService._get_and_check_cost(
-                    key=f"quota:account:{account_id}:cost:total",
-                    limit=account_cost_limit_total,
-                    code="account_cost_quota_exhausted",
-                    message="Owner account total cost quota exhausted",
-                )
-            if account_id is not None and account_cost_limit_daily and account_cost_limit_daily > 0:
-                await RateLimitService._get_and_check_cost(
-                    key=f"quota:account:{account_id}:cost:{day_key}",
-                    limit=account_cost_limit_daily,
-                    code="account_daily_cost_quota_exhausted",
-                    message="Owner account daily cost quota exhausted",
-                )
-            if account_id is not None and account_cost_limit_monthly and account_cost_limit_monthly > 0:
-                await RateLimitService._get_and_check_cost(
-                    key=f"quota:account:{account_id}:cost:{month_key}",
-                    limit=account_cost_limit_monthly,
-                    code="account_monthly_cost_quota_exhausted",
-                    message="Owner account monthly cost quota exhausted",
                 )
         except RateLimitExceededError:
             raise

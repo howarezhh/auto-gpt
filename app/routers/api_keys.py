@@ -74,7 +74,7 @@ def export_api_keys(
     items = ApiKeyAdminService.list_api_keys(db)
     buffer = io.StringIO()
     writer = csv.writer(buffer)
-    writer.writerow(["id", "name", "owner_user_name", "key_prefix", "status", "enabled", "route_mode", "default_provider_id", "allowed_provider_count", "token_limit_total", "remaining_tokens", "cost_limit_total", "balance_amount", "total_cost_used", "created_at", "last_used_at"])
+    writer.writerow(["id", "name", "owner_user_name", "key_prefix", "status", "enabled", "allowed_provider_count", "account_balance", "total_cost_used", "created_at", "last_used_at"])
     for item in items:
         serialized = ApiKeyAdminService.serialize_api_key(item)
         writer.writerow([
@@ -84,12 +84,7 @@ def export_api_keys(
             serialized["key_prefix"],
             serialized["status"],
             "true" if serialized["enabled"] else "false",
-            serialized["route_mode"],
-            serialized["default_provider_id"] or "",
             len(serialized["allowed_provider_ids"]),
-            serialized["token_limit_total"] or "",
-            serialized["remaining_tokens"] or "",
-            serialized["cost_limit_total"] or "",
             serialized["balance_amount"] or "",
             serialized["total_cost_used"] or 0,
             serialized["created_at"].isoformat() if serialized["created_at"] else "",
@@ -119,7 +114,11 @@ def create_api_key(
     current_user=Depends(require_admin_api_user),
 ) -> ApiKeyCreateResponse:
     try:
-        api_key, raw_api_key = ApiKeyAdminService.create_api_key(db, payload)
+        api_key, raw_api_key = ApiKeyAdminService.create_api_key(
+            db,
+            payload,
+            default_owner_user_id=current_user.id,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     AdminAuditService.create_log(

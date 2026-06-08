@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import get_db
-from app.schemas.api_key import ApiKeyCreate, ApiKeyUpdate, RouteMode
+from app.schemas.api_key import ApiKeyCreate, ApiKeyUpdate
 from app.schemas.conversation import ConversationReplay, ConversationSummaryList
 from app.schemas.log import (
     LogFilterOptionsResponse,
@@ -31,6 +31,7 @@ from app.services.api_key_admin_service import ApiKeyAdminService
 from app.services.api_key_service import ApiClientAuthError, ApiKeyService
 from app.services.asset_service import AssetService
 from app.services.log_service import LogService
+from app.routers.logging_api import build_request_log_timeline_payload
 from app.services.model_catalog_service import ModelCatalogService
 from app.services.openai_error_service import OpenAIErrorService
 from app.services.provider_service import ProviderService
@@ -40,11 +41,13 @@ from app.services.user_auth_service import USER_ROLE_ADMIN, UserAuthService
 from app.services.user_portal_service import UserPortalService
 from app.logging.adapters.user_operation_adapter import UserOperationLogRecorder
 from app.models.logging_events import UserOperationAuditLog
+from app.utils.display_format import register_display_filters
 from app.utils.json_utils import safeJsonParse, to_jsonable
 
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
+register_display_filters(templates)
 
 SELF_TEST_IMAGE_MODES = {"none", "url", "upload", "generate"}
 SELF_TEST_TEXT_PROMPT = "请只回复 pong"
@@ -120,30 +123,14 @@ def _build_user_api_key_payload(
     raw_api_key: str | None,
     remark: str | None,
     enabled: bool,
-    route_mode: RouteMode,
-    default_provider_id: str | None,
-    manual_allow_fallback: bool,
-    route_exhausted_retry_infinite_enabled: bool,
-    trusted_providers_only: bool = False,
-    allow_low_trust_providers: bool = False,
     content_guard_required: bool = True,
 ) -> dict:
-    parsed_default_provider_id = _parse_optional_int_form(default_provider_id, field_label="默认提供商")
-    if parsed_default_provider_id is not None:
-        if parsed_default_provider_id not in selectable_provider_ids:
-            raise ValueError("默认提供商未启用，当前不可选择")
     return {
         "name": name,
         "raw_api_key": raw_api_key,
         "remark": remark,
         "enabled": enabled,
-        "route_mode": route_mode,
-        "default_provider_id": parsed_default_provider_id,
         "owner_user_id": current_user_id,
-        "manual_allow_fallback": manual_allow_fallback,
-        "route_exhausted_retry_infinite_enabled": route_exhausted_retry_infinite_enabled,
-        "trusted_providers_only": trusted_providers_only,
-        "allow_low_trust_providers": allow_low_trust_providers,
         "content_guard_required": content_guard_required,
         "auto_sync_provider_bindings": True,
         "allowed_provider_ids": [],
@@ -722,12 +709,6 @@ def create_user_api_key(
     raw_api_key: str | None = Form(default=None),
     remark: str | None = Form(default=None),
     enabled: str | None = Form(default=None),
-    route_mode: RouteMode = Form(default="failover"),
-    default_provider_id: str | None = Form(default=None),
-    manual_allow_fallback: str | None = Form(default=None),
-    route_exhausted_retry_infinite_enabled: str | None = Form(default=None),
-    trusted_providers_only: str | None = Form(default="on"),
-    allow_low_trust_providers: str | None = Form(default=None),
     content_guard_required: str | None = Form(default="on"),
     db: Session = Depends(get_db),
 ):
@@ -744,12 +725,6 @@ def create_user_api_key(
                 raw_api_key=raw_api_key,
                 remark=remark,
                 enabled=enabled == "on",
-                route_mode=route_mode,
-                default_provider_id=default_provider_id,
-                manual_allow_fallback=manual_allow_fallback == "on",
-                route_exhausted_retry_infinite_enabled=route_exhausted_retry_infinite_enabled == "on",
-                trusted_providers_only=trusted_providers_only == "on",
-                allow_low_trust_providers=allow_low_trust_providers == "on",
                 content_guard_required=content_guard_required == "on",
             )
         )
@@ -791,12 +766,6 @@ def update_user_api_key(
     raw_api_key: str | None = Form(default=None),
     remark: str | None = Form(default=None),
     enabled: str | None = Form(default=None),
-    route_mode: RouteMode = Form(default="failover"),
-    default_provider_id: str | None = Form(default=None),
-    manual_allow_fallback: str | None = Form(default=None),
-    route_exhausted_retry_infinite_enabled: str | None = Form(default=None),
-    trusted_providers_only: str | None = Form(default="on"),
-    allow_low_trust_providers: str | None = Form(default=None),
     content_guard_required: str | None = Form(default="on"),
     db: Session = Depends(get_db),
 ):
@@ -816,12 +785,6 @@ def update_user_api_key(
                 raw_api_key=raw_api_key,
                 remark=remark,
                 enabled=enabled == "on",
-                route_mode=route_mode,
-                default_provider_id=default_provider_id,
-                manual_allow_fallback=manual_allow_fallback == "on",
-                route_exhausted_retry_infinite_enabled=route_exhausted_retry_infinite_enabled == "on",
-                trusted_providers_only=trusted_providers_only == "on",
-                allow_low_trust_providers=allow_low_trust_providers == "on",
                 content_guard_required=content_guard_required == "on",
             )
         )
@@ -1292,6 +1255,21 @@ def user_log_detail_api(
     if log is None:
         return JSONResponse({"detail": "not_found"}, status_code=404)
     return JSONResponse(log.model_dump(mode="json"))
+
+
+@router.get("/api/user/logs/{log_id}/timeline")
+def user_log_timeline_api(
+    log_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    current_user = require_user_html(request, db)
+    if isinstance(current_user, RedirectResponse):
+        return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    log = UserPortalService.get_owned_request_log(db, user=current_user, log_id=log_id)
+    if log is None:
+        return JSONResponse({"detail": "not_found"}, status_code=404)
+    return JSONResponse(build_request_log_timeline_payload(db, log))
 
 
 @router.get("/user/billing", response_class=HTMLResponse)

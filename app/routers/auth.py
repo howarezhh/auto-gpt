@@ -9,10 +9,12 @@ from app.database import get_db
 from app.services.admin_audit_service import AdminAuditService
 from app.services.setting_service import SettingService
 from app.services.user_auth_service import USER_ROLE_USER, UserAuthService
+from app.utils.display_format import register_display_filters
 
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
+register_display_filters(templates)
 
 
 def _current_user(request: Request, db: Session):

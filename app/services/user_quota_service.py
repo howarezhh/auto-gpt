@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.models.api_client_key import ApiClientKey
 from app.models.request_log import RequestLog
 from app.models.user_account import UserAccount
+from app.models.user_account_billing_record import UserAccountBillingRecord
 from app.services.api_key_auth_cache import ApiKeyAuthCache
 from app.services.billing_service import BillingService
 from app.services.log_service import LogService
@@ -92,14 +93,41 @@ class UserQuotaService:
                 func.sum(RequestLog.total_tokens).label("total_tokens"),
                 func.sum(case((RequestLog.created_at >= day_start, RequestLog.total_tokens), else_=0)).label("day_tokens"),
                 func.sum(case((RequestLog.created_at >= month_start, RequestLog.total_tokens), else_=0)).label("month_tokens"),
-                func.sum(RequestLog.total_cost).label("total_cost_used"),
-                func.sum(case((RequestLog.created_at >= day_start, RequestLog.total_cost), else_=0)).label("day_cost_used"),
-                func.sum(case((RequestLog.created_at >= month_start, RequestLog.total_cost), else_=0)).label("month_cost_used"),
             ).where(
                 RequestLog.api_client_key_id.in_(key_ids),
                 LogService._route_traffic_expr(),
-                RequestLog.request_path != "/v1/models",
+                LogService._non_model_list_request_expr(),
             )
+        ).one()
+        billing_row = db.execute(
+            select(
+                func.sum(
+                    case(
+                        (UserAccountBillingRecord.record_type == "request_charge", func.abs(UserAccountBillingRecord.amount)),
+                        else_=0,
+                    )
+                ).label("total_cost_used"),
+                func.sum(
+                    case(
+                        (
+                            (UserAccountBillingRecord.record_type == "request_charge")
+                            & (UserAccountBillingRecord.created_at >= day_start),
+                            func.abs(UserAccountBillingRecord.amount),
+                        ),
+                        else_=0,
+                    )
+                ).label("day_cost_used"),
+                func.sum(
+                    case(
+                        (
+                            (UserAccountBillingRecord.record_type == "request_charge")
+                            & (UserAccountBillingRecord.created_at >= month_start),
+                            func.abs(UserAccountBillingRecord.amount),
+                        ),
+                        else_=0,
+                    )
+                ).label("month_cost_used"),
+            ).where(UserAccountBillingRecord.user_account_id == user.id)
         ).one()
 
         return UserQuotaUsageSnapshot(
@@ -109,9 +137,9 @@ class UserQuotaService:
             frozen_amount=frozen_amount,
             available_balance=available_balance,
             total_recharge_amount=total_recharge_amount,
-            total_cost_used=BillingService.to_decimal(usage_row.total_cost_used),
-            day_cost_used=BillingService.to_decimal(usage_row.day_cost_used),
-            month_cost_used=BillingService.to_decimal(usage_row.month_cost_used),
+            total_cost_used=BillingService.to_decimal(billing_row.total_cost_used),
+            day_cost_used=BillingService.to_decimal(billing_row.day_cost_used),
+            month_cost_used=BillingService.to_decimal(billing_row.month_cost_used),
             total_requests=int(usage_row.total_requests or 0),
             day_requests=int(usage_row.day_requests or 0),
             month_requests=int(usage_row.month_requests or 0),
@@ -153,15 +181,6 @@ class UserQuotaService:
             "day_tokens": snapshot.day_tokens,
             "month_tokens": snapshot.month_tokens,
             "has_balance_limit": snapshot.has_balance_limit,
-            "request_limit_total": user.request_limit_total,
-            "request_limit_daily": user.request_limit_daily,
-            "request_limit_monthly": user.request_limit_monthly,
-            "token_limit_total": user.token_limit_total,
-            "token_limit_daily": user.token_limit_daily,
-            "token_limit_monthly": user.token_limit_monthly,
-            "cost_limit_total": BillingService.to_float(user.cost_limit_total),
-            "cost_limit_daily": BillingService.to_float(user.cost_limit_daily),
-            "cost_limit_monthly": BillingService.to_float(user.cost_limit_monthly),
         }
 
     @staticmethod

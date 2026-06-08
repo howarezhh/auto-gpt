@@ -26,10 +26,12 @@ from app.services.setting_service import SettingService
 from app.services.user_auth_service import USER_ROLE_ADMIN, USER_ROLE_USER, require_admin_api_user, UserAuthService
 from app.services.user_portal_service import UserPortalService
 from app.services.user_quota_service import UserQuotaService
+from app.utils.display_format import register_display_filters
 
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
+register_display_filters(templates)
 
 QUOTA_FIELD_DEFINITIONS = (
     ("frozen_amount", "冻结金额", "decimal", "0.000000"),

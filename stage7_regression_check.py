@@ -731,7 +731,6 @@ def main() -> None:
             filter_options = filter_options_response.json()
 
             _assert(detail["total_tokens_used"] == 50, f"detail total tokens mismatch: {detail}")
-            _assert(detail["remaining_tokens"] == 950, f"detail remaining tokens mismatch: {detail}")
             _assert(detail["total_cost_used"] > 0, f"detail total cost should be positive: {detail}")
             _assert(detail["balance_amount"] < 1, f"detail balance should be deducted: {detail}")
             _assert(stats["total_requests"] == 1, f"stats total requests mismatch: {stats}")

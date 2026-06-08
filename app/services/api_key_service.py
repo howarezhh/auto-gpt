@@ -24,6 +24,7 @@ from app.services.billing_service import BillingService
 from app.services.log_service import LogService
 from app.services.rate_limit_service import RateLimitExceededError, RateLimitService
 from app.services.router_service import RoutePolicyContext
+from app.services.setting_service import SettingService
 from app.services.user_quota_service import UserQuotaService
 from app.utils.json_utils import dumps_json, loads_json
 
@@ -42,10 +43,7 @@ class ApiClientAuthError(Exception):
         api_client_key_prefix: str | None = None,
         user_account_id: int | None = None,
         user_account_name: str | None = None,
-        remaining_tokens: int | None = None,
         remaining_balance: float | None = None,
-        remaining_requests_daily: int | None = None,
-        remaining_cost_daily: float | None = None,
         policy_snapshot_json: str | None = None,
     ):
         self.status_code = status_code
@@ -56,10 +54,7 @@ class ApiClientAuthError(Exception):
         self.api_client_key_prefix = api_client_key_prefix
         self.user_account_id = user_account_id
         self.user_account_name = user_account_name
-        self.remaining_tokens = remaining_tokens
         self.remaining_balance = remaining_balance
-        self.remaining_requests_daily = remaining_requests_daily
-        self.remaining_cost_daily = remaining_cost_daily
         self.policy_snapshot_json = policy_snapshot_json
         super().__init__(message)
 
@@ -70,10 +65,7 @@ class ApiClientAuthContext:
 
     api_client_key: ApiClientKey
     route_context: RoutePolicyContext
-    remaining_tokens: int | None
     remaining_balance: float | None
-    remaining_requests_daily: int | None
-    remaining_cost_daily: float | None
     policy_snapshot_json: str
 
 
@@ -202,15 +194,24 @@ class ApiKeyService:
         api_client_key, route_context = ApiKeyAuthCache.build_auth_context(cached_auth)
         owner_user = api_client_key.owner_user
         owner_user_name = owner_user.username if owner_user else None
-        remaining_tokens = None
-        remaining_balance = None
+        remaining_balance = cached_auth.get("remaining_balance")
         if owner_user is not None:
             remaining_balance = float(BillingService.to_decimal(owner_user.balance_amount) - BillingService.to_decimal(owner_user.frozen_amount))
-        elif api_client_key.balance_amount is not None:
-            remaining_balance = float(api_client_key.balance_amount)
         policy_snapshot_json = str(cached_auth.get("policy_snapshot_json") or "{}")
-        remaining_requests_daily = None
-        remaining_cost_daily = None
+        if owner_user is None:
+            ApiKeyAuthCache.invalidate_hash(key_hash)
+            raise ApiClientAuthError(
+                status_code=status.HTTP_403_FORBIDDEN,
+                code="owner_user_required",
+                message="API Key must be bound to an owner account",
+                api_client_key_id=api_client_key.id,
+                api_client_key_name=api_client_key.name,
+                api_client_key_prefix=api_client_key.key_prefix,
+                user_account_id=api_client_key.owner_user_id,
+                user_account_name=owner_user_name,
+                remaining_balance=remaining_balance,
+                policy_snapshot_json=policy_snapshot_json,
+            )
         if not api_client_key.enabled:
             ApiKeyAuthCache.invalidate_hash(key_hash)
             raise ApiClientAuthError(
@@ -222,7 +223,6 @@ class ApiKeyService:
                 api_client_key_prefix=api_client_key.key_prefix,
                 user_account_id=api_client_key.owner_user_id,
                 user_account_name=owner_user_name,
-                remaining_tokens=remaining_tokens,
                 remaining_balance=remaining_balance,
                 policy_snapshot_json=policy_snapshot_json,
             )
@@ -237,7 +237,6 @@ class ApiKeyService:
                 api_client_key_prefix=api_client_key.key_prefix,
                 user_account_id=api_client_key.owner_user_id,
                 user_account_name=owner_user_name,
-                remaining_tokens=remaining_tokens,
                 remaining_balance=remaining_balance,
                 policy_snapshot_json=policy_snapshot_json,
             )
@@ -251,7 +250,6 @@ class ApiKeyService:
                 api_client_key_prefix=api_client_key.key_prefix,
                 user_account_id=api_client_key.owner_user_id,
                 user_account_name=owner_user_name,
-                remaining_tokens=remaining_tokens,
                 remaining_balance=remaining_balance,
                 policy_snapshot_json=policy_snapshot_json,
             )
@@ -265,7 +263,6 @@ class ApiKeyService:
                 api_client_key_prefix=api_client_key.key_prefix,
                 user_account_id=api_client_key.owner_user_id,
                 user_account_name=owner_user_name,
-                remaining_tokens=remaining_tokens,
                 remaining_balance=remaining_balance,
                 policy_snapshot_json=policy_snapshot_json,
             )
@@ -280,7 +277,6 @@ class ApiKeyService:
                 api_client_key_prefix=api_client_key.key_prefix,
                 user_account_id=api_client_key.owner_user_id,
                 user_account_name=owner_user_name,
-                remaining_tokens=remaining_tokens,
                 remaining_balance=remaining_balance,
                 policy_snapshot_json=policy_snapshot_json,
             )
@@ -294,21 +290,6 @@ class ApiKeyService:
                 api_client_key_prefix=api_client_key.key_prefix,
                 user_account_id=api_client_key.owner_user_id,
                 user_account_name=owner_user_name,
-                remaining_tokens=remaining_tokens,
-                remaining_balance=remaining_balance,
-                policy_snapshot_json=policy_snapshot_json,
-            )
-        if owner_user is None and api_client_key.balance_amount is not None and Decimal(str(api_client_key.balance_amount)) <= Decimal("0"):
-            raise ApiClientAuthError(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                code="insufficient_balance",
-                message="Api key balance exhausted",
-                api_client_key_id=api_client_key.id,
-                api_client_key_name=api_client_key.name,
-                api_client_key_prefix=api_client_key.key_prefix,
-                user_account_id=api_client_key.owner_user_id,
-                user_account_name=owner_user_name,
-                remaining_tokens=remaining_tokens,
                 remaining_balance=remaining_balance,
                 policy_snapshot_json=policy_snapshot_json,
             )
@@ -324,7 +305,6 @@ class ApiKeyService:
                     api_client_key_prefix=api_client_key.key_prefix,
                     user_account_id=api_client_key.owner_user_id,
                     user_account_name=owner_user_name,
-                    remaining_tokens=remaining_tokens,
                     remaining_balance=remaining_balance,
                     policy_snapshot_json=policy_snapshot_json,
                 )
@@ -332,10 +312,7 @@ class ApiKeyService:
         return ApiClientAuthContext(
             api_client_key=api_client_key,
             route_context=route_context,
-            remaining_tokens=remaining_tokens,
             remaining_balance=remaining_balance,
-            remaining_requests_daily=remaining_requests_daily,
-            remaining_cost_daily=remaining_cost_daily,
             policy_snapshot_json=policy_snapshot_json,
         )
 
@@ -370,34 +347,34 @@ class ApiKeyService:
                 message="Invalid api key",
                 api_client_key_prefix=ApiKeyService.extract_key_prefix(raw_key),
             )
-        remaining_tokens = None
-        remaining_requests_daily = None
-        remaining_cost_daily = None
         allowed_provider_ids = [binding.provider_id for binding in api_client_key.provider_bindings]
-        default_provider_id = api_client_key.default_provider_id
-        if default_provider_id not in allowed_provider_ids:
-            default_provider_id = None
         owner_user = db.get(UserAccount, api_client_key.owner_user_id) if api_client_key.owner_user_id is not None else None
         owner_user_id = owner_user.id if owner_user is not None else None
         owner_user_name = owner_user.username if owner_user is not None else None
+        if owner_user is None:
+            raise ApiClientAuthError(
+                status_code=status.HTTP_403_FORBIDDEN,
+                code="owner_user_required",
+                message="API Key must be bound to an owner account",
+                api_client_key_id=api_client_key.id,
+                api_client_key_name=api_client_key.name,
+                api_client_key_prefix=api_client_key.key_prefix,
+                user_account_id=api_client_key.owner_user_id,
+                user_account_name=owner_user_name,
+                remaining_balance=None,
+                policy_snapshot_json="{}",
+            )
         user_quota_snapshot = UserQuotaService.get_realtime_usage_snapshot(db, user=owner_user) if owner_user is not None else None
         remaining_balance = None
         if user_quota_snapshot is not None and user_quota_snapshot.available_balance is not None:
             remaining_balance = float(user_quota_snapshot.available_balance)
-        elif api_client_key.balance_amount is not None:
-            remaining_balance = float(api_client_key.balance_amount)
         policy_snapshot = {
-            "route_mode": api_client_key.route_mode,
-            "default_provider_id": default_provider_id,
-            "manual_allow_fallback": api_client_key.manual_allow_fallback,
-            "route_exhausted_retry_infinite_enabled": api_client_key.route_exhausted_retry_infinite_enabled,
             "allowed_provider_ids": allowed_provider_ids,
             "allowed_model_names": loads_json(api_client_key.allowed_model_names_json, []),
             "allowed_endpoint_paths": loads_json(api_client_key.allowed_endpoint_paths_json, []),
             "allowed_source_ips": loads_json(api_client_key.allowed_source_ips_json, []),
             "preferred_provider_ids": loads_json(api_client_key.preferred_provider_ids_json, []),
             "preferred_region_tags": loads_json(api_client_key.preferred_region_tags_json, []),
-            "max_candidate_count": api_client_key.max_candidate_count,
             "latency_bias": api_client_key.latency_bias,
             "success_rate_bias": api_client_key.success_rate_bias,
             "cost_bias": api_client_key.cost_bias,
@@ -419,7 +396,6 @@ class ApiKeyService:
                 api_client_key_prefix=api_client_key.key_prefix,
                 user_account_id=owner_user_id,
                 user_account_name=owner_user_name,
-                remaining_tokens=remaining_tokens,
                 remaining_balance=remaining_balance,
                 policy_snapshot_json=policy_snapshot_json,
             )
@@ -433,7 +409,6 @@ class ApiKeyService:
                 api_client_key_prefix=api_client_key.key_prefix,
                 user_account_id=owner_user_id,
                 user_account_name=owner_user_name,
-                remaining_tokens=remaining_tokens,
                 remaining_balance=remaining_balance,
                 policy_snapshot_json=policy_snapshot_json,
             )
@@ -447,7 +422,6 @@ class ApiKeyService:
                 api_client_key_prefix=api_client_key.key_prefix,
                 user_account_id=owner_user_id,
                 user_account_name=owner_user_name,
-                remaining_tokens=remaining_tokens,
                 remaining_balance=remaining_balance,
                 policy_snapshot_json=policy_snapshot_json,
             )
@@ -461,21 +435,6 @@ class ApiKeyService:
                 api_client_key_prefix=api_client_key.key_prefix,
                 user_account_id=owner_user_id,
                 user_account_name=owner_user_name,
-                remaining_tokens=remaining_tokens,
-                remaining_balance=remaining_balance,
-                policy_snapshot_json=policy_snapshot_json,
-            )
-        if owner_user is None and api_client_key.balance_amount is not None and Decimal(str(api_client_key.balance_amount)) <= Decimal("0"):
-            raise ApiClientAuthError(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                code="insufficient_balance",
-                message="Api key balance exhausted",
-                api_client_key_id=api_client_key.id,
-                api_client_key_name=api_client_key.name,
-                api_client_key_prefix=api_client_key.key_prefix,
-                user_account_id=owner_user_id,
-                user_account_name=owner_user_name,
-                remaining_tokens=remaining_tokens,
                 remaining_balance=remaining_balance,
                 policy_snapshot_json=policy_snapshot_json,
             )
@@ -492,7 +451,6 @@ class ApiKeyService:
                     api_client_key_prefix=api_client_key.key_prefix,
                     user_account_id=owner_user_id,
                     user_account_name=owner_user_name,
-                    remaining_tokens=remaining_tokens,
                     remaining_balance=(
                         float(user_quota_snapshot.available_balance)
                         if user_quota_snapshot.available_balance is not None
@@ -510,23 +468,17 @@ class ApiKeyService:
                 api_client_key_prefix=api_client_key.key_prefix,
                 user_account_id=owner_user_id,
                 user_account_name=owner_user_name,
-                remaining_tokens=remaining_tokens,
                 remaining_balance=remaining_balance,
                 policy_snapshot_json=policy_snapshot_json,
             )
 
+        route_setting = SettingService.get_cached()
         route_context = RoutePolicyContext(
-            route_mode=api_client_key.route_mode,
-            default_provider_id=default_provider_id,
-            manual_allow_fallback=api_client_key.manual_allow_fallback,
             allowed_provider_ids=allowed_provider_ids,
-            route_exhausted_retry_infinite_enabled=api_client_key.route_exhausted_retry_infinite_enabled,
-            allow_low_trust_providers=api_client_key.allow_low_trust_providers,
-            require_trusted_provider=api_client_key.trusted_providers_only,
-            content_guard_required=api_client_key.content_guard_required,
+            require_trusted_provider=bool(getattr(route_setting, "trusted_providers_only", False)),
+            content_guard_required=True,
             preferred_provider_ids=loads_json(api_client_key.preferred_provider_ids_json, []),
             preferred_region_tags=loads_json(api_client_key.preferred_region_tags_json, []),
-            max_candidate_count=api_client_key.max_candidate_count,
             latency_bias=api_client_key.latency_bias,
             success_rate_bias=api_client_key.success_rate_bias,
             cost_bias=api_client_key.cost_bias,
@@ -537,21 +489,14 @@ class ApiKeyService:
             owner_user=owner_user,
             owner_quota_snapshot=policy_snapshot.get("owner_user"),
             allowed_provider_ids=allowed_provider_ids,
-            default_provider_id=default_provider_id,
-            remaining_tokens=remaining_tokens,
             remaining_balance=remaining_balance,
-            remaining_requests_daily=remaining_requests_daily,
-            remaining_cost_daily=remaining_cost_daily,
             policy_snapshot_json=policy_snapshot_json,
         )
         ApiKeyService.enqueue_last_used_touch(api_client_key.id)
         return ApiClientAuthContext(
             api_client_key=api_client_key,
             route_context=route_context,
-            remaining_tokens=remaining_tokens,
             remaining_balance=remaining_balance,
-            remaining_requests_daily=remaining_requests_daily,
-            remaining_cost_daily=remaining_cost_daily,
             policy_snapshot_json=policy_snapshot_json,
         )
 
@@ -585,6 +530,8 @@ class ApiKeyService:
         if normalized_path.startswith("/v1/chat/completions/") and "/v1/chat/completions" in allowed_paths:
             return True
         if normalized_path.startswith("/v1/responses/") and "/v1/responses" in allowed_paths:
+            return True
+        if normalized_path.startswith("/v1/models/") and "/v1/models" in allowed_paths:
             return True
         if normalized_path.startswith("/v1/files/") and "/v1/files" in allowed_paths:
             return True
@@ -625,13 +572,11 @@ class ApiKeyService:
     @staticmethod
     async def validate_redis_rate_limits(auth_context: ApiClientAuthContext, *, request_path: str | None = None) -> None:
         api_client_key = auth_context.api_client_key
-        is_billable_model_request = bool(request_path and request_path != "/v1/models")
         has_api_key_limits = any(
             value is not None
             for value in (
                 api_client_key.qps_limit,
                 api_client_key.rpm_limit,
-                api_client_key.tpm_limit if is_billable_model_request else None,
             )
         )
         if not has_api_key_limits:
@@ -641,7 +586,6 @@ class ApiKeyService:
                 api_key_id=api_client_key.id,
                 qps_limit=api_client_key.qps_limit,
                 rpm_limit=api_client_key.rpm_limit,
-                tpm_limit=api_client_key.tpm_limit if is_billable_model_request else None,
             )
         except RateLimitExceededError as exc:
             raise ApiClientAuthError(
@@ -653,10 +597,7 @@ class ApiKeyService:
                 api_client_key_prefix=api_client_key.key_prefix,
                 user_account_id=api_client_key.owner_user_id,
                 user_account_name=api_client_key.owner_user.username if api_client_key.owner_user else None,
-                remaining_tokens=auth_context.remaining_tokens,
                 remaining_balance=auth_context.remaining_balance,
-                remaining_requests_daily=auth_context.remaining_requests_daily,
-                remaining_cost_daily=auth_context.remaining_cost_daily,
                 policy_snapshot_json=auth_context.policy_snapshot_json,
             ) from exc
         except Exception as exc:
@@ -669,10 +610,7 @@ class ApiKeyService:
                 api_client_key_prefix=api_client_key.key_prefix,
                 user_account_id=api_client_key.owner_user_id,
                 user_account_name=api_client_key.owner_user.username if api_client_key.owner_user else None,
-                remaining_tokens=auth_context.remaining_tokens,
                 remaining_balance=auth_context.remaining_balance,
-                remaining_requests_daily=auth_context.remaining_requests_daily,
-                remaining_cost_daily=auth_context.remaining_cost_daily,
                 policy_snapshot_json=auth_context.policy_snapshot_json,
             ) from exc
 
@@ -765,7 +703,7 @@ class ApiKeyService:
         route_filters = (
             RequestLog.api_client_key_id == target_id,
             LogService._route_traffic_expr(),
-            or_(RequestLog.request_path.is_(None), RequestLog.request_path != "/v1/models"),
+            LogService._non_model_list_request_expr(),
         )
         totals = db.execute(
             select(
@@ -894,7 +832,7 @@ class ApiKeyService:
                     ).label("month_cost"),
                 ).where(
                     LogService._route_traffic_expr(),
-                    or_(RequestLog.request_path.is_(None), RequestLog.request_path != "/v1/models"),
+                    LogService._non_model_list_request_expr(),
                     or_(*account_scope),
                 )
             ).one()

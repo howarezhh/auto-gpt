@@ -26,16 +26,8 @@ class ApiKeyBase(BaseModel):
     expires_at: datetime | None = None
     qps_limit: int | None = Field(default=20, ge=0)
     rpm_limit: int | None = Field(default=20, ge=0)
-    tpm_limit: int | None = Field(default=None, ge=0)
-    balance_amount: float | None = Field(default=None, ge=0)
-    route_mode: RouteMode = "failover"
-    default_provider_id: int | None = None
     owner_user_id: int | None = None
-    manual_allow_fallback: bool = True
-    route_exhausted_retry_infinite_enabled: bool = False
     auto_sync_provider_bindings: bool = True
-    trusted_providers_only: bool = False
-    allow_low_trust_providers: bool = False
     content_guard_required: bool = True
     allowed_provider_ids: list[int] = Field(default_factory=list)
     allowed_model_names: list[str] = Field(default_factory=list)
@@ -43,7 +35,6 @@ class ApiKeyBase(BaseModel):
     allowed_source_ips: list[str] = Field(default_factory=list)
     preferred_provider_ids: list[int] = Field(default_factory=list)
     preferred_region_tags: list[str] = Field(default_factory=list)
-    max_candidate_count: int | None = Field(default=None, ge=1, le=500)
     latency_bias: int = Field(default=1, ge=0, le=10)
     success_rate_bias: int = Field(default=1, ge=0, le=10)
     cost_bias: int = Field(default=0, ge=0, le=10)
@@ -132,16 +123,8 @@ class ApiKeyUpdate(BaseModel):
     expires_at: datetime | None = None
     qps_limit: int | None = Field(default=None, ge=0)
     rpm_limit: int | None = Field(default=None, ge=0)
-    tpm_limit: int | None = Field(default=None, ge=0)
-    balance_amount: float | None = Field(default=None, ge=0)
-    route_mode: RouteMode | None = None
-    default_provider_id: int | None = None
     owner_user_id: int | None = None
-    manual_allow_fallback: bool | None = None
-    route_exhausted_retry_infinite_enabled: bool | None = None
     auto_sync_provider_bindings: bool | None = None
-    trusted_providers_only: bool | None = None
-    allow_low_trust_providers: bool | None = None
     content_guard_required: bool | None = None
     allowed_provider_ids: list[int] | None = None
     allowed_model_names: list[str] | None = None
@@ -149,7 +132,6 @@ class ApiKeyUpdate(BaseModel):
     allowed_source_ips: list[str] | None = None
     preferred_provider_ids: list[int] | None = None
     preferred_region_tags: list[str] | None = None
-    max_candidate_count: int | None = Field(default=None, ge=1, le=500)
     latency_bias: int | None = Field(default=None, ge=0, le=10)
     success_rate_bias: int | None = Field(default=None, ge=0, le=10)
     cost_bias: int | None = Field(default=None, ge=0, le=10)
@@ -224,23 +206,15 @@ class ApiKeyOut(BaseModel):
     expires_at: datetime | None
     qps_limit: int | None
     rpm_limit: int | None
-    tpm_limit: int | None
     prompt_tokens_used: int
     completion_tokens_used: int
     total_tokens_used: int
     total_cost_used: float
     balance_amount: float | None
     total_recharge_amount: float
-    route_mode: RouteMode
-    default_provider_id: int | None
-    default_provider_name: str | None = None
     owner_user_id: int | None
     owner_user_name: str | None
-    manual_allow_fallback: bool
-    route_exhausted_retry_infinite_enabled: bool
     auto_sync_provider_bindings: bool
-    trusted_providers_only: bool
-    allow_low_trust_providers: bool
     content_guard_required: bool
     allowed_provider_ids: list[int]
     allowed_model_names: list[str]
@@ -248,7 +222,6 @@ class ApiKeyOut(BaseModel):
     allowed_source_ips: list[str]
     preferred_provider_ids: list[int]
     preferred_region_tags: list[str]
-    max_candidate_count: int | None
     latency_bias: int
     success_rate_bias: int
     cost_bias: int
@@ -296,7 +269,6 @@ class ApiKeySummaryOut(BaseModel):
     enabled_keys: int
     disabled_keys: int
     expired_keys: int
-    quota_exhausted_keys: int
     balance_exhausted_keys: int = 0
     unbound_keys: int
     total_requests: int
@@ -351,10 +323,6 @@ class ApiKeyBatchRotateResultOut(ApiKeyBatchActionResultOut):
 
 
 class ApiKeyBatchProviderUpdateIn(ApiKeyBatchActionIn):
-    route_mode: RouteMode
-    default_provider_id: int | None = None
-    manual_allow_fallback: bool = True
-    route_exhausted_retry_infinite_enabled: bool = False
     auto_sync_provider_bindings: bool = False
     allowed_provider_ids: list[int] = Field(default_factory=list)
 
@@ -414,8 +382,12 @@ class ApiKeyBillingRecordOut(BaseModel):
     prompt_tokens: int | None
     completion_tokens: int | None
     total_tokens: int | None
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
     unit_input_price_per_1k: float | None
     unit_output_price_per_1k: float | None
+    unit_cache_read_price_per_1k: float | None = None
+    unit_cache_write_price_per_1k: float | None = None
     remark: str | None
     created_at: datetime
 

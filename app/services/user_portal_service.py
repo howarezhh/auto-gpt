@@ -22,6 +22,7 @@ from app.services.billing_service import BillingService
 from app.services.conversation_service import ConversationService
 from app.services.log_service import LogService
 from app.services.router_service import RoutePolicyContext, RouterService
+from app.services.setting_service import SettingService
 from app.services.user_quota_service import UserQuotaService
 
 
@@ -424,16 +425,20 @@ class UserPortalService:
         }
 
     @staticmethod
-    def get_log_detail(db: Session, *, user: UserAccount, log_id: int) -> RequestLogOut | None:
+    def get_owned_request_log(db: Session, *, user: UserAccount, log_id: int) -> RequestLog | None:
         key_ids = UserPortalService.list_owned_api_key_ids(db, user_id=user.id)
         if not key_ids:
             return None
-        log = db.scalar(
+        return db.scalar(
             select(RequestLog).where(
                 RequestLog.id == log_id,
                 RequestLog.api_client_key_id.in_(key_ids),
             )
         )
+
+    @staticmethod
+    def get_log_detail(db: Session, *, user: UserAccount, log_id: int) -> RequestLogOut | None:
+        log = UserPortalService.get_owned_request_log(db, user=user, log_id=log_id)
         if log is None:
             return None
         return RequestLogOut.model_validate(LogService.serialize_log(log))
@@ -453,11 +458,13 @@ class UserPortalService:
             "record_type",
             "api_client_key_id",
             "api_client_key_name",
-            "amount",
-            "balance_after",
+            "amount_display",
+            "balance_after_display",
             "provider_name",
             "model_name",
-            "total_tokens",
+            "total_tokens_display",
+            "cache_read_tokens_display",
+            "cache_write_tokens_display",
             "remark",
         ])
         if not key_ids:
@@ -477,11 +484,13 @@ class UserPortalService:
                 item.record_type,
                 item.api_client_key_id,
                 key_name_map.get(item.api_client_key_id, ""),
-                BillingService.to_float(item.amount) or 0,
-                BillingService.to_float(item.balance_after),
+                LogService.format_money_display(BillingService.to_float(item.amount) or 0),
+                LogService.format_money_display(BillingService.to_float(item.balance_after)),
                 item.provider_name or "",
                 item.model_name or "",
-                item.total_tokens or "",
+                LogService.format_token_display(item.total_tokens),
+                LogService.format_token_display(item.cache_read_tokens),
+                LogService.format_token_display(item.cache_write_tokens),
                 item.remark or "",
             ])
         return buffer.getvalue()
@@ -514,13 +523,22 @@ class UserPortalService:
                 func.date(RequestLog.created_at).label("day"),
                 func.count(RequestLog.id).label("total_requests"),
                 func.sum(RequestLog.total_tokens).label("total_tokens"),
-                func.sum(RequestLog.total_cost).label("total_cost"),
             ).where(
                 RequestLog.api_client_key_id.in_(key_ids),
                 LogService._route_traffic_expr(),
-                RequestLog.request_path != "/v1/models",
+                LogService._non_model_list_request_expr(),
                 RequestLog.created_at >= since,
             ).group_by(func.date(RequestLog.created_at))
+        ).all()
+        billing_rows = db.execute(
+            select(
+                func.date(UserAccountBillingRecord.created_at).label("day"),
+                func.sum(func.abs(UserAccountBillingRecord.amount)).label("total_cost"),
+            ).where(
+                UserAccountBillingRecord.user_account_id == user.id,
+                UserAccountBillingRecord.record_type == "request_charge",
+                UserAccountBillingRecord.created_at >= since,
+            ).group_by(func.date(UserAccountBillingRecord.created_at))
         ).all()
         for row in rows:
             if not row.day:
@@ -530,6 +548,12 @@ class UserPortalService:
                 continue
             day_map[label]["requests"] = int(row.total_requests or 0)
             day_map[label]["tokens"] = int(row.total_tokens or 0)
+        for row in billing_rows:
+            if not row.day:
+                continue
+            label = datetime.strptime(str(row.day), "%Y-%m-%d").strftime("%m-%d")
+            if label not in day_map:
+                continue
             day_map[label]["cost"] = float(row.total_cost or 0)
         return list(day_map.values())
 
@@ -545,25 +569,19 @@ class UserPortalService:
         serialized_keys = [ApiKeyAdminService.serialize_api_key(item) for item in owned_api_keys]
 
         def collect_models_for_key(api_key: ApiClientKey) -> list[str]:
+            route_setting = SettingService.get_cached()
             if not api_key.enabled:
                 return []
             allowed_provider_ids = [binding.provider_id for binding in api_key.provider_bindings]
             provider_ids = set(allowed_provider_ids)
-            if api_key.default_provider_id is not None:
-                provider_ids.add(api_key.default_provider_id)
             if not provider_ids:
                 return []
             names: list[str] = []
             for model in RouterService.get_available_candidates(
                 db,
                 route_context=RoutePolicyContext(
-                    route_mode=api_key.route_mode,
-                    default_provider_id=api_key.default_provider_id if api_key.default_provider_id in provider_ids else None,
-                    manual_allow_fallback=api_key.manual_allow_fallback,
                     allowed_provider_ids=sorted(provider_ids),
-                    route_exhausted_retry_infinite_enabled=api_key.route_exhausted_retry_infinite_enabled,
-                    allow_low_trust_providers=api_key.allow_low_trust_providers,
-                    require_trusted_provider=api_key.trusted_providers_only,
+                    require_trusted_provider=bool(getattr(route_setting, "trusted_providers_only", False)),
                     content_guard_required=api_key.content_guard_required,
                 ),
             ):
@@ -602,13 +620,8 @@ class UserPortalService:
                         "integration_profiles": UserPortalService.build_integration_profiles(serialized_keys),
                     }
                 route_context = RoutePolicyContext(
-                    route_mode=selected_key.route_mode,
-                    default_provider_id=selected_key.default_provider_id,
-                    manual_allow_fallback=selected_key.manual_allow_fallback,
                     allowed_provider_ids=[binding.provider_id for binding in selected_key.provider_bindings],
-                    route_exhausted_retry_infinite_enabled=selected_key.route_exhausted_retry_infinite_enabled,
-                    allow_low_trust_providers=selected_key.allow_low_trust_providers,
-                    require_trusted_provider=selected_key.trusted_providers_only,
+                    require_trusted_provider=bool(getattr(SettingService.get_cached(), "trusted_providers_only", False)),
                     content_guard_required=selected_key.content_guard_required,
                 )
                 candidates = RouterService.order_candidates(
@@ -626,7 +639,6 @@ class UserPortalService:
                         "route_score": round(item.route_score, 2),
                         "recent_success_rate": round(item.recent_success_rate * 100, 2),
                         "recent_avg_latency_ms": item.recent_avg_latency_ms,
-                        "is_default": selected_key.default_provider_id == item.provider.id,
                     }
                     for item in candidates[:8]
                 ]
@@ -673,17 +685,6 @@ class UserPortalService:
             and available_balance / balance_amount <= 0.2
         ):
             warnings.append({"level": "warning", "message": "账户可用余额已低于 20%，建议尽快补充额度。"})
-
-        for current_field, limit_field, label in (
-            ("day_requests", "request_limit_daily", "日调用次数"),
-            ("month_requests", "request_limit_monthly", "月调用次数"),
-            ("day_tokens", "token_limit_daily", "日 Token"),
-            ("month_tokens", "token_limit_monthly", "月 Token"),
-        ):
-            limit = account_summary.get(limit_field)
-            current = account_summary.get(current_field) or 0
-            if limit is not None and limit > 0 and current / limit >= 0.8:
-                warnings.append({"level": "warning", "message": f"{label}已使用 {current}/{limit}，接近上限。"})
 
         abnormal_keys = [
             item for item in owned_api_keys if item.get("status") not in {"active"}

@@ -72,14 +72,7 @@ class ApiKeyAdminService:
 
     @staticmethod
     def _api_key_balance_exhausted_expr():
-        return or_(
-            and_(UserAccount.id.is_not(None), UserAccount.balance_amount <= 0),
-            and_(
-                UserAccount.id.is_(None),
-                ApiClientKey.balance_amount.is_not(None),
-                ApiClientKey.balance_amount <= 0,
-            ),
-        )
+        return and_(UserAccount.id.is_not(None), UserAccount.balance_amount <= 0)
 
     @staticmethod
     def get_summary(db: Session) -> ApiKeySummaryOut:
@@ -132,7 +125,7 @@ class ApiKeyAdminService:
             ).where(
                 RequestLog.api_client_key_id.is_not(None),
                 LogService._route_traffic_expr(),
-                or_(RequestLog.request_path.is_(None), RequestLog.request_path != "/v1/models"),
+                LogService._non_model_list_request_expr(),
             )
         ).one()
         user_has_key = select(ApiClientKey.id).where(ApiClientKey.owner_user_id == UserAccount.id).exists()
@@ -142,21 +135,14 @@ class ApiKeyAdminService:
                 func.sum(UserAccount.total_recharge_amount).label("total_recharge_amount"),
             ).where(user_has_key)
         ).one()
-        direct_balance_row = db.execute(
-            select(
-                func.sum(ApiClientKey.balance_amount).label("balance_amount"),
-                func.sum(ApiClientKey.total_recharge_amount).label("total_recharge_amount"),
-            ).where(ApiClientKey.owner_user_id.is_(None))
-        ).one()
-        total_balance_amount = float(owner_balance_row.balance_amount or 0) + float(direct_balance_row.balance_amount or 0)
-        total_recharge_amount = float(owner_balance_row.total_recharge_amount or 0) + float(direct_balance_row.total_recharge_amount or 0)
+        total_balance_amount = float(owner_balance_row.balance_amount or 0)
+        total_recharge_amount = float(owner_balance_row.total_recharge_amount or 0)
 
         return ApiKeySummaryOut(
             total_keys=int(key_count_row.total_keys or 0),
             enabled_keys=int(key_count_row.enabled_keys or 0),
             disabled_keys=int(key_count_row.disabled_keys or 0),
             expired_keys=int(key_count_row.expired_keys or 0),
-            quota_exhausted_keys=0,
             balance_exhausted_keys=int(key_count_row.balance_exhausted_keys or 0),
             unbound_keys=int(key_count_row.unbound_keys or 0),
             total_requests=int(key_usage_row.total_requests or 0),
@@ -253,7 +239,13 @@ class ApiKeyAdminService:
         )
 
     @staticmethod
-    def create_api_key(db: Session, payload: ApiKeyCreate) -> tuple[ApiClientKey, str]:
+    def create_api_key(
+        db: Session,
+        payload: ApiKeyCreate,
+        *,
+        default_owner_user_id: int | None = None,
+    ) -> tuple[ApiClientKey, str]:
+        owner_user_id = payload.owner_user_id or default_owner_user_id
         auto_sync_provider_bindings = ApiKeyAdminService._should_auto_sync_provider_bindings(
             payload.auto_sync_provider_bindings,
             payload.allowed_provider_ids,
@@ -263,19 +255,11 @@ class ApiKeyAdminService:
             auto_sync_provider_bindings=auto_sync_provider_bindings,
             allowed_provider_ids=payload.allowed_provider_ids,
         )
-        ApiKeyAdminService._validate_provider_configuration(
-            db,
-            route_mode=payload.route_mode,
-            allowed_provider_ids=resolved_allowed_provider_ids,
-            default_provider_id=payload.default_provider_id,
-        )
+        ApiKeyAdminService._validate_provider_ids(db, resolved_allowed_provider_ids)
         ApiKeyAdminService._validate_model_names(db, payload.allowed_model_names)
-        ApiKeyAdminService._validate_owner_user(db, payload.owner_user_id)
+        ApiKeyAdminService._validate_owner_user(db, owner_user_id)
         raw_api_key = ApiKeyService.build_raw_api_key(payload.raw_api_key)
         ApiKeyAdminService._validate_raw_api_key_uniqueness(db, raw_api_key)
-        use_shared_wallet = payload.owner_user_id is not None
-        if use_shared_wallet and payload.balance_amount is not None:
-            raise ValueError("共享钱包模式下禁止在 API Key 上单独设置 balance_amount，请改为给用户账户充值")
         api_key = ApiClientKey(
             name=payload.name,
             remark=payload.remark,
@@ -288,49 +272,23 @@ class ApiKeyAdminService:
             raw_key_encrypted=ApiKeyService.encrypt_raw_api_key(raw_api_key),
             enabled=payload.enabled,
             expires_at=payload.expires_at,
-            token_limit_total=None,
-            request_limit_daily=None,
-            token_limit_daily=None,
-            cost_limit_daily=None,
             qps_limit=payload.qps_limit,
             rpm_limit=payload.rpm_limit,
-            tpm_limit=payload.tpm_limit,
-            cost_limit_total=None,
-            balance_amount=None if use_shared_wallet else (BillingService.to_decimal(payload.balance_amount) if payload.balance_amount is not None else None),
             total_cost_used=BillingService.to_decimal(0),
-            total_recharge_amount=BillingService.to_decimal(0) if use_shared_wallet else (BillingService.to_decimal(payload.balance_amount) if payload.balance_amount is not None else BillingService.to_decimal(0)),
-            route_mode=payload.route_mode,
-            default_provider_id=payload.default_provider_id,
-            owner_user_id=payload.owner_user_id,
-            manual_allow_fallback=payload.manual_allow_fallback,
-            route_exhausted_retry_infinite_enabled=payload.route_exhausted_retry_infinite_enabled,
+            owner_user_id=owner_user_id,
             auto_sync_provider_bindings=auto_sync_provider_bindings,
-            trusted_providers_only=payload.trusted_providers_only,
-            allow_low_trust_providers=payload.allow_low_trust_providers,
             content_guard_required=payload.content_guard_required,
             allowed_model_names_json=dumps_json(payload.allowed_model_names),
             allowed_endpoint_paths_json=dumps_json(payload.allowed_endpoint_paths),
             allowed_source_ips_json=dumps_json(payload.allowed_source_ips),
             preferred_provider_ids_json=dumps_json(payload.preferred_provider_ids),
             preferred_region_tags_json=dumps_json(payload.preferred_region_tags),
-            max_candidate_count=payload.max_candidate_count,
             latency_bias=payload.latency_bias,
             success_rate_bias=payload.success_rate_bias,
             cost_bias=payload.cost_bias,
         )
         db.add(api_key)
         db.flush()
-        if not use_shared_wallet and payload.balance_amount is not None and payload.balance_amount > 0:
-            db.add(
-                ApiClientBillingRecord(
-                    api_client_key_id=api_key.id,
-                    request_log_id=None,
-                    record_type="top_up",
-                    amount=BillingService.to_decimal(payload.balance_amount),
-                    balance_after=BillingService.to_decimal(payload.balance_amount),
-                    remark="创建 API Key 初始余额",
-                )
-            )
         ApiKeyAdminService._apply_provider_bindings(
             db,
             api_key,
@@ -350,8 +308,6 @@ class ApiKeyAdminService:
         data = payload.model_dump(exclude_unset=True)
         allowed_provider_ids = data.get("allowed_provider_ids")
         auto_sync_provider_bindings = data.get("auto_sync_provider_bindings")
-        route_mode = data.get("route_mode", api_key.route_mode)
-        default_provider_id = data.get("default_provider_id", api_key.default_provider_id)
         owner_user_id = data.get("owner_user_id", api_key.owner_user_id)
         if allowed_provider_ids is None:
             allowed_provider_ids = [binding.provider_id for binding in api_key.provider_bindings]
@@ -365,18 +321,10 @@ class ApiKeyAdminService:
             auto_sync_provider_bindings=desired_auto_sync_provider_bindings,
             allowed_provider_ids=allowed_provider_ids,
         )
-        ApiKeyAdminService._validate_provider_configuration(
-            db,
-            route_mode=route_mode,
-            allowed_provider_ids=resolved_allowed_provider_ids,
-            default_provider_id=default_provider_id,
-        )
+        ApiKeyAdminService._validate_provider_ids(db, resolved_allowed_provider_ids)
         if "allowed_model_names" in data:
             ApiKeyAdminService._validate_model_names(db, data["allowed_model_names"] or [])
         ApiKeyAdminService._validate_owner_user(db, owner_user_id)
-        use_shared_wallet = owner_user_id is not None
-        if use_shared_wallet and "balance_amount" in data:
-            raise ValueError("共享钱包模式下禁止在 API Key 上单独设置 balance_amount，请改为给用户账户充值")
         raw_api_key = data.get("raw_api_key")
         if raw_api_key is not None:
             normalized_raw_api_key = ApiKeyService.build_raw_api_key(raw_api_key)
@@ -387,18 +335,7 @@ class ApiKeyAdminService:
         for field, value in data.items():
             if field in {"allowed_provider_ids", "raw_api_key"}:
                 continue
-            if field in {"token_limit_total", "request_limit_daily", "token_limit_daily", "cost_limit_daily", "cost_limit_total"}:
-                continue
-            if field in {"cost_limit_total", "balance_amount", "cost_limit_daily"} and value is not None:
-                value = BillingService.to_decimal(value)
-            if field == "balance_amount" and use_shared_wallet:
-                value = None
             setattr(api_key, field, value)
-        api_key.token_limit_total = None
-        api_key.request_limit_daily = None
-        api_key.token_limit_daily = None
-        api_key.cost_limit_daily = None
-        api_key.cost_limit_total = None
         json_list_fields = {
             "allowed_model_names": "allowed_model_names_json",
             "allowed_endpoint_paths": "allowed_endpoint_paths_json",
@@ -409,9 +346,6 @@ class ApiKeyAdminService:
         for payload_field, model_field in json_list_fields.items():
             if payload_field in data:
                 setattr(api_key, model_field, dumps_json(data[payload_field] or []))
-        if use_shared_wallet:
-            api_key.balance_amount = None
-            api_key.total_recharge_amount = BillingService.to_decimal(0)
         api_key.auto_sync_provider_bindings = desired_auto_sync_provider_bindings
         if "allowed_provider_ids" in data or "auto_sync_provider_bindings" in data:
             ApiKeyAdminService._apply_provider_bindings(
@@ -530,12 +464,7 @@ class ApiKeyAdminService:
             auto_sync_provider_bindings=payload.auto_sync_provider_bindings,
             allowed_provider_ids=payload.allowed_provider_ids,
         )
-        ApiKeyAdminService._validate_provider_configuration(
-            db,
-            route_mode=payload.route_mode,
-            allowed_provider_ids=resolved_allowed_provider_ids,
-            default_provider_id=payload.default_provider_id,
-        )
+        ApiKeyAdminService._validate_provider_ids(db, resolved_allowed_provider_ids)
         items = list(
             db.scalars(
                 select(ApiClientKey)
@@ -544,10 +473,6 @@ class ApiKeyAdminService:
             )
         )
         for item in items:
-            item.route_mode = payload.route_mode
-            item.default_provider_id = payload.default_provider_id
-            item.manual_allow_fallback = payload.manual_allow_fallback
-            item.route_exhausted_retry_infinite_enabled = payload.route_exhausted_retry_infinite_enabled
             item.auto_sync_provider_bindings = payload.auto_sync_provider_bindings
             ApiKeyAdminService._apply_provider_bindings(
                 db,
@@ -805,24 +730,14 @@ class ApiKeyAdminService:
             for binding in api_key.provider_bindings
             if binding.provider is not None
         ]
-        default_provider_name = next(
-            (
-                provider["name"]
-                for provider in allowed_providers
-                if provider["id"] == api_key.default_provider_id
-            ),
-            None,
-        )
-        balance_amount = BillingService.to_float(owner_balance_amount) if owner_balance_amount is not None else BillingService.to_float(api_key.balance_amount)
-        total_recharge_amount = BillingService.to_float(owner_total_recharge_amount) if owner_total_recharge_amount is not None else (BillingService.to_float(api_key.total_recharge_amount) or 0)
+        balance_amount = BillingService.to_float(owner_balance_amount)
+        total_recharge_amount = BillingService.to_float(owner_total_recharge_amount) if owner_total_recharge_amount is not None else 0
         status = "active"
         if not api_key.enabled:
             status = "disabled"
         elif api_key.expires_at is not None and api_key.expires_at <= datetime.utcnow():
             status = "expired"
         elif owner_balance_amount is not None and owner_balance_amount <= Decimal("0"):
-            status = "balance_exhausted"
-        elif owner_balance_amount is None and api_key.balance_amount is not None and BillingService.to_decimal(api_key.balance_amount) <= Decimal("0"):
             status = "balance_exhausted"
         elif not allowed_providers:
             status = "unbound"
@@ -841,32 +756,17 @@ class ApiKeyAdminService:
             "raw_api_key": raw_api_key,
             "has_stored_raw_key": raw_api_key is not None,
             "expires_at": api_key.expires_at,
-            "token_limit_total": None,
-            "request_limit_daily": None,
-            "token_limit_daily": None,
-            "cost_limit_daily": None,
             "qps_limit": api_key.qps_limit,
             "rpm_limit": api_key.rpm_limit,
-            "tpm_limit": api_key.tpm_limit,
             "prompt_tokens_used": api_key.prompt_tokens_used,
             "completion_tokens_used": api_key.completion_tokens_used,
             "total_tokens_used": api_key.total_tokens_used,
-            "remaining_tokens": None,
-            "cost_limit_total": None,
             "total_cost_used": BillingService.to_float(api_key.total_cost_used) or 0,
             "balance_amount": balance_amount,
             "total_recharge_amount": total_recharge_amount,
-            "remaining_cost_quota": None,
-            "route_mode": api_key.route_mode,
-            "default_provider_id": api_key.default_provider_id,
-            "default_provider_name": default_provider_name,
             "owner_user_id": api_key.owner_user_id,
             "owner_user_name": api_key.owner_user.username if api_key.owner_user else None,
-            "manual_allow_fallback": api_key.manual_allow_fallback,
-            "route_exhausted_retry_infinite_enabled": api_key.route_exhausted_retry_infinite_enabled,
             "auto_sync_provider_bindings": api_key.auto_sync_provider_bindings,
-            "trusted_providers_only": api_key.trusted_providers_only,
-            "allow_low_trust_providers": api_key.allow_low_trust_providers,
             "content_guard_required": api_key.content_guard_required,
             "allowed_provider_ids": [binding.provider_id for binding in api_key.provider_bindings],
             "allowed_model_names": loads_json(api_key.allowed_model_names_json, []),
@@ -874,7 +774,6 @@ class ApiKeyAdminService:
             "allowed_source_ips": loads_json(api_key.allowed_source_ips_json, []),
             "preferred_provider_ids": loads_json(api_key.preferred_provider_ids_json, []),
             "preferred_region_tags": loads_json(api_key.preferred_region_tags_json, []),
-            "max_candidate_count": api_key.max_candidate_count,
             "latency_bias": api_key.latency_bias,
             "success_rate_bias": api_key.success_rate_bias,
             "cost_bias": api_key.cost_bias,
@@ -1039,8 +938,6 @@ class ApiKeyAdminService:
             else list(allowed_provider_ids)
         )
         ApiKeyAdminService._replace_provider_bindings(db, api_key, resolved_allowed_provider_ids)
-        if api_key.default_provider_id is not None and api_key.default_provider_id not in resolved_allowed_provider_ids:
-            api_key.default_provider_id = None
 
     @staticmethod
     def _list_all_provider_ids(db: Session) -> list[int]:
@@ -1126,18 +1023,11 @@ class ApiKeyAdminService:
         return len(items)
 
     @staticmethod
-    def _validate_provider_configuration(
+    def _validate_provider_ids(
         db: Session,
-        *,
-        route_mode: str,
         allowed_provider_ids: list[int],
-        default_provider_id: int | None,
     ) -> None:
-        if route_mode == "manual" and default_provider_id is None:
-            raise ValueError("manual route_mode requires default_provider_id")
         if not allowed_provider_ids:
-            if default_provider_id is not None:
-                raise ValueError("default_provider_id must be one of allowed_provider_ids")
             return
         existing_ids = set(
             db.scalars(select(Provider.id).where(Provider.id.in_(allowed_provider_ids))).all()
@@ -1145,8 +1035,6 @@ class ApiKeyAdminService:
         missing_ids = [provider_id for provider_id in allowed_provider_ids if provider_id not in existing_ids]
         if missing_ids:
             raise ValueError(f"Provider not found: {', '.join(str(item) for item in missing_ids)}")
-        if default_provider_id is not None and default_provider_id not in existing_ids:
-            raise ValueError("default_provider_id must be one of allowed_provider_ids")
 
     @staticmethod
     def _validate_model_names(db: Session, allowed_model_names: list[str]) -> None:
@@ -1162,7 +1050,7 @@ class ApiKeyAdminService:
     @staticmethod
     def _validate_owner_user(db: Session, owner_user_id: int | None) -> None:
         if owner_user_id is None:
-            return
+            raise ValueError("API Key 必须绑定归属用户")
         existing = db.scalar(select(UserAccount.id).where(UserAccount.id == owner_user_id, UserAccount.enabled.is_(True)))
         if existing is None:
             raise ValueError("owner_user_id does not exist")

@@ -2,16 +2,11 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field, field_validator
 
-from app.schemas.api_key import RouteMode
-
 
 class ApiKeyPolicyTemplateBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     remark: str | None = None
     enabled: bool = True
-    route_mode: RouteMode = "failover"
-    default_provider_id: int | None = None
-    manual_allow_fallback: bool = True
     expires_in_days: int | None = Field(default=None, ge=0)
     allowed_provider_ids: list[int] = Field(default_factory=list)
     allowed_model_names: list[str] = Field(default_factory=list)
@@ -63,9 +58,6 @@ class ApiKeyPolicyTemplateUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=100)
     remark: str | None = None
     enabled: bool | None = None
-    route_mode: RouteMode | None = None
-    default_provider_id: int | None = None
-    manual_allow_fallback: bool | None = None
     expires_in_days: int | None = Field(default=None, ge=0)
     allowed_provider_ids: list[int] | None = None
     allowed_model_names: list[str] | None = None
