@@ -3019,6 +3019,42 @@ html[data-theme="dark"] .settings-switch-control input:checked + .settings-switc
     gap: var(--panel-gap);
 }
 
+.content-guard-tabs {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: var(--panel-gap);
+    border-bottom: 1px solid var(--line);
+}
+
+.content-guard-tab {
+    display: inline-flex;
+    align-items: center;
+    min-height: 38px;
+    padding: 0 12px;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    background: transparent;
+    color: var(--muted);
+    font-size: 13px;
+    font-weight: 800;
+    cursor: pointer;
+}
+
+.content-guard-tab:hover,
+.content-guard-tab:focus-visible,
+.content-guard-tab.is-active {
+    color: var(--text-strong);
+    border-bottom-color: var(--accent);
+    outline: none;
+}
+
+.content-guard-tab-panel[hidden] {
+    display: none !important;
+}
+
 .content-guard-layout {
     display: grid;
     grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
@@ -3038,6 +3074,12 @@ html[data-theme="dark"] .settings-switch-control input:checked + .settings-switc
 }
 
 .content-guard-rules-panel {
+    display: grid;
+    gap: 14px;
+    margin-top: var(--panel-gap);
+}
+
+.content-guard-governance-panel {
     display: grid;
     gap: 14px;
     margin-top: var(--panel-gap);
@@ -3223,6 +3265,23 @@ html[data-theme="dark"] .settings-switch-control input:checked + .settings-switc
     table-layout: fixed;
 }
 
+.content-guard-governance-table {
+    min-width: 980px;
+    table-layout: fixed;
+}
+
+.content-guard-governance-actions,
+.content-guard-reason-inline {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.content-guard-reason-inline {
+    max-width: 100%;
+}
+
 .content-guard-rules-table th:nth-child(1),
 .content-guard-rules-table th:nth-child(8) {
     width: 72px;
@@ -3289,8 +3348,9 @@ html[data-theme="dark"] .settings-switch-control input:checked + .settings-switc
 }
 
 .content-guard-reason-cell {
-    max-width: 360px;
-    word-break: break-word;
+    width: 180px;
+    max-width: 220px;
+    white-space: nowrap;
 }
 
 .provider-model-note {
