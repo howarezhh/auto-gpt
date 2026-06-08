@@ -304,6 +304,10 @@ class ContentGuardService:
             url_check_enabled=url_check_enabled,
             rules=rules if rules is not None else cls.parse_rules_json(rules_json),
         )
+        active_rules = cls.normalize_rules(rules if rules is not None else cls.parse_rules_json(rules_json))
+        invalid_config_rules = [rule for rule in active_rules if rule.category == "rule_configuration_error"]
+        if invalid_config_rules:
+            matched_rules.extend(rule for rule in invalid_config_rules if rule.id not in {item.id for item in matched_rules})
         invalid_regex_rules = [rule for rule in matched_rules if rule.category == "rule_configuration_error"]
         if invalid_regex_rules:
             return cls._with_latency(
@@ -560,9 +564,28 @@ class ContentGuardService:
             return cls.normalize_rules(None)
         try:
             parsed = json.loads(rules_json)
-        except Exception:
-            return cls.normalize_rules(None)
+        except Exception as exc:
+            return [
+                cls._invalid_rules_json_rule(
+                    f"内容防护规则 JSON 配置损坏：{exc}",
+                )
+            ]
         return cls.normalize_rules(parsed)
+
+    @classmethod
+    def _invalid_rules_json_rule(cls, reason: str) -> ContentGuardRule:
+        return ContentGuardRule(
+            id="invalid_rules_json",
+            name="规则配置损坏",
+            category="rule_configuration_error",
+            match_type="keyword_any",
+            patterns=["__invalid_content_guard_rules_json__"],
+            risk_level="high",
+            action="record",
+            score_delta=0,
+            confidence=1.0,
+            reason=reason[:200],
+        )
 
     @classmethod
     def serialize_rules_json(cls, rules: list[ContentGuardRule | dict[str, Any]] | None) -> str:

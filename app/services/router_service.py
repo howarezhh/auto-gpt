@@ -1094,6 +1094,11 @@ class RouterService:
 
     @staticmethod
     def _content_policy_diagnostic_reason(provider: Provider, *, route_context: RoutePolicyContext | None) -> str | None:
+        try:
+            if not bool(getattr(SettingService.get_cached(), "content_guard_enabled", True)):
+                return None
+        except Exception:
+            pass
         decision = ContentTrustProbeService.get_trust_decision_for_route(
             provider,
             route_context=route_context,
