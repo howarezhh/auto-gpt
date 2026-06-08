@@ -100,11 +100,6 @@
                 <option value="true">仅启用</option>
                 <option value="false">仅禁用</option>
             </select>
-            <select class="field-input" id="api-key-content-guard-filter">
-                <option value="">全部内容检测</option>
-                <option value="true">要求内容检测</option>
-                <option value="false">内容检测可选</option>
-            </select>
             <select class="field-input" id="api-key-owner-filter">
                 <option value="">全部归属用户</option>
             </select>
@@ -178,7 +173,6 @@
                         <th>名称</th>
                         <th>授权渠道</th>
                         <th>模型白名单</th>
-                        <th>内容检测</th>
                         <th>有效期</th>
                         <th>到期策略</th>
                         <th>状态</th>
@@ -186,7 +180,7 @@
                     </tr>
                 </thead>
                 <tbody id="api-key-template-table-body">
-                    <tr><td colspan="6"><div class="empty-state">正在加载策略模板...</div></td></tr>
+                    <tr><td colspan="7"><div class="empty-state">正在加载策略模板...</div></td></tr>
                 </tbody>
             </table>
         </div>
@@ -304,7 +298,6 @@
                     <span>启用该密钥</span>
                 </label>
             </div>
-            <input id="api-key-content-guard-required" type="hidden" value="true">
             <label class="form-span-2">
                 <span>授权提供商</span>
                 <div class="settings-note">
@@ -385,10 +378,6 @@
             <label class="toggle-row">
                 <input id="api-key-template-enabled" type="checkbox" checked>
                 <span>启用模板</span>
-            </label>
-            <label class="toggle-row">
-                <input id="api-key-template-content-guard-required" type="checkbox" checked>
-                <span>要求内容检测</span>
             </label>
             <label class="form-span-2">
                 <span>备注</span>

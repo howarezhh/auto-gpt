@@ -892,18 +892,19 @@
         const {
             successText = "已完成",
             errorText = "失败",
+            reviewText = "待复核",
             duration = 1400,
         } = options;
-        const nextText = status === "error" ? errorText : successText;
+        const nextText = status === "error" ? errorText : (status === "review" ? reviewText : successText);
         window.clearTimeout(Number(button.dataset.feedbackTimer || 0));
         if (!button.dataset.feedbackOriginalText) {
             button.dataset.feedbackOriginalText = button.textContent;
         }
-        button.classList.remove("is-action-success", "is-action-error");
-        button.classList.add(status === "error" ? "is-action-error" : "is-action-success");
+        button.classList.remove("is-action-success", "is-action-error", "is-action-review");
+        button.classList.add(status === "error" ? "is-action-error" : (status === "review" ? "is-action-review" : "is-action-success"));
         button.textContent = nextText;
         button.dataset.feedbackTimer = String(window.setTimeout(() => {
-            button.classList.remove("is-action-success", "is-action-error");
+            button.classList.remove("is-action-success", "is-action-error", "is-action-review");
             button.textContent = button.dataset.feedbackOriginalText || button.textContent;
             delete button.dataset.feedbackTimer;
         }, duration));
@@ -8826,6 +8827,9 @@
         const internalFields = document.getElementById("content-guard-internal-fields");
         const externalFields = document.getElementById("content-guard-external-fields");
         const probeOptionsNode = document.getElementById("content-guard-probe-options");
+        const externalApiKeyInput = document.getElementById("content-guard-external-api-key");
+        const externalApiKeyToggleBtn = document.getElementById("content-guard-external-api-key-toggle");
+        const externalApiKeyClearBtn = document.getElementById("content-guard-external-api-key-clear");
         const rulesBody = document.getElementById("content-guard-rules-body");
         const addRuleBtn = document.getElementById("content-guard-add-rule-btn");
         const resetRulesBtn = document.getElementById("content-guard-reset-rules-btn");
@@ -8899,6 +8903,44 @@
             `;
         };
 
+        const formatContentGuardActionLabel = (value) => ({
+            allow: "放行",
+            record: "记录",
+            review: "复核",
+            block: "拦截",
+        }[String(value || "")] || String(value || "-"));
+
+        const formatContentGuardCategories = (value) => {
+            const categories = Array.isArray(value) ? value : safeJsonParse(String(value || ""));
+            const items = Array.isArray(categories) ? categories : [];
+            return items.map((item) => ruleCategoryLabels[String(item)] || String(item)).filter(Boolean).join("、") || "-";
+        };
+
+        const normalizeRuleId = (value) => String(value || "")
+            .trim()
+            .toLowerCase()
+            .replace(/[^a-z0-9_]+/g, "_")
+            .replace(/^_+|_+$/g, "")
+            .slice(0, 64);
+
+        const nextCustomRuleId = () => {
+            const existing = new Set((Array.isArray(state.rules) ? state.rules : []).map((rule) => String(rule.id || "")));
+            let index = existing.size + 1;
+            let candidate = `custom_content_rule_${index}`;
+            while (existing.has(candidate)) {
+                index += 1;
+                candidate = `custom_content_rule_${index}`;
+            }
+            return candidate;
+        };
+
+        const readNumberField = (input, fallback, { min = -Infinity, max = Infinity } = {}) => {
+            const raw = String(input?.value ?? "").trim();
+            const numeric = raw === "" ? Number(fallback) : Number(raw);
+            if (!Number.isFinite(numeric)) return Number(fallback);
+            return Math.min(max, Math.max(min, numeric));
+        };
+
         const renderRuleSelectOptions = (labels, selected, fallbackLabel = "自定义") => {
             const baseOptions = Object.entries(labels)
                 .map(([value, label]) => `<option value="${escapeHtml(value)}" ${value === selected ? "selected" : ""}>${escapeHtml(label)}</option>`)
@@ -8938,7 +8980,7 @@
                     </td>
                     <td>
                         <input class="field-input content-guard-rule-input" data-rule-field="name" value="${escapeHtml(rule.name)}" aria-label="规则名称">
-                        <input type="hidden" data-rule-field="id" value="${escapeHtml(rule.id)}">
+                        <input class="field-input content-guard-rule-id" data-rule-field="id" value="${escapeHtml(rule.id)}" aria-label="规则标识">
                     </td>
                     <td>
                         <select class="field-input content-guard-rule-select" data-rule-field="category" aria-label="规则分类">
@@ -8990,8 +9032,8 @@
                     patterns,
                     risk_level: read("risk_level")?.value || "medium",
                     action: read("action")?.value || "record",
-                    score_delta: Math.min(0, Math.max(-100, Number(read("score_delta")?.value || -8))),
-                    confidence: Math.min(1, Math.max(0, Number(read("confidence")?.value || 0.7))),
+                    score_delta: readNumberField(read("score_delta"), -8, { min: -100, max: 0 }),
+                    confidence: readNumberField(read("confidence"), 0.7, { min: 0, max: 1 }),
                     reason: String(read("reason")?.value || "").trim(),
                 };
             });
@@ -9000,6 +9042,7 @@
         const validateRules = (rules) => {
             const ids = new Set();
             rules.forEach((rule) => {
+                rule.id = normalizeRuleId(rule.id);
                 if (!rule.id || !rule.name || !rule.category) {
                     throw new Error("规则标识、名称和分类不能为空");
                 }
@@ -9009,6 +9052,27 @@
                 ids.add(rule.id);
                 if (!rule.patterns.length) {
                     throw new Error(`${rule.name} 至少需要一个匹配项`);
+                }
+                const patternSet = new Set();
+                rule.patterns.forEach((pattern) => {
+                    const normalizedPattern = String(pattern || "").trim();
+                    if (patternSet.has(normalizedPattern)) {
+                        throw new Error(`${rule.name} 存在重复匹配项：${normalizedPattern}`);
+                    }
+                    patternSet.add(normalizedPattern);
+                    if (rule.match_type === "regex") {
+                        try {
+                            new RegExp(normalizedPattern);
+                        } catch {
+                            throw new Error(`${rule.name} 的正则无效：${normalizedPattern}`);
+                        }
+                    }
+                });
+                if (rule.action === "allow" && rule.score_delta !== 0) {
+                    throw new Error(`${rule.name} 为放行动作时扣分必须为 0`);
+                }
+                if (rule.action === "block" && rule.risk_level !== "high") {
+                    throw new Error(`${rule.name} 为拦截动作时风险等级必须为高`);
                 }
             });
         };
@@ -9164,12 +9228,12 @@
             content_guard_async_review_enabled: document.getElementById("content-guard-async-review-enabled").checked,
             content_guard_url_check_enabled: document.getElementById("content-guard-url-check-enabled").checked,
             content_guard_high_risk_strategy: document.getElementById("content-guard-high-risk-strategy").value,
-            content_guard_max_detection_delay_ms: Math.max(0, Math.min(500, Number(document.getElementById("content-guard-max-detection-delay-ms").value || 300))),
+            content_guard_max_detection_delay_ms: readNumberField(document.getElementById("content-guard-max-detection-delay-ms"), 300, { min: 0, max: 500 }),
             content_guard_stream_mode: document.getElementById("content-guard-stream-mode").value,
-            content_guard_probe_interval_sec: Math.max(300, Number(document.getElementById("content-guard-probe-interval-sec").value || 3600)),
-            content_guard_max_scan_bytes: Math.max(1024, Number(document.getElementById("content-guard-max-scan-bytes").value || 16384)),
-            content_guard_stream_buffer_max_bytes: Math.max(1024, Number(document.getElementById("content-guard-stream-buffer-max-bytes").value || 16384)),
-            content_guard_high_risk_confidence_threshold: Math.max(0, Math.min(100, Number(document.getElementById("content-guard-high-risk-confidence-threshold").value || 85))),
+            content_guard_probe_interval_sec: readNumberField(document.getElementById("content-guard-probe-interval-sec"), 3600, { min: 300 }),
+            content_guard_max_scan_bytes: readNumberField(document.getElementById("content-guard-max-scan-bytes"), 16384, { min: 1024 }),
+            content_guard_stream_buffer_max_bytes: readNumberField(document.getElementById("content-guard-stream-buffer-max-bytes"), 16384, { min: 1024 }),
+            content_guard_high_risk_confidence_threshold: readNumberField(document.getElementById("content-guard-high-risk-confidence-threshold"), 85, { min: 0, max: 100 }),
             content_guard_url_allowlist_json: document.getElementById("content-guard-url-allowlist-json").value.trim(),
         });
 
@@ -9180,7 +9244,7 @@
             }
             if (selectedTargetType() === "external") {
                 const baseUrl = document.getElementById("content-guard-external-base-url").value.trim();
-                const apiKey = document.getElementById("content-guard-external-api-key").value.trim();
+                const apiKey = externalApiKeyInput?.value.trim() || "";
                 const modelName = document.getElementById("content-guard-external-model-name").value.trim();
                 if (!baseUrl || !apiKey || !modelName) {
                     throw new Error("请填写外部提供商接口地址、密钥和模型名");
@@ -9256,10 +9320,26 @@
         });
         providerSelect.addEventListener("change", renderProviderModelOptions);
         refreshBtn?.addEventListener("click", () => loadOverview({ manual: true }));
+        externalApiKeyToggleBtn?.addEventListener("click", () => {
+            if (!externalApiKeyInput) return;
+            const visible = externalApiKeyInput.type === "text";
+            externalApiKeyInput.type = visible ? "password" : "text";
+            externalApiKeyToggleBtn.setAttribute("aria-label", visible ? "显示密钥" : "隐藏密钥");
+            externalApiKeyToggleBtn.innerHTML = `<i class="bi ${visible ? "bi-eye" : "bi-eye-slash"}" aria-hidden="true"></i>`;
+            setButtonTransientFeedback(externalApiKeyToggleBtn, "success", { successText: visible ? "已隐藏" : "已显示" });
+        });
+        externalApiKeyClearBtn?.addEventListener("click", () => {
+            if (!externalApiKeyInput) return;
+            externalApiKeyInput.value = "";
+            externalApiKeyInput.type = "password";
+            externalApiKeyToggleBtn?.setAttribute("aria-label", "显示密钥");
+            if (externalApiKeyToggleBtn) externalApiKeyToggleBtn.innerHTML = '<i class="bi bi-eye" aria-hidden="true"></i>';
+            setButtonTransientFeedback(externalApiKeyClearBtn, "success", { successText: "已清除" });
+        });
         addRuleBtn?.addEventListener("click", () => {
             state.rules = collectRules();
             state.rules.push(normalizeRuleForView({
-                id: `custom_rule_${Date.now()}`,
+                id: nextCustomRuleId(),
                 name: "新规则",
                 category: "custom_content_guard",
                 enabled: true,
@@ -9342,15 +9422,29 @@
                 const guard = result.result || {};
                 const guardResult = guard.content_guard_result || "pass";
                 const matchedRules = Array.isArray(result.matched_rules) ? result.matched_rules : [];
+                const categoriesText = formatContentGuardCategories(guard.content_guard_categories_json);
+                const excerpt = String(guard.content_guard_excerpt || "").trim();
+                const action = result.action || guard.content_guard_action || "-";
+                const detailReason = [
+                    matchedRules.length ? `规则：${matchedRules.map((rule) => rule.name).filter(Boolean).join("、")}` : null,
+                    categoriesText !== "-" ? `分类：${categoriesText}` : null,
+                    `动作：${formatContentGuardActionLabel(action)}`,
+                    excerpt ? `片段：${excerpt}` : null,
+                    guard.content_guard_reason ? `原因：${guard.content_guard_reason}` : null,
+                ].filter(Boolean).join("\n");
                 inspectResult.innerHTML = `
                     <span class="status-badge ${resultStatusClass(guardResult)}">${escapeHtml(formatContentGuardResultLabel(guardResult))}</span>
                     <strong>${escapeHtml(formatContentGuardRiskLabel(result.risk_level || guard.content_guard_risk_level))}</strong>
                     <span>${escapeHtml(String(Math.round(Number(result.confidence || 0) * 100)))}%</span>
-                    <span>${escapeHtml(matchedRules.map((rule) => rule.name).join("、") || "未命中")}</span>
+                    <span>动作 ${escapeHtml(formatContentGuardActionLabel(action))}</span>
+                    <span>分类 ${escapeHtml(categoriesText)}</span>
+                    <span>${escapeHtml(excerpt ? `片段 ${excerpt}` : (matchedRules.map((rule) => rule.name).join("、") || "未命中"))}</span>
+                    ${detailReason ? renderReasonHelp(detailReason, "检测明细") : ""}
                 `;
-                setButtonTransientFeedback(inspectSubmitBtn, guardResult === "pass" ? "success" : "error", {
+                setButtonTransientFeedback(inspectSubmitBtn, guardResult === "pass" ? "success" : (guardResult === "review" ? "review" : "error"), {
                     successText: "已通过",
-                    errorText: "命中",
+                    reviewText: "待复核",
+                    errorText: "已拦截",
                 });
             } catch (error) {
                 setButtonTransientFeedback(inspectSubmitBtn, "error", { errorText: "失败" });
@@ -9380,13 +9474,25 @@
             try {
                 setButtonLoading(probeSubmitBtn, true);
                 const result = await api.post("/api/content-guard/precheck/probe", buildProbePayload());
+                const usedExternalTarget = selectedTargetType() === "external";
                 renderProbeResult(result);
                 activateContentGuardTab("results");
                 setButtonTransientFeedback(probeSubmitBtn, result?.summary?.status === "passed" ? "success" : "error", {
                     successText: "已通过",
                     errorText: "需复核",
                 });
-                showToast(`检测完成：${formatContentGuardResultLabel(result?.summary?.content_guard_result)}`);
+                const summary = result?.summary || {};
+                const targetName = [result?.target?.provider_name || result?.target?.name, result?.target?.model_name].filter(Boolean).join(" · ") || "检测目标";
+                const total = Number(summary.total || 0);
+                const passed = Number(summary.passed || 0);
+                const failed = Number(summary.failed || Math.max(0, total - passed));
+                showToast(`检测完成：${targetName}，通过 ${passed}/${total}，失败 ${failed}，${formatContentGuardResultLabel(summary.content_guard_result)}`);
+                if (usedExternalTarget && externalApiKeyInput) {
+                    externalApiKeyInput.value = "";
+                    externalApiKeyInput.type = "password";
+                    externalApiKeyToggleBtn?.setAttribute("aria-label", "显示密钥");
+                    if (externalApiKeyToggleBtn) externalApiKeyToggleBtn.innerHTML = '<i class="bi bi-eye" aria-hidden="true"></i>';
+                }
                 await loadOverview();
             } catch (error) {
                 setButtonTransientFeedback(probeSubmitBtn, "error", { errorText: "失败" });
@@ -12313,7 +12419,6 @@
         const searchInput = document.getElementById("api-key-search");
         const statusFilter = document.getElementById("api-key-status-filter");
         const enabledFilter = document.getElementById("api-key-enabled-filter");
-        const contentGuardFilter = document.getElementById("api-key-content-guard-filter");
         const ownerFilter = document.getElementById("api-key-owner-filter");
         const pageSizeSelect = document.getElementById("api-key-page-size");
         const refreshBtn = document.getElementById("api-key-refresh-btn");
@@ -12342,7 +12447,6 @@
         const copyRawBtn = document.getElementById("api-key-copy-raw-btn");
         const providerSelector = document.getElementById("api-key-provider-selector");
         const modelSelector = document.getElementById("api-key-model-selector");
-        const contentGuardRequiredInput = document.getElementById("api-key-content-guard-required");
         const enabledInput = document.getElementById("api-key-enabled");
         const ownerUserSelect = document.getElementById("api-key-owner-user-id");
         const expiresAtInput = document.getElementById("api-key-expires-at");
@@ -12368,7 +12472,6 @@
         const templateNameInput = document.getElementById("api-key-template-name");
         const templateExpiresInDaysInput = document.getElementById("api-key-template-expires-in-days");
         const templateEnabledInput = document.getElementById("api-key-template-enabled");
-        const templateContentGuardRequiredInput = document.getElementById("api-key-template-content-guard-required");
         const templateRemarkInput = document.getElementById("api-key-template-remark");
         const templateProviderSelector = document.getElementById("api-key-template-provider-selector");
         const templateModelSelector = document.getElementById("api-key-template-model-selector");
@@ -12407,7 +12510,6 @@
                 keyword: "",
                 status: "",
                 enabled: "",
-                contentGuardRequired: "",
                 ownerUserId: "",
             },
             selectedIds: new Set(),
@@ -12454,7 +12556,6 @@
             state.filters.keyword = searchInput.value.trim();
             state.filters.status = statusFilter.value;
             state.filters.enabled = enabledFilter.value;
-            state.filters.contentGuardRequired = contentGuardFilter?.value || "";
             state.filters.ownerUserId = ownerFilter.value;
         }
 
@@ -12529,7 +12630,6 @@
                             <strong>${escapeHtml(providerSummary.countText)}</strong>
                             <div class="table-muted">${escapeHtml(providerSummary.nameText)}</div>
                             <div class="table-muted">模型 ${escapeHtml((item.allowed_model_names || []).length ? `${formatNumber(item.allowed_model_names.length)} 个白名单` : "全部可路由")}</div>
-                            <div class="table-muted">内容检测 ${formatSwitchText(item.content_guard_required, "要求", "可选")}</div>
                         </td>
                         <td>
                             <strong>${escapeHtml(quota.summary)}</strong>
@@ -12730,7 +12830,6 @@
             const template = state.templates.find((item) => String(item.id) === String(templateId));
             if (!template) return;
             enabledInput.checked = template.enabled ?? true;
-            contentGuardRequiredInput.checked = template.content_guard_required ?? true;
             expiresAtInput.value = template.expires_in_days ? toDatetimeLocalInputValue(new Date(Date.now() + (Number(template.expires_in_days) * 86400000)).toISOString()) : "";
             renderApiKeyProviderSelector(providerSelector, state.providers, getProviderSelectionForTemplate(template));
             renderApiKeyModelSelector(modelSelector, state.models, template.allowed_model_names || []);
@@ -12762,9 +12861,6 @@
                             <div class="table-muted">${escapeHtml((item.allowed_model_names || []).join(", ") || "全部可路由模型")}</div>
                         </td>
                         <td>
-                            <strong>${formatSwitchText(item.content_guard_required ?? true, "要求", "可选")}</strong>
-                        </td>
-                        <td>
                             <strong>${item.expires_in_days == null ? "不自动过期" : `${formatNumber(item.expires_in_days)} 天后过期`}</strong>
                         </td>
                         <td>${statusBadge(item.enabled ? "healthy" : "disabled")}</td>
@@ -12787,7 +12883,6 @@
             templateNameInput.value = template?.name ?? "";
             templateExpiresInDaysInput.value = template?.expires_in_days ?? "";
             templateEnabledInput.checked = template?.enabled ?? true;
-            templateContentGuardRequiredInput.checked = template?.content_guard_required ?? true;
             templateRemarkInput.value = template?.remark ?? "";
             renderApiKeyProviderSelector(templateProviderSelector, state.providers, getProviderSelectionForTemplate(template));
             renderApiKeyModelSelector(templateModelSelector, state.models, template?.allowed_model_names || []);
@@ -12799,7 +12894,6 @@
             templateModal.classList.add("hidden");
             templateForm.reset();
             templateEditIdInput.value = "";
-            templateContentGuardRequiredInput.checked = true;
             renderApiKeyProviderSelector(templateProviderSelector, state.providers, getAllProviderIds());
             renderApiKeyModelSelector(templateModelSelector, state.models, []);
         }
@@ -12884,7 +12978,6 @@
             rawApiKeyInput.value = isEditing ? (apiKey?.raw_api_key || "") : "";
             remarkInput.value = apiKey?.remark || "";
             enabledInput.checked = apiKey?.enabled ?? true;
-            contentGuardRequiredInput.checked = apiKey?.content_guard_required ?? true;
             populateOwnerUserOptions(apiKey?.owner_user_id || null);
             expiresAtInput.value = toDatetimeLocalInputValue(apiKey?.expires_at);
             qpsLimitInput.value = apiKey?.qps_limit ?? 20;
@@ -12906,7 +12999,6 @@
             if (templateSelect) templateSelect.value = "";
             generationModeInput.value = "auto";
             rawApiKeyInput.value = "";
-            contentGuardRequiredInput.checked = true;
             renderApiKeyProviderSelector(providerSelector, state.providers, getAllProviderIds());
             renderApiKeyModelSelector(modelSelector, state.models, []);
             populateOwnerUserOptions();
@@ -12971,7 +13063,6 @@
             if (state.filters.keyword) params.set("keyword", state.filters.keyword);
             if (state.filters.status) params.set("status", state.filters.status);
             if (state.filters.enabled) params.set("enabled", state.filters.enabled);
-            if (state.filters.contentGuardRequired) params.set("content_guard_required", state.filters.contentGuardRequired);
             if (state.filters.ownerUserId) params.set("owner_user_id", state.filters.ownerUserId);
             renderLoadingState();
             let summary;
@@ -13071,7 +13162,6 @@
                 qps_limit: qpsLimitInput.value === "" ? null : Number(qpsLimitInput.value),
                 rpm_limit: rpmLimitInput.value === "" ? null : Number(rpmLimitInput.value),
                 owner_user_id: ownerUserSelect.value === "" ? null : Number(ownerUserSelect.value),
-                content_guard_required: contentGuardRequiredInput.checked,
                 auto_sync_provider_bindings: providerAuthorizationPayload.auto_sync_provider_bindings,
                 allowed_provider_ids: providerAuthorizationPayload.allowed_provider_ids,
                 allowed_model_names: getSelectedModelNames(),
@@ -13358,7 +13448,6 @@
                 name: templateNameInput.value.trim(),
                 remark: templateRemarkInput.value.trim() || null,
                 enabled: templateEnabledInput.checked,
-                content_guard_required: templateContentGuardRequiredInput.checked,
                 expires_in_days: templateExpiresInDaysInput.value === "" ? null : Number(templateExpiresInDaysInput.value),
                 allowed_provider_ids: providerAuthorizationPayload.allowed_provider_ids,
                 allowed_model_names: getTemplateSelectedModelNames(),
