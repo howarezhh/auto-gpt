@@ -289,6 +289,92 @@ def _check_high_risk_route_detection() -> None:
         ),
         "长上下文请求必须被识别为长上下文场景",
     )
+    base_context = _context(content_guard_required=False)
+    trusted_context = ProxyService._with_content_guard_route_policy(
+        base_context,
+        payload={"messages": [{"role": "user", "content": "长上下文" * 4000}]},
+        endpoint_path="/chat/completions",
+        has_image=False,
+        require_tools=False,
+    )
+    _assert(trusted_context is not None and trusted_context.require_trusted_provider is True, "长上下文等高风险请求必须动态要求可信提供商")
+    _assert(trusted_context.content_guard_required is True, "动态可信路由必须同步强制内容检测")
+    normal_context = ProxyService._with_content_guard_route_policy(
+        base_context,
+        payload={"messages": [{"role": "user", "content": "ping"}]},
+        endpoint_path="/chat/completions",
+        has_image=False,
+        require_tools=False,
+    )
+    _assert(normal_context is base_context, "普通请求不应被无差别提升为只走可信提供商")
+
+
+def _check_content_guard_route_cache_and_scheduler_policy() -> None:
+    required_context = _context(content_guard_required=True)
+    optional_context = _context(content_guard_required=False)
+    common = {
+        "model_name": "stage33-model",
+        "require_vision": False,
+        "require_stream": False,
+        "require_tools": False,
+        "require_image_generation": False,
+        "require_chat_completions": True,
+        "require_responses": False,
+    }
+    required_key = RouterService._build_candidate_cache_key(route_context=required_context, **common)
+    optional_key = RouterService._build_candidate_cache_key(route_context=optional_context, **common)
+    _assert(required_key == optional_key and "guard-optional" not in required_key, "候选缓存 key 不应按内容检测可选拆分")
+
+    provider = _provider()
+    blocked_model = ProviderModel(
+        id=4404,
+        provider_id=provider.id,
+        model_name="stage33-blocked-content-model",
+        enabled=True,
+        content_integrity_status="blocked",
+        content_probe_last_failed_at=datetime.utcnow() - timedelta(minutes=30),
+    )
+    setting = type("Setting", (), {"content_guard_probe_interval_sec": 300})()
+    _assert(
+        HealthService._should_run_scheduled_content_probe(provider, blocked_model, setting=setting) is False,
+        "自动预检不得每轮持续探测已隔离 blocked 模型",
+    )
+    unknown_model = ProviderModel(
+        id=4405,
+        provider_id=provider.id,
+        model_name="stage33-unknown-content-model",
+        enabled=True,
+        content_integrity_status="unknown",
+    )
+    _assert(
+        HealthService._should_run_scheduled_content_probe(provider, unknown_model, setting=setting) is True,
+        "尚未检测模型仍应进入自动预检",
+    )
+
+    original_get_cached = app_tasks.SettingService.get_cached
+    try:
+        app_tasks.SettingService.get_cached = staticmethod(lambda: type("Setting", (), {"content_guard_probe_interval_sec": 900})())
+        _assert(app_tasks._content_integrity_lock_ttl_seconds() == 1800, "内容预检任务锁 TTL 必须随检测间隔动态计算")
+    finally:
+        app_tasks.SettingService.get_cached = original_get_cached
+
+
+def _check_content_guard_frontend_policy_wiring() -> None:
+    app_js = Path("app/static/js/app.js").read_text(encoding="utf-8")
+    api_keys_template = Path("app/templates/api_keys.html").read_text(encoding="utf-8")
+    user_template = Path("app/templates/user_api_keys.html").read_text(encoding="utf-8")
+    user_router = Path("app/routers/user_portal.py").read_text(encoding="utf-8")
+    _assert("selectedProviderId = providerSelect.value" in app_js, "内容防护概览刷新必须保留提供商选择")
+    _assert("selectedModelId = providerModelSelect.value" in app_js, "内容防护概览刷新必须保留模型选择")
+    _assert("existingChecked" in app_js and "selectedKeys" in app_js, "内容防护概览刷新必须保留探针勾选状态")
+    _assert("api-key-content-guard-filter" in api_keys_template and "content_guard_required" in app_js, "API Key 管理端必须提供独立内容检测筛选")
+    _assert("api-key-template-content-guard-required" in api_keys_template, "API Key 策略模板必须提供内容检测策略控件")
+    _assert("content_guard_required: templateContentGuardRequiredInput.checked" in app_js, "策略模板提交必须同步内容检测策略")
+    _assert("contentGuardRequiredInput.checked = template.content_guard_required" in app_js, "套用模板必须预填内容检测策略")
+    _assert("user-api-key-create-content-guard-required" not in user_template, "普通用户端禁止提供关闭内容检测的创建控件")
+    _assert('name="content_guard_required"' not in user_template, "普通用户端禁止提交内容检测开关字段")
+    _assert("content_guard_required: str | None = Form" not in user_router, "普通用户端接口禁止接收内容检测开关字段")
+    _assert("content_guard_required=True" in user_router, "普通用户创建/更新 API Key 必须强制要求内容检测")
 
 
 def _check_error_catalog() -> None:
@@ -730,16 +816,16 @@ def _expect_validation_error(factory, message: str) -> None:
 def _check_external_probe_security_boundaries() -> None:
     def target(**kwargs):
         payload = {
-            "base_url": "https://api.example.com/v1",
+            "base_url": "https://example.com/v1",
             "api_key": "sk-stage33",
             "model_name": "stage33-model",
         }
         payload.update(kwargs)
         return ContentGuardExternalTarget(**payload)
 
-    _assert(target().base_url == "https://api.example.com/v1", "外部检测应接受公网 HTTPS 地址")
+    _assert(target().base_url == "https://example.com/v1", "外部检测应接受公网 HTTPS 地址")
     for bad_url in (
-        "http://api.example.com/v1",
+        "http://example.com/v1",
         "https://localhost/v1",
         "https://127.0.0.1/v1",
         "https://10.0.0.2/v1",
@@ -879,7 +965,7 @@ def _check_content_guard_browser_smoke() -> None:
             page.goto(smoke_url, wait_until="domcontentloaded")
             page.locator("#content-guard-refresh-btn").click()
             page.locator("input[name='content_guard_target_type'][value='external']").check(force=True)
-            page.locator("#content-guard-external-base-url").fill("https://api.example.com/v1")
+            page.locator("#content-guard-external-base-url").fill("https://example.com/v1")
             page.locator("#content-guard-external-api-key").fill("sk-stage33")
             page.locator("#content-guard-external-model-name").fill("stage33-model")
             page.locator("#content-guard-inspect-text").fill("这是一段本地检测文本")
@@ -900,12 +986,14 @@ def _check_frontend_and_log_wiring() -> None:
         ]),
         ("app/templates/api_keys.html", [
             "api-key-content-guard-required",
+            "api-key-content-guard-filter",
+            "api-key-template-content-guard-required",
         ]),
         ("app/templates/user_api_keys.html", [
-            "user-api-key-create-content-guard-required",
+            "管理员统一要求",
         ]),
         ("app/routers/user_portal.py", [
-            "content_guard_required: str | None = Form(default=\"on\")",
+            "content_guard_required=True",
         ]),
         ("app/services/user_portal_service.py", [
             "require_trusted_provider=bool(getattr(route_setting, \"trusted_providers_only\", False))",
@@ -926,6 +1014,8 @@ def _check_frontend_and_log_wiring() -> None:
             "content_guard_enabled",
             "trusted_providers_only",
             "content_guard_required",
+            "contentGuardFilter",
+            "templateContentGuardRequiredInput",
             "content_guard_result",
             "content_guard_risk_level",
             "formatContentGuardResultLabel",
@@ -1002,6 +1092,8 @@ def _check_frontend_and_log_wiring() -> None:
             "CREATE TABLE IF NOT EXISTS request_content_guard_events",
             "CREATE TABLE IF NOT EXISTS health_probe_events",
             "ix_request_logs_content_guard_risk_created_provider",
+            "ALTER TABLE api_key_policy_templates",
+            "content_guard_required BOOLEAN NOT NULL DEFAULT TRUE",
         ]),
         ("migrations/2026-06-07_extend_content_guard_strategy_metrics.sql", [
             "ix_request_logs_content_guard_final_strategy",
@@ -1092,6 +1184,8 @@ def main() -> None:
     _check_runtime_guard_request_semantics()
     _check_low_trust_route_field_hidden()
     _check_high_risk_route_detection()
+    _check_content_guard_route_cache_and_scheduler_policy()
+    _check_content_guard_frontend_policy_wiring()
     _check_error_catalog()
     _check_health_probe_guard_helpers()
     _check_content_probe_health_window_and_recovery()
