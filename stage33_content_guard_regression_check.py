@@ -346,6 +346,119 @@ def _check_health_probe_guard_helpers() -> None:
     _assert(incomplete_decision["content_guard_result"] != "pass", f"缺少短链/外链/广告识别探针不应标记可信：{incomplete_decision}")
 
 
+def _check_content_probe_health_window_and_recovery() -> None:
+    provider = _provider(
+        id=3303,
+        name="stage33-探针窗口测试提供商",
+        content_integrity_status="blocked",
+        circuit_state="open",
+        trust_level="blocked",
+    )
+    provider_model = ProviderModel(
+        id=4403,
+        provider_id=provider.id,
+        model_name="stage33-probe-window-model",
+        enabled=True,
+        health_status="healthy",
+        circuit_state="open",
+        content_integrity_status="blocked",
+        content_probe_failure_count=2,
+        content_probe_last_failed_at=datetime.utcnow() - timedelta(minutes=11),
+    )
+    provider.provider_models = [provider_model]
+    db = _ProbeHealthSession()
+    review_result = {
+        "content_guard_result": ContentGuardService.RESULT_REVIEW,
+        "content_guard_reason": "临时探针失败",
+        "content_guard_action": "record",
+    }
+    endpoint_results = [
+        {
+            "capability_key": "content_fixed_answer",
+            "endpoint_label": "固定答案完整性探针",
+            "success": False,
+            "content_guard": review_result,
+        }
+    ]
+    ContentGuardProbeService.apply_content_probe_health(
+        db,
+        provider,
+        provider_model,
+        content_guard_result=review_result,
+        endpoint_results=endpoint_results,
+    )
+    _assert(provider_model.content_probe_failure_count == 1, "超过 10 分钟的旧探针失败不得累计到本轮")
+    _assert(provider_model.content_integrity_status == "degraded", "窗口外单次失败只应降级，不应直接 blocked")
+    _assert(provider.content_integrity_status == "degraded", "provider 状态必须随模型窗口内失败汇总为 degraded")
+
+    provider_model.content_probe_last_failed_at = datetime.utcnow()
+    provider_model.content_probe_failure_count = 2
+    ContentGuardProbeService.apply_content_probe_health(
+        db,
+        provider,
+        provider_model,
+        content_guard_result=review_result,
+        endpoint_results=endpoint_results,
+    )
+    _assert(provider_model.content_probe_failure_count == 3, "10 分钟窗口内失败必须累计")
+    _assert(provider_model.content_integrity_status == "blocked", "10 分钟窗口内 3 次失败必须隔离模型")
+    _assert(provider.content_integrity_status == "blocked", "10 分钟窗口内 3 次失败必须隔离 provider")
+
+    pass_result = {
+        "content_guard_result": ContentGuardService.RESULT_PASS,
+        "content_guard_reason": "可信探针通过",
+        "content_guard_action": "allow",
+    }
+    pass_endpoint_results = [
+        {
+            "capability_key": key,
+            "endpoint_label": key,
+            "success": True,
+            "content_guard": pass_result,
+        }
+        for key in ("content_fixed_answer", "content_pollution_rules", "content_sse")
+    ]
+    ContentGuardProbeService.apply_content_probe_health(
+        db,
+        provider,
+        provider_model,
+        content_guard_result=pass_result,
+        endpoint_results=pass_endpoint_results,
+    )
+    _assert(provider_model.content_integrity_status == "passed", "blocked 模型通过可信探针后必须恢复为 passed")
+    _assert(provider_model.circuit_state == "closed", "blocked 模型通过可信探针后必须关闭内容熔断")
+    _assert(provider.content_integrity_status == "passed", "provider 在所有启用模型通过后必须自动恢复 passed")
+    _assert(provider.circuit_state == "closed", "provider 在所有启用模型通过后必须关闭内容熔断")
+
+
+def _check_trust_probe_keys_and_probe_boundaries() -> None:
+    merged = ContentTrustProbeService.merge_required_probe_keys(["json", "tools", "fixed_answer"])
+    _assert(merged == ["json", "tools", "fixed_answer", "pollution_rules", "sse"], f"可信探针必须保留用户勾选项并补齐必需项：{merged}")
+    invalid = ContentTrustProbeService.invalid_probe(
+        probe_key="frontend_unknown",
+        endpoint_path="/responses",
+        message="未知探针",
+    )
+    _assert(invalid["support_mode"] == "invalid_probe", f"未知探针必须显式失败而不是 skipped：{invalid}")
+    _assert(invalid["success"] is False and invalid.get("content_guard"), f"未知探针失败必须带内容防护上下文：{invalid}")
+
+    service_text = Path("app/services/content_guard_probe_service.py").read_text(encoding="utf-8")
+    _assert("SSE_PROBE_MAX_CHUNKS" in service_text and "SSE_PROBE_MAX_BYTES" in service_text, "SSE 探针必须有 chunk 与字节边界")
+    _assert("range(6)" not in service_text, "SSE 探针禁止固定只读取 6 个 chunk")
+    _assert("POLLUTION_PROBE_SCENARIO_TIMEOUT_SECONDS" in service_text, "外链广告识别探针必须有单场景超时")
+    _assert("POLLUTION_PROBE_TOTAL_TIMEOUT_SECONDS" in service_text, "外链广告识别探针必须有总超时")
+    _assert("asyncio.wait_for" in service_text and "pollution_probe_timeout" in service_text, "外链广告识别探针必须实际执行超时控制")
+    marker = ContentGuardProbeService.mark_detection_result(
+        {
+            "endpoint_path": "/responses",
+            "endpoint_label": "固定答案完整性探针",
+            "trace": [],
+        }
+    )
+    _assert(marker["traffic_type"] == "content_guard_probe" and marker["is_detection_traffic"] is True, f"探针结果必须标记检测流量：{marker}")
+    _assert(marker["trace"] and marker["trace"][0]["is_detection_traffic"] is True, f"探针 trace 必须标记检测流量：{marker}")
+
+
 def _check_manual_trust_edit_trace() -> None:
     provider_model = ProviderModel(
         id=4402,
@@ -975,6 +1088,8 @@ def main() -> None:
     _check_high_risk_route_detection()
     _check_error_catalog()
     _check_health_probe_guard_helpers()
+    _check_content_probe_health_window_and_recovery()
+    _check_trust_probe_keys_and_probe_boundaries()
     _check_manual_trust_edit_trace()
     _check_content_guard_metrics_alerts()
     _check_content_guard_auto_isolation()
