@@ -1,5 +1,68 @@
 # Errors
 
+## [ERR-20260608-003] nested-pwsh-variable-expansion-in-double-quoted-command
+
+**Logged**: 2026-06-08T00:00:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tooling
+
+### Summary
+Nested `pwsh -Command "..."` expanded `$out` and `$err` in the outer shell before the inner script ran, producing an invalid `Remove-Item -LiteralPath ,` command.
+
+### Error
+```text
+ParserError: Missing argument in parameter list.
+```
+
+### Context
+- Command attempted: temporary uvicorn startup verification with `$out` and `$err` variables inside a double-quoted nested PowerShell command.
+- Environment: Windows shell command wrapper with project-required PowerShell 7.
+
+### Suggested Fix
+Wrap complex PowerShell scripts with `pwsh -NoLogo -NoProfile -Command '& { ... }'` so `$` variables are evaluated inside the intended script block.
+
+### Metadata
+- Reproducible: yes
+- Related Files: 项目全局规范.md
+- Tags: powershell, verification
+
+---
+
+## [ERR-20260608-001] nested-pwsh-variable-expansion
+
+**Logged**: 2026-06-08T00:00:00+08:00
+**Priority**: medium
+**Status**: resolved
+**Area**: infra
+
+### Summary
+Nested `pwsh -Command "..."` caused `$paths` to be expanded by the outer shell before the inner PowerShell 7 script ran, leaving an invalid assignment.
+
+### Error
+```text
+=: The term '=' is not recognized as a name of a cmdlet, function, script file, or executable program.
+Nothing specified, nothing added.
+```
+
+### Context
+- Command attempted: define `$paths = @(...)` inside a double-quoted `pwsh -Command`.
+- Environment: Codex shell wrapper invoking project-required PowerShell 7.
+
+### Suggested Fix
+Use a single-quoted script block for nested PowerShell scripts, for example `pwsh -NoLogo -NoProfile -Command '$paths = @(...); git add -- $paths'`, or avoid variables and pass explicit paths directly.
+
+### Metadata
+- Reproducible: yes
+- Related Files: 项目全局规范.md
+- Tags: powershell, git
+
+### Resolution
+- **Resolved**: 2026-06-08T00:00:00+08:00
+- **Notes**: Retried with a single-quoted PowerShell 7 script block so `$paths` is interpreted by the intended shell.
+
+---
+
 ## [ERR-20260429-001] docker_compose_postgres_engine_unavailable
 
 **Logged**: 2026-04-29T00:00:00+08:00
@@ -57,6 +120,35 @@ Use single-quoted regex patterns and single-quoted script blocks inside nested `
 ### Metadata
 - Reproducible: yes
 - Related Files: none
+
+---
+
+## [ERR-20260608-001] powershell-variable-expansion-in-tool-command
+
+**Logged**: 2026-06-08T00:00:00+08:00
+**Priority**: low
+**Status**: pending
+**Area**: config
+
+### Summary
+PowerShell line-number helper failed because `$i` was parsed away before reaching `pwsh -Command`.
+
+### Error
+```text
+ParserError: Missing expression after unary operator '++'.
+```
+
+### Context
+- Command attempted: `pwsh -NoLogo -NoProfile -Command "... { $i++; if ($i -ge ...) ... }"`
+- The outer command string allowed `$i` expansion/parsing to corrupt the script block.
+
+### Suggested Fix
+Use single-quoted `-Command` scripts, escaped `$`, or a simpler command shape for PowerShell snippets that contain variables.
+
+### Metadata
+- Reproducible: yes
+- Related Files: N/A
+- Tags: powershell, quoting, tool-usage
 
 ---
 
@@ -801,8 +893,8 @@ Use `pwsh -NoLogo -NoProfile -Command '& { ... }'` for scripts containing `$`, `
 - Reproducible: yes
 - Related Files: 项目全局规范.md
 - Tags: powershell, tests
-- Recurrence-Count: 7
-- Last-Seen: 2026-06-07
+- Recurrence-Count: 16
+- Last-Seen: 2026-06-08
 
 ---
 
@@ -833,5 +925,38 @@ When editing migration helpers, anchor patches on function-specific names or uni
 - Reproducible: yes
 - Related Files: app/main.py
 - Tags: migrations, tests
+
+---
+
+## [ERR-20260607-001] assertion-script-private-method-drift
+
+**Logged**: 2026-06-07T23:10:18+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+A temporary verification script called a guessed private batch-import helper that does not exist.
+
+### Error
+```text
+AttributeError: type object 'ProviderService' has no attribute '_parse_batch_row'
+```
+
+### Context
+- Command attempted: inline Python assertion for provider retry defaults.
+- Actual batch import normalization entry point is `_normalize_batch_provider_item`.
+
+### Suggested Fix
+Before writing assertions against private helpers, use `rg` to confirm the actual function name and call shape.
+
+### Metadata
+- Reproducible: yes
+- Related Files: app/services/provider_service.py
+- Tags: tests, verification
+
+### Resolution
+- **Resolved**: 2026-06-07T23:10:18+08:00
+- **Notes**: Switched the verification script to call `_normalize_batch_provider_item` after inspecting the service.
 
 ---
