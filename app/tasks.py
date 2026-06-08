@@ -322,7 +322,7 @@ def distributed_job_lock(job_name: str, *, ttl_seconds: int | Callable[[], int])
                                 "updated_at": finished_at.isoformat(),
                             },
                         )
-                            await client.expire(state_key, max(lock_ttl_seconds, 300))
+                        await client.expire(state_key, max(lock_ttl_seconds, 300))
                 except Exception:
                     pass
                 _safe_finish_job_event(
@@ -349,7 +349,7 @@ def distributed_job_lock(job_name: str, *, ttl_seconds: int | Callable[[], int])
                                 "updated_at": finished_at.isoformat(),
                             },
                         )
-                            await client.expire(state_key, max(lock_ttl_seconds, 300))
+                        await client.expire(state_key, max(lock_ttl_seconds, 300))
                 except Exception:
                     pass
                 _safe_finish_job_event(

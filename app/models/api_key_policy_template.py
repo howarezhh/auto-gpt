@@ -11,6 +11,7 @@ class ApiKeyPolicyTemplate(Base):
     name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     remark: Mapped[str | None] = mapped_column(Text, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    content_guard_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     expires_in_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     allowed_provider_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     allowed_model_names_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")

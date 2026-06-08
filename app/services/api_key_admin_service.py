@@ -174,6 +174,7 @@ class ApiKeyAdminService:
         keyword: str | None,
         status: str | None,
         enabled: bool | None,
+        content_guard_required: bool | None,
         owner_user_id: int | None,
         page: int,
         page_size: int,
@@ -201,6 +202,8 @@ class ApiKeyAdminService:
             filters.append(keyword_filter)
         if enabled is not None:
             filters.append(ApiClientKey.enabled == enabled)
+        if content_guard_required is not None:
+            filters.append(ApiClientKey.content_guard_required == content_guard_required)
         if owner_user_id is not None:
             filters.append(ApiClientKey.owner_user_id == owner_user_id)
         if status:
