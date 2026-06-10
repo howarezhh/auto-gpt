@@ -2449,6 +2449,7 @@ def _check_content_guard_template_dom_contract() -> None:
             "耗时",
             "Trace",
             "原因",
+            "原始响应",
         ],
         f"内容防护探针结果表头必须提供完整排障证据列：{parser.result_headers}",
     )
@@ -2501,7 +2502,7 @@ def _check_frontend_and_log_wiring() -> None:
         ("app/services/log_service.py", [
             "content_guard_result: str | None = None",
             "content_guard_risk_level: str | None = None",
-            '"content_guard_excerpt"',
+            "content_guard_excerpt",
         ]),
         ("app/services/system_metrics_service.py", [
             '"content_guard": content_guard',
@@ -2570,7 +2571,7 @@ def _check_frontend_and_log_wiring() -> None:
             "ix_request_logs_content_guard_buffer_wait",
         ]),
         ("app/templates/base.html", [
-            "?v=20260609-",
+            "?v=20260610-",
             "/content-guard",
             "内容防护",
         ]),
@@ -2783,7 +2784,7 @@ def _check_frontend_and_log_wiring() -> None:
     _assert("content-guard-external-api-key" not in content_guard_template, "内容防护页面禁止保留外部探针 API Key 输入框")
     _assert("content_guard_target_type" not in content_guard_template and "data-content-guard-target-type" in content_guard_template, "内容防护探测目标必须使用分段按钮而不是原生 radio")
     _assert("<th>策略</th>" in content_guard_template and "<th>可信度</th>" not in content_guard_template, "内容防护规则表必须采用核心主列加详情披露")
-    _assert('<td colspan="14" class="table-muted">等待检测</td>' in content_guard_template, "探针结果表扩展证据列后空态 colspan 必须同步")
+    _assert('<td colspan="15" class="table-muted">等待检测</td>' in content_guard_template, "探针结果表扩展证据列后空态 colspan 必须同步")
     app_js = Path("app/static/js/app.js").read_text(encoding="utf-8", errors="ignore")
     _assert('patterns: ["待填写"]' not in app_js and 'patterns: [],' in app_js, "新增内容防护规则禁止把占位词作为真实匹配项")
     _assert('window.confirm("恢复默认规则？")' not in app_js, "恢复默认规则禁止继续使用 window.confirm")
@@ -2805,7 +2806,7 @@ def _check_frontend_and_log_wiring() -> None:
         "adapted_success",
         "native_success",
         "trace_id || item.trace",
-        'colspan="14"',
+        'colspan="15"',
     ):
         _assert(needle in app_js, f"内容防护探针结果渲染缺少排障字段：{needle}")
     _assert("extract_probe_sse_text_delta" in Path("app/services/content_guard_probe_service.py").read_text(encoding="utf-8", errors="ignore"), "SSE 探针必须聚合流式文本校验固定答案")
@@ -2906,7 +2907,7 @@ def _check_typed_logging_governance() -> None:
     config_text = Path("app/config.py").read_text(encoding="utf-8", errors="ignore")
     env_text = Path(".env.example").read_text(encoding="utf-8", errors="ignore")
     _assert("logging_event_queue_require_local_worker" in config_text and "LOGGING_EVENT_QUEUE_REQUIRE_LOCAL_WORKER=false" in env_text, "类型化日志队列必须支持独立 worker 架构")
-    _assert("DEAD_LETTER_KEY" in queue_text and "FAILURE_COUNT_KEY" in queue_text and "_record_worker_failure" in queue_text, "类型化日志队列批次失败必须有死信和失败计数")
+    _assert("DEAD_LETTER_KEY" in queue_text and "FAILURE_COUNT_KEY" in queue_text and "_prepare_failed_processing_item" in queue_text and "_dead_letter_payload" in queue_text, "类型化日志队列批次失败必须有死信和失败计数")
     _assert("asyncio.wait(workers, timeout=2)" in queue_text and "worker.cancel()" in queue_text, "类型化日志队列停机必须先尝试 drain 再取消")
     enqueue_body = queue_text.split("def enqueue", 1)[1].split("def _has_active_workers", 1)[0]
     _assert("not cls._has_active_workers()" not in enqueue_body or "logging_event_queue_require_local_worker" in enqueue_body, "类型化日志入队禁止强依赖当前 Web 进程本地 worker")

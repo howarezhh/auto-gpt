@@ -554,3 +554,90 @@ ParserError: Missing type name after '['.
 - **Notes**: 后续读取指定行改用 `pwsh -NoLogo -NoProfile -Command '& { ... }'`。
 
 ---
+---
+
+## [ERR-20260610-001] content-guard-contract-raw-response-header
+
+**Logged**: 2026-06-10T00:00:00+08:00
+**Priority**: medium
+**Status**: resolved
+**Area**: regression
+
+### Summary
+`stage33_content_guard_regression_check.py` failed because the template contract expected the old content guard result table headers without `原始响应`.
+
+### Error
+```text
+AssertionError: 内容防护探针结果表头必须提供完整排障证据列
+```
+
+### Context
+- `app/templates/content_guard.html` already exposed the `原始响应` column.
+- Current project rules require content/health probe results to provide a raw upstream response summary or sample for troubleshooting.
+
+### Suggested Fix
+When adding a required troubleshooting column to a template, update the corresponding DOM contract assertion in the same change.
+
+### Metadata
+- Reproducible: yes
+- Related Files: app/templates/content_guard.html, stage33_content_guard_regression_check.py
+
+---
+
+## [ERR-20260610-002] postgres-test-database-missing
+
+**Logged**: 2026-06-10T00:00:00+08:00
+**Priority**: medium
+**Status**: pending
+**Area**: test-environment
+
+### Summary
+PostgreSQL-backed stage checks failed locally because the configured test database did not exist.
+
+### Error
+```text
+FATAL: database "aotu_gpt_test" does not exist
+```
+
+### Context
+- `stage34_logging_system_regression_check.py`, `stage35_logging_usage_accuracy_regression_check.py`, and `stage36_ip_management_regression_check.py` attempted to connect to `127.0.0.1:5432/aotu_gpt_test`.
+- The project is now PostgreSQL-only, so these checks require a prepared PostgreSQL test database.
+
+### Suggested Fix
+Create or provision `aotu_gpt_test` before running PostgreSQL-backed stage checks, or document the required local test database bootstrap command.
+
+### Metadata
+- Reproducible: yes
+- Related Files: stage34_logging_system_regression_check.py, stage35_logging_usage_accuracy_regression_check.py, stage36_ip_management_regression_check.py
+
+---
+
+## [ERR-20260610-003] typed-logging-queue-contract-stale-symbol
+
+**Logged**: 2026-06-10T00:00:00+08:00
+**Priority**: medium
+**Status**: resolved
+**Area**: regression
+
+### Summary
+`stage33_content_guard_regression_check.py` failed because the typed logging queue governance assertion still searched for the old `_record_worker_failure` symbol.
+
+### Error
+```text
+AssertionError: 类型化日志队列批次失败必须有死信和失败计数
+```
+
+### Context
+- `app/logging/queue.py` already records dead letters through `DEAD_LETTER_KEY`, `FAILURE_COUNT_KEY`, `_prepare_failed_processing_item`, and `_dead_letter_payload`.
+- The implementation had been refactored, but the static regression assertion still depended on the old helper name.
+
+### Suggested Fix
+Static governance checks should assert the current failure-handling semantics and stable queue artifacts, not obsolete private helper names.
+
+### Metadata
+- Reproducible: yes
+- Related Files: app/logging/queue.py, stage33_content_guard_regression_check.py
+
+### Resolution
+- **Resolved**: 2026-06-10T00:00:00+08:00
+- **Notes**: Updated the stage33 assertion to check the current dead-letter preparation and payload helpers.
