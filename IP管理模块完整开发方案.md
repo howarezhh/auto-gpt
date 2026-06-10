@@ -728,7 +728,6 @@ def resolve_ip_management_scope(path: str) -> str | None:
 
 效果：
 
-- PostgreSQL 与 SQLite 需要分别确认语法可用。
 - 禁止依赖生产 Web worker 启动阶段自动 DDL。
 
 ### 第 3 步：新增 Schema

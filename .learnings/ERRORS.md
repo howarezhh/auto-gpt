@@ -1,1073 +1,556 @@
-# Errors
+## [ERR-20260609-001] benchmark_content_guard_overhead
 
-## [ERR-20260608-003] nested-pwsh-variable-expansion-in-double-quoted-command
-
-**Logged**: 2026-06-08T00:00:00+08:00
-**Priority**: low
-**Status**: resolved
-**Area**: tooling
-
-### Summary
-Nested `pwsh -Command "..."` expanded `$out` and `$err` in the outer shell before the inner script ran, producing an invalid `Remove-Item -LiteralPath ,` command.
-
-### Error
-```text
-ParserError: Missing argument in parameter list.
-```
-
-### Context
-- Command attempted: temporary uvicorn startup verification with `$out` and `$err` variables inside a double-quoted nested PowerShell command.
-- Environment: Windows shell command wrapper with project-required PowerShell 7.
-
-### Suggested Fix
-Wrap complex PowerShell scripts with `pwsh -NoLogo -NoProfile -Command '& { ... }'` so `$` variables are evaluated inside the intended script block.
-
-### Metadata
-- Reproducible: yes
-- Related Files: 项目全局规范.md
-- Tags: powershell, verification
-
----
-
-## [ERR-20260608-001] nested-pwsh-variable-expansion
-
-**Logged**: 2026-06-08T00:00:00+08:00
-**Priority**: medium
-**Status**: resolved
-**Area**: infra
-
-### Summary
-Nested `pwsh -Command "..."` caused `$paths` to be expanded by the outer shell before the inner PowerShell 7 script ran, leaving an invalid assignment.
-
-### Error
-```text
-=: The term '=' is not recognized as a name of a cmdlet, function, script file, or executable program.
-Nothing specified, nothing added.
-```
-
-### Context
-- Command attempted: define `$paths = @(...)` inside a double-quoted `pwsh -Command`.
-- Environment: Codex shell wrapper invoking project-required PowerShell 7.
-
-### Suggested Fix
-Use a single-quoted script block for nested PowerShell scripts, for example `pwsh -NoLogo -NoProfile -Command '$paths = @(...); git add -- $paths'`, or avoid variables and pass explicit paths directly.
-
-### Metadata
-- Reproducible: yes
-- Related Files: 项目全局规范.md
-- Tags: powershell, git
-
-### Resolution
-- **Resolved**: 2026-06-08T00:00:00+08:00
-- **Notes**: Retried with a single-quoted PowerShell 7 script block so `$paths` is interpreted by the intended shell.
-
----
-
-## [ERR-20260429-001] docker_compose_postgres_engine_unavailable
-
-**Logged**: 2026-04-29T00:00:00+08:00
-**Priority**: low
-**Status**: pending
-**Area**: infra
-
-### Summary
-Docker CLI and Compose were installed, but Docker Desktop Linux Engine was not running, so local PostgreSQL container startup could not be used for verification.
-
-### Error
-```text
-unable to get image 'postgres:16': error during connect: Get "http://%2F%2F.%2Fpipe%2FdockerDesktopLinuxEngine/v1.51/images/postgres:16/json": open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.
-```
-
-### Context
-- Command attempted: `docker compose -f docker-compose.postgres.yml up -d`
-- Environment: Windows PowerShell workspace
-- Task: Stage 1 PostgreSQL migration verification
-
-### Suggested Fix
-Start Docker Desktop Linux Engine before running compose verification, or verify PostgreSQL against an already running local/remote PostgreSQL instance.
-
-### Metadata
-- Reproducible: yes
-- Related Files: docker-compose.postgres.yml
-
----
-
-## [ERR-20260601-001] powershell_quoted_range_and_pipe_patterns
-
-**Logged**: 2026-06-01T22:04:53+08:00
-**Priority**: low
-**Status**: pending
-**Area**: infra
-
-### Summary
-PowerShell commands passed through `pwsh -Command` can misparse regex pipe patterns and range expressions when quoting is not explicit enough.
-
-### Error
-```text
-project_disk: The term 'project_disk' is not recognized as a name of a cmdlet...
-Select-Object: Cannot bind parameter 'Index'. Cannot convert value "35..65" to type "System.Int32".
-```
-
-### Context
-- Command attempted: `rg -n "PROJECT_DISK_CACHE_SECONDS|project_disk|..." ...`
-- Command attempted: `Get-Content ... | Select-Object -Index 35..65`
-- Command attempted: nested `pwsh -Command` checks containing `$script` and `$_` inside an outer double-quoted command.
-- Environment: Windows workspace using PowerShell 7 via `pwsh`.
-
-### Suggested Fix
-Use single-quoted regex patterns and single-quoted script blocks inside nested `pwsh -Command` calls, or prefer `rg -C` for context. For `Select-Object -Index`, ensure the range is evaluated by PowerShell rather than passed as a string.
-
-### Metadata
-- Reproducible: yes
-- Related Files: none
-
----
-
-## [ERR-20260608-001] powershell-variable-expansion-in-tool-command
-
-**Logged**: 2026-06-08T00:00:00+08:00
-**Priority**: low
-**Status**: pending
-**Area**: config
-
-### Summary
-PowerShell line-number helper failed because `$i` was parsed away before reaching `pwsh -Command`.
-
-### Error
-```text
-ParserError: Missing expression after unary operator '++'.
-```
-
-### Context
-- Command attempted: `pwsh -NoLogo -NoProfile -Command "... { $i++; if ($i -ge ...) ... }"`
-- The outer command string allowed `$i` expansion/parsing to corrupt the script block.
-
-### Suggested Fix
-Use single-quoted `-Command` scripts, escaped `$`, or a simpler command shape for PowerShell snippets that contain variables.
-
-### Metadata
-- Reproducible: yes
-- Related Files: N/A
-- Tags: powershell, quoting, tool-usage
-
----
-
-## [ERR-20260607-001] powershell-dollar-expansion-in-nested-pwsh
-
-**Logged**: 2026-06-07T00:00:00+08:00
-**Priority**: low
-**Status**: resolved
-**Area**: infra
-
-### Summary
-Nested `pwsh -Command` scripts containing `$lines[...]` failed because the outer PowerShell expanded `$lines` before PowerShell 7 received the command.
-
-### Error
-```text
-ParserError: Missing type name after '['.
-```
-
-### Context
-- Command attempted: `pwsh -NoLogo -NoProfile -Command "$lines = Get-Content ...; $lines[7330..7778]"`
-- Environment: Codex shell running through PowerShell, with project rule requiring PowerShell 7.
-
-### Suggested Fix
-Wrap nested PowerShell scripts in `& { ... }` and escape `$` as `` `$ `` when the outer shell could parse it first.
-
-### Metadata
-- Reproducible: yes
-- Related Files: app/static/js/app.js
-- Tags: powershell, command-quoting
-
----
-## [ERR-20260531-001] powershell_nested_regex_escaping
-
-**Logged**: 2026-05-31T14:45:00+08:00
-**Priority**: low
-**Status**: pending
-**Area**: infra
-
-### Summary
-Nested `pwsh -Command` with double-quoted regex patterns can leak backslashes to PowerShell parsing and fail before `rg` runs.
-
-### Error
-```text
-The term '\' is not recognized as a name of a cmdlet, function, script file, or executable program.
-```
-
-### Context
-- Command attempted: `pwsh -Command "rg -n \"jsonable_encoder|datetime.*isoformat|isoformat\\(\\)\" app"`
-- Environment: Codex shell command already runs under PowerShell, then nested `pwsh -Command` adds another quoting layer.
-
-### Suggested Fix
-Use a single-quoted outer PowerShell command for regex searches, or avoid nested `pwsh -Command` when the command contains escaped parentheses or quotes.
-
-### Metadata
-- Reproducible: yes
-- Related Files: none
-
----
-## [ERR-20260530-001] powershell_nested_rg_pipe_pattern
-
-**Logged**: 2026-05-30T23:55:23+08:00
-**Priority**: low
-**Status**: pending
-**Area**: infra
-
-### Summary
-Nested `pwsh -Command` can misparse ripgrep regex patterns containing `|` when quoting is not protected.
-
-### Error
-```text
-ParserError: Expressions are only allowed as the first element of a pipeline.
-```
-
-### Context
-- Command attempted: `pwsh -Command "rg -n \"uvicorn|FastAPI|app =|...\" app start_project.py run.ps1 -S"`
-- Environment: Windows PowerShell 7 command executed through another PowerShell command layer.
-
-### Suggested Fix
-Use PowerShell single quotes around the ripgrep pattern inside the nested command, for example `& rg -n 'uvicorn|FastAPI|app =' app start_project.py run.ps1 -S`.
-
-### Metadata
-- Reproducible: yes
-- Related Files: none
-
----
-## [ERR-20260502-002] github_push_network_unreachable
-
-**Logged**: 2026-05-02T23:30:00+08:00
-**Priority**: medium
-**Status**: pending
-**Area**: infra
-
-### Summary
-`git push -u origin main` failed because the local environment could not connect to GitHub over HTTPS.
-
-### Error
-```text
-fatal: unable to access 'https://github.com/howarezhh/auto-gpt.git/': Recv failure: Connection was reset
-fatal: unable to access 'https://github.com/howarezhh/auto-gpt.git/': Failed to connect to github.com port 443 after 21089 ms: Could not connect to server
-```
-
-### Context
-- Command attempted twice: `git push -u origin main`
-- Branch: `main`
-- Remote: `https://github.com/howarezhh/auto-gpt.git`
-- Impact: local commits are ready but not synced to GitHub.
-
-### Suggested Fix
-Retry after network/proxy access to `github.com:443` is restored; do not run fetch/pull/merge unless the remote rejects with non-fast-forward and the user confirms a recovery plan.
-
-### Metadata
-- Reproducible: yes
-- Related Files: none
-
----
-## [ERR-20260502-001] powershell_python_heredoc_syntax
-
-**Logged**: 2026-05-02T23:24:49+08:00
+**Logged**: 2026-06-09T00:00:00+08:00
 **Priority**: low
 **Status**: resolved
 **Area**: tests
 
 ### Summary
-PowerShell does not support Bash-style `python - <<'PY'` heredoc syntax.
+Content guard benchmark fixture initially missed provider runtime state fields.
 
 ### Error
-```text
-ParserError: Missing file specification after redirection operator.
+```
+AttributeError: 'BenchmarkProvider' object has no attribute 'circuit_state'
 ```
 
 ### Context
-- Command attempted: `.venv\Scripts\python.exe - <<'PY' ... PY`
-- Environment: Windows PowerShell workspace.
-- Impact: quick Python validation snippets fail before Python starts.
+- Command: `.venv\Scripts\python.exe scripts\benchmark_content_guard_overhead.py --iterations 10 --concurrency 2 --scan-bytes 2048`
+- The new runtime benchmark path calls `ContentRuntimeGuardService.record_runtime_pass()`, which reads provider and model circuit/content state fields.
 
 ### Suggested Fix
-Use a PowerShell here-string piped into Python: `@' ... '@ | .venv\Scripts\python.exe -`.
+Benchmark fixtures that call runtime guard services must include the provider/model state fields touched by pass/failure recording.
 
 ### Metadata
 - Reproducible: yes
-- Related Files: none
+- Related Files: `scripts/benchmark_content_guard_overhead.py`
 
 ### Resolution
-- **Resolved**: 2026-05-02T23:24:49+08:00
-- **Notes**: Re-ran the same validation using a PowerShell here-string and it passed.
-
----
-## [ERR-20260430-002] github_https_push_connection_reset
-
-**Logged**: 2026-04-30T23:55:00+08:00
-**Priority**: high
-**Status**: pending
-**Area**: infra
-
-### Summary
-Pushing to GitHub over HTTPS failed twice because the connection was reset.
-
-### Error
-```text
-fatal: unable to access 'https://github.com/howarezhh/auto-gpt.git/': Recv failure: Connection was reset
-```
-
-### Context
-- Command attempted: `git push -u origin main`
-- Remote: `https://github.com/howarezhh/auto-gpt.git`
-- Local commit exists and branch is ahead by 1, but remote push did not complete.
-
-### Suggested Fix
-Retry from a network path that can reach GitHub HTTPS, or switch the remote to an available SSH/proxy configuration after confirming credentials.
-
-### Metadata
-- Reproducible: yes
-- Related Files: none
+- **Resolved**: 2026-06-09T00:00:00+08:00
+- **Notes**: Added the missing provider/model content integrity and circuit state fields to benchmark fixtures.
 
 ---
 
-## [ERR-20260429-003] gunicorn_not_runnable_on_windows
+## [ERR-20260610-003] rg_windows_glob_path
 
-**Logged**: 2026-04-29T00:00:00+08:00
+**Logged**: 2026-06-10T00:00:00+08:00
 **Priority**: low
-**Status**: pending
+**Status**: resolved
 **Area**: infra
 
 ### Summary
-Gunicorn installed successfully in the project virtual environment, but `python -m gunicorn --version` cannot run on Windows because Gunicorn imports Unix-only `fcntl`.
+在 Windows PowerShell 中把 `stage*_regression_check.py` 作为普通路径参数传给 `rg`，ripgrep 报路径语法错误。
 
 ### Error
-```text
-ModuleNotFoundError: No module named 'fcntl'
+```
+rg: stage*_regression_check.py: 文件名、目录名或卷标语法不正确。 (os error 123)
 ```
 
 ### Context
-- Command attempted: `.venv\Scripts\python.exe -m gunicorn --version`
-- Environment: Windows PowerShell workspace
-- Task: Stage 2 multi-worker production startup verification
+- Command: `rg ... tests stage*_regression_check.py`
+- Windows 路径解析不接受该通配形式作为实际路径参数。
 
 ### Suggested Fix
-Verify Gunicorn startup on the target Linux/Alibaba Cloud host. Keep Windows startup on Uvicorn/`run.ps1` for local development only.
+使用 ripgrep 自身的 `-g 'stage*_regression_check.py' .` 做文件过滤，或先只查目录再单独查根目录匹配文件。
 
 ### Metadata
 - Reproducible: yes
-- Related Files: requirements.txt, start_aliyun.sh, README.md, 启动指南.md
+- Related Files: `.learnings/ERRORS.md`
+
+### Resolution
+- **Resolved**: 2026-06-10T00:00:00+08:00
+- **Notes**: 已改用 `rg ... tests; rg ... -g 'stage*_regression_check.py' .`。
 
 ---
 
-## [ERR-20260429-002] bash_syntax_check_blocked_by_wsl
+## [ERR-20260610-002] pwsh_select_string_interpolation
 
-**Logged**: 2026-04-29T21:15:14+08:00
+**Logged**: 2026-06-10T00:00:00+08:00
 **Priority**: low
-**Status**: pending
-**Area**: infra
+**Status**: resolved
+**Area**: backend
 
 ### Summary
-Default `bash -n` could not validate `start_aliyun.sh` because the Windows environment routes bash through WSL and WSL virtualization support is unavailable.
+在外层双引号 `pwsh -Command` 中拼接 `Select-String | ForEach-Object { "$($_...)" }`，导致 `$_` 与反斜杠被外层解析破坏。
 
 ### Error
-```text
-Bash/Service/CreateInstance/CreateVm/HCS/HCS_E_HYPERV_NOT_INSTALLED
+```
+InvalidOperation: You cannot call a method on a null-valued expression.
+\: The term '\' is not recognized as a name of a cmdlet, function, script file, or executable program.
 ```
 
 ### Context
-- Command attempted: `bash -n start_aliyun.sh`
-- Fallback attempted: `C:\Program Files\Git\bin\bash.exe -n start_aliyun.sh`
-- Fallback result: Git Bash was not installed at the default path.
+- Command: `Select-String ... | ForEach-Object { "$($_.Path):$($_.LineNumber):$($_.Line.Trim())" }`
+- 外层 PowerShell 先处理插值和转义，内层脚本收到的表达式已失真。
 
 ### Suggested Fix
-Validate shell scripts on the target Ubuntu/Alibaba Cloud host, install Git Bash locally, or enable WSL virtualization support before using `bash -n` on this Windows machine.
+需要输出匹配行号时优先用 `rg -n --fixed-strings` 或把 PowerShell 脚本放进单引号脚本块；避免在双引号 `-Command` 中嵌套 `$()` 插值。
 
 ### Metadata
 - Reproducible: yes
-- Related Files: start_aliyun.sh
+- Related Files: `项目全局规范.md`
 
----
-# 2026-04-29 PowerShell 不支持 Bash heredoc 重定向
-
-- Context: 在 Windows PowerShell 中运行 `python - <<'PY'` 做内联 Python 验证。
-- Error: PowerShell 报 `Missing file specification after redirection operator`。
-- Fix: 使用 PowerShell here-string：`@' ... '@ | .\.venv\Scripts\python.exe -`。
-- Prevention: 当前 shell 为 PowerShell 时，不要使用 Bash heredoc；内联 Python 优先用 here-string 管道。
-
-# 2026-04-29 Windows SQLite 临时文件测试需要显式释放句柄
-
-- Context: 使用 SQLAlchemy + SQLite 临时文件做幂等验证。
-- Error: `NamedTemporaryFile` 路径无法被 SQLite 打开，改用 `TemporaryDirectory` 后清理时报 `PermissionError: [WinError 32]`。
-- Fix: 使用临时目录中的普通 `.db` 文件，并在退出前先关闭 session，再调用 `engine.dispose()`。
-- Prevention: Windows 上 SQLite 文件测试不要复用仍打开的 `NamedTemporaryFile`；清理临时目录前必须释放 SQLAlchemy engine 连接池。
-
-## [ERR-20260430-001] powershell_nested_quote_variable_expansion
-
-**Logged**: 2026-04-30T00:00:00+08:00
-**Priority**: low
-**Status**: pending
-**Area**: infra
-
-### Summary
-Nested `pwsh -Command` strings containing PowerShell `$` variables can be expanded by the outer command before the inner command executes.
-
-### Error
-```text
-Missing expression after unary operator '++'.
-```
-
-### Context
-- Command attempted: nested `pwsh -Command` with `$i=0` and `$i++` inside an outer double-quoted command string.
-- Environment: Windows PowerShell / pwsh nested command invocation.
-
-### Suggested Fix
-Avoid nesting PowerShell code containing `$` variables inside outer double quotes. Use single-quoted outer command text, escape `$`, or avoid the nested `pwsh -Command` layer when the current shell is already PowerShell.
-
-### Metadata
-- Reproducible: yes
-- Related Files: none
+### Resolution
+- **Resolved**: 2026-06-10T00:00:00+08:00
+- **Notes**: 改用 `rg -n` 获取关键实现行号。
 
 ---
 
-## [ERR-20260430-002] powershell_nested_here_string_in_pwsh_command
+## [ERR-20260610-002] postgres_test_database_create_privilege
 
-**Logged**: 2026-04-30T17:20:00+08:00
+**Logged**: 2026-06-10T00:00:00+08:00
 **Priority**: medium
 **Status**: pending
-**Area**: infra
+**Area**: tests
 
 ### Summary
-Nested `pwsh -Command` plus PowerShell here-string can be parsed by the outer shell unexpectedly, causing Python source piped to `python -` to be interpreted as PowerShell.
+尝试为 PostgreSQL 回归脚本创建隔离测试库 `aotu_gpt_test` 时，当前业务账号缺少 `CREATE DATABASE` 权限。
 
 ### Error
-```text
-ParserError: The 'from' keyword is not supported in this version of the language.
+```
+psycopg.errors.InsufficientPrivilege: permission denied to create database
 ```
 
 ### Context
-- Command attempted: embed `$script = @' ... '@; $script | .\.venv\Scripts\python.exe -` inside another `pwsh -Command` string.
-- Environment: tool command already executes under PowerShell, then nested `pwsh -Command` adds another quoting layer.
+- Command: PowerShell here-string piped to `.venv\Scripts\python.exe -`
+- DSN: `postgresql://aotu_gpt:***@127.0.0.1:5432/postgres`
+- 组合测试中的 `tests/test_background_guard_regression.py` 需要 `aotu_gpt_test` 已存在。
 
 ### Suggested Fix
-Avoid nested `pwsh -Command` for multiline Python. Prefer direct current-shell commands, short `python -c`, or create a temporary script file when code is multiline.
+使用 PostgreSQL 管理员角色预先创建 `aotu_gpt_test`，或为本地测试配置具备建库权限的专用管理账号；不要把回归脚本指向生产库。
 
 ### Metadata
 - Reproducible: yes
-- Related Files: none
-- Recurrence-Count: 2
-- Last-Seen: 2026-06-07
+- Related Files: `tests/test_background_guard_regression.py`
 
 ---
-## [ERR-20260502-001] ripgrep_pattern_starting_with_dash
 
-**Logged**: 2026-05-02T11:56:00+08:00
-**Priority**: low
-**Status**: pending
-**Area**: infra
+## [ERR-20260610-002] postgres_test_database_create_privilege
 
-### Summary
-Searching CSS custom property names with `rg` failed because the pattern started with `--` and was parsed as a flag.
-
-### Error
-```text
-rg: unrecognized flag --green|--red
-```
-
-### Context
-- Command attempted: `rg -n "--green|--red" app\static\css\app.css`
-- Environment: PowerShell workspace using ripgrep.
-
-### Suggested Fix
-Use `rg -n -- "--green|--red" app\static\css\app.css` when the search pattern starts with `-`.
-
-### Metadata
-- Reproducible: yes
-- Related Files: none
-
----
-## [ERR-20260430-001] local_bash_validation_wsl_unavailable
-
-**Logged**: 2026-04-30T23:43:00+08:00
+**Logged**: 2026-06-10T01:24:00+08:00
 **Priority**: medium
 **Status**: pending
-**Area**: infra
+**Area**: tests
 
 ### Summary
-Local `bash -n start_aliyun.sh` cannot be trusted on this Windows workspace because WSL/Hyper-V is unavailable.
+本地 PostgreSQL 角色可连接服务但没有 `CREATE DATABASE` 权限，导致依赖 `aotu_gpt_test` 的回归测试无法自动补齐隔离测试库。
 
 ### Error
-```text
-Wsl/Service/CreateInstance/CreateVm/HCS/HCS_E_HYPERV_NOT_INSTALLED
+```
+psycopg.errors.InsufficientPrivilege: permission denied to create database
 ```
 
 ### Context
-- Command attempted: `bash -n start_aliyun.sh`
-- Environment: Windows PowerShell 7 workspace with WSL command present but Hyper-V support unavailable.
-- Impact: shell script syntax checks must be run on the target Linux server or another working Bash environment.
+- Command: 使用 `.venv` 中 `psycopg` 连接 `postgres` 数据库并执行 `CREATE DATABASE aotu_gpt_test`
+- Earlier failure: `database "aotu_gpt_test" does not exist`
 
 ### Suggested Fix
-Validate `start_aliyun.sh` on the Ubuntu ECS host with `bash -n start_aliyun.sh` before rerunning deployment.
+运行 PostgreSQL 依赖回归测试前，用具备 `CREATEDB` 权限的管理员账户预先创建 `aotu_gpt_test`，或为测试角色授予创建隔离测试库的权限；禁止把这类测试指向生产库。
 
 ### Metadata
 - Reproducible: yes
-- Related Files: start_aliyun.sh
+- Related Files: `tests/test_background_guard_regression.py`, `stage16_observability_regression_check.py`, `项目问题及解决方法记录.md`
 
 ---
-## [ERR-20260603-001] nested_pwsh_rg_pipe_pattern
 
-**Logged**: 2026-06-03T00:00:00+08:00
+## [ERR-20260610-001] pwsh_outer_variable_expansion
+
+**Logged**: 2026-06-10T00:00:00+08:00
 **Priority**: low
-**Status**: pending
-**Area**: infra
+**Status**: resolved
+**Area**: backend
 
 ### Summary
-Nested `pwsh -Command` with a double-quoted `rg` alternation pattern can let `|` be parsed by PowerShell instead of ripgrep.
+在默认 shell 外层调用 `pwsh -Command "..."` 时，命令里的 `$lines[...]` 被外层 PowerShell 提前解析，导致传给 PowerShell 7 的脚本块残缺。
 
 ### Error
-```text
-The term 'stream' is not recognized as a name of a cmdlet, function, script file, or executable program.
+```
+ParserError: Missing type name after '['.
 ```
 
 ### Context
-- Command attempted: `pwsh -Command "rg -n \"def forward_|stream|retry\" app/services/proxy_service.py"`
-- Environment: Codex shell command already runs under PowerShell, then invokes nested PowerShell 7 per project rule.
+- Command: `pwsh -NoLogo -NoProfile -Command "$lines = Get-Content ...; $lines[2180..2725]"`
+- 项目要求使用 PowerShell 7，但外层 shell 仍会先解析双引号中的 `$`。
 
 ### Suggested Fix
-Use single quotes inside the nested command for ripgrep patterns, for example `pwsh -Command "rg -n 'def forward_|stream|retry' app/services/proxy_service.py"`.
+包含 `$`、数组下标或复杂表达式的 PowerShell 7 命令使用单引号包裹 `-Command '& { ... }'` 脚本块，避免外层提前展开变量。
 
 ### Metadata
 - Reproducible: yes
-- Related Files: none
+- Related Files: `项目全局规范.md`
+
+### Resolution
+- **Resolved**: 2026-06-10T00:00:00+08:00
+- **Notes**: 后续代码片段读取已改用 `pwsh -Command '& { ... }'`。
 
 ---
 
-## [ERR-20260603-001] powershell-and-apply-patch-in-chinese-path
+## [ERR-20260610-001] pwsh_rg_pipe_quote
 
-**Logged**: 2026-06-03T00:00:00+08:00
+**Logged**: 2026-06-10T00:00:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: shell
+
+### Summary
+在 PowerShell 7 校验代码时，把包含 `|` 的 `rg` 正则放进外层双引号命令，外层 shell 先解析了管道符，导致 `pwsh` 收到损坏命令。
+
+### Error
+```
+ParserError: You must provide a value expression following the '-' operator.
+```
+
+### Suggested Fix
+包含 `|`、`$`、双引号或括号的检索命令优先拆成多条 `rg --fixed-strings` 查询，或使用可验证的转义/脚本块，避免外层 shell 与目标命令双重解析。
+
+### Resolution
+- **Resolved**: 2026-06-10T00:00:00+08:00
+- **Notes**: 已改用拆分后的固定字符串查询继续校验。
+
+---
+
+## [ERR-20260610-001] pwsh_variable_expansion
+
+**Logged**: 2026-06-10T00:00:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: infra
+
+### Summary
+在默认外层 PowerShell 中用双引号包裹 `pwsh -Command` 脚本时，`$PSVersionTable` 被外层提前展开，导致 PowerShell 7 版本检测命令损坏。
+
+### Error
+```
+ParserError: An expression was expected after '('.
+```
+
+### Context
+- Command: `pwsh -NoProfile -Command "$PSVersionTable.PSVersion.ToString()"`
+- 外层 shell 先解析 `$PSVersionTable`，传给 PowerShell 7 的脚本变成无效表达式。
+
+### Suggested Fix
+包含 `$` 的 PowerShell 7 脚本必须使用单引号包裹或拆成脚本块，例如 `pwsh -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'`。
+
+### Metadata
+- Reproducible: yes
+- Related Files: `项目全局规范.md`
+
+### Resolution
+- **Resolved**: 2026-06-10T00:00:00+08:00
+- **Notes**: 后续命令已改用单引号脚本块。
+
+---
+
+## [ERR-20260610-003] stage36_ip_management_postgres_database_missing
+
+**Logged**: 2026-06-10T00:00:00+08:00
 **Priority**: medium
 **Status**: pending
-**Area**: infra
+**Area**: tests
 
 ### Summary
-apply_patch failed in the Chinese-path workspace, and PowerShell commands with variables or embedded quotes failed when not quoted carefully.
+IP 管理回归脚本连接本地 PostgreSQL 测试库时，目标数据库 `aotu_gpt_test` 不存在，导致脚本在建表前失败。
 
 ### Error
-`	ext
-The system cannot find the path specified.
-ParserError from unescaped PowerShell variables or quote-heavy commands.
-`
-
-### Context
-- Workspace path contains Chinese characters.
-- apply_patch --help failed before reading patch input.
-- pwsh -Command snippets using variables or HTML/CSS quote-heavy strings failed when the outer shell expanded variables or parsed quotes.
-
-### Suggested Fix
-Use pwsh -NoLogo -Command with single-quoted command bodies for PowerShell variables, escape dollar signs when using double-quoted outer commands, and prefer small line-based replacements over nested here-strings in quote-heavy HTML/CSS edits.
-
-### Metadata
-- Reproducible: yes
-- Related Files: app/static/js/app.js, app/templates/user_api_keys.html, app/static/css/app.css
-
----
-
-## [ERR-20260603-002] powershell_heredoc_not_bash
-
-**Logged**: 2026-06-03T10:50:00+08:00
-**Priority**: low
-**Status**: pending
-**Area**: infra
-
-### Summary
-PowerShell 7 does not support Bash-style python - <<'PY' heredoc redirection.
-
-### Error
-`	ext
-ParserError: Missing file specification after redirection operator.
-`
-
-### Context
-- Command attempted: inline Python smoke test using & '.\.venv\Scripts\python.exe' - <<'PY' in pwsh -Command.
-- Environment: Windows workspace where project requires PowerShell 7 commands.
-
-### Suggested Fix
-Use a PowerShell here-string piped into Python: @' ... '@ | & '.\.venv\Scripts\python.exe' -.
-
-### Metadata
-- Reproducible: yes
-- Related Files: none
-- See Also: ERR-20260603-001 nested_pwsh_rg_pipe_pattern
-
----
-
-## [ERR-20260603-003] nested_pwsh_last_exitcode_expansion
-
-**Logged**: 2026-06-03T11:05:00+08:00
-**Priority**: low
-**Status**: pending
-**Area**: infra
-
-### Summary
-Nested `pwsh -Command` using double-quoted command text can let the outer shell expand `$LASTEXITCODE`, leaving `if ( -ne 0)` in the inner command.
-
-### Error
-```text
--ne: The term '-ne' is not recognized as a name of a cmdlet, function, script file, or executable program.
+```
+psycopg.OperationalError: connection failed: connection to server at "127.0.0.1", port 5432 failed: FATAL: database "aotu_gpt_test" does not exist
 ```
 
 ### Context
-- Command attempted: run multiple Python regression scripts with an inline `$LASTEXITCODE` check.
-- Environment: Codex shell command runs under PowerShell and invokes PowerShell 7 per project rule.
+- Command: `.venv\Scripts\python.exe stage36_ip_management_regression_check.py`
+- 环境：本地 PostgreSQL 服务可连接，但缺少脚本使用的测试数据库。
 
 ### Suggested Fix
-Wrap nested PowerShell script blocks in single quotes, for example `pwsh -Command '& { ... if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } ... }'`.
+运行依赖 PostgreSQL 的回归脚本前，先创建 `aotu_gpt_test` 测试库，或把 `DATABASE_URL` 指向已存在的隔离测试库。
 
 ### Metadata
 - Reproducible: yes
-- Related Files: none
-- See Also: ERR-20260603-001 nested_pwsh_rg_pipe_pattern
+- Related Files: `stage36_ip_management_regression_check.py`
 
 ---
 
-## [ERR-20260606-003] powershell-double-quoted-variable-loss
+## [ERR-20260610-002] pwsh_command_variable_quote
 
-**Logged**: 2026-06-06T00:00:00+08:00
+**Logged**: 2026-06-10T00:00:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: shell
+
+### Summary
+通过外层 PowerShell 调用 `pwsh -Command` 时，双引号中的 `$PSVersionTable` 被外层提前展开，传入内层后变成损坏表达式。
+
+### Error
+```
+ParserError: An expression was expected after '('.
+```
+
+### Context
+- Command: `pwsh -NoLogo -NoProfile -Command "$PSVersionTable.PSVersion.ToString()"`
+- 外层 shell 先处理 `$PSVersionTable`，导致内层 PowerShell 收到错误内容。
+
+### Suggested Fix
+涉及 `$` 的 `pwsh -Command` 参数优先用外层单引号包裹，例如 `pwsh -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'`。
+
+### Metadata
+- Reproducible: yes
+- Related Files: `项目全局规范.md`
+
+### Resolution
+- **Resolved**: 2026-06-10T00:00:00+08:00
+- **Notes**: 已改用外层单引号确认当前 PowerShell 版本为 7.6.0。
+
+---
+
+## [ERR-20260610-001] pwsh_rg_regex_pipe_quote
+
+**Logged**: 2026-06-10T00:00:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+在 PowerShell 7 的 `-Command` 双引号字符串里直接放入包含 `|` 和内层双引号的 `rg` 正则，外层解析把正则拆成管道命令，导致校验命令失败。
+
+### Error
+```
+The term 'admin-audits' is not recognized as a name of a cmdlet, function, script file, or executable program.
+```
+
+### Context
+- Command: `rg -n 'data-logging-tab=\"(admin-audits|user-operations|alert-events)\"|...' ...`
+- 外层 `pwsh -Command "..."` 先处理了内层双引号和管道符，`rg` 没有收到完整正则。
+
+### Suggested Fix
+复杂 `rg` 正则在 PowerShell 7 中优先拆成多条 `rg --fixed-strings`；若必须使用正则，应把外层命令改短，避免同一层同时承载双引号、反斜杠和 `|`。
+
+### Metadata
+- Reproducible: yes
+- Related Files: `app/static/js/app.js`, `app/templates/logs.html`, `app/routers/logging_api.py`
+- See Also: ERR-20260609-004
+
+### Resolution
+- **Resolved**: 2026-06-10T00:00:00+08:00
+- **Notes**: 改用拆分后的 `rg --fixed-strings` 查询；后续 `$LASTEXITCODE` 类变量检查改用转义后的脚本块或不依赖外层变量的 `Select-String` 检查。
+
+---
+
+## [ERR-20260609-005] pwsh_outer_variable_expansion
+
+**Logged**: 2026-06-09T13:38:55+08:00
 **Priority**: medium
 **Status**: resolved
-**Area**: tooling
+**Area**: tests
 
 ### Summary
-PowerShell snippets containing `$i++` were wrapped in an outer double-quoted `pwsh -Command` string, so the outer shell consumed `$i` before PowerShell 7 executed the script.
+在 `pwsh -Command "..."` 中直接写 `$missing`、`$_` 等 PowerShell 变量，外层命令字符串会提前解析变量，导致内层脚本被破坏。
 
 ### Error
-```text
-ParserError: Missing expression after unary operator '++'.
+```
+=: The term '=' is not recognized as a name of a cmdlet...
+-match: The term '-match' is not recognized as a name of a cmdlet...
 ```
 
 ### Context
-- Command attempted: line-numbered `Get-Content | ForEach-Object { $i++; ... }`
-- Files involved: code inspection commands
+- Command: `pwsh -Command "$missing = @(); Get-Content ... { if ($_ -match ...) ... }"`
+- 目标是统计 `问题.md` 中 451-500 是否均已标记完成。
 
 ### Suggested Fix
-Wrap complex PowerShell 7 scripts in an outer single-quoted `-Command '...'` string, or use a script block, whenever the command contains `$`, pipes, regex, JSON, or nested quotes.
+包含 `$`、`$_`、管道脚本块或多层引号的 PowerShell 检查命令必须改用外层单引号、脚本文件，或 PowerShell here-string 管道到项目虚拟环境，避免外层 shell 抢先展开变量。
 
 ### Metadata
 - Reproducible: yes
-- Related Files: 项目全局规范.md
-- Tags: powershell, shell-quoting
+- Related Files: `项目全局规范.md`
+
+### Resolution
+- **Resolved**: 2026-06-09T13:38:55+08:00
+- **Notes**: 已改用 PowerShell here-string 管道到 `.venv\Scripts\python.exe -` 完成统计，输出 `451-500 total=50 missing_completed=0`。
 
 ---
 
-## [ERR-20260606-003] changelog-anchor-drift
+## [ERR-20260609-003] powershell_command_variable_expansion
 
-**Logged**: 2026-06-06T21:43:25+08:00
+**Logged**: 2026-06-09T00:00:00+08:00
 **Priority**: low
 **Status**: resolved
 **Area**: docs
 
 ### Summary
-Attempted to patch the project change log using an outdated anchor near the top of the file after the day section had already changed shape.
+使用 `pwsh -Command "..."` 执行含 `$p`、`$lines`、`foreach($i ...)` 的片段时，外层 shell 提前展开变量，导致 PowerShell 语法错误。
 
 ### Error
-```text
-apply_patch verification failed: Failed to find expected lines in 项目全局规范-变更记录.md
+```
+ParserError: Missing variable name after foreach.
 ```
 
 ### Context
-- Command attempted: patching `项目全局规范-变更记录.md`
-- Files involved: `项目全局规范-变更记录.md`
-- The file's top section had been reordered by earlier edits, so the expected header block no longer matched the patch anchor.
+- Command: `pwsh -NoLogo -NoProfile -Command "$p='...'; $lines=Get-Content ...; foreach($i in ...){ ... }"`
+- 项目规范要求复杂 PowerShell 命令优先使用单引号包裹，避免 `$`、管道或嵌套引号被外层解析破坏。
 
 ### Suggested Fix
-Re-read the current file head before patching dated changelog sections, and anchor on the exact current entries rather than remembered line order.
+含 `$` 的 PowerShell 片段必须用单引号包裹 `-Command` 内容，或拆成更短命令，必要时改用脚本块。
 
 ### Metadata
 - Reproducible: yes
-- Related Files: 项目全局规范-变更记录.md
-- Tags: docs, patching
-
----
-
-## [ERR-20260603-004] httpx_stream_response_text_before_read
-
-**Logged**: 2026-06-03T11:35:00+08:00
-**Priority**: low
-**Status**: resolved
-**Area**: tests
-
-### Summary
-`TestClient.stream(...)` 返回的流式响应在消费前不能读取 `.text`，否则会触发 `httpx.ResponseNotRead`。
-
-### Error
-```text
-httpx.ResponseNotRead: Attempted to access streaming response content, without having called `read()`.
-```
-
-### Context
-- Command attempted: run `stage19_completions_regression_check.py`.
-- Environment: FastAPI `TestClient` / httpx streaming response test.
-
-### Suggested Fix
-流式断言先检查 `status_code`，正文通过 `iter_text()`、`iter_bytes()` 或显式 `read()` 后再断言；失败信息不要直接引用未读取流的 `.text`。
-
-### Metadata
-- Reproducible: yes
-- Related Files: stage19_completions_regression_check.py
+- Related Files: `项目全局规范.md`
 
 ### Resolution
-- **Resolved**: 2026-06-03T11:35:00+08:00
-- **Notes**: 将失败提示从 `stream_response.text` 改为 `stream_response.status_code`，随后回归通过。
+- **Resolved**: 2026-06-09T00:00:00+08:00
+- **Notes**: 后续读取命令已改用单引号包裹 `-Command`。
 
 ---
 
-## 2026-06-03 PowerShell does not support Bash heredoc redirection
+## [ERR-20260609-003] powershell_nested_herestring
 
-- Context: Tried to run inline Python with `python - <<'PY'` inside PowerShell.
-- Error: `ParserError: Missing file specification after redirection operator.`
-- Fix: Use a PowerShell here-string piped into Python, e.g. `@' ... '@ | & $py -`.
-
----
-
-## [ERR-20260605-001] nested_pwsh_rg_regex_pipe_quoting
-
-**Logged**: 2026-06-05T00:00:00+08:00
-**Priority**: low
-**Status**: resolved
-**Area**: infra
-
-### Summary
-Nested `pwsh -Command` with a double-quoted `rg` regex containing `|` can be split by PowerShell before reaching `rg`.
-
-### Error
-```text
-mapping: The term 'mapping' is not recognized as a name of a cmdlet, function, script file, or executable program.
-/v1/responses: The term '/v1/responses' is not recognized as a name of a cmdlet, function, script file, or executable program.
-```
-
-### Context
-- Command attempted: `pwsh -NoLogo -Command "rg -n \"model_mapping|mapping|...\" app"`.
-- Environment: Codex shell command runs under PowerShell and invokes PowerShell 7 per project rule.
-
-### Suggested Fix
-Use single quotes for the regex inside the nested PowerShell command, or wrap the inner script in a single-quoted script block: `pwsh -Command '& { rg -n ''pattern1|pattern2'' app }'`.
-
-### Metadata
-- Reproducible: yes
-- Related Files: none
-- See Also: ERR-20260603-001 nested_pwsh_rg_pipe_pattern
-
----
-
-## [ERR-20260605-002] powershell_rg_glob_path_argument
-
-**Logged**: 2026-06-05T00:00:00+08:00
-**Priority**: low
-**Status**: pending
-**Area**: infra
-
-### Summary
-On Windows, passing `stage*.py` as an `rg` path argument can be treated as an invalid literal path instead of a glob.
-
-### Error
-```text
-rg: stage*.py: 文件名、目录名或卷标语法不正确。 (os error 123)
-```
-
-### Context
-- Command attempted: `rg -n 'pattern' stage*.py test_data app/tests tests`.
-- Environment: PowerShell 7 wrapper on Windows.
-
-### Suggested Fix
-Use ripgrep's glob option instead of a wildcard path argument, for example `rg -n --glob 'stage*.py' 'pattern' .`.
-
-### Metadata
-- Reproducible: yes
-- Related Files: none
-- See Also: ERR-20260605-001 nested_pwsh_rg_regex_pipe_quoting
-
----
-
-## [ERR-20260605-003] cache_service_no_clear_method
-
-**Logged**: 2026-06-05T00:00:00+08:00
-**Priority**: low
-**Status**: resolved
-**Area**: verification
-
-### Summary
-`CacheService` does not expose a `clear()` helper, so temporary verification scripts must not call it.
-
-### Error
-```text
-AttributeError: type object 'CacheService' has no attribute 'clear'
-```
-
-### Context
-- Command attempted: an inline Python regression check for model mapping capability filtering.
-- Environment: project `.venv` Python on Windows.
-
-### Suggested Fix
-Use `CacheService.invalidate_prefix(...)` for the relevant cache prefixes, or run the verification in a fresh Python process with isolated test data.
-
-### Metadata
-- Reproducible: yes
-- Related Files: app/services/cache_service.py
-## [ERR-20260605-001] regression-test-expectation-drift
-
-**Logged**: 2026-06-05T00:00:00Z
+**Logged**: 2026-06-09T23:35:00+08:00
 **Priority**: medium
 **Status**: resolved
-**Area**: tests
+**Area**: shell
 
 ### Summary
-Endpoint-independence refactor invalidated old fallback-oriented regression expectations.
+通过外层 PowerShell 调用 `pwsh -Command` 时，内层单引号 here-string 被外层提前解析，导致 Python 片段内容被当成 PowerShell 语句执行。
 
 ### Error
-`stage22_model_family_compat_regression_check.py` and `stage14_health_routing_regression_check.py` failed because their assertions still expected endpoint fallback or older parallel probe caps.
-
-### Context
-- `stage22_model_family_compat_regression_check.py`
-- `stage14_health_routing_regression_check.py`
+```
+ParserError: The 'from' keyword is not supported in this version of the language.
+```
 
 ### Suggested Fix
-When removing or disabling a compatibility path, rewrite regression assertions to validate the new primary behavior instead of the old fallback path.
+让 `pwsh -Command` 参数整体用单引号传递，并在内层使用双引号 here-string `@"..."@`；这样外层不会抢先处理 `@'...'@`。
 
 ### Metadata
-- Reproducible: no
-- Related Files: app/services/proxy_service.py, app/services/health_service.py
-- Tags: tests, backend
-
----
-
-## [ERR-20260605-002] provider-out-protocol-fields
-
-**Logged**: 2026-06-05T00:00:00Z
-**Priority**: medium
-**Status**: pending
-**Area**: backend
-
-### Summary
-Provider creation regression still reports missing `protocol_type` and `protocol_label` in `ProviderOut`.
-
-### Error
-`stage10_tools_regression_check.py` failed while creating a provider because `ProviderOut` validation reported missing `protocol_type` and `protocol_label`.
-
-### Context
-- `stage10_tools_regression_check.py`
-- `app/routers/providers.py`
-- `app/services/provider_service.py`
-
-### Suggested Fix
-Verify the create-provider response payload always includes the protocol fields expected by `ProviderOut`, and reconcile any schema drift between the service dict and the response model.
-
-### Metadata
-- Reproducible: unknown
-- Related Files: app/schemas/provider.py, app/services/provider_service.py
-- Tags: backend, tests
+- Reproducible: yes
+- Related Files: `项目全局规范.md`
 
 ### Resolution
-- **Resolved**: 2026-06-05T00:00:00Z
-- **Notes**: Verified `ProviderService.provider_to_dict()` includes both fields and reran `stage10_tools_regression_check.py` successfully.
+- **Resolved**: 2026-06-09T23:35:00+08:00
+- **Notes**: 已用内层双引号 here-string 复跑 Python schema 校验并通过。
 
 ---
 
-## [ERR-20260606-001] powershell-nested-command-quoting
+## [ERR-20260609-003] logging_api_import
 
-**Logged**: 2026-06-06T00:00:00+08:00
-**Priority**: low
-**Status**: resolved
-**Area**: tests
-
-### Summary
-Nested `pwsh -Command "..."` calls can let the outer shell expand `$variables` or break regex quoting before PowerShell 7 receives the command.
-
-### Error
-```text
-The term 'POST' is not recognized as a name of a cmdlet...
-Missing type name after '['.
-```
-
-### Context
-- Commands attempted: `rg -n "...POST /v1/responses..."` and `$lines[120..260]` inside a nested `pwsh -Command "..."`.
-- Environment: Windows shell command wrapper with project-required PowerShell 7.
-
-### Suggested Fix
-Use `pwsh -NoLogo -NoProfile -Command '& { ... }'` for scripts containing `$`, `[]`, pipes, regex alternation, or nested quotes.
-
-### Metadata
-- Reproducible: yes
-- Related Files: 项目全局规范.md
-- Tags: powershell, tests
-- Recurrence-Count: 16
-- Last-Seen: 2026-06-08
-
----
-
-## [ERR-20260606-002] migration-patch-context-drift
-
-**Logged**: 2026-06-06T00:00:00+08:00
+**Logged**: 2026-06-09T00:00:00+08:00
 **Priority**: medium
 **Status**: resolved
 **Area**: backend
 
 ### Summary
-Broad `apply_patch` context inserted app_settings migration backfill code into unrelated migration functions with similar loop shapes.
+类型化日志接口新增过滤参数后，`list_content_guard_events()` 出现重复参数导致模块无法导入。
 
 ### Error
-```text
-NameError: name 'runtime_settings' is not defined
+```
+SyntaxError: duplicate argument 'provider_id' in function definition
 ```
 
 ### Context
-- Command attempted: `stage10_tools_regression_check.py`
-- Files involved: `app/main.py`
-- The same `changed = False` / `for column, ddl in additions.items()` pattern appears in multiple migration helpers.
+- Command: `.venv\Scripts\python.exe stage33_content_guard_regression_check.py`
+- 导入 `app.routers.logging_api` 时失败，阻断内容防护回归脚本。
 
 ### Suggested Fix
-When editing migration helpers, anchor patches on function-specific names or unique target columns, then run `rg` for newly introduced identifiers to confirm they appear only in intended scopes.
+新增接口查询参数时先检查同名参数是否已存在；重复字段只保留一份。
 
 ### Metadata
 - Reproducible: yes
-- Related Files: app/main.py
-- Tags: migrations, tests
+- Related Files: `app/routers/logging_api.py`
+
+### Resolution
+- **Resolved**: 2026-06-09T00:00:00+08:00
+- **Notes**: Removed duplicate `provider_id`、`model_name` and `is_stream` declarations.
 
 ---
 
-## [ERR-20260607-001] assertion-script-private-method-drift
+## [ERR-20260609-002] stage33_content_guard_regression_check
 
-**Logged**: 2026-06-07T23:10:18+08:00
+**Logged**: 2026-06-09T00:00:00+08:00
 **Priority**: low
 **Status**: resolved
 **Area**: tests
 
 ### Summary
-A temporary verification script called a guessed private batch-import helper that does not exist.
+新增回归断言使用 `httpx.TimeoutException` 时漏导入 `httpx`。
 
 ### Error
-```text
-AttributeError: type object 'ProviderService' has no attribute '_parse_batch_row'
+```
+NameError: name 'httpx' is not defined
 ```
 
 ### Context
-- Command attempted: inline Python assertion for provider retry defaults.
-- Actual batch import normalization entry point is `_normalize_batch_provider_item`.
+- Command: `.venv\Scripts\python.exe stage33_content_guard_regression_check.py`
+- 新增内容预检异常 retryable 断言引用了 `httpx.TimeoutException`。
 
 ### Suggested Fix
-Before writing assertions against private helpers, use `rg` to confirm the actual function name and call shape.
+为测试脚本新增外部异常类型断言时，同步检查测试文件顶部导入。
 
 ### Metadata
 - Reproducible: yes
-- Related Files: app/services/provider_service.py
-- Tags: tests, verification
+- Related Files: `stage33_content_guard_regression_check.py`
 
 ### Resolution
-- **Resolved**: 2026-06-07T23:10:18+08:00
-- **Notes**: Switched the verification script to call `_normalize_batch_provider_item` after inspecting the service.
+- **Resolved**: 2026-06-09T00:00:00+08:00
+- **Notes**: Added the missing `httpx` import.
 
 ---
-## [ERR-20260608-001] powershell-variable-expansion
 
-**Logged**: 2026-06-08T21:20:00+08:00
+## [ERR-20260609-004] pwsh_rg_regex_quote
+
+**Logged**: 2026-06-09T00:00:00+08:00
 **Priority**: low
-**Status**: pending
-**Area**: infra
+**Status**: resolved
+**Area**: tests
 
 ### Summary
-PowerShell command passed through an outer shell lost `$lines` during parsing and caused a slice expression parser error.
+在 PowerShell 7 中把包含双引号和反斜杠的多个 `rg` 正则拼进同一个命令，导致 ripgrep 收到损坏的正则。
 
 ### Error
-```text
+```
+rg: regex parse error:
+error: unclosed group
+```
+
+### Context
+- Command: `rg -n "precheck/probe|...|data-rule-field=\"reason\"" app ...`
+- 外层 PowerShell 字符串处理后，末尾正则变成未闭合分组。
+
+### Suggested Fix
+多关键字代码检索优先使用多条 `rg --fixed-strings`，复杂正则拆短执行，避免外层 shell 与 ripgrep 正则同时解析引号。
+
+### Metadata
+- Reproducible: yes
+- Related Files: `项目全局规范.md`
+
+### Resolution
+- **Resolved**: 2026-06-09T00:00:00+08:00
+- **Notes**: 已改用拆分后的 `rg --fixed-strings` 查询。
+
+---
+
+## [ERR-20260610-001] pwsh_outer_variable_expansion
+
+**Logged**: 2026-06-10T00:00:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: backend
+
+### Summary
+在外层 PowerShell 中用双引号传递 `pwsh -Command` 脚本块时，`$lines` 被外层提前展开，导致内层脚本变成非法索引表达式。
+
+### Error
+```
 ParserError: Missing type name after '['.
 ```
 
 ### Context
-- Command attempted to read a file slice with `$lines = Get-Content ...; $lines[8950..9225]`.
-- The outer command string expanded `$lines` before PowerShell 7 received it.
+- Command: `pwsh -NoLogo -NoProfile -Command "$lines = Get-Content ...; $lines[0..130] ..."`
+- 外层 shell 在启动 PowerShell 7 前先处理了 `$lines`，内层收到的命令缺少变量名。
 
 ### Suggested Fix
-Escape `$` as `` `$ `` or use a script block / shorter command when passing PowerShell variables through another shell boundary.
+复杂 PowerShell 7 命令用单引号包裹 `-Command '& { ... }'` 脚本块，或转义 `$`，避免外层 shell 抢先展开变量。
 
 ### Metadata
 - Reproducible: yes
-- Related Files: app/static/js/app.js
+- Related Files: `项目全局规范.md`
 
----
-
-## [ERR-20260608-002] ripgrep-pattern-starting-with-dash
-
-**Logged**: 2026-06-08T21:24:00+08:00
-**Priority**: low
-**Status**: pending
-**Area**: infra
-
-### Summary
-`rg` treated a regex beginning with `--yellow` as command options instead of a search pattern.
-
-### Error
-```text
-rg: unrecognized flag --yellow|--amber|warning|var\(--yellow|var\(--orange|var\(--amber
-```
-
-### Context
-- Command attempted to search CSS custom properties and warning colors.
-- Pattern began with `--`, which ripgrep parsed as an option.
-
-### Suggested Fix
-Pass `--` before regex patterns that can begin with a dash, for example `rg -n -- '--yellow|--amber' app.css`.
-
-### Metadata
-- Reproducible: yes
-- Related Files: app/static/css/app.css
-
----
-
-## [ERR-20260608-003] ripgrep-overescaped-pattern
-
-**Logged**: 2026-06-08T21:31:00+08:00
-**Priority**: low
-**Status**: pending
-**Area**: infra
-
-### Summary
-An over-combined `rg` regex with escaped quotes, Chinese text, and template literals failed during verification.
-
-### Error
-```text
-rg: regex parse error: unrecognized escape sequence
-```
-
-### Context
-- Command tried to verify many unrelated strings in one regex.
-- Escapes were interpreted differently across PowerShell and ripgrep.
-
-### Suggested Fix
-Use separate fixed-string searches (`rg -F`) or simpler single-purpose regexes for verification checks.
-
-### Metadata
-- Reproducible: yes
-- Related Files: app/static/js/app.js, app/static/css/app.css
-
----
-## [ERR-20260608-001] powershell-variable-expansion
-
-**Logged**: 2026-06-08T00:00:00+08:00
-**Priority**: medium
-**Status**: pending
-**Area**: infra
-
-### Summary
-PowerShell command passed through an outer double-quoted `pwsh -Command` string expanded `$_` too early and broke `Select-Object` / `Where-Object` pipeline usage.
-
-### Error
-```text
-.Name: The term '.Name' is not recognized as a name of a cmdlet, function, script file, or executable program.
-```
-
-### Context
-- Command attempted inside `pwsh -NoLogo -NoProfile -Command "..."`.
-- The inner script contained `Where-Object { $_.Name -match ... }`.
-- Outer PowerShell parsing consumed `$_`, leaving `.Name`.
-
-### Suggested Fix
-Use single quotes around the outer `-Command` argument when the inner script contains `$`, or escape `$` as `` `$ ``. For simple file enumeration, prefer `Select-Object -ExpandProperty Name` without `$_` when possible.
-
-### Metadata
-- Reproducible: yes
-- Related Files: 项目全局规范.md
+### Resolution
+- **Resolved**: 2026-06-10T00:00:00+08:00
+- **Notes**: 后续读取指定行改用 `pwsh -NoLogo -NoProfile -Command '& { ... }'`。
 
 ---
