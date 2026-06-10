@@ -19,17 +19,29 @@ async def main() -> None:
         except NotImplementedError:
             pass
 
-    await RedisService.init()
-    await LoggingQueue.start_background_workers()
-    await RequestLogQueueService.start_background_workers()
-    await TokenUsageService.start_background_workers()
+    redis_started = False
+    logging_started = False
+    request_log_started = False
+    token_usage_started = False
     try:
+        await RedisService.init()
+        redis_started = True
+        await LoggingQueue.start_background_workers()
+        logging_started = True
+        await RequestLogQueueService.start_background_workers()
+        request_log_started = True
+        await TokenUsageService.start_background_workers()
+        token_usage_started = True
         await stop_event.wait()
     finally:
-        await RequestLogQueueService.stop_background_workers()
-        await TokenUsageService.stop_background_workers()
-        await LoggingQueue.stop_background_workers()
-        await RedisService.aclose()
+        if request_log_started:
+            await RequestLogQueueService.stop_background_workers()
+        if token_usage_started:
+            await TokenUsageService.stop_background_workers()
+        if logging_started:
+            await LoggingQueue.stop_background_workers()
+        if redis_started:
+            await RedisService.aclose()
 
 
 if __name__ == "__main__":
