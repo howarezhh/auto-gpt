@@ -68,7 +68,6 @@ def _candidate(
         recent_failure_rate=0.0,
         recent_success_rate=1.0,
         recent_avg_latency_ms=50,
-        dynamic_weight=100.0,
         route_score=route_score,
         health_tier=health_tier,
         load_factor=load_factor,
@@ -80,8 +79,8 @@ def _check_recent_session_actual_target_wins_when_available() -> None:
     unhealthy_recent = _candidate(2, 202, health_tier=2, route_score=999)
     ordered = RouterService._primary_route_order(
         [unhealthy_recent, healthy],
-        sticky_key="会话-1",
         recent_route=RecentSessionRoute(provider_id=2, provider_model_id=202, model_name="stage28-model"),
+        route_context=None,
     )
     _assert(
         ordered[0] is unhealthy_recent,
@@ -94,8 +93,8 @@ def _check_health_order_when_recent_session_target_unavailable() -> None:
     unhealthy = _candidate(2, 202, health_tier=2, route_score=999)
     ordered = RouterService._primary_route_order(
         [unhealthy, healthy],
-        sticky_key="会话-2",
         recent_route=RecentSessionRoute(provider_id=9, provider_model_id=909, model_name="stage28-model"),
+        route_context=None,
     )
     _assert(
         ordered[0] is healthy,
@@ -103,12 +102,13 @@ def _check_health_order_when_recent_session_target_unavailable() -> None:
     )
 
 
-def _check_load_affects_distribution_weight() -> None:
-    low_load = _candidate(1, 101, load_factor=0.1)
-    high_load = _candidate(2, 202, load_factor=0.9)
+def _check_load_affects_balanced_order() -> None:
+    low_load = _candidate(1, 101, route_score=100, load_factor=0.1)
+    high_load = _candidate(2, 202, route_score=100, load_factor=0.9)
+    ordered = RouterService._balanced_order([high_load, low_load])
     _assert(
-        RouterService._route_selection_weight(low_load) > RouterService._route_selection_weight(high_load),
-        "lower loaded provider should receive a higher distribution weight",
+        ordered[0] is low_load,
+        "lower loaded provider should be ordered first when candidates are in the same score bucket",
     )
 
 
@@ -249,7 +249,7 @@ def _check_encrypted_content_blocks_endpoint_conversion() -> None:
 def main() -> None:
     _check_recent_session_actual_target_wins_when_available()
     _check_health_order_when_recent_session_target_unavailable()
-    _check_load_affects_distribution_weight()
+    _check_load_affects_balanced_order()
     _check_capacity_is_hard_filter()
     _check_provider_rpm_is_hard_filter()
     _check_mapping_recent_model_policy()

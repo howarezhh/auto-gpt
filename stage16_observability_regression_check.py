@@ -10,7 +10,7 @@ from sqlalchemy import text
 TEMP_DB_PATH = Path("data/stage16-observability.db")
 if TEMP_DB_PATH.exists():
     TEMP_DB_PATH.unlink()
-os.environ["DATABASE_URL"] = "sqlite:///./data/stage16-observability.db"
+os.environ["DATABASE_URL"] = os.environ.get("TEST_DATABASE_URL", "postgresql+psycopg://aotu_gpt:zhh123456@127.0.0.1:5432/aotu_gpt_test")
 os.environ["ENABLE_SCHEDULER"] = "false"
 os.environ["REDIS_URL"] = ""
 
@@ -121,6 +121,11 @@ def main() -> None:
     _assert(metrics["traffic"]["status_5xx"] == 1, "5xx count mismatch")
     _assert(metrics["traffic"]["qps"] > 0, "qps should be derived from window seconds")
     _assert(metrics["traffic"]["stream_qps"] > 0, "stream qps should be derived from stream requests")
+    _assert(metrics["traffic"]["latency_by_mode"]["stream"]["request_count"] == 1, "stream latency bucket mismatch")
+    _assert(metrics["traffic"]["latency_by_mode"]["non_stream"]["request_count"] == 1, "non-stream latency bucket mismatch")
+    _assert(metrics["traffic"]["terminal_breakdown"]["upstream_failed"] == 0, "terminal breakdown should not invent upstream failures")
+    _assert("event_loop" in metrics["runtime"], "runtime should expose event loop delay snapshot")
+    _assert("configuration_effectiveness" in metrics, "configuration effectiveness metadata should be exposed")
     _assert(isinstance(metrics["timeseries"], list), "timeseries should be embedded in system metrics")
     _assert(metrics["background"]["pending_finalize_logs"] == 1, "formal API-key billing backlog count mismatch")
 

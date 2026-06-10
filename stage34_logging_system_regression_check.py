@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
+import os
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
@@ -9,6 +8,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.database import Base, get_db
 from app.logging.dispatcher import LoggingDispatcher
+from app.logging.adapters.alert_adapter import AlertLogRecorder
 from app.logging.adapters.asset_adapter import AssetLogRecorder
 from app.logging.adapters.background_job_adapter import BackgroundJobLogRecorder
 from app.logging.adapters.billing_adapter import BillingLogRecorder
@@ -32,14 +32,18 @@ from app.models.logging_events import (
     TokenFinalizeEvent,
     UserOperationAuditLog,
 )
+from app.models.alert_event import AlertEvent
 from app.services.data_retention_service import DataRetentionService
 from app.services.log_service import LogService
 
 
 def main() -> None:
-    with tempfile.TemporaryDirectory() as tmpdir:
-        db_path = Path(tmpdir) / "logging-regression.db"
-        engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    database_url = os.environ.get(
+        "TEST_DATABASE_URL",
+        "postgresql+psycopg://aotu_gpt:zhh123456@127.0.0.1:5432/aotu_gpt_test",
+    )
+    engine = create_engine(database_url, future=True)
+    if True:
         Base.metadata.create_all(bind=engine)
         SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
         db = SessionLocal()
@@ -218,6 +222,17 @@ def main() -> None:
             )
             assert db.scalar(select(AssetEvent).where(AssetEvent.filename == "测试图片.png")) is not None
 
+            AlertLogRecorder.upsert_alert(
+                db,
+                alert_key="stage34:alert",
+                alert_type="queue",
+                severity="warning",
+                title="日志队列告警",
+                message="日志队列存在积压",
+                payload={"queued": 3},
+            )
+            assert db.scalar(select(AlertEvent).where(AlertEvent.alert_key == "stage34:alert")) is not None
+
             from app.main import app
             from app.services.user_auth_service import require_admin_api_user
 
@@ -250,7 +265,12 @@ def main() -> None:
                     assert client.get("/api/logging/billing-events?page_size=10").status_code == 200
                     assert client.get("/api/logging/background-jobs?page_size=10").status_code == 200
                     assert client.get("/api/logging/user-operations?page_size=10").status_code == 200
+                    assert client.get("/api/logging/admin-audits?page_size=10").status_code == 200
+                    assert client.get("/api/logging/alert-events?page_size=10").status_code == 200
                     assert client.get("/api/logging/asset-events?page_size=10").status_code == 200
+
+                    alert_export_response = client.get("/api/logging/export?typed_log_type=alert-events&limit=10")
+                    assert alert_export_response.status_code == 200, alert_export_response.text
             finally:
                 app.dependency_overrides.pop(get_db, None)
                 app.dependency_overrides.pop(require_admin_api_user, None)

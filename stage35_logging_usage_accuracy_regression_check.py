@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from pathlib import Path
+import os
 from types import SimpleNamespace
-import tempfile
 
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
@@ -21,9 +20,12 @@ from app.services.token_usage_service import TokenUsageService
 
 
 def main() -> None:
-    with tempfile.TemporaryDirectory() as tmpdir:
-        db_path = Path(tmpdir) / "usage-accuracy.db"
-        engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    database_url = os.environ.get(
+        "TEST_DATABASE_URL",
+        "postgresql+psycopg://aotu_gpt:zhh123456@127.0.0.1:5432/aotu_gpt_test",
+    )
+    engine = create_engine(database_url, future=True)
+    if True:
         Base.metadata.create_all(bind=engine)
         SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
         db = SessionLocal()

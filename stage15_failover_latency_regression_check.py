@@ -21,13 +21,13 @@ def main() -> None:
 
     for status_code in (405, 422, 501):
         _assert(
-            ProxyService._should_try_endpoint_fallback(
+            not ProxyService._should_try_endpoint_fallback(
                 provider,
                 endpoint_path="/responses",
                 status_code=status_code,
                 error_detail={"message": "unsupported responses endpoint for this model"},
             ),
-            f"endpoint fallback should allow status {status_code}",
+            f"endpoint fallback should not auto-convert status {status_code}",
         )
 
     for status_code in (401, 403, 404, 429):

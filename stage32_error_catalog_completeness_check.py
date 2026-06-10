@@ -132,7 +132,7 @@ INTERNAL_CODES_FROM_REQUIREMENT = {
     "upstream_raw_error",
     "deployment_config_invalid",
     "secret_invalid",
-    "sqlite_production_start_blocked",
+    "postgresql_required",
     "nginx_sse_buffering_enabled",
     "unhandled_exception",
     "third_party_library_error",

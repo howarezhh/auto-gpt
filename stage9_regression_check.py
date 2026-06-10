@@ -8,7 +8,7 @@ from unittest.mock import patch
 TEMP_DB_PATH = Path("data/stage9-regression.db")
 if TEMP_DB_PATH.exists():
     TEMP_DB_PATH.unlink()
-os.environ["DATABASE_URL"] = "sqlite:///./data/stage9-regression.db"
+os.environ["DATABASE_URL"] = os.environ.get("TEST_DATABASE_URL", "postgresql+psycopg://aotu_gpt:zhh123456@127.0.0.1:5432/aotu_gpt_test")
 os.environ["ENABLE_SCHEDULER"] = "false"
 
 from fastapi.testclient import TestClient

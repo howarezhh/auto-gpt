@@ -77,7 +77,6 @@ def _candidate(
         recent_failure_rate=0.0,
         recent_success_rate=1.0,
         route_score=route_score,
-        dynamic_weight=100.0,
         health_tier=health_tier,
     )
 
