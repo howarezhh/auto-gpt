@@ -19,6 +19,7 @@ from app.services.setting_service import SettingService
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 _DASHBOARD_USAGE_CACHE_TTL_SECONDS = 30
 _DASHBOARD_USAGE_TOP_LIMIT = 12
+_DASHBOARD_CONVERSATION_COUNT_TTL_SECONDS = 30
 
 
 def _int_value(value) -> int:
@@ -116,52 +117,119 @@ def _dashboard_usage_overview(db: Session) -> dict:
     return CacheService.set("dashboard-usage-overview", payload, ttl_seconds=_DASHBOARD_USAGE_CACHE_TTL_SECONDS)
 
 
+def _dashboard_recent_overview(db: Session, *, recent_since: datetime) -> dict:
+    cached = CacheService.get("dashboard-recent-overview")
+    if isinstance(cached, dict):
+        return cached
+    row = db.execute(
+        select(
+            func.count(RequestLog.id).label("recent_requests"),
+            func.sum(case((RequestLog.success.is_(False), 1), else_=0)).label("recent_failures"),
+            func.sum(RequestLog.total_tokens).label("recent_tokens"),
+        ).where(
+            RequestLog.created_at >= recent_since,
+            LogService._route_traffic_expr(),
+        )
+    ).one()
+    payload = {
+        "recent_requests": int(row.recent_requests or 0),
+        "recent_failures": int(row.recent_failures or 0),
+        "recent_tokens": int(row.recent_tokens or 0),
+    }
+    return CacheService.set("dashboard-recent-overview", payload, ttl_seconds=10)
+
+
+def _dashboard_provider_status_counts(db: Session) -> dict:
+    cached = CacheService.get("dashboard-provider-status-counts")
+    if isinstance(cached, dict):
+        return cached
+    rows = db.execute(
+        select(Provider.health_status, func.count(Provider.id).label("count"))
+        .group_by(Provider.health_status)
+    )
+    counts = {"provider_count": 0, "healthy_count": 0, "degraded_count": 0, "unhealthy_count": 0}
+    for row in rows:
+        count = int(row.count or 0)
+        counts["provider_count"] += count
+        if row.health_status == "healthy":
+            counts["healthy_count"] = count
+        elif row.health_status == "degraded":
+            counts["degraded_count"] = count
+        elif row.health_status == "unhealthy":
+            counts["unhealthy_count"] = count
+    return CacheService.set("dashboard-provider-status-counts", counts, ttl_seconds=10)
+
+
+def _dashboard_model_status_counts(db: Session) -> dict:
+    cached = CacheService.get("dashboard-model-status-counts")
+    if isinstance(cached, dict):
+        return cached
+    model_count = int(db.scalar(select(func.count()).select_from(ModelCatalog)) or 0)
+    rows = db.execute(
+        select(ProviderModel.health_status, func.count(ProviderModel.id).label("count"))
+        .group_by(ProviderModel.health_status)
+    )
+    counts = {
+        "model_count": model_count,
+        "healthy_model_count": 0,
+        "degraded_model_count": 0,
+        "unhealthy_model_count": 0,
+    }
+    for row in rows:
+        count = int(row.count or 0)
+        if row.health_status == "healthy":
+            counts["healthy_model_count"] = count
+        elif row.health_status == "degraded":
+            counts["degraded_model_count"] = count
+        elif row.health_status == "unhealthy":
+            counts["unhealthy_model_count"] = count
+    return CacheService.set("dashboard-model-status-counts", counts, ttl_seconds=10)
+
+
+def _dashboard_conversation_count(db: Session) -> int:
+    cached = CacheService.get("dashboard-conversation-count")
+    if cached is not None:
+        return int(cached or 0)
+    count = db.scalar(
+        select(func.count(func.distinct(RequestLog.conversation_key))).where(
+            RequestLog.conversation_key.is_not(None),
+            LogService._route_traffic_expr(),
+        )
+    ) or 0
+    return int(CacheService.set("dashboard-conversation-count", int(count or 0), ttl_seconds=_DASHBOARD_CONVERSATION_COUNT_TTL_SECONDS))
+
+
 def build_dashboard_payload(db: Session) -> dict:
     settings = SettingService.get_or_create(db)
     api_key_summary = ApiKeyAdminService.get_summary(db)
-    default_provider = db.get(Provider, settings.default_provider_id) if settings.default_provider_id else None
     usage_overview = _dashboard_usage_overview(db)
     usage_summary = usage_overview["summary"]
     recent_since = datetime.utcnow() - timedelta(hours=24)
-    recent_requests = db.scalar(
-        select(func.count()).select_from(RequestLog).where(RequestLog.created_at >= recent_since, LogService._route_traffic_expr())
-    ) or 0
-    recent_failures = db.scalar(
-        select(func.count()).select_from(RequestLog).where(RequestLog.created_at >= recent_since, LogService._route_traffic_expr(), RequestLog.success.is_(False))
-    ) or 0
+    recent_overview = _dashboard_recent_overview(db, recent_since=recent_since)
+    recent_requests = recent_overview["recent_requests"]
+    recent_failures = recent_overview["recent_failures"]
     recent_failure_rate = round((recent_failures / recent_requests) * 100, 2) if recent_requests else 0.0
-    recent_tokens = db.scalar(
-        select(func.sum(RequestLog.total_tokens)).where(RequestLog.created_at >= recent_since, LogService._route_traffic_expr())
-    ) or 0
-    conversation_count = db.scalar(
-        select(func.count(func.distinct(RequestLog.conversation_key))).where(RequestLog.conversation_key.is_not(None), LogService._route_traffic_expr())
-    ) or 0
+    conversation_count = _dashboard_conversation_count(db)
+    provider_counts = _dashboard_provider_status_counts(db)
+    model_counts = _dashboard_model_status_counts(db)
 
     return {
-        "provider_count": db.scalar(select(func.count()).select_from(Provider)) or 0,
-        "healthy_count": db.scalar(select(func.count()).select_from(Provider).where(Provider.health_status == "healthy")) or 0,
-        "degraded_count": db.scalar(select(func.count()).select_from(Provider).where(Provider.health_status == "degraded")) or 0,
-        "unhealthy_count": db.scalar(select(func.count()).select_from(Provider).where(Provider.health_status == "unhealthy")) or 0,
-        "model_count": db.scalar(select(func.count()).select_from(ModelCatalog)) or 0,
-        "healthy_model_count": db.scalar(select(func.count()).select_from(ProviderModel).where(ProviderModel.health_status == "healthy")) or 0,
-        "degraded_model_count": db.scalar(select(func.count()).select_from(ProviderModel).where(ProviderModel.health_status == "degraded")) or 0,
-        "unhealthy_model_count": db.scalar(select(func.count()).select_from(ProviderModel).where(ProviderModel.health_status == "unhealthy")) or 0,
+        **provider_counts,
+        **model_counts,
         "total_requests": usage_summary["total_requests"],
         "total_tokens": usage_summary["total_tokens"],
         "total_cost": usage_summary["total_cost"],
         "total_failures": usage_summary["failed_requests"],
         "recent_requests": recent_requests,
-        "recent_tokens": int(recent_tokens or 0),
-        "conversation_count": int(conversation_count or 0),
+        "recent_tokens": recent_overview["recent_tokens"],
+        "conversation_count": conversation_count,
         "recent_failure_rate": recent_failure_rate,
         "usage_overview": usage_overview,
-        "default_provider": default_provider.name if default_provider else None,
-        "route_mode": settings.route_mode,
         "api_key_total": api_key_summary.total_keys,
         "api_key_enabled": api_key_summary.enabled_keys,
         "api_key_disabled": api_key_summary.disabled_keys,
         "api_key_expired": api_key_summary.expired_keys,
-        "api_key_quota_exhausted": api_key_summary.quota_exhausted_keys,
+        "api_key_quota_exhausted": api_key_summary.balance_exhausted_keys,
         "api_key_balance_exhausted": api_key_summary.balance_exhausted_keys,
         "api_key_total_requests": api_key_summary.total_requests,
         "api_key_total_prompt_tokens": api_key_summary.total_prompt_tokens,

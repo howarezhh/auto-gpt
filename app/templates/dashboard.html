@@ -1,5 +1,4 @@
 {% extends "base.html" %}
-{% set route_mode_labels = {"manual": "健康优先", "failover": "健康优先", "weighted": "健康优先", "sticky": "健康优先"} %}
 {% set health_labels = {"healthy": "健康", "degraded": "降级", "unhealthy": "异常", "unknown": "未知"} %}
 {% set circuit_labels = {"closed": "闭合", "open": "已熔断", "half_open": "半开探测", "unknown": "未知"} %}
 {% block content %}
@@ -21,7 +20,7 @@
             <span style="width: {{ ((stats.healthy_count / stats.provider_count) * 100) if stats.provider_count else 0 }}%"></span>
         </div>
         <div class="cockpit-aside-meta">
-            <span>路由 {{ route_mode_labels.get(settings.route_mode, settings.route_mode) }}</span>
+            <span>路由 健康优先</span>
             <span>{{ stats.healthy_count or 0 }}/{{ stats.provider_count or 0 }} 健康</span>
         </div>
     </div>
@@ -286,8 +285,7 @@
                 </div>
             </div>
             <div class="detail-list" id="dashboard-route-meta">
-                <div><span>模式</span><strong>{{ route_mode_labels.get(settings.route_mode, settings.route_mode) }}</strong></div>
-                <div><span>默认提供商</span><strong>{{ stats.default_provider or '-' }}</strong></div>
+                <div><span>策略</span><strong>健康优先</strong></div>
                 <div><span>自动巡检</span><strong>{{ '开启' if settings.auto_health_check else '关闭' }}</strong></div>
                 <div><span>检查间隔</span><strong>{{ settings.health_check_interval_sec }} 秒</strong></div>
                 <div><span>模型健康</span><strong>健康 {{ stats.healthy_model_count or 0 }} / 降级 {{ stats.degraded_model_count or 0 }} / 异常 {{ stats.unhealthy_model_count or 0 }}</strong></div>

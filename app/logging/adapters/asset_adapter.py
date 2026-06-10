@@ -26,6 +26,7 @@ class AssetLogRecorder:
                 "content_type": content_type,
                 "file_size_bytes": file_size_bytes,
                 "sha256_prefix": sha256_hex[:16] if sha256_hex else None,
+                "sha256_hex": sha256_hex,
                 "storage_scope": storage_scope,
                 "result": result,
                 "error": error,

@@ -2,15 +2,41 @@ from __future__ import annotations
 
 from typing import Any
 
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.logging.dispatcher import LoggingDispatcher
 from app.logging.sanitizers import dumps_sanitized
+from app.models.logging_events import (
+    RequestAuthEvent,
+    RequestBillingEvent,
+    RequestContentGuardEvent,
+    RequestErrorResponseEvent,
+    RequestModelPermissionEvent,
+    RequestProviderAttemptEvent,
+    RequestRouteDecisionEvent,
+    RequestStreamEvent,
+    RequestUpstreamResponseEvent,
+    RequestValidationEvent,
+)
 from app.models.request_log import RequestLog
 from app.utils.json_utils import safeJsonParse
 
 
 class RequestLogRecorder:
+    EVENT_MODELS = {
+        "request_auth": RequestAuthEvent,
+        "request_validation": RequestValidationEvent,
+        "request_model_permission": RequestModelPermissionEvent,
+        "request_route_decision": RequestRouteDecisionEvent,
+        "request_provider_attempt": RequestProviderAttemptEvent,
+        "request_upstream_response": RequestUpstreamResponseEvent,
+        "request_stream": RequestStreamEvent,
+        "request_error_response": RequestErrorResponseEvent,
+        "request_content_guard": RequestContentGuardEvent,
+        "request_billing": RequestBillingEvent,
+    }
+
     @staticmethod
     def record_summary(db: Session, **kwargs: Any) -> RequestLog:
         from app.services.log_service import LogService
@@ -63,6 +89,23 @@ class RequestLogRecorder:
         if not events:
             return
         LoggingDispatcher.record_many(events, db=db, enqueue=False, auto_commit=auto_commit)
+
+    @staticmethod
+    def record_missing_events_from_summary(db: Session, log: RequestLog, *, auto_commit: bool = False) -> int:
+        events = []
+        for event in RequestLogRecorder.build_events_from_summary(log):
+            model = RequestLogRecorder.EVENT_MODELS.get(event.envelope.event_name)
+            if model is None or log.id is None:
+                continue
+            exists = db.scalar(
+                select(func.count()).select_from(model).where(model.request_log_id == log.id)
+            )
+            if not exists:
+                events.append(event)
+        if not events:
+            return 0
+        LoggingDispatcher.record_many(events, db=db, enqueue=False, auto_commit=auto_commit)
+        return len(events)
 
     @staticmethod
     def build_events_from_summary(log: RequestLog):
@@ -214,11 +257,20 @@ class RequestLogRecorder:
                     }),
                     "response_summary_json": log.response_body_json,
                     "response_text_excerpt": (log.response_text or "")[:500] if log.response_text else None,
-                    "response_body_truncated": "truncated" in (log.response_body_json or "").lower(),
+                    "response_body_truncated": RequestLogRecorder._is_response_body_truncated(log.response_body_json),
                 },
             ))
         if log.is_stream and "request_stream" not in native_event_names:
-            stream_result = "completed" if log.success else ("client_disconnected" if log.status_code == 499 else "upstream_error")
+            stream_payload = RequestLogRecorder._stream_payload_from_trace(log, trace_items)
+            stream_result = stream_payload.get("stream_result") or (
+                "completed" if log.success else ("client_disconnected" if log.status_code == 499 else "upstream_error")
+            )
+            sse_error_sent = stream_payload.get("sse_error_sent")
+            done_sent = stream_payload.get("done_sent")
+            if sse_error_sent is None and log.error_code == "content_integrity_violation" and log.status_code != 499:
+                sse_error_sent = True
+            if done_sent is None and log.error_code == "content_integrity_violation" and log.status_code != 499:
+                done_sent = True
             events.append(LoggingDispatcher.build_event(
                 event_type="external_request",
                 event_name="request_stream",
@@ -233,13 +285,25 @@ class RequestLogRecorder:
                     "first_token_latency_ms": log.first_token_latency_ms,
                     "ttfb_ms": log.ttfb_ms,
                     "duration_ms": log.duration_ms,
-                    "captured_text_bytes": len((log.response_text or "").encode("utf-8")) if log.response_text else None,
-                    "sse_error_sent": not log.success,
-                    "done_sent": True,
+                    "chunk_count": stream_payload.get("chunk_count"),
+                    "captured_text_bytes": (
+                        stream_payload.get("captured_text_bytes")
+                        if stream_payload.get("captured_text_bytes") is not None
+                        else (len((log.response_text or "").encode("utf-8")) if log.response_text else None)
+                    ),
+                    "sse_error_sent": sse_error_sent,
+                    "done_sent": done_sent,
                     "disconnect_status_code": 499 if log.status_code == 499 else None,
                 },
             ))
         if not log.success and "request_error_response" not in native_event_names:
+            error_body = safeJsonParse(log.response_body_json or "")
+            error_context = error_body.get("error_context") if isinstance(error_body, dict) else None
+            recoverable = (
+                bool(error_context.get("recoverable"))
+                if isinstance(error_context, dict) and error_context.get("recoverable") is not None
+                else log.retryable
+            )
             events.append(LoggingDispatcher.build_event(
                 event_type="external_request",
                 event_name="request_error_response",
@@ -257,11 +321,21 @@ class RequestLogRecorder:
                     "public_message": log.message,
                     "category": RequestLogRecorder._error_category_from_body(log.response_body_json),
                     "retryable": log.retryable,
-                    "recoverable": log.retryable,
+                    "recoverable": recoverable,
                     "diagnostic_sample_json": log.response_body_json or dumps_sanitized({"trace": trace_items[-5:]}),
                 },
             ))
         if log.content_guard_result and "request_content_guard" not in native_event_names:
+            content_guard_payload = RequestLogRecorder._latest_content_guard_payload(
+                trace_items,
+                response_body_json=log.response_body_json,
+            )
+            guard_result = str(log.content_guard_result or "")
+            event_result = "blocked" if RequestLogRecorder._content_guard_event_is_blocked(guard_result) else ("review" if guard_result == "review" else "success")
+            matched_rules_json = (
+                content_guard_payload.get("matched_rules_json")
+                or RequestLogRecorder._content_guard_matched_rules_from_summary(log)
+            )
             events.append(LoggingDispatcher.build_event(
                 event_type="external_request",
                 event_name="request_content_guard",
@@ -269,18 +343,28 @@ class RequestLogRecorder:
                 correlation_id=str(request_log_id),
                 module="content_guard",
                 severity="danger" if log.content_guard_risk_level == "high" else "info",
-                result="blocked" if log.content_guard_result == "block" else "success",
+                result=event_result,
                 payload={
                     "request_log_id": request_log_id,
                     "trace_id": trace_id,
-                    "guard_stage": "stream_buffer" if log.is_stream else "non_stream_response",
+                    "provider_id": log.provider_id,
+                    "provider_name": log.provider_name,
+                    "provider_model_id": log.resolved_provider_model_id,
+                    "model_name": log.model_name,
+                    "requested_model": log.requested_model,
+                    "request_path": log.request_path,
+                    "is_stream": log.is_stream,
+                    "guard_stage": RequestLogRecorder._content_guard_stage_from_payload(log, content_guard_payload),
                     "guard_result": log.content_guard_result,
                     "risk_level": log.content_guard_risk_level,
-                    "matched_categories_json": log.content_guard_categories_json,
+                    "matched_categories_json": content_guard_payload.get("matched_categories_json") or log.content_guard_categories_json,
+                    "matched_rules_json": matched_rules_json,
                     "reason": log.content_guard_reason,
                     "action": log.content_guard_action,
                     "excerpt": log.content_guard_excerpt,
-                    "provider_status_after": None,
+                    "provider_status_after": content_guard_payload.get("provider_status_after"),
+                    "confidence": content_guard_payload.get("confidence"),
+                    "score_delta": content_guard_payload.get("score_delta"),
                 },
             ))
         if (log.billing_status or log.billing_event_id) and "request_billing" not in native_event_names:
@@ -312,6 +396,164 @@ class RequestLogRecorder:
         return events
 
     @staticmethod
+    def _content_guard_event_is_blocked(value: str | None) -> bool:
+        normalized = str(value or "").strip().lower()
+        return normalized in {"block", "blocked", "deny", "denied", "reject", "rejected"}
+
+    @staticmethod
+    def _content_guard_matched_rules_from_summary(log: RequestLog) -> str | None:
+        categories = safeJsonParse(log.content_guard_categories_json or "")
+        if not isinstance(categories, list):
+            categories = []
+        normalized_categories = [str(item).strip() for item in categories if str(item).strip()]
+        if not normalized_categories and not log.content_guard_reason:
+            return None
+        category = normalized_categories[0] if normalized_categories else "content_guard_summary"
+        return dumps_sanitized([
+            {
+                "id": f"legacy_summary_{category}",
+                "name": "历史请求摘要回填",
+                "category": category,
+                "match_type": "request_summary",
+                "risk_level": log.content_guard_risk_level,
+                "action": log.content_guard_action,
+                "reason": log.content_guard_reason,
+                "source": "request_log_summary_backfill",
+            }
+        ])
+
+    @staticmethod
+    def _latest_trace_item(trace_items: list[Any], event_name: str) -> dict[str, Any]:
+        for item in reversed(trace_items or []):
+            if not isinstance(item, dict):
+                continue
+            if item.get("typed_event") == event_name:
+                return item
+        return {}
+
+    @staticmethod
+    def _latest_content_guard_payload(
+        trace_items: list[Any],
+        *,
+        response_body_json: str | None = None,
+    ) -> dict[str, Any]:
+        for item in reversed(trace_items or []):
+            payload = RequestLogRecorder._content_guard_payload_from_trace_item(item)
+            if payload:
+                return payload
+        error_body = safeJsonParse(response_body_json or "")
+        if isinstance(error_body, dict):
+            payload = RequestLogRecorder._content_guard_payload_from_error_body(error_body)
+            if payload:
+                return payload
+        return {}
+
+    @staticmethod
+    def _content_guard_payload_from_trace_item(item: Any) -> dict[str, Any]:
+        if not isinstance(item, dict):
+            return {}
+        payload = item.get("payload")
+        if item.get("typed_event") == "request_content_guard" and isinstance(payload, dict):
+            return dict(payload)
+        if isinstance(payload, dict):
+            if payload.get("guard_result") or payload.get("risk_level") or payload.get("guard_stage"):
+                return dict(payload)
+            nested = payload.get("content_guard")
+            if isinstance(nested, dict):
+                return RequestLogRecorder._normalize_content_guard_detail(nested, payload=payload)
+            detail_payload = RequestLogRecorder._content_guard_payload_from_error_body(payload)
+            if detail_payload:
+                return detail_payload
+        nested = item.get("content_guard")
+        if isinstance(nested, dict):
+            return RequestLogRecorder._normalize_content_guard_detail(nested, payload=item)
+        return RequestLogRecorder._content_guard_payload_from_error_body(item)
+
+    @staticmethod
+    def _stream_payload_from_trace(log: RequestLog, trace_items: list[Any]) -> dict[str, Any]:
+        for item in reversed(trace_items or []):
+            if not isinstance(item, dict):
+                continue
+            if item.get("typed_event") == "request_stream" and isinstance(item.get("payload"), dict):
+                return dict(item["payload"])
+            payload = item.get("payload")
+            if isinstance(payload, dict) and any(
+                key in payload
+                for key in ("stream_result", "sse_error_sent", "done_sent", "chunk_count", "captured_text_bytes")
+            ):
+                return dict(payload)
+        results = [str(item.get("result") or "") for item in trace_items if isinstance(item, dict)]
+        if log.status_code == 499 or any("disconnect" in item for item in results):
+            return {"stream_result": "client_disconnected", "done_sent": False, "sse_error_sent": False}
+        if any(item in {"empty_stream", "stream_empty"} for item in results):
+            return {"stream_result": "empty_stream"}
+        if any("timeout" in item for item in results):
+            return {"stream_result": "timeout"}
+        if any(item in {"stream_error", "upstream_error"} for item in results):
+            return {"stream_result": "upstream_error"}
+        return {}
+
+    @staticmethod
+    def _is_response_body_truncated(response_body_json: str | None) -> bool | None:
+        if not response_body_json:
+            return None
+        parsed = safeJsonParse(response_body_json)
+        if isinstance(parsed, dict):
+            for key in ("truncated", "response_body_truncated", "is_truncated"):
+                value = parsed.get(key)
+                if isinstance(value, bool):
+                    return value
+            meta = parsed.get("metadata") or parsed.get("meta")
+            if isinstance(meta, dict):
+                for key in ("truncated", "response_body_truncated", "is_truncated"):
+                    value = meta.get(key)
+                    if isinstance(value, bool):
+                        return value
+        return "truncated" in response_body_json.lower()
+
+    @staticmethod
+    def _content_guard_payload_from_error_body(value: dict[str, Any]) -> dict[str, Any]:
+        error = value.get("error") if isinstance(value, dict) else None
+        detail = error.get("detail") if isinstance(error, dict) else None
+        guard = detail.get("content_guard") if isinstance(detail, dict) else None
+        if isinstance(guard, dict):
+            return RequestLogRecorder._normalize_content_guard_detail(guard, payload=detail)
+        guard = value.get("content_guard") if isinstance(value, dict) else None
+        if isinstance(guard, dict):
+            return RequestLogRecorder._normalize_content_guard_detail(guard, payload=value)
+        return {}
+
+    @staticmethod
+    def _normalize_content_guard_detail(guard: dict[str, Any], *, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = payload or {}
+        categories = guard.get("categories")
+        matched_rules = guard.get("matched_rules")
+        return {
+            "guard_stage": payload.get("guard_stage") or guard.get("guard_stage"),
+            "guard_result": guard.get("result") or guard.get("guard_result"),
+            "risk_level": guard.get("risk_level"),
+            "matched_categories_json": dumps_sanitized(categories) if categories is not None else guard.get("matched_categories_json"),
+            "matched_rules_json": dumps_sanitized(matched_rules) if matched_rules is not None else guard.get("matched_rules_json"),
+            "reason": guard.get("reason"),
+            "action": guard.get("action"),
+            "excerpt": guard.get("excerpt"),
+            "provider_status_after": payload.get("provider_status_after") or guard.get("provider_status_after"),
+            "confidence": guard.get("confidence"),
+            "score_delta": guard.get("score_delta"),
+        }
+
+    @staticmethod
+    def _content_guard_stage_from_payload(log: RequestLog, payload: dict[str, Any]) -> str:
+        stage = str(payload.get("guard_stage") or "").strip()
+        if stage:
+            return stage
+        if not log.is_stream:
+            return "non_stream_response"
+        if log.content_guard_buffer_wait_ms is not None and int(log.content_guard_buffer_wait_ms or 0) > 0:
+            return "stream_buffer"
+        return "stream_chunk"
+
+    @staticmethod
     def _build_native_events_from_trace(log: RequestLog, trace_items: list[dict]):
         events = []
         provider_attempt_index = 0
@@ -325,6 +567,14 @@ class RequestLogRecorder:
             native_payload = dict(payload)
             native_payload.setdefault("request_log_id", log.id)
             native_payload.setdefault("trace_id", log.trace_id)
+            if event_name == "request_content_guard":
+                native_payload.setdefault("provider_id", log.provider_id)
+                native_payload.setdefault("provider_name", log.provider_name)
+                native_payload.setdefault("provider_model_id", log.resolved_provider_model_id)
+                native_payload.setdefault("model_name", log.model_name)
+                native_payload.setdefault("requested_model", log.requested_model)
+                native_payload.setdefault("request_path", log.request_path)
+                native_payload.setdefault("is_stream", log.is_stream)
             if event_name == "request_provider_attempt":
                 provider_attempt_index += 1
                 native_payload.setdefault("attempt_index", provider_attempt_index)

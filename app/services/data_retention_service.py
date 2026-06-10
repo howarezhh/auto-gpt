@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.models.admin_audit_log import AdminAuditLog
+from app.models.alert_event import AlertEvent
 from app.models.logging_events import (
     AssetEvent,
     BackgroundJobEvent,
@@ -32,6 +33,8 @@ from app.models.request_log import RequestLog
 class DataRetentionService:
     HEALTH_CHECK_LOG_RETENTION_HOURS = 6
     HEALTH_CHECK_LOG_TYPES = ("health_check", "health_check_provider", "health_check_model")
+    CLEANUP_BATCH_SIZE = 5000
+    CLEANUP_MAX_BATCHES_PER_MODEL = 100
 
     REQUEST_CHILD_EVENT_MODELS = (
         RequestAuthEvent,
@@ -59,6 +62,7 @@ class DataRetentionService:
         background_job_log_retention_days: int = 90,
         user_operation_log_retention_days: int = 180,
         asset_log_retention_days: int = 180,
+        alert_event_retention_days: int = 180,
     ) -> dict[str, int]:
         result = {
             "request_logs_deleted": 0,
@@ -73,43 +77,46 @@ class DataRetentionService:
             "background_job_events_deleted": 0,
             "user_operation_audit_logs_deleted": 0,
             "asset_events_deleted": 0,
+            "alert_events_deleted": 0,
         }
         changed = False
 
         health_check_cutoff = datetime.utcnow() - timedelta(hours=DataRetentionService.HEALTH_CHECK_LOG_RETENTION_HOURS)
-        health_check_delete = db.execute(
-            delete(RequestLog).where(
-                RequestLog.created_at < health_check_cutoff,
-                RequestLog.log_type.in_(DataRetentionService.HEALTH_CHECK_LOG_TYPES),
-            )
+        result["health_check_logs_deleted"] = DataRetentionService._delete_batched(
+            db,
+            RequestLog,
+            RequestLog.created_at < health_check_cutoff,
+            RequestLog.log_type.in_(DataRetentionService.HEALTH_CHECK_LOG_TYPES),
         )
-        result["health_check_logs_deleted"] = int(health_check_delete.rowcount or 0)
         changed = changed or result["health_check_logs_deleted"] > 0
 
         if request_log_retention_days > 0:
             request_cutoff = datetime.utcnow() - timedelta(days=request_log_retention_days)
-            request_delete = db.execute(
-                delete(RequestLog).where(
-                    RequestLog.created_at < request_cutoff,
-                    RequestLog.log_type.not_in(DataRetentionService.HEALTH_CHECK_LOG_TYPES),
-                )
+            result["request_logs_deleted"] = DataRetentionService._delete_batched(
+                db,
+                RequestLog,
+                RequestLog.created_at < request_cutoff,
+                RequestLog.log_type.not_in(DataRetentionService.HEALTH_CHECK_LOG_TYPES),
             )
-            result["request_logs_deleted"] = int(request_delete.rowcount or 0)
             changed = changed or result["request_logs_deleted"] > 0
 
         if admin_audit_log_retention_days > 0:
             audit_cutoff = datetime.utcnow() - timedelta(days=admin_audit_log_retention_days)
-            audit_delete = db.execute(
-                delete(AdminAuditLog).where(AdminAuditLog.created_at < audit_cutoff)
+            result["admin_audit_logs_deleted"] = DataRetentionService._delete_batched(
+                db,
+                AdminAuditLog,
+                AdminAuditLog.created_at < audit_cutoff,
             )
-            result["admin_audit_logs_deleted"] = int(audit_delete.rowcount or 0)
             changed = changed or result["admin_audit_logs_deleted"] > 0
 
         if request_child_log_retention_days > 0:
             request_child_cutoff = datetime.utcnow() - timedelta(days=request_child_log_retention_days)
             for model in DataRetentionService.REQUEST_CHILD_EVENT_MODELS:
-                deleted = db.execute(delete(model).where(model.created_at < request_child_cutoff))
-                result["request_child_logs_deleted"] += int(deleted.rowcount or 0)
+                result["request_child_logs_deleted"] += DataRetentionService._delete_batched(
+                    db,
+                    model,
+                    model.created_at < request_child_cutoff,
+                )
             changed = changed or result["request_child_logs_deleted"] > 0
 
         changed = DataRetentionService._delete_by_created_at(
@@ -122,17 +129,29 @@ class DataRetentionService:
         )
         if health_log_retention_days > 0:
             health_cutoff = datetime.utcnow() - timedelta(days=health_log_retention_days)
-            health_probe_delete = db.execute(delete(HealthProbeEvent).where(HealthProbeEvent.created_at < health_cutoff))
-            health_run_delete = db.execute(delete(HealthCheckRun).where(HealthCheckRun.created_at < health_cutoff))
-            result["health_probes_deleted"] = int(health_probe_delete.rowcount or 0)
-            result["health_runs_deleted"] = int(health_run_delete.rowcount or 0)
+            result["health_probes_deleted"] = DataRetentionService._delete_batched(
+                db,
+                HealthProbeEvent,
+                HealthProbeEvent.created_at < health_cutoff,
+            )
+            result["health_runs_deleted"] = DataRetentionService._delete_batched(
+                db,
+                HealthCheckRun,
+                HealthCheckRun.created_at < health_cutoff,
+            )
             changed = changed or result["health_probes_deleted"] > 0 or result["health_runs_deleted"] > 0
         if billing_log_retention_days > 0:
             billing_cutoff = datetime.utcnow() - timedelta(days=billing_log_retention_days)
-            token_delete = db.execute(delete(TokenFinalizeEvent).where(TokenFinalizeEvent.created_at < billing_cutoff))
-            billing_delete = db.execute(delete(BillingProcessEvent).where(BillingProcessEvent.created_at < billing_cutoff))
-            result["token_finalize_events_deleted"] = int(token_delete.rowcount or 0)
-            result["billing_process_events_deleted"] = int(billing_delete.rowcount or 0)
+            result["token_finalize_events_deleted"] = DataRetentionService._delete_batched(
+                db,
+                TokenFinalizeEvent,
+                TokenFinalizeEvent.created_at < billing_cutoff,
+            )
+            result["billing_process_events_deleted"] = DataRetentionService._delete_batched(
+                db,
+                BillingProcessEvent,
+                BillingProcessEvent.created_at < billing_cutoff,
+            )
             changed = changed or result["token_finalize_events_deleted"] > 0 or result["billing_process_events_deleted"] > 0
         changed = DataRetentionService._delete_by_created_at(
             db,
@@ -158,6 +177,14 @@ class DataRetentionService:
             model=AssetEvent,
             days=asset_log_retention_days,
         )
+        changed = DataRetentionService._delete_by_created_at(
+            db,
+            result=result,
+            changed=changed,
+            result_key="alert_events_deleted",
+            model=AlertEvent,
+            days=alert_event_retention_days,
+        )
 
         if changed:
             db.commit()
@@ -178,6 +205,32 @@ class DataRetentionService:
         if days <= 0:
             return changed
         cutoff = datetime.utcnow() - timedelta(days=days)
-        deleted = db.execute(delete(model).where(model.created_at < cutoff))
-        result[result_key] = int(deleted.rowcount or 0)
+        result[result_key] = DataRetentionService._delete_batched(db, model, model.created_at < cutoff)
         return changed or result[result_key] > 0
+
+    @staticmethod
+    def _delete_batched(db: Session, model, *conditions) -> int:
+        total_deleted = 0
+        batch_size = DataRetentionService.CLEANUP_BATCH_SIZE
+        batch_count = 0
+        while True:
+            if batch_count >= DataRetentionService.CLEANUP_MAX_BATCHES_PER_MODEL:
+                break
+            ids = list(
+                db.scalars(
+                    select(model.id)
+                    .where(*conditions)
+                    .order_by(model.id.asc())
+                    .limit(batch_size)
+                )
+            )
+            if not ids:
+                break
+            deleted = db.execute(delete(model).where(model.id.in_(ids)))
+            deleted_count = int(deleted.rowcount or 0)
+            total_deleted += deleted_count
+            db.commit()
+            batch_count += 1
+            if len(ids) < batch_size or deleted_count <= 0:
+                break
+        return total_deleted

@@ -3,21 +3,24 @@
 <section class="page-heading">
     <div>
         <div class="eyebrow">日志中心</div>
-        <h2>请求日志中心</h2>
+        <h2 id="logs-page-title">请求日志中心</h2>
     </div>
 </section>
 
-<nav class="logs-segmented-nav" aria-label="日志类型">
-    <button class="logs-segment active" type="button" data-logging-tab="request">请求日志</button>
-    <button class="logs-segment" type="button" data-logging-tab="exceptions">异常事件</button>
-    <button class="logs-segment" type="button" data-logging-tab="health-runs">健康检查日志</button>
-    <button class="logs-segment" type="button" data-logging-tab="billing-events">计费日志</button>
-    <button class="logs-segment" type="button" data-logging-tab="content-guard-events">内容防护日志</button>
-    <button class="logs-segment" type="button" data-logging-tab="background-jobs">后台任务日志</button>
-    <button class="logs-segment" type="button" data-logging-tab="asset-events">素材日志</button>
+<nav class="logs-segmented-nav" aria-label="日志类型" role="tablist">
+    <button class="logs-segment active" type="button" role="tab" aria-selected="true" aria-controls="logs-request-panel" data-logging-tab="request">请求日志</button>
+    <button class="logs-segment" type="button" role="tab" aria-selected="false" aria-controls="logs-typed-panel" data-logging-tab="exceptions">异常事件</button>
+    <button class="logs-segment" type="button" role="tab" aria-selected="false" aria-controls="logs-typed-panel" data-logging-tab="health-runs">健康检查日志</button>
+    <button class="logs-segment" type="button" role="tab" aria-selected="false" aria-controls="logs-typed-panel" data-logging-tab="billing-events">计费日志</button>
+    <button class="logs-segment" type="button" role="tab" aria-selected="false" aria-controls="logs-typed-panel" data-logging-tab="content-guard-events">内容防护日志</button>
+    <button class="logs-segment" type="button" role="tab" aria-selected="false" aria-controls="logs-typed-panel" data-logging-tab="background-jobs">调度任务日志</button>
+    <button class="logs-segment" type="button" role="tab" aria-selected="false" aria-controls="logs-typed-panel" data-logging-tab="admin-audits">后台审计日志</button>
+    <button class="logs-segment" type="button" role="tab" aria-selected="false" aria-controls="logs-typed-panel" data-logging-tab="user-operations">用户操作日志</button>
+    <button class="logs-segment" type="button" role="tab" aria-selected="false" aria-controls="logs-typed-panel" data-logging-tab="alert-events">告警事件</button>
+    <button class="logs-segment" type="button" role="tab" aria-selected="false" aria-controls="logs-typed-panel" data-logging-tab="asset-events">素材日志</button>
 </nav>
 
-<section class="stats-grid" data-logging-panel="request">
+<section class="stats-grid" id="logs-request-summary-panel" data-logging-panel="request">
     <article class="metric-card"><span>当前请求量</span><strong data-log-summary="total_requests">0</strong></article>
     <article class="metric-card"><span>成功请求</span><strong data-log-summary="success_requests">0</strong></article>
     <article class="metric-card metric-card-alert"><span>失败请求</span><strong data-log-summary="failed_requests">0</strong></article>
@@ -27,7 +30,7 @@
     <article class="metric-card"><span>总 Token</span><strong data-log-summary="total_tokens">0 token</strong></article>
 </section>
 
-<section class="panel-card section-shell" data-logging-panel="request">
+<section class="panel-card section-shell" id="logs-request-panel" data-logging-panel="request">
     <div class="section-subhead compact-section-subhead">
         <div>
             <div class="panel-kicker">日志列表</div>
@@ -52,8 +55,6 @@
                     <option value="responses">响应请求</option>
                     <option value="moderations">内容审核请求</option>
                     <option value="files">文件请求</option>
-                    <option value="health_check_provider">提供商健康检查</option>
-                    <option value="health_check_model">模型健康检查</option>
                     <option value="proxy_generic">通用代理日志</option>
                     <option value="api_client_auth">密钥鉴权失败日志</option>
                     <option value="unsupported_endpoint">不支持端点日志</option>
@@ -168,18 +169,64 @@
                     </select>
                 </label>
                 <label>
+                    <span>内容处置动作</span>
+                    <select class="field-input" id="logs-content-guard-action">
+                        <option value="">全部</option>
+                        <option value="allow">放行</option>
+                        <option value="record">记录</option>
+                        <option value="async_review">异步复核</option>
+                        <option value="block">阻断</option>
+                    </select>
+                </label>
+                <label>
+                    <span>最终策略</span>
+                    <select class="field-input" id="logs-content-guard-final-strategy">
+                        <option value="">全部</option>
+                        <option value="allow">放行</option>
+                        <option value="record_only">仅记录</option>
+                        <option value="async_review">异步复核</option>
+                        <option value="block">阻断</option>
+                        <option value="safe_error">安全错误</option>
+                        <option value="switch_provider">切换提供商</option>
+                        <option value="switch_provider_succeeded">切换成功</option>
+                        <option value="switch_provider_exhausted">切换耗尽</option>
+                    </select>
+                </label>
+                <label>
+                    <span>检测阶段</span>
+                    <select class="field-input" id="logs-content-guard-stage">
+                        <option value="">全部</option>
+                        <option value="non_stream_response">非流式响应</option>
+                        <option value="stream_buffer">流式首段缓冲</option>
+                        <option value="stream_chunk">流式分块</option>
+                        <option value="runtime_async_review">异步复核</option>
+                    </select>
+                </label>
+                <label>
+                    <span>命中分类</span>
+                    <input class="field-input" id="logs-content-guard-category" type="text" placeholder="输入分类标识">
+                </label>
+                <label>
+                    <span>是否切换提供商</span>
+                    <select class="field-input" id="logs-content-guard-switched-provider">
+                        <option value="">全部</option>
+                        <option value="true">已切换</option>
+                        <option value="false">未切换</option>
+                    </select>
+                </label>
+                <label>
+                    <span>是否适配跳过</span>
+                    <select class="field-input" id="logs-content-guard-adaptation-skipped">
+                        <option value="">全部</option>
+                        <option value="true">已跳过</option>
+                        <option value="false">未跳过</option>
+                    </select>
+                </label>
+                <label>
                     <span>会话键</span>
                     <input class="field-input" id="logs-conversation-key" type="text" placeholder="例如 user-001 或 request_id">
                 </label>
-                <label class="logs-toggle-field" for="logs-exclude-health-checks">
-                    <span class="logs-toggle-copy">
-                        <strong>隐藏健康检查日志</strong>
-                    </span>
-                    <span class="settings-switch-control">
-                        <input id="logs-exclude-health-checks" type="checkbox" checked>
-                        <span class="settings-switch-slider"></span>
-                    </span>
-                </label>
+                <input id="logs-exclude-health-checks" type="checkbox" checked hidden>
             </div>
         </details>
         <div class="table-shell">
@@ -216,7 +263,7 @@
     </div>
 </section>
 
-<section class="panel-card section-shell hidden" data-logging-panel="typed">
+<section class="panel-card section-shell hidden" id="logs-typed-panel" data-logging-panel="typed">
     <div class="section-subhead compact-section-subhead">
         <div>
             <div class="panel-kicker" id="typed-logs-kicker">类型化日志</div>
@@ -229,6 +276,8 @@
         </div>
     </div>
     <div class="data-workspace-card">
+        <div class="typed-logs-summary-grid" id="typed-logs-summary" aria-live="polite"></div>
+        <div class="typed-logs-meta-strip" id="typed-logs-meta-strip"></div>
         <div class="filter-grid compact-filter-grid">
             <label>
                 <span id="typed-logs-keyword-label">关键词</span>

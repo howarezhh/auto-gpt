@@ -1,22 +1,28 @@
 import csv
+import hashlib
 import io
 from typing import Any
 from datetime import datetime, timedelta
 
 from sqlalchemy import Text, and_, case, cast, delete, func, not_, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
+from app.models.logging_events import RequestContentGuardEvent
 from app.models.request_log import RequestLog
 from app.services.cache_service import CacheService
 from app.services.error_catalog_service import ErrorCatalogService
+from app.services.openai_error_service import OpenAIErrorService
+from app.services.redis_service import RedisService
 from app.services.runtime_state_service import RuntimeStateService
 from app.utils.json_utils import dumps_json, safeJsonParse
 
 
 class LogService:
     """负责请求日志落库、派生指标计算和日志序列化。"""
+
+    TOKEN_FINALIZE_MAX_ATTEMPTS = 3
 
     @staticmethod
     def format_money_display(value) -> str:
@@ -41,6 +47,23 @@ class LogService:
             return f"{numeric / 1000:.2f}k"
         return f"{numeric / 1000000:.2f}m"
 
+    @staticmethod
+    def _escape_like(value: str) -> str:
+        return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+    @staticmethod
+    def format_bool_display(value: bool | None) -> str:
+        if value is None:
+            return ""
+        return "是" if value else "否"
+
+    @staticmethod
+    def format_csv_label(value: Any) -> str:
+        if value is None:
+            return ""
+        text = str(value)
+        return LogService.CSV_VALUE_LABELS.get(text, text)
+
     HEALTH_CHECK_LOG_TYPES = ("health_check", "health_check_provider", "health_check_model")
     ROUTE_TRAFFIC_LOG_TYPES = ("chat", "responses", "moderations", "files")
     TOKEN_BILLING_LOG_TYPES = ("chat", "responses", "embeddings")
@@ -49,7 +72,106 @@ class LogService:
     REASONING_LEVEL_NONE = "无"
     REASONING_LEVEL_VALUES = {REASONING_LEVEL_NONE, "low", "medium", "high", "xhigh"}
     METRIC_ROW_SAMPLE_LIMIT = 10000
+    METRIC_GROUP_LIMIT = 500
+    RECENT_RUNTIME_METRIC_MAX_ROWS = 5000
+    RECENT_RUNTIME_CACHE_TTL_SECONDS = 60
+    RECENT_RUNTIME_ACTIVE_CACHE_KEY = "route-runtime-metrics:active-provider-models"
+    RECENT_RUNTIME_CACHE_PREFIX = "route-runtime-metrics"
+    RECENT_RUNTIME_MIN_SAMPLE_FOR_ABNORMAL = 2
+    RECENT_RUNTIME_HEALTH_FAILURE_CATEGORIES = {
+        "timeout",
+        "network",
+        "upstream_transient",
+        "server_error",
+        "rate_limit",
+        "route_unavailable",
+        "invalid_response",
+    }
+    RECENT_RUNTIME_IGNORED_ERROR_CATEGORIES = {
+        "invalid_request",
+        "authentication",
+        "authorization",
+        "client_cancelled",
+        "capability_not_supported",
+        "model_unavailable",
+        "content_integrity",
+    }
+    CLEAR_LOGS_BATCH_SIZE = 5000
+    CLEAR_LOGS_MAX_BATCHES = 100
+    EXPORT_LIMIT = 5000
     TOKEN_JOB_MAX_PAYLOAD_BYTES = 65536
+    CSV_VALUE_LABELS = {
+        "chat": "对话",
+        "responses": "响应",
+        "moderations": "审核",
+        "files": "文件",
+        "health_check": "健康检查",
+        "health_check_provider": "提供商健康检查",
+        "health_check_model": "模型健康检查",
+        "pass": "通过",
+        "review": "需复核",
+        "block": "已拦截",
+        "record": "记录",
+        "switch_provider": "切换提供商",
+        "safe_error": "安全错误",
+        "record_only": "仅记录",
+        "low": "低",
+        "medium": "中",
+        "high": "高",
+        "success": "成功",
+        "failed": "失败",
+        "pending_tokens": "等待 Token",
+        "retry": "重试",
+        "billed": "已计费",
+        "no_charge": "不扣费",
+        "skipped": "跳过",
+        "token_finalize": "Token 回填",
+        "billing_process": "计费过程",
+        "critical": "严重",
+        "danger": "危险",
+        "warning": "警告",
+        "info": "信息",
+        "healthy": "健康",
+        "degraded": "降级",
+        "unhealthy": "异常",
+        "running": "运行中",
+        "stale_running": "运行超时",
+        "manual_single": "手动单项",
+        "manual_batch": "手动批量",
+        "scheduler": "调度器",
+        "manual": "手动",
+        "startup": "启动",
+        "system": "系统",
+        "acquired": "已获取",
+        "unavailable": "不可用",
+        "unavailable_fallback": "不可用已执行",
+        "unavailable_skipped": "锁不可用跳过",
+        "skipped_locked": "锁定跳过",
+        "skipped_lock_unavailable": "锁不可用跳过",
+        "non_stream_response": "非流式响应",
+        "stream_buffer": "流式首段",
+        "stream_chunk": "流式分块",
+        "request_summary": "请求摘要",
+        "admin_user": "管理员",
+        "user": "用户",
+        "api_client": "API Key",
+        "user_asset": "用户素材",
+        "playground_asset": "调试素材",
+        "system_asset": "系统素材",
+        "active": "活跃",
+        "resolved": "已解决",
+        "acknowledged": "已确认",
+    }
+    HEAVY_LOG_FIELD_NAMES = frozenset(
+        (
+            "request_body_json",
+            "response_body_json",
+            "response_text",
+            "api_client_policy_snapshot_json",
+            "trace_json",
+            "usage_details_json",
+        )
+    )
 
     @staticmethod
     def create_log(
@@ -102,6 +224,7 @@ class LogService:
         request_body_json: str | None = None,
         response_body_json: str | None = None,
         response_text: str | None = None,
+        capability_result: dict | list | None = None,
         message: str | None = None,
         error_type: str | None = None,
         error_code: str | None = None,
@@ -116,6 +239,8 @@ class LogService:
         content_guard_buffer_wait_ms: int | None = None,
         content_guard_retry_provider_count: int | None = None,
         content_guard_final_strategy: str | None = None,
+        content_guard_confidence: float | None = None,
+        content_guard_score_delta: int | None = None,
         api_client_key_id: int | None = None,
         api_client_key_name: str | None = None,
         api_client_key_prefix: str | None = None,
@@ -216,6 +341,8 @@ class LogService:
                 error_context=error_context,
             )
             trace = LogService._merge_error_context_into_trace(trace=trace, error_context=error_context)
+        if capability_result is not None and response_body_json is None:
+            response_body_json = dumps_json({"capability_result": capability_result})
         log = RequestLog(
             log_type=log_type,
             provider_id=provider_id,
@@ -292,6 +419,8 @@ class LogService:
             content_guard_buffer_wait_ms=content_guard_buffer_wait_ms,
             content_guard_retry_provider_count=content_guard_retry_provider_count,
             content_guard_final_strategy=content_guard_final_strategy,
+            content_guard_confidence=content_guard_confidence,
+            content_guard_score_delta=content_guard_score_delta,
             api_client_key_id=api_client_key_id,
             api_client_key_name=api_client_key_name,
             api_client_key_prefix=api_client_key_prefix,
@@ -338,18 +467,18 @@ class LogService:
             log.billing_error = None
         LogService.refresh_derived_fields(log, response_payload=token_response_payload, trace=trace)
         db.add(log)
-        if flush_after_add:
+        if flush_after_add or auto_commit:
             db.flush()
-        if auto_commit:
-            db.commit()
-        if refresh_after_create:
-            db.refresh(log)
         if log.id is not None:
             from app.logging.adapters.request_adapter import RequestLogRecorder
 
             RequestLogRecorder.record_events_from_summary(db, log, auto_commit=False)
             if auto_commit:
                 db.commit()
+        elif auto_commit:
+            db.commit()
+        if refresh_after_create:
+            db.refresh(log)
         if enqueue_finalize:
             if log.id is None:
                 db.flush()
@@ -362,7 +491,50 @@ class LogService:
                 token_response_text=token_response_text,
                 schedule_token_fill=schedule_token_fill,
         )
+        LogService._cache_recent_runtime_log(log)
         return log
+
+    @staticmethod
+    def backfill_typed_events_from_request_logs(
+        db: Session,
+        *,
+        limit: int = 500,
+        scan_limit: int | None = None,
+    ) -> dict[str, int | None]:
+        from app.logging.adapters.request_adapter import RequestLogRecorder
+
+        limit = max(1, min(5000, int(limit or 500)))
+        normalized_scan_limit = max(limit, min(50000, int(scan_limit or limit * 5)))
+        candidate_ids = (
+            select(RequestLog.id)
+            .order_by(RequestLog.id.desc())
+            .limit(normalized_scan_limit)
+            .subquery()
+        )
+        candidate_stmt = (
+            select(RequestLog)
+            .where(RequestLog.id.in_(select(candidate_ids.c.id)))
+            .order_by(RequestLog.id.desc())
+            .limit(limit)
+        )
+        missing_event_filters = [
+            ~select(model.id).where(model.request_log_id == RequestLog.id).exists()
+            for model in RequestLogRecorder.EVENT_MODELS.values()
+        ]
+        if missing_event_filters:
+            candidate_stmt = candidate_stmt.where(or_(*missing_event_filters))
+        logs = db.scalars(candidate_stmt).all()
+        created_events = 0
+        for log in logs:
+            created_events += RequestLogRecorder.record_missing_events_from_summary(db, log, auto_commit=False)
+        if created_events:
+            db.commit()
+        return {
+            "scanned_logs": len(logs),
+            "created_events": created_events,
+            "last_request_log_id": logs[-1].id if logs else None,
+            "scan_limit": normalized_scan_limit,
+        }
 
     @staticmethod
     def _merge_error_context_into_response_body(*, response_body_json: str | None, error_context: dict[str, Any]) -> str:
@@ -454,20 +626,57 @@ class LogService:
         )
 
     @staticmethod
-    def serialize_log(log: RequestLog) -> dict[str, Any]:
+    def serialize_log(
+        log: RequestLog,
+        *,
+        include_payload_fields: bool = True,
+        derive_image_observability: bool = True,
+    ) -> dict[str, Any]:
         """把单条日志对象转换为接口返回结构。"""
-        data = {column.name: getattr(log, column.name) for column in RequestLog.__table__.columns}
+        data = {}
+        for column in RequestLog.__table__.columns:
+            if not include_payload_fields and column.name in LogService.HEAVY_LOG_FIELD_NAMES:
+                data[column.name] = None
+                continue
+            data[column.name] = getattr(log, column.name)
         data["display_model"] = LogService.build_display_model(
             requested_model=log.requested_model,
             actual_model=log.model_name,
         )
-        data.update(LogService._derive_image_observability(log))
+        if derive_image_observability:
+            data.update(LogService._derive_image_observability(log))
+        else:
+            data.update(LogService._basic_image_observability(log))
         return data
 
     @staticmethod
-    def serialize_logs(logs: list[RequestLog]) -> list[dict[str, Any]]:
+    def serialize_logs(
+        logs: list[RequestLog],
+        *,
+        include_payload_fields: bool = True,
+        derive_image_observability: bool = True,
+    ) -> list[dict[str, Any]]:
         """批量序列化日志对象。"""
-        return [LogService.serialize_log(item) for item in logs]
+        return [
+            LogService.serialize_log(
+                item,
+                include_payload_fields=include_payload_fields,
+                derive_image_observability=derive_image_observability,
+            )
+            for item in logs
+        ]
+
+    @staticmethod
+    def _lightweight_log_load_options():
+        return (
+            load_only(
+                *[
+                    getattr(RequestLog, column.name)
+                    for column in RequestLog.__table__.columns
+                    if column.name not in LogService.HEAVY_LOG_FIELD_NAMES
+                ]
+            ),
+        )
 
     @staticmethod
     def build_display_model(*, requested_model: str | None, actual_model: str | None) -> str | None:
@@ -511,6 +720,21 @@ class LogService:
             "has_partial_generated_image": has_partial_generated_image,
             "generated_image_result_truncated": generated_image_result_truncated,
             "image_response_mode": ("stream" if log.is_stream else "json") if imagegen_related else None,
+        }
+
+    @staticmethod
+    def _basic_image_observability(log: RequestLog) -> dict[str, Any]:
+        has_image_input = bool(log.has_image)
+        return {
+            "has_image_input": has_image_input,
+            "uses_image_generation": None,
+            "request_modality": "vision" if has_image_input else "text",
+            "generated_images_count": None,
+            "generated_image_mime_types": None,
+            "generated_image_approx_bytes": None,
+            "has_partial_generated_image": None,
+            "generated_image_result_truncated": None,
+            "image_response_mode": None,
         }
 
     @staticmethod
@@ -672,9 +896,12 @@ class LogService:
         content_guard_final_strategy: str | None = None,
         content_guard_retry_count: int | None = None,
         content_guard_guard_stage: str | None = None,
+        content_guard_category: str | None = None,
+        content_guard_switched_provider: bool | None = None,
+        content_guard_adaptation_skipped: bool | None = None,
         api_client_key_ids: list[int] | None = None,
     ) -> tuple[int, list[RequestLog], dict[str, int]]:
-        stmt = select(RequestLog)
+        stmt = select(RequestLog).options(*LogService._lightweight_log_load_options())
         count_stmt = select(func.count()).select_from(RequestLog)
         summary_stmt = select(
             func.count(RequestLog.id).label("total_requests"),
@@ -711,6 +938,9 @@ class LogService:
             content_guard_final_strategy=content_guard_final_strategy,
             content_guard_retry_count=content_guard_retry_count,
             content_guard_guard_stage=content_guard_guard_stage,
+            content_guard_category=content_guard_category,
+            content_guard_switched_provider=content_guard_switched_provider,
+            content_guard_adaptation_skipped=content_guard_adaptation_skipped,
             api_client_key_ids=api_client_key_ids,
         )
         count_stmt = LogService._apply_log_filters(
@@ -738,6 +968,9 @@ class LogService:
             content_guard_final_strategy=content_guard_final_strategy,
             content_guard_retry_count=content_guard_retry_count,
             content_guard_guard_stage=content_guard_guard_stage,
+            content_guard_category=content_guard_category,
+            content_guard_switched_provider=content_guard_switched_provider,
+            content_guard_adaptation_skipped=content_guard_adaptation_skipped,
             api_client_key_ids=api_client_key_ids,
         )
         summary_stmt = LogService._apply_log_filters(
@@ -765,6 +998,9 @@ class LogService:
             content_guard_final_strategy=content_guard_final_strategy,
             content_guard_retry_count=content_guard_retry_count,
             content_guard_guard_stage=content_guard_guard_stage,
+            content_guard_category=content_guard_category,
+            content_guard_switched_provider=content_guard_switched_provider,
+            content_guard_adaptation_skipped=content_guard_adaptation_skipped,
             api_client_key_ids=api_client_key_ids,
         )
         total = db.scalar(count_stmt) or 0
@@ -813,6 +1049,9 @@ class LogService:
         content_guard_final_strategy: str | None = None,
         content_guard_retry_count: int | None = None,
         content_guard_guard_stage: str | None = None,
+        content_guard_category: str | None = None,
+        content_guard_switched_provider: bool | None = None,
+        content_guard_adaptation_skipped: bool | None = None,
         api_client_key_ids: list[int] | None = None,
     ):
         if exclude_health_checks:
@@ -906,9 +1145,63 @@ class LogService:
             stmt = stmt.where(RequestLog.content_guard_retry_provider_count == content_guard_retry_count)
         if content_guard_guard_stage:
             stage = content_guard_guard_stage.strip()
-            stmt = stmt.where(
-                RequestLog.trace_json.ilike(f'%"guard_stage": "{stage}"%')
+            child_stage_logs = select(RequestContentGuardEvent.request_log_id).where(
+                RequestContentGuardEvent.request_log_id.is_not(None),
+                RequestContentGuardEvent.guard_stage == stage,
             )
+            stmt = stmt.where(
+                or_(
+                    RequestLog.id.in_(child_stage_logs),
+                    RequestLog.trace_json.ilike(
+                        f'%"guard_stage": "{LogService._escape_like(stage)}"%',
+                        escape="\\",
+                    ),
+                    RequestLog.trace_json.ilike(
+                        f'%"guard_stage":"{LogService._escape_like(stage)}"%',
+                        escape="\\",
+                    ),
+                )
+            )
+        if content_guard_category:
+            category = content_guard_category.strip()
+            category_pattern = f'%"{LogService._escape_like(category)}"%'
+            child_category_logs = select(RequestContentGuardEvent.request_log_id).where(
+                RequestContentGuardEvent.request_log_id.is_not(None),
+                or_(
+                    RequestContentGuardEvent.matched_categories_json.ilike(category_pattern, escape="\\"),
+                    RequestContentGuardEvent.matched_rules_json.ilike(category_pattern, escape="\\"),
+                ),
+            )
+            stmt = stmt.where(
+                or_(
+                    RequestLog.content_guard_categories_json.ilike(category_pattern, escape="\\"),
+                    RequestLog.id.in_(child_category_logs),
+                )
+            )
+        if content_guard_switched_provider is not None:
+            if content_guard_switched_provider:
+                stmt = stmt.where(RequestLog.content_guard_retry_provider_count > 0)
+            else:
+                stmt = stmt.where(
+                    or_(
+                        RequestLog.content_guard_retry_provider_count.is_(None),
+                        RequestLog.content_guard_retry_provider_count <= 0,
+                    )
+                )
+        if content_guard_adaptation_skipped is not None:
+            skipped_expr = or_(
+                RequestLog.error_code.in_(
+                    [
+                        "endpoint_fallback_conversion_unsafe",
+                        "endpoint_response_conversion_unsafe",
+                        "unsupported_endpoint_fallback",
+                    ]
+                ),
+                RequestLog.trace_json.ilike('%"event": "endpoint_fallback_preselected"%'),
+                RequestLog.trace_json.ilike('%"code": "endpoint_fallback_conversion_unsafe"%'),
+                RequestLog.trace_json.ilike('%"code": "endpoint_response_conversion_unsafe"%'),
+            )
+            stmt = stmt.where(skipped_expr if content_guard_adaptation_skipped else not_(skipped_expr))
         return stmt
 
     @staticmethod
@@ -934,6 +1227,24 @@ class LogService:
             RequestLog.api_client_key_id.is_not(None),
             RequestLog.success.is_(True),
         )
+
+    @staticmethod
+    def _pending_token_billing_finalize_expr(*, max_attempts: int | None = TOKEN_FINALIZE_MAX_ATTEMPTS):
+        conditions = [
+            LogService._token_billing_finalize_candidate_expr(),
+            or_(
+                RequestLog.billing_finalized_at.is_(None),
+                RequestLog.billing_status == "pending_tokens",
+            ),
+        ]
+        if max_attempts is not None:
+            conditions.append(
+                or_(
+                    RequestLog.token_finalize_attempt_count.is_(None),
+                    RequestLog.token_finalize_attempt_count < max(0, int(max_attempts)),
+                )
+            )
+        return and_(*conditions)
 
     @staticmethod
     def is_token_billing_finalize_candidate(log: RequestLog) -> bool:
@@ -980,7 +1291,20 @@ class LogService:
         exclude_health_checks: bool = False,
         user_account_id: int | None = None,
         api_client_key_ids: list[int] | None = None,
+        limit: int = 200,
     ) -> dict[str, list[dict[str, str]]]:
+        normalized_limit = max(1, min(int(limit or 200), 500))
+        api_key_scope = ",".join(str(item) for item in sorted(api_client_key_ids or []))
+        api_key_scope_digest = hashlib.sha256(api_key_scope.encode("utf-8")).hexdigest()[:16] if api_key_scope else "*"
+        cache_key = (
+            "logs:filter-options:"
+            f"exclude_health={int(bool(exclude_health_checks))}:"
+            f"user={user_account_id or 0}:keys={api_key_scope_digest}:limit={normalized_limit}"
+        )
+        cached = CacheService.get(cache_key)
+        if isinstance(cached, dict):
+            return cached
+
         def build_business_stmt(column):
             stmt = select(column).where(column.is_not(None), column != "")
             return LogService._apply_log_filters(
@@ -1127,22 +1451,22 @@ class LogService:
         )
 
         provider_rows = db.execute(
-            provider_stmt.distinct().order_by(RequestLog.provider_id.asc(), RequestLog.provider_name.asc())
+            provider_stmt.distinct().order_by(RequestLog.provider_id.asc(), RequestLog.provider_name.asc()).limit(normalized_limit)
         )
-        model_rows = list(db.execute(model_stmt.distinct().order_by(RequestLog.model_name.asc())))
+        model_rows = list(db.execute(model_stmt.distinct().order_by(RequestLog.model_name.asc()).limit(normalized_limit)))
         requested_model_rows = list(
-            db.execute(requested_model_stmt.distinct().order_by(RequestLog.requested_model.asc()))
+            db.execute(requested_model_stmt.distinct().order_by(RequestLog.requested_model.asc()).limit(normalized_limit))
         )
         api_key_rows = db.execute(
-            api_key_stmt.distinct().order_by(RequestLog.api_client_key_id.asc(), RequestLog.api_client_key_name.asc())
+            api_key_stmt.distinct().order_by(RequestLog.api_client_key_id.asc(), RequestLog.api_client_key_name.asc()).limit(normalized_limit)
         )
         user_rows = db.execute(
-            user_stmt.distinct().order_by(RequestLog.user_account_id.asc(), RequestLog.user_account_name.asc())
+            user_stmt.distinct().order_by(RequestLog.user_account_id.asc(), RequestLog.user_account_name.asc()).limit(normalized_limit)
         )
-        tenant_rows = db.execute(tenant_stmt.distinct().order_by(RequestLog.tenant_name.asc()))
-        project_rows = db.execute(project_stmt.distinct().order_by(RequestLog.project_name.asc()))
-        app_rows = db.execute(app_stmt.distinct().order_by(RequestLog.app_name.asc()))
-        environment_rows = db.execute(environment_stmt.distinct().order_by(RequestLog.environment_name.asc()))
+        tenant_rows = db.execute(tenant_stmt.distinct().order_by(RequestLog.tenant_name.asc()).limit(normalized_limit))
+        project_rows = db.execute(project_stmt.distinct().order_by(RequestLog.project_name.asc()).limit(normalized_limit))
+        app_rows = db.execute(app_stmt.distinct().order_by(RequestLog.app_name.asc()).limit(normalized_limit))
+        environment_rows = db.execute(environment_stmt.distinct().order_by(RequestLog.environment_name.asc()).limit(normalized_limit))
 
         providers = [
             {
@@ -1220,9 +1544,9 @@ class LogService:
             if row.environment_name
         ]
 
-        return {
+        result = {
             "providers": providers,
-            "model_names": model_names,
+            "model_names": model_names[:normalized_limit],
             "api_client_key_ids": api_client_key_ids,
             "api_client_key_queries": api_client_key_queries,
             "users": users,
@@ -1231,6 +1555,7 @@ class LogService:
             "apps": apps,
             "environments": environments,
         }
+        return CacheService.set(cache_key, result, ttl_seconds=10)
 
     @staticmethod
     def normalize_reasoning_level(value: str | None) -> str:
@@ -1644,9 +1969,23 @@ class LogService:
 
     @staticmethod
     def clear_logs(db: Session) -> int:
-        result = db.execute(delete(RequestLog))
-        db.commit()
-        return result.rowcount or 0
+        total_deleted = 0
+        for _ in range(LogService.CLEAR_LOGS_MAX_BATCHES):
+            ids = list(
+                db.scalars(
+                    select(RequestLog.id)
+                    .order_by(RequestLog.id.asc())
+                    .limit(LogService.CLEAR_LOGS_BATCH_SIZE)
+                )
+            )
+            if not ids:
+                break
+            result = db.execute(delete(RequestLog).where(RequestLog.id.in_(ids)))
+            db.commit()
+            total_deleted += int(result.rowcount or 0)
+            if len(ids) < LogService.CLEAR_LOGS_BATCH_SIZE:
+                break
+        return total_deleted
 
     @staticmethod
     def metric_summary(
@@ -1656,6 +1995,15 @@ class LogService:
         user_account_id: int | None = None,
         api_client_key_ids: list[int] | None = None,
     ) -> list[dict]:
+        cache_key = LogService._metric_cache_key(
+            "summary",
+            window_minutes=window_minutes,
+            user_account_id=user_account_id,
+            api_client_key_ids=api_client_key_ids,
+        )
+        cached = CacheService.get(cache_key)
+        if isinstance(cached, list):
+            return cached
         since = datetime.utcnow() - timedelta(minutes=window_minutes)
         window_seconds = max(1, window_minutes * 60)
         results: list[dict] = []
@@ -1683,6 +2031,7 @@ class LogService:
             )
             .group_by(RequestLog.provider_id, RequestLog.provider_name, RequestLog.requested_model)
             .order_by(func.count(RequestLog.id).desc())
+            .limit(LogService.METRIC_GROUP_LIMIT)
         )
         stmt = LogService._apply_metric_scope(
             stmt,
@@ -1740,15 +2089,16 @@ class LogService:
                     "total_cost": round(float(row.total_cost or 0), 6),
                 }
             )
-        return results
+        return CacheService.set(cache_key, results, ttl_seconds=5)
 
     @staticmethod
     def route_metric_summary(db: Session, *, window_minutes: int, requested_model: str | None = None) -> dict[tuple[int | None, str | None], dict]:
-        cache_key = f"route-metrics:{int(window_minutes)}:{requested_model or '*'}"
+        metric_model_expr = func.coalesce(RequestLog.model_name, RequestLog.requested_model)
+        cache_key = f"route-metrics:{int(window_minutes)}:{requested_model or '*'}:actual-model"
         cached = CacheService.get(cache_key)
         if isinstance(cached, list):
             return {
-                (item.get("provider_id"), item.get("requested_model")): {
+                (item.get("provider_id"), item.get("model_name")): {
                     "total_requests": int(item.get("total_requests") or 0),
                     "failed_requests": int(item.get("failed_requests") or 0),
                     "failure_rate": float(item.get("failure_rate") or 0.0),
@@ -1762,7 +2112,7 @@ class LogService:
         stmt = (
             select(
                 RequestLog.provider_id,
-                RequestLog.requested_model,
+                metric_model_expr.label("metric_model_name"),
                 func.count(RequestLog.id).label("total_requests"),
                 func.sum(case((RequestLog.success.is_(False), 1), else_=0)).label("failed_requests"),
                 func.avg(RequestLog.latency_ms).label("avg_latency_ms"),
@@ -1773,14 +2123,18 @@ class LogService:
             )
         )
         if requested_model:
-            stmt = stmt.where(RequestLog.requested_model == requested_model)
-        stmt = stmt.group_by(RequestLog.provider_id, RequestLog.requested_model)
+            stmt = stmt.where(metric_model_expr == requested_model)
+        stmt = (
+            stmt.group_by(RequestLog.provider_id, metric_model_expr)
+            .order_by(func.count(RequestLog.id).desc())
+            .limit(LogService.METRIC_GROUP_LIMIT)
+        )
 
         summary: dict[tuple[int | None, str | None], dict] = {}
         for row in db.execute(stmt):
             total_requests = int(row.total_requests or 0)
             failed_requests = int(row.failed_requests or 0)
-            summary[(row.provider_id, row.requested_model)] = {
+            summary[(row.provider_id, row.metric_model_name)] = {
                 "total_requests": total_requests,
                 "failed_requests": failed_requests,
                 "failure_rate": (failed_requests / total_requests) if total_requests else 0.0,
@@ -1792,7 +2146,7 @@ class LogService:
             [
                 {
                     "provider_id": provider_id,
-                    "requested_model": model_name,
+                    "model_name": model_name,
                     **payload,
                 }
                 for (provider_id, model_name), payload in summary.items()
@@ -1800,6 +2154,468 @@ class LogService:
             ttl_seconds=2,
         )
         return summary
+
+    @staticmethod
+    def _recent_runtime_second_bucket(value: datetime | None = None) -> int:
+        return int((value or datetime.utcnow()).timestamp())
+
+    @staticmethod
+    def _recent_runtime_cache_key(second_bucket: int, provider_id: int, provider_model_id: int) -> str:
+        return f"{LogService.RECENT_RUNTIME_CACHE_PREFIX}:{second_bucket}:{provider_id}:{provider_model_id}"
+
+    @staticmethod
+    def _recent_runtime_member(provider_id: int, provider_model_id: int) -> str:
+        return f"{provider_id}:{provider_model_id}"
+
+    @staticmethod
+    def _parse_recent_runtime_member(value: Any) -> tuple[int, int] | None:
+        try:
+            provider_text, provider_model_text = str(value).split(":", 1)
+            return int(provider_text), int(provider_model_text)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _cache_recent_runtime_log(log: RequestLog) -> None:
+        if (
+            log.provider_id is None
+            or log.resolved_provider_model_id is None
+            or log.log_type not in LogService.ROUTE_TRAFFIC_LOG_TYPES
+        ):
+            return
+        try:
+            provider_id = int(log.provider_id)
+            provider_model_id = int(log.resolved_provider_model_id)
+            second_bucket = LogService._recent_runtime_second_bucket(log.created_at)
+            key = LogService._recent_runtime_cache_key(second_bucket, provider_id, provider_model_id)
+            member = LogService._recent_runtime_member(provider_id, provider_model_id)
+            classification = LogService._classify_runtime_log_failure(
+                success=bool(log.success),
+                status_code=log.status_code,
+                error_code=log.error_code,
+                message=log.message,
+                content_guard_risk_level=log.content_guard_risk_level,
+            )
+            client = RedisService.get_sync_client()
+            pipe = client.pipeline()
+            pipe.zadd(LogService.RECENT_RUNTIME_ACTIVE_CACHE_KEY, {member: second_bucket})
+            pipe.expire(LogService.RECENT_RUNTIME_ACTIVE_CACHE_KEY, LogService.RECENT_RUNTIME_CACHE_TTL_SECONDS)
+            pipe.hincrby(key, "total_requests", 1)
+            if log.success:
+                pipe.hincrby(key, "success_requests", 1)
+            else:
+                pipe.hincrby(key, "failed_requests", 1)
+                pipe.hincrby(key, classification["counter_field"], 1)
+                if classification.get("category"):
+                    pipe.hset(key, "latest_error_category", classification["category"])
+                if classification.get("code"):
+                    pipe.hset(key, "latest_error_code", classification["code"])
+                if log.status_code is not None:
+                    pipe.hset(key, "latest_status_code", int(log.status_code))
+                if log.trace_id:
+                    pipe.hset(key, "latest_trace_id", log.trace_id)
+                if log.message:
+                    pipe.hset(key, "latest_error_message", str(log.message)[:500])
+                pipe.hset(key, "latest_error_at", log.created_at.isoformat() if log.created_at else datetime.utcnow().isoformat())
+            if log.model_name:
+                pipe.hset(key, "model_name", log.model_name)
+            if log.requested_model:
+                pipe.hset(key, "requested_model", log.requested_model)
+            pipe.hset(key, "latest_log_at", log.created_at.isoformat() if log.created_at else datetime.utcnow().isoformat())
+            if log.latency_ms is not None:
+                pipe.hincrbyfloat(key, "latency_sum", float(max(0, int(log.latency_ms))))
+                pipe.hincrby(key, "latency_count", 1)
+            if log.ttfb_ms is not None:
+                pipe.hincrbyfloat(key, "ttfb_sum", float(max(0, int(log.ttfb_ms))))
+                pipe.hincrby(key, "ttfb_count", 1)
+            pipe.expire(key, LogService.RECENT_RUNTIME_CACHE_TTL_SECONDS)
+            pipe.execute()
+        except Exception:
+            return
+
+    @staticmethod
+    def _classify_runtime_log_failure(
+        *,
+        success: bool,
+        status_code: int | None,
+        error_code: str | None,
+        message: str | None,
+        content_guard_risk_level: str | None,
+    ) -> dict[str, str]:
+        if success:
+            return {"counter_field": "success_requests", "category": "", "code": ""}
+        normalized_code = str(error_code or "")
+        status = int(status_code or 0) or 502
+        classified = OpenAIErrorService.classify_error(
+            status_code=status,
+            detail={"code": normalized_code, "message": message or ""},
+        )
+        category = str(classified.get("category") or "")
+        code = str(classified.get("code") or normalized_code or "")
+        if code == "content_integrity_violation" or category == "content_integrity":
+            if str(content_guard_risk_level or "").lower() == "high" or code == "content_integrity_violation":
+                return {"counter_field": "content_integrity_high_risk_count", "category": category, "code": code}
+            return {"counter_field": "ignored_failure_requests", "category": category, "code": code}
+        if category in LogService.RECENT_RUNTIME_IGNORED_ERROR_CATEGORIES:
+            return {"counter_field": "ignored_failure_requests", "category": category, "code": code}
+        if category in LogService.RECENT_RUNTIME_HEALTH_FAILURE_CATEGORIES or bool(classified.get("recoverable")):
+            field = {
+                "timeout": "timeout_count",
+                "network": "network_count",
+                "rate_limit": "rate_limit_count",
+                "server_error": "server_error_count",
+                "invalid_response": "invalid_response_count",
+            }.get(category, "upstream_transient_count")
+            return {"counter_field": field, "category": category, "code": code}
+        return {"counter_field": "ignored_failure_requests", "category": category, "code": code}
+
+    @staticmethod
+    def _recent_runtime_metrics_from_cache(
+        *,
+        window_seconds: int,
+        provider_id: int | None = None,
+        provider_model_id: int | None = None,
+    ) -> dict[tuple[int, int], dict[str, Any]] | None:
+        try:
+            client = RedisService.get_sync_client()
+            now_bucket = LogService._recent_runtime_second_bucket()
+            window = max(1, min(int(window_seconds or 5), 30))
+            if provider_id is not None and provider_model_id is not None:
+                members = [LogService._recent_runtime_member(int(provider_id), int(provider_model_id))]
+            else:
+                raw_members = client.zrangebyscore(
+                    LogService.RECENT_RUNTIME_ACTIVE_CACHE_KEY,
+                    now_bucket - window - 1,
+                    now_bucket,
+                )
+                members = [str(item) for item in raw_members]
+            parsed_members = [LogService._parse_recent_runtime_member(member) for member in members]
+            parsed_keys = [item for item in parsed_members if item is not None]
+            if not parsed_keys:
+                return {}
+            pipe = client.pipeline()
+            bucket_range = range(now_bucket - window + 1, now_bucket + 1)
+            lookup_order: list[tuple[int, int, int]] = []
+            for item_provider_id, item_provider_model_id in parsed_keys:
+                for second_bucket in bucket_range:
+                    lookup_order.append((second_bucket, item_provider_id, item_provider_model_id))
+                    pipe.hgetall(LogService._recent_runtime_cache_key(second_bucket, item_provider_id, item_provider_model_id))
+            values = pipe.execute()
+        except Exception:
+            return None
+        results: dict[tuple[int, int], dict[str, Any]] = {}
+        for (second_bucket, item_provider_id, item_provider_model_id), payload in zip(lookup_order, values, strict=False):
+            if not isinstance(payload, dict) or not payload:
+                continue
+            key = (item_provider_id, item_provider_model_id)
+            item = results.setdefault(
+                key,
+                LogService._empty_recent_runtime_metrics(
+                    provider_id=item_provider_id,
+                    provider_model_id=item_provider_model_id,
+                    window_seconds=window,
+                ),
+            )
+            LogService._merge_recent_runtime_cache_bucket(item, payload)
+        for item in results.values():
+            LogService._finalize_recent_runtime_metric(item)
+        return results
+
+    @staticmethod
+    def _merge_recent_runtime_cache_bucket(item: dict[str, Any], payload: dict[str, Any]) -> None:
+        int_fields = (
+            "total_requests",
+            "success_requests",
+            "failed_requests",
+            "ignored_failure_requests",
+            "timeout_count",
+            "network_count",
+            "rate_limit_count",
+            "server_error_count",
+            "upstream_transient_count",
+            "invalid_response_count",
+            "content_integrity_high_risk_count",
+        )
+        for field in int_fields:
+            item[field] = int(item.get(field) or 0) + int(payload.get(field) or 0)
+        item["upstream_failure_requests"] = (
+            int(item.get("timeout_count") or 0)
+            + int(item.get("network_count") or 0)
+            + int(item.get("rate_limit_count") or 0)
+            + int(item.get("server_error_count") or 0)
+            + int(item.get("upstream_transient_count") or 0)
+            + int(item.get("invalid_response_count") or 0)
+        )
+        item["model_name"] = payload.get("model_name") or item.get("model_name")
+        item["requested_model"] = payload.get("requested_model") or item.get("requested_model")
+        if payload.get("latest_log_at"):
+            item["latest_log_at"] = payload.get("latest_log_at")
+        if payload.get("latest_error_code"):
+            item["latest_error_code"] = payload.get("latest_error_code")
+            item["latest_error_category"] = payload.get("latest_error_category")
+            item["latest_status_code"] = int(payload.get("latest_status_code") or 0) or None
+            item["latest_trace_id"] = payload.get("latest_trace_id")
+            item["latest_error_message"] = payload.get("latest_error_message")
+            item["latest_error_at"] = payload.get("latest_error_at") or item.get("latest_error_at")
+        latency_count = int(payload.get("latency_count") or 0)
+        if latency_count > 0:
+            item.setdefault("_latency_sum", 0.0)
+            item.setdefault("_latency_count", 0)
+            item["_latency_sum"] += float(payload.get("latency_sum") or 0.0)
+            item["_latency_count"] += latency_count
+        ttfb_count = int(payload.get("ttfb_count") or 0)
+        if ttfb_count > 0:
+            item.setdefault("_ttfb_sum", 0.0)
+            item.setdefault("_ttfb_count", 0)
+            item["_ttfb_sum"] += float(payload.get("ttfb_sum") or 0.0)
+            item["_ttfb_count"] += ttfb_count
+
+    @staticmethod
+    def provider_model_recent_runtime_metrics(
+        db: Session,
+        *,
+        provider_id: int,
+        provider_model_id: int,
+        window_seconds: int = 5,
+        max_rows: int | None = None,
+    ) -> dict[str, Any]:
+        """返回指定提供商模型 ID 最近短窗口的正式路由运行指标。
+
+        注意：provider_model_id 是唯一模型挂载 ID；model_name 只是自定义展示/请求名，不用于唯一定位。
+        """
+        metrics = LogService.provider_model_recent_runtime_metrics_batch(
+            db,
+            window_seconds=window_seconds,
+            max_rows=max_rows,
+            provider_id=provider_id,
+            provider_model_id=provider_model_id,
+        )
+        return metrics.get(
+            (provider_id, provider_model_id),
+            LogService._empty_recent_runtime_metrics(
+                provider_id=provider_id,
+                provider_model_id=provider_model_id,
+                window_seconds=window_seconds,
+            ),
+        )
+
+    @staticmethod
+    def provider_model_recent_runtime_metrics_batch(
+        db: Session,
+        *,
+        window_seconds: int = 5,
+        max_rows: int | None = None,
+        provider_id: int | None = None,
+        provider_model_id: int | None = None,
+    ) -> dict[tuple[int, int], dict[str, Any]]:
+        """批量返回最近短窗口内活跃 provider_model 的运行指标。
+
+        为避免定时任务消耗过多资源，本函数优先读取 Redis 秒级聚合缓存；缓存不可用时只读取轻量列。
+        max_rows 为正数时限制数据库兜底扫描行数；max_rows <= 0 表示不截断最近短窗口。
+        """
+        parsed_window_seconds = max(1, min(int(window_seconds or 5), 30))
+        if max_rows is None:
+            parsed_max_rows: int | None = LogService.RECENT_RUNTIME_METRIC_MAX_ROWS
+        else:
+            raw_max_rows = int(max_rows)
+            parsed_max_rows = None if raw_max_rows <= 0 else max(1, min(raw_max_rows, 20000))
+        cached = LogService._recent_runtime_metrics_from_cache(
+            window_seconds=parsed_window_seconds,
+            provider_id=provider_id,
+            provider_model_id=provider_model_id,
+        )
+        if cached is not None:
+            if provider_id is None and provider_model_id is None:
+                return cached
+            requested_key = (
+                int(provider_id) if provider_id is not None else None,
+                int(provider_model_id) if provider_model_id is not None else None,
+            )
+            if None not in requested_key and requested_key in cached:
+                return cached
+            if None in requested_key:
+                return cached
+        since = datetime.utcnow() - timedelta(seconds=parsed_window_seconds)
+        stmt = (
+            select(
+                RequestLog.provider_id,
+                RequestLog.resolved_provider_model_id,
+                RequestLog.model_name,
+                RequestLog.requested_model,
+                RequestLog.success,
+                RequestLog.status_code,
+                RequestLog.latency_ms,
+                RequestLog.ttfb_ms,
+                RequestLog.duration_ms,
+                RequestLog.error_code,
+                RequestLog.message,
+                RequestLog.trace_id,
+                RequestLog.created_at,
+                RequestLog.content_guard_result,
+                RequestLog.content_guard_risk_level,
+            )
+            .where(
+                RequestLog.created_at >= since,
+                RequestLog.provider_id.is_not(None),
+                RequestLog.resolved_provider_model_id.is_not(None),
+                LogService._route_traffic_expr(),
+            )
+            .order_by(RequestLog.created_at.desc(), RequestLog.id.desc())
+        )
+        if parsed_max_rows is not None:
+            stmt = stmt.limit(parsed_max_rows)
+        if provider_id is not None:
+            stmt = stmt.where(RequestLog.provider_id == provider_id)
+        if provider_model_id is not None:
+            stmt = stmt.where(RequestLog.resolved_provider_model_id == provider_model_id)
+
+        grouped: dict[tuple[int, int], dict[str, Any]] = {}
+        for row in db.execute(stmt):
+            if row.provider_id is None or row.resolved_provider_model_id is None:
+                continue
+            key = (int(row.provider_id), int(row.resolved_provider_model_id))
+            item = grouped.setdefault(
+                key,
+                LogService._empty_recent_runtime_metrics(
+                    provider_id=key[0],
+                    provider_model_id=key[1],
+                    window_seconds=parsed_window_seconds,
+                ),
+            )
+            LogService._accumulate_recent_runtime_metric(item, row)
+        for item in grouped.values():
+            LogService._finalize_recent_runtime_metric(item)
+        return grouped
+
+    @staticmethod
+    def _empty_recent_runtime_metrics(*, provider_id: int, provider_model_id: int, window_seconds: int) -> dict[str, Any]:
+        return {
+            "provider_id": provider_id,
+            "provider_model_id": provider_model_id,
+            "model_name": None,
+            "requested_model": None,
+            "window_seconds": max(1, min(int(window_seconds or 5), 30)),
+            "total_requests": 0,
+            "success_requests": 0,
+            "failed_requests": 0,
+            "upstream_failure_requests": 0,
+            "ignored_failure_requests": 0,
+            "success_rate": 1.0,
+            "upstream_failure_rate": 0.0,
+            "avg_latency_ms": None,
+            "p95_latency_ms": None,
+            "avg_ttfb_ms": None,
+            "p95_ttfb_ms": None,
+            "timeout_count": 0,
+            "network_count": 0,
+            "rate_limit_count": 0,
+            "server_error_count": 0,
+            "upstream_transient_count": 0,
+            "invalid_response_count": 0,
+            "content_integrity_high_risk_count": 0,
+            "latest_error_code": None,
+            "latest_error_category": None,
+            "latest_status_code": None,
+            "latest_trace_id": None,
+            "latest_error_message": None,
+            "latest_error_at": None,
+            "latest_log_at": None,
+            "decision": "no_data",
+            "confidence": "none",
+            "_latency_values": [],
+            "_ttfb_values": [],
+            "_latency_sum": 0.0,
+            "_latency_count": 0,
+            "_ttfb_sum": 0.0,
+            "_ttfb_count": 0,
+        }
+
+    @staticmethod
+    def _accumulate_recent_runtime_metric(item: dict[str, Any], row: Any) -> None:
+        item["total_requests"] += 1
+        item["model_name"] = item.get("model_name") or row.model_name
+        item["requested_model"] = item.get("requested_model") or row.requested_model
+        item["latest_log_at"] = row.created_at.isoformat() if row.created_at else item.get("latest_log_at")
+        if row.latency_ms is not None:
+            item["_latency_values"].append(max(0, int(row.latency_ms)))
+        if row.ttfb_ms is not None:
+            item["_ttfb_values"].append(max(0, int(row.ttfb_ms)))
+        if bool(row.success):
+            item["success_requests"] += 1
+            return
+        item["failed_requests"] += 1
+        status_code = int(row.status_code or 0) or 502
+        detail = {"code": row.error_code, "message": row.message or ""}
+        classified = OpenAIErrorService.classify_error(status_code=status_code, detail=detail)
+        category = str(classified.get("category") or "")
+        code = str(classified.get("code") or row.error_code or "")
+        if not item.get("latest_error_code"):
+            item["latest_error_code"] = code or None
+            item["latest_error_category"] = category or None
+            item["latest_status_code"] = status_code
+            item["latest_trace_id"] = row.trace_id
+            item["latest_error_message"] = str(row.message or "")[:500] or None
+            item["latest_error_at"] = row.created_at.isoformat() if row.created_at else None
+        if code == "content_integrity_violation" or category == "content_integrity":
+            if str(row.content_guard_risk_level or "").lower() == "high" or code == "content_integrity_violation":
+                item["content_integrity_high_risk_count"] += 1
+            item["ignored_failure_requests"] += 1
+            return
+        if category in LogService.RECENT_RUNTIME_IGNORED_ERROR_CATEGORIES:
+            item["ignored_failure_requests"] += 1
+            return
+        if category in LogService.RECENT_RUNTIME_HEALTH_FAILURE_CATEGORIES or bool(classified.get("recoverable")):
+            item["upstream_failure_requests"] += 1
+            if category == "timeout":
+                item["timeout_count"] += 1
+            elif category == "network":
+                item["network_count"] += 1
+            elif category == "rate_limit":
+                item["rate_limit_count"] += 1
+            elif category == "server_error":
+                item["server_error_count"] += 1
+            elif category == "invalid_response":
+                item["invalid_response_count"] += 1
+            else:
+                item["upstream_transient_count"] += 1
+            return
+        item["ignored_failure_requests"] += 1
+
+    @staticmethod
+    def _finalize_recent_runtime_metric(item: dict[str, Any]) -> None:
+        total_requests = int(item.get("total_requests") or 0)
+        success_requests = int(item.get("success_requests") or 0)
+        upstream_failure_requests = int(item.get("upstream_failure_requests") or 0)
+        latency_values = item.pop("_latency_values", [])
+        ttfb_values = item.pop("_ttfb_values", [])
+        latency_sum = float(item.pop("_latency_sum", 0.0) or 0.0)
+        latency_count = int(item.pop("_latency_count", 0) or 0)
+        ttfb_sum = float(item.pop("_ttfb_sum", 0.0) or 0.0)
+        ttfb_count = int(item.pop("_ttfb_count", 0) or 0)
+        if latency_values:
+            latency_sum += float(sum(latency_values))
+            latency_count += len(latency_values)
+        if ttfb_values:
+            ttfb_sum += float(sum(ttfb_values))
+            ttfb_count += len(ttfb_values)
+        item["success_rate"] = round(success_requests / total_requests, 6) if total_requests else 1.0
+        item["upstream_failure_rate"] = round(upstream_failure_requests / total_requests, 6) if total_requests else 0.0
+        item["avg_latency_ms"] = round(latency_sum / latency_count, 2) if latency_count else None
+        item["p95_latency_ms"] = LogService._percentile(latency_values, 95) if latency_values else None
+        item["avg_ttfb_ms"] = round(ttfb_sum / ttfb_count, 2) if ttfb_count else None
+        item["p95_ttfb_ms"] = LogService._percentile(ttfb_values, 95) if ttfb_values else None
+        if total_requests <= 0:
+            item["decision"] = "no_data"
+            item["confidence"] = "none"
+        elif upstream_failure_requests <= 0:
+            item["decision"] = "healthy_signal"
+            item["confidence"] = "medium" if total_requests >= LogService.RECENT_RUNTIME_MIN_SAMPLE_FOR_ABNORMAL else "low"
+        elif total_requests < LogService.RECENT_RUNTIME_MIN_SAMPLE_FOR_ABNORMAL:
+            item["decision"] = "observe_only"
+            item["confidence"] = "low"
+        else:
+            item["decision"] = "probe_required"
+            item["confidence"] = "high" if upstream_failure_requests >= 2 else "medium"
 
     @staticmethod
     def export_logs_csv(
@@ -1828,10 +2644,13 @@ class LogService:
         content_guard_final_strategy: str | None = None,
         content_guard_retry_count: int | None = None,
         content_guard_guard_stage: str | None = None,
+        content_guard_category: str | None = None,
+        content_guard_switched_provider: bool | None = None,
+        content_guard_adaptation_skipped: bool | None = None,
         api_client_key_ids: list[int] | None = None,
         limit: int = 5000,
     ) -> str:
-        stmt = select(RequestLog)
+        stmt = select(RequestLog).options(*LogService._lightweight_log_load_options())
         stmt = LogService._apply_log_filters(
             stmt,
             log_type=log_type,
@@ -1857,86 +2676,98 @@ class LogService:
             content_guard_final_strategy=content_guard_final_strategy,
             content_guard_retry_count=content_guard_retry_count,
             content_guard_guard_stage=content_guard_guard_stage,
+            content_guard_category=content_guard_category,
+            content_guard_switched_provider=content_guard_switched_provider,
+            content_guard_adaptation_skipped=content_guard_adaptation_skipped,
             api_client_key_ids=api_client_key_ids,
         )
         rows = list(
             db.scalars(
-                stmt.order_by(RequestLog.created_at.desc(), RequestLog.id.desc()).limit(max(1, min(limit, 10000)))
+                stmt.order_by(RequestLog.created_at.desc(), RequestLog.id.desc()).limit(max(1, min(limit, LogService.EXPORT_LIMIT)))
             )
         )
         buffer = io.StringIO()
         writer = csv.writer(buffer)
         writer.writerow([
-            "created_at",
-            "log_type",
-            "trace_id",
-            "request_id",
-            "session_id",
-            "conversation_key",
-            "model",
-            "requested_model",
-            "actual_model",
-            "provider_name",
-            "tenant_name",
-            "project_name",
-            "app_name",
-            "environment_name",
-            "source_ip",
-            "http_method",
-            "success",
-            "status_code",
-            "error_type",
-            "error_code",
-            "retryable",
-            "is_stream",
-            "has_image",
-            "request_modality",
-            "uses_image_generation",
-            "generated_images_count",
-            "generated_image_mime_types",
-            "generated_image_approx_bytes",
-            "has_partial_generated_image",
-            "generated_image_result_truncated",
-            "image_response_mode",
-            "upstream_usage_missing",
-            "content_guard_result",
-            "content_guard_risk_level",
-            "content_guard_action",
-            "content_guard_final_strategy",
-            "content_guard_retry_provider_count",
-            "content_guard_reason",
-            "content_guard_excerpt",
-            "latency_ms",
-            "ttfb_ms",
-            "duration_ms",
-            "tps",
-            "prompt_tokens_display",
-            "completion_tokens_display",
-            "total_tokens_display",
-            "cache_read_tokens_display",
-            "cache_write_tokens_display",
-            "reasoning_tokens_display",
-            "prompt_audio_tokens_display",
-            "completion_audio_tokens_display",
-            "accepted_prediction_tokens_display",
-            "rejected_prediction_tokens_display",
-            "token_source",
-            "billing_multiplier",
-            "channel_price_cache_write_display",
-            "pricing_tier_name",
-            "total_cost_display",
-            "billing_calculation",
-            "reasoning_level",
-            "model_reasoning_effort",
-            "api_client_key_name",
-            "user_account_name",
-            "message",
+            "创建时间",
+            "日志类型",
+            "链路 ID",
+            "请求 ID",
+            "会话 ID",
+            "会话键",
+            "展示模型",
+            "请求模型",
+            "实际模型",
+            "提供商",
+            "租户",
+            "项目",
+            "应用",
+            "环境",
+            "来源 IP",
+            "HTTP 方法",
+            "是否成功",
+            "状态码",
+            "错误类型",
+            "错误码",
+            "是否可重试",
+            "是否流式",
+            "是否含图片",
+            "请求模态",
+            "是否生图",
+            "生成图片数",
+            "生成图片 MIME",
+            "生成图片近似字节",
+            "是否有局部生图",
+            "生图结果是否截断",
+            "图片响应模式",
+            "上游用量是否缺失",
+            "内容检测结果",
+            "内容风险等级",
+            "内容处置动作",
+            "内容命中分类",
+            "内容最终策略",
+            "内容重试提供商数",
+            "内容检测耗时 ms",
+            "内容缓冲等待 ms",
+            "内容置信度",
+            "内容评分变化",
+            "内容原因",
+            "内容摘录",
+            "延迟 ms",
+            "首包 ms",
+            "总耗时 ms",
+            "输出速率",
+            "输入 Token",
+            "输出 Token",
+            "总 Token",
+            "缓存读取 Token",
+            "缓存写入 Token",
+            "推理 Token",
+            "输入音频 Token",
+            "输出音频 Token",
+            "接受预测 Token",
+            "拒绝预测 Token",
+            "Token 来源",
+            "计费倍率",
+            "缓存写入价格",
+            "价格档位",
+            "总费用",
+            "计费公式",
+            "思维等级",
+            "模型思维参数",
+            "API Key 名称",
+            "用户账号",
+            "消息",
         ])
         for item in rows:
-            serialized = LogService.serialize_log(item)
+            serialized = LogService.serialize_log(
+                item,
+                include_payload_fields=False,
+                derive_image_observability=False,
+            )
             writer.writerow([
                 item.created_at.isoformat() if item.created_at else "",
-                item.log_type,
+                LogService.format_csv_label(item.log_type),
                 item.trace_id or "",
                 item.request_id or "",
                 item.session_id or "",
@@ -1951,27 +2782,32 @@ class LogService:
                 item.environment_name or "",
                 item.source_ip or "",
                 item.http_method or "",
-                "true" if item.success else "false",
+                LogService.format_bool_display(item.success),
                 item.status_code if item.status_code is not None else "",
                 item.error_type or "",
                 item.error_code or "",
-                "" if item.retryable is None else ("true" if item.retryable else "false"),
-                "true" if item.is_stream else "false",
-                "true" if item.has_image else "false",
+                LogService.format_bool_display(item.retryable),
+                LogService.format_bool_display(item.is_stream),
+                LogService.format_bool_display(item.has_image),
                 serialized.get("request_modality") or "",
-                "" if serialized.get("uses_image_generation") is None else ("true" if serialized.get("uses_image_generation") else "false"),
+                LogService.format_bool_display(serialized.get("uses_image_generation")),
                 serialized.get("generated_images_count") if serialized.get("generated_images_count") is not None else "",
                 ",".join(serialized.get("generated_image_mime_types") or []),
                 serialized.get("generated_image_approx_bytes") if serialized.get("generated_image_approx_bytes") is not None else "",
-                "" if serialized.get("has_partial_generated_image") is None else ("true" if serialized.get("has_partial_generated_image") else "false"),
-                "" if serialized.get("generated_image_result_truncated") is None else ("true" if serialized.get("generated_image_result_truncated") else "false"),
+                LogService.format_bool_display(serialized.get("has_partial_generated_image")),
+                LogService.format_bool_display(serialized.get("generated_image_result_truncated")),
                 serialized.get("image_response_mode") or "",
-                "" if serialized.get("upstream_usage_missing") is None else ("true" if serialized.get("upstream_usage_missing") else "false"),
-                item.content_guard_result or "",
-                item.content_guard_risk_level or "",
-                item.content_guard_action or "",
-                item.content_guard_final_strategy or "",
+                LogService.format_bool_display(serialized.get("upstream_usage_missing")),
+                LogService.format_csv_label(item.content_guard_result),
+                LogService.format_csv_label(item.content_guard_risk_level),
+                LogService.format_csv_label(item.content_guard_action),
+                item.content_guard_categories_json or "",
+                LogService.format_csv_label(item.content_guard_final_strategy),
                 item.content_guard_retry_provider_count if item.content_guard_retry_provider_count is not None else "",
+                item.content_guard_latency_ms if item.content_guard_latency_ms is not None else "",
+                item.content_guard_buffer_wait_ms if item.content_guard_buffer_wait_ms is not None else "",
+                item.content_guard_confidence if item.content_guard_confidence is not None else "",
+                item.content_guard_score_delta if item.content_guard_score_delta is not None else "",
                 item.content_guard_reason or "",
                 item.content_guard_excerpt or "",
                 item.latency_ms if item.latency_ms is not None else "",
@@ -2000,7 +2836,7 @@ class LogService:
                 item.user_account_name or "",
                 item.message or "",
             ])
-        return buffer.getvalue()
+        return "\ufeff" + buffer.getvalue()
 
     @staticmethod
     def format_billing_calculation(item: RequestLog) -> str:
@@ -2059,6 +2895,16 @@ class LogService:
         api_client_key_ids: list[int] | None = None,
     ) -> list[dict]:
         bucket_minutes = max(1, min(bucket_minutes, window_minutes))
+        cache_key = LogService._metric_cache_key(
+            "timeseries",
+            window_minutes=window_minutes,
+            bucket_minutes=bucket_minutes,
+            user_account_id=user_account_id,
+            api_client_key_ids=api_client_key_ids,
+        )
+        cached = CacheService.get(cache_key)
+        if isinstance(cached, list):
+            return cached
         since = datetime.utcnow() - timedelta(minutes=window_minutes)
         stmt = (
             select(
@@ -2122,7 +2968,28 @@ class LogService:
                     "total_cost": round(sum(float(item.total_cost or 0) for item in bucket_logs), 6),
                 }
             )
-        return results
+        return CacheService.set(cache_key, results, ttl_seconds=5)
+
+    @staticmethod
+    def _metric_cache_key(
+        metric_name: str,
+        *,
+        window_minutes: int,
+        bucket_minutes: int | None = None,
+        user_account_id: int | None = None,
+        api_client_key_ids: list[int] | None = None,
+    ) -> str:
+        sorted_key_ids = sorted(api_client_key_ids or [])
+        if sorted_key_ids:
+            key_material = ",".join(str(item) for item in sorted_key_ids)
+            key_digest = hashlib.sha256(key_material.encode("utf-8")).hexdigest()[:16]
+            api_key_scope = f"{len(sorted_key_ids)}:{key_digest}"
+        else:
+            api_key_scope = "*"
+        return (
+            f"metrics:{metric_name}:window={int(window_minutes)}:"
+            f"bucket={int(bucket_minutes or 0)}:user={user_account_id or 0}:keys={api_key_scope}"
+        )
 
     @staticmethod
     def metric_period_report(
@@ -2305,20 +3172,7 @@ class LogService:
 
     @staticmethod
     def _period_bucket_expr(db: Session, period_type: str):
-        dialect = db.get_bind().dialect.name
-        if dialect == "sqlite":
-            if period_type == "day":
-                return func.strftime("%Y-%m-%d", RequestLog.created_at)
-            if period_type == "week":
-                return func.strftime("%Y-%W", RequestLog.created_at)
-            return func.strftime("%Y-%m", RequestLog.created_at)
-        if dialect == "postgresql":
-            return func.date_trunc(period_type, RequestLog.created_at)
-        if period_type == "day":
-            return func.date(RequestLog.created_at)
-        if period_type == "week":
-            return func.extract("week", RequestLog.created_at)
-        return func.extract("month", RequestLog.created_at)
+        return func.date_trunc(period_type, RequestLog.created_at)
 
     @staticmethod
     def _normalize_period_row_start(value, period_type: str) -> datetime:

@@ -166,6 +166,15 @@ class OpenAIErrorService:
                 "client_cancelled",
                 catalog_spec.next_action,
             )
+        if detail_code == "content_integrity_violation" or "content_integrity_violation" in basis:
+            return OpenAIErrorService._classification(
+                "content_policy_error",
+                "content_integrity_violation",
+                False,
+                False,
+                "content_integrity",
+                catalog_spec.next_action,
+            )
         if status_code == 401:
             return OpenAIErrorService._classification(
                 "authentication_error",

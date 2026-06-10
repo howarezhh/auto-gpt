@@ -5,9 +5,12 @@ import logging
 import time
 import threading
 import hashlib
+from datetime import UTC, datetime
 from typing import Any
 
 from redis.exceptions import RedisError
+from sqlalchemy import select
+from sqlalchemy.orm import load_only
 
 from app.config import get_settings
 from app.database import SessionLocal
@@ -23,6 +26,15 @@ class RequestLogQueueService:
 
     QUEUE_KEY = "request_logs:queue"
     PROCESSING_KEY = "request_logs:processing"
+    DEAD_LETTER_KEY = "request_logs:dead_letter"
+    FAILURE_COUNT_KEY = "request_logs:failure_count"
+    RECOVERY_BATCH_SIZE = 500
+    RECOVERY_MAX_BATCHES = 100
+    MAX_BATCH_SIZE = 500
+    MAX_INGRESS_QUEUE_SIZE = 100000
+    MAX_PROCESSING_ATTEMPTS = 5
+    DEAD_LETTER_LIMIT = 1000
+    DEAD_LETTER_ITEM_MAX_CHARS = 65536
     _workers: list[asyncio.Task] = []
     _stop_event: asyncio.Event | None = None
     _runtime_enabled: bool | None = None
@@ -44,6 +56,7 @@ class RequestLogQueueService:
         if not cls.enabled():
             return False
         kwargs = cls._with_dedupe_key(dict(kwargs))
+        kwargs.setdefault("_queue_enqueued_at", time.time())
         loop = RedisService.event_loop()
         if loop is not None:
             try:
@@ -51,8 +64,13 @@ class RequestLogQueueService:
                 if RedisService.event_loop_thread_id() == threading.get_ident():
                     queue = cls._ingress_queue
                     if queue is not None:
-                        queue.put_nowait(dict(kwargs))
-                        return True
+                        try:
+                            queue.put_nowait(dict(kwargs))
+                            return True
+                        except asyncio.QueueFull:
+                            raw_item = dumps_json({"kwargs": kwargs})
+                            RedisService.get_sync_client().lpush(cls.QUEUE_KEY, raw_item)
+                            return True
                 future = asyncio.run_coroutine_threadsafe(cls._enqueue_via_ingress(dict(kwargs)), loop)
                 future.add_done_callback(lambda fut: fut.exception() if not fut.cancelled() else None)
                 return True
@@ -69,11 +87,13 @@ class RequestLogQueueService:
             return False
 
     @classmethod
-    @classmethod
     def _ensure_ingress_worker(cls, loop: asyncio.AbstractEventLoop) -> None:
         with cls._ingress_guard:
             if cls._ingress_queue is None:
-                ingress_queue_size = max(1000, int(getattr(get_settings(), "request_log_ingress_queue_size", 20000) or 0))
+                ingress_queue_size = min(
+                    cls.MAX_INGRESS_QUEUE_SIZE,
+                    max(1000, int(getattr(get_settings(), "request_log_ingress_queue_size", 20000) or 0)),
+                )
                 cls._ingress_queue = asyncio.Queue(maxsize=ingress_queue_size)
             if cls._ingress_task is None or cls._ingress_task.done():
                 cls._ingress_task = loop.create_task(cls._ingress_worker(), name="request-log-ingress")
@@ -95,6 +115,7 @@ class RequestLogQueueService:
 
     @classmethod
     async def _ingress_worker(cls) -> None:
+        batch: list[dict[str, Any]] = []
         while True:
             try:
                 queue = cls._ingress_queue
@@ -102,7 +123,7 @@ class RequestLogQueueService:
                     return
                 first_item = await queue.get()
                 batch = [first_item]
-                batch_size = max(1, int(get_settings().request_log_queue_batch_size or 1))
+                batch_size = min(cls.MAX_BATCH_SIZE, max(1, int(get_settings().request_log_queue_batch_size or 1)))
                 while len(batch) < batch_size:
                     try:
                         batch.append(queue.get_nowait())
@@ -114,7 +135,10 @@ class RequestLogQueueService:
                 except (RedisError, RuntimeError, TypeError, ValueError) as exc:
                     logger.warning("Failed to flush request log ingress batch to Redis; falling back to direct DB write: %s", exc)
                     await asyncio.to_thread(cls._write_kwargs_batch, batch)
+                batch = []
             except asyncio.CancelledError:
+                if batch:
+                    await asyncio.to_thread(cls._write_kwargs_batch, batch)
                 raise
             except Exception as exc:
                 logger.warning("Request log ingress worker failed: %s", exc)
@@ -176,16 +200,27 @@ class RequestLogQueueService:
     async def _recover_processing_items(cls) -> None:
         try:
             client = RedisService.get_client()
-            items = await client.lrange(cls.PROCESSING_KEY, 0, -1)
-            if items:
+            for _ in range(cls.RECOVERY_MAX_BATCHES):
+                items = await client.lrange(cls.PROCESSING_KEY, 0, cls.RECOVERY_BATCH_SIZE - 1)
+                if not items:
+                    break
                 await client.rpush(cls.QUEUE_KEY, *items)
-                await client.delete(cls.PROCESSING_KEY)
+                await client.ltrim(cls.PROCESSING_KEY, len(items), -1)
+                if len(items) < cls.RECOVERY_BATCH_SIZE:
+                    break
+            else:
+                logger.warning(
+                    "Request log processing recovery reached batch cap: %s",
+                    cls.RECOVERY_MAX_BATCHES,
+                )
         except Exception as exc:
             logger.warning("Failed to recover request log processing queue: %s", exc)
 
     @classmethod
     async def _worker(cls, index: int) -> None:
         while cls._stop_event is None or not cls._stop_event.is_set():
+            batch: list[str] = []
+            write_completed = False
             try:
                 raw_item = await cls._blocking_move_to_processing(timeout=1)
                 if not raw_item:
@@ -193,13 +228,14 @@ class RequestLogQueueService:
                 batch = [raw_item]
                 batch.extend(await cls._drain_available_items())
                 await asyncio.to_thread(cls._write_batch, batch)
-                client = RedisService.get_client()
-                for item in batch:
-                    await client.lrem(cls.PROCESSING_KEY, 1, item)
+                write_completed = True
+                await cls._ack_processing_batch(batch)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 logger.warning("Request log worker %s failed: %s", index, exc)
+                if batch and not write_completed:
+                    await cls._requeue_processing_batch(batch, error=exc)
                 await asyncio.sleep(0.2)
 
     @classmethod
@@ -210,7 +246,7 @@ class RequestLogQueueService:
     @classmethod
     async def _drain_available_items(cls) -> list[str]:
         settings = get_settings()
-        batch_size = max(1, int(settings.request_log_queue_batch_size or 1))
+        batch_size = min(cls.MAX_BATCH_SIZE, max(1, int(settings.request_log_queue_batch_size or 1)))
         if batch_size <= 1:
             return []
         client = RedisService.get_client()
@@ -222,50 +258,97 @@ class RequestLogQueueService:
             items.append(raw_item)
         return items
 
+    @classmethod
+    async def _ack_processing_batch(cls, batch: list[str]) -> None:
+        if not batch:
+            return
+        client = RedisService.get_client()
+        pipe = client.pipeline(transaction=True)
+        for item in batch:
+            pipe.lrem(cls.PROCESSING_KEY, 1, item)
+        await pipe.execute()
+
+    @classmethod
+    async def _requeue_processing_batch(cls, batch: list[str], *, error: BaseException | None = None) -> None:
+        if not batch:
+            return
+        try:
+            client = RedisService.get_client()
+            pipe = client.pipeline(transaction=True)
+            for item in batch:
+                retry_item, dead_letter_item = cls._prepare_failed_processing_item(item, error=error)
+                if dead_letter_item is not None:
+                    pipe.lpush(cls.DEAD_LETTER_KEY, dead_letter_item)
+                    pipe.ltrim(cls.DEAD_LETTER_KEY, 0, cls.DEAD_LETTER_LIMIT - 1)
+                elif retry_item is not None:
+                    pipe.rpush(cls.QUEUE_KEY, retry_item)
+                pipe.lrem(cls.PROCESSING_KEY, 1, item)
+            pipe.incr(cls.FAILURE_COUNT_KEY)
+            await pipe.execute()
+        except Exception as exc:
+            logger.warning("Failed to requeue request log processing batch: %s", exc)
+
+    @classmethod
+    def _prepare_failed_processing_item(
+        cls,
+        raw_item: str,
+        *,
+        error: BaseException | None = None,
+    ) -> tuple[str | None, str | None]:
+        payload = loads_json(raw_item, {})
+        error_message = str(error or "")[:1000] or None
+        if not isinstance(payload, dict):
+            return None, cls._dead_letter_payload(
+                raw_item=raw_item,
+                attempts=cls.MAX_PROCESSING_ATTEMPTS,
+                error=error_message or "request log queue payload is not a JSON object",
+            )
+        attempts = cls._coerce_attempt_count(payload.get("_queue_attempts")) + 1
+        payload["_queue_attempts"] = attempts
+        payload["_last_queue_error"] = error_message
+        payload["_last_queue_failed_at"] = datetime.now(UTC).isoformat()
+        if attempts >= cls.MAX_PROCESSING_ATTEMPTS:
+            return None, cls._dead_letter_payload(raw_item=dumps_json(payload), attempts=attempts, error=error_message)
+        return dumps_json(payload), None
+
+    @staticmethod
+    def _coerce_attempt_count(value: Any) -> int:
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    @classmethod
+    def _dead_letter_payload(cls, *, raw_item: str, attempts: int, error: str | None) -> str:
+        clipped_item = raw_item[: cls.DEAD_LETTER_ITEM_MAX_CHARS]
+        return dumps_json(
+            {
+                "failed_at": datetime.now(UTC).isoformat(),
+                "attempts": attempts,
+                "error": error,
+                "truncated": len(raw_item) > len(clipped_item),
+                "item": clipped_item,
+            }
+        )
+
     @staticmethod
     def _write_batch(raw_items: list[str]) -> None:
-        from app.services.log_service import LogService
-        from app.models.provider import Provider
-
         if not raw_items:
             return
-        db = SessionLocal()
-        finalize_jobs: list[tuple[Any, dict[str, Any]]] = []
-        try:
-            for raw_item in raw_items:
-                payload = loads_json(raw_item, {})
-                kwargs = payload.get("kwargs") if isinstance(payload, dict) else None
-                if not isinstance(kwargs, dict):
-                    continue
-                payload_kwargs = dict(kwargs)
-                existing = RequestLogQueueService._find_existing_log(db, payload_kwargs)
-                if existing is not None:
-                    finalize_jobs.append((existing, kwargs))
-                    continue
-                RequestLogQueueService._sanitize_log_provider_id(db, payload_kwargs, Provider)
-                payload_kwargs.pop("_dedupe_key", None)
-                payload_kwargs["auto_commit"] = False
-                payload_kwargs["refresh_after_create"] = False
-                payload_kwargs["flush_after_add"] = False
-                payload_kwargs["enqueue_finalize"] = False
-                log = LogService.create_log(db, **payload_kwargs)
-                finalize_jobs.append((log, kwargs))
-            if finalize_jobs:
-                db.flush()
-                from app.logging.adapters.request_adapter import RequestLogRecorder
-
-                for log, _ in finalize_jobs:
-                    RequestLogRecorder.record_events_from_summary(db, log, auto_commit=False)
-            db.commit()
-            RequestLogQueueService._enqueue_finalize_jobs(finalize_jobs)
-        except Exception:
-            db.rollback()
-            raise
-        finally:
-            db.close()
+        payloads: list[dict[str, Any]] = []
+        for raw_item in raw_items:
+            payload = loads_json(raw_item, {})
+            kwargs = payload.get("kwargs") if isinstance(payload, dict) else None
+            if isinstance(kwargs, dict):
+                payloads.append(dict(kwargs))
+        RequestLogQueueService._write_payloads_batch(payloads)
 
     @staticmethod
     def _write_kwargs_batch(items: list[dict[str, Any]]) -> None:
+        RequestLogQueueService._write_payloads_batch([dict(item) for item in items if isinstance(item, dict)])
+
+    @staticmethod
+    def _write_payloads_batch(items: list[dict[str, Any]]) -> None:
         from app.services.log_service import LogService
         from app.models.provider import Provider
 
@@ -273,28 +356,39 @@ class RequestLogQueueService:
             return
         db = SessionLocal()
         finalize_jobs: list[tuple[Any, dict[str, Any]]] = []
+        created_logs: list[Any] = []
         try:
+            existing_by_signature = RequestLogQueueService._load_existing_logs_for_payloads(db, items)
+            valid_provider_ids = RequestLogQueueService._load_valid_provider_ids(db, items, Provider)
+            seen_signatures: set[tuple[Any, ...]] = set()
             for kwargs in items:
-                if not isinstance(kwargs, dict):
-                    continue
                 payload = dict(kwargs)
-                existing = RequestLogQueueService._find_existing_log(db, payload)
+                signature = RequestLogQueueService._dedupe_signature(payload)
+                if signature is not None and signature in seen_signatures:
+                    continue
+                existing = existing_by_signature.get(signature) if signature is not None else None
                 if existing is not None:
+                    seen_signatures.add(signature)
                     finalize_jobs.append((existing, kwargs))
                     continue
-                RequestLogQueueService._sanitize_log_provider_id(db, payload, Provider)
+                RequestLogQueueService._sanitize_log_provider_id(payload, valid_provider_ids)
                 payload.pop("_dedupe_key", None)
+                payload.pop("_queue_enqueued_at", None)
                 payload["auto_commit"] = False
                 payload["refresh_after_create"] = False
                 payload["flush_after_add"] = False
                 payload["enqueue_finalize"] = False
                 log = LogService.create_log(db, **payload)
+                if signature is not None:
+                    seen_signatures.add(signature)
+                    existing_by_signature[signature] = log
+                created_logs.append(log)
                 finalize_jobs.append((log, kwargs))
             if finalize_jobs:
                 db.flush()
                 from app.logging.adapters.request_adapter import RequestLogRecorder
 
-                for log, _ in finalize_jobs:
+                for log in created_logs:
                     RequestLogRecorder.record_events_from_summary(db, log, auto_commit=False)
             db.commit()
             RequestLogQueueService._enqueue_finalize_jobs(finalize_jobs)
@@ -305,7 +399,65 @@ class RequestLogQueueService:
             db.close()
 
     @staticmethod
-    def _sanitize_log_provider_id(db, payload: dict[str, Any], provider_cls) -> None:
+    def _load_existing_logs_for_payloads(db, payloads: list[dict[str, Any]]) -> dict[tuple[Any, ...], Any]:
+        from app.models.request_log import RequestLog
+
+        trace_ids = {
+            str(payload.get("trace_id"))
+            for payload in payloads
+            if payload.get("trace_id")
+        }
+        if not trace_ids:
+            return {}
+        rows = list(
+            db.scalars(
+                select(RequestLog)
+                .options(
+                    load_only(
+                        RequestLog.id,
+                        RequestLog.trace_id,
+                        RequestLog.request_id,
+                        RequestLog.log_type,
+                        RequestLog.request_path,
+                        RequestLog.http_method,
+                    )
+                )
+                .where(RequestLog.trace_id.in_(trace_ids))
+                .order_by(RequestLog.id.desc())
+            )
+        )
+        existing: dict[tuple[Any, ...], Any] = {}
+        for row in rows:
+            signature = RequestLogQueueService._dedupe_signature(
+                {
+                    "trace_id": row.trace_id,
+                    "request_id": row.request_id,
+                    "log_type": row.log_type,
+                    "request_path": row.request_path,
+                    "http_method": row.http_method,
+                }
+            )
+            if signature is not None and signature not in existing:
+                existing[signature] = row
+        return existing
+
+    @staticmethod
+    def _load_valid_provider_ids(db, payloads: list[dict[str, Any]], provider_cls) -> set[int]:
+        provider_ids: set[int] = set()
+        for payload in payloads:
+            try:
+                provider_ids.add(int(payload.get("provider_id")))
+            except (TypeError, ValueError):
+                continue
+        if not provider_ids:
+            return set()
+        return {
+            int(item)
+            for item in db.scalars(select(provider_cls.id).where(provider_cls.id.in_(provider_ids)))
+        }
+
+    @staticmethod
+    def _sanitize_log_provider_id(payload: dict[str, Any], valid_provider_ids: set[int]) -> None:
         provider_id = payload.get("provider_id")
         if provider_id is None:
             return
@@ -314,8 +466,10 @@ class RequestLogQueueService:
         except (TypeError, ValueError):
             payload["provider_id"] = None
             return
-        if db.get(provider_cls, normalized_provider_id) is None:
+        if normalized_provider_id not in valid_provider_ids:
             payload["provider_id"] = None
+            return
+        payload["provider_id"] = normalized_provider_id
 
     @staticmethod
     def _with_dedupe_key(kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -334,26 +488,17 @@ class RequestLogQueueService:
         return kwargs
 
     @staticmethod
-    def _find_existing_log(db, payload: dict[str, Any]):
-        from app.models.request_log import RequestLog
-
+    def _dedupe_signature(payload: dict[str, Any]) -> tuple[Any, ...] | None:
         trace_id = payload.get("trace_id")
         if not trace_id:
             return None
-        stmt = db.query(RequestLog).filter(RequestLog.trace_id == trace_id)
-        request_id = payload.get("request_id")
-        if request_id:
-            stmt = stmt.filter(RequestLog.request_id == request_id)
-        log_type = payload.get("log_type")
-        if log_type:
-            stmt = stmt.filter(RequestLog.log_type == log_type)
-        request_path = payload.get("request_path")
-        if request_path:
-            stmt = stmt.filter(RequestLog.request_path == request_path)
-        http_method = payload.get("http_method")
-        if http_method:
-            stmt = stmt.filter(RequestLog.http_method == http_method)
-        return stmt.order_by(RequestLog.id.desc()).first()
+        return (
+            str(trace_id),
+            payload.get("request_id") or None,
+            payload.get("log_type") or None,
+            payload.get("request_path") or None,
+            payload.get("http_method") or None,
+        )
 
     @staticmethod
     def _enqueue_finalize_jobs(finalize_jobs: list[tuple[Any, dict[str, Any]]]) -> None:
@@ -375,16 +520,34 @@ class RequestLogQueueService:
     @classmethod
     async def queue_lengths(cls) -> dict[str, int]:
         client = RedisService.get_client()
-        queued, processing = await asyncio.gather(
+        queued, processing, dead_letter = await asyncio.gather(
             client.llen(cls.QUEUE_KEY),
             client.llen(cls.PROCESSING_KEY),
+            client.llen(cls.DEAD_LETTER_KEY),
         )
+        failure_count = await client.get(cls.FAILURE_COUNT_KEY)
         ingress = cls._ingress_queue.qsize() if cls._ingress_queue is not None else 0
-        return {"queued": int(queued or 0), "processing": int(processing or 0), "ingress": int(ingress or 0)}
+        return {
+            "queued": int(queued or 0),
+            "processing": int(processing or 0),
+            "dead_letter": int(dead_letter or 0),
+            "failure_count": int(failure_count or 0),
+            "ingress": int(ingress or 0),
+        }
 
     @classmethod
     async def wait_until_idle(cls, *, timeout_seconds: float = 2.0, poll_interval_seconds: float = 0.05) -> dict[str, Any]:
         """等待请求日志队列进入空闲态，供日志页手动刷新时尽量看到最新结果。"""
+        if not cls.enabled():
+            return {
+                "idle": True,
+                "timed_out": False,
+                "queued": 0,
+                "processing": 0,
+                "dead_letter": 0,
+                "failure_count": 0,
+                "ingress": 0,
+            }
         if timeout_seconds <= 0:
             lengths = await cls.queue_lengths()
             return {"idle": (lengths["ingress"] + lengths["queued"] + lengths["processing"]) == 0, "timed_out": False, **lengths}
@@ -397,3 +560,27 @@ class RequestLogQueueService:
             if time.monotonic() >= deadline:
                 return {"idle": False, "timed_out": True, **last_lengths}
             await asyncio.sleep(max(0.01, poll_interval_seconds))
+
+    @classmethod
+    def discard_pending(cls) -> dict[str, int]:
+        """清空尚未落库的请求日志队列，供管理员执行日志清空时避免旧日志回流。"""
+        discarded = {"ingress": 0, "queued": 0, "processing": 0, "dead_letter": 0}
+        queue = cls._ingress_queue
+        if queue is not None:
+            while True:
+                try:
+                    queue.get_nowait()
+                    discarded["ingress"] += 1
+                except asyncio.QueueEmpty:
+                    break
+        if not cls.enabled():
+            return discarded
+        try:
+            client = RedisService.get_sync_client()
+            discarded["queued"] = int(client.llen(cls.QUEUE_KEY) or 0)
+            discarded["processing"] = int(client.llen(cls.PROCESSING_KEY) or 0)
+            discarded["dead_letter"] = int(client.llen(cls.DEAD_LETTER_KEY) or 0)
+            client.delete(cls.QUEUE_KEY, cls.PROCESSING_KEY, cls.DEAD_LETTER_KEY)
+        except (RedisError, RuntimeError, TypeError, ValueError) as exc:
+            logger.warning("Failed to discard pending request log queue before clearing logs: %s", exc)
+        return discarded

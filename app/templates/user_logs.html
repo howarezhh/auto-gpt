@@ -105,18 +105,82 @@
                     </select>
                 </label>
                 <label>
+                    <span>内容检测结果</span>
+                    <select class="field-input" id="logs-content-guard-result">
+                        <option value="">全部</option>
+                        <option value="pass">通过</option>
+                        <option value="review">需复核</option>
+                        <option value="block">已拦截</option>
+                    </select>
+                </label>
+                <label>
+                    <span>内容风险等级</span>
+                    <select class="field-input" id="logs-content-guard-risk-level">
+                        <option value="">全部</option>
+                        <option value="low">低</option>
+                        <option value="medium">中</option>
+                        <option value="high">高</option>
+                    </select>
+                </label>
+                <label>
+                    <span>内容处置动作</span>
+                    <select class="field-input" id="logs-content-guard-action">
+                        <option value="">全部</option>
+                        <option value="allow">放行</option>
+                        <option value="record">记录</option>
+                        <option value="async_review">异步复核</option>
+                        <option value="block">阻断</option>
+                    </select>
+                </label>
+                <label>
+                    <span>最终策略</span>
+                    <select class="field-input" id="logs-content-guard-final-strategy">
+                        <option value="">全部</option>
+                        <option value="allow">放行</option>
+                        <option value="record_only">仅记录</option>
+                        <option value="async_review">异步复核</option>
+                        <option value="block">阻断</option>
+                        <option value="safe_error">安全错误</option>
+                        <option value="switch_provider">切换提供商</option>
+                        <option value="switch_provider_succeeded">切换成功</option>
+                        <option value="switch_provider_exhausted">切换耗尽</option>
+                    </select>
+                </label>
+                <label>
+                    <span>检测阶段</span>
+                    <select class="field-input" id="logs-content-guard-stage">
+                        <option value="">全部</option>
+                        <option value="non_stream_response">非流式响应</option>
+                        <option value="stream_buffer">流式首段缓冲</option>
+                        <option value="stream_chunk">流式分块</option>
+                        <option value="runtime_async_review">异步复核</option>
+                    </select>
+                </label>
+                <label>
+                    <span>命中分类</span>
+                    <input class="field-input" id="logs-content-guard-category" type="text" placeholder="输入分类标识">
+                </label>
+                <label>
+                    <span>是否切换提供商</span>
+                    <select class="field-input" id="logs-content-guard-switched-provider">
+                        <option value="">全部</option>
+                        <option value="true">已切换</option>
+                        <option value="false">未切换</option>
+                    </select>
+                </label>
+                <label>
+                    <span>是否适配跳过</span>
+                    <select class="field-input" id="logs-content-guard-adaptation-skipped">
+                        <option value="">全部</option>
+                        <option value="true">已跳过</option>
+                        <option value="false">未跳过</option>
+                    </select>
+                </label>
+                <label>
                     <span>会话键</span>
                     <input class="field-input" id="logs-conversation-key" type="text" placeholder="例如 conversation_key / session_id">
                 </label>
-                <label class="logs-toggle-field" for="logs-exclude-health-checks">
-                    <span class="logs-toggle-copy">
-                        <strong>隐藏健康检查日志</strong>
-                    </span>
-                    <span class="settings-switch-control">
-                        <input id="logs-exclude-health-checks" type="checkbox" checked>
-                        <span class="settings-switch-slider"></span>
-                    </span>
-                </label>
+                <input id="logs-exclude-health-checks" type="checkbox" checked hidden>
             </div>
         </details>
 </section>

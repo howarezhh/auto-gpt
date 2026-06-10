@@ -1,7 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, Numeric, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, Numeric, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -19,7 +19,23 @@ class RequestLog(Base):
     __tablename__ = "request_logs"
     __table_args__ = (
         Index("ix_request_logs_created_at", "created_at"),
-        Index("ix_request_logs_route_metrics", "log_type", "created_at", "provider_id", "requested_model", "success"),
+        Index("ix_request_logs_route_metrics", "log_type", "created_at", "provider_id", "model_name", "success"),
+        Index("ix_request_logs_recent_provider_model_health", "created_at", "provider_id", "resolved_provider_model_id", "log_type", "success"),
+        Index(
+            "ix_request_logs_token_finalize_pending",
+            "created_at",
+            "id",
+            postgresql_where=text(
+                "api_client_key_id IS NOT NULL "
+                "AND success = true "
+                "AND log_type IN ('chat','responses','embeddings') "
+                "AND request_path IS NOT NULL "
+                "AND request_path <> '/v1/models' "
+                "AND request_path NOT LIKE '/v1/models/%' "
+                "AND (billing_finalized_at IS NULL OR billing_status = 'pending_tokens') "
+                "AND (token_finalize_attempt_count IS NULL OR token_finalize_attempt_count < 3)"
+            ),
+        ),
         Index("ix_request_logs_api_key_created_at", "api_client_key_id", "created_at"),
         Index("ix_request_logs_user_account_created_at", "user_account_id", "created_at"),
         Index("ix_request_logs_session_id", "session_id"),
@@ -105,6 +121,8 @@ class RequestLog(Base):
     content_guard_buffer_wait_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     content_guard_retry_provider_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     content_guard_final_strategy: Mapped[str | None] = mapped_column(Text, nullable=True)
+    content_guard_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    content_guard_score_delta: Mapped[int | None] = mapped_column(Integer, nullable=True)
     api_client_key_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     api_client_key_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     api_client_key_prefix: Mapped[str | None] = mapped_column(Text, nullable=True)

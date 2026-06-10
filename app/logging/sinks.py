@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import logging
+
 from sqlalchemy.orm import Session
 
 from app.logging.envelope import LogEvent
-from app.logging.registry import filter_payload_for_model, model_for_event
+from app.logging.registry import columns_for_model, filter_payload_for_model, model_for_event
+from app.logging.sanitizers import dumps_sanitized
+from app.models.logging_events import ExceptionEvent
+
+
+logger = logging.getLogger(__name__)
 
 
 class DatabaseLogSink:
@@ -11,8 +18,43 @@ class DatabaseLogSink:
     def write(db: Session, event: LogEvent, *, auto_commit: bool = True):
         model = model_for_event(event.envelope.event_name)
         if model is None:
-            return None
+            logger.warning("Unregistered typed log event ignored: %s", event.envelope.event_name)
+            item = ExceptionEvent(
+                event_id=event.envelope.event_id,
+                event_type="logging",
+                event_name="typed_log_unregistered_event",
+                trace_id=event.envelope.trace_id,
+                correlation_id=event.envelope.correlation_id,
+                module=event.envelope.module or "logging",
+                severity="warning",
+                actor_type=event.envelope.actor_type,
+                actor_id=event.envelope.actor_id,
+                source_ip=event.envelope.source_ip,
+                result="failed",
+                exception_type="UnregisteredTypedLogEvent",
+                error_code="typed_log_event_unregistered",
+                message=f"未注册的类型化日志事件：{event.envelope.event_name}",
+                detail_json=dumps_sanitized({
+                    "event_name": event.envelope.event_name,
+                    "event_type": event.envelope.event_type,
+                    "payload_keys": sorted(event.payload.keys()),
+                }),
+                occurred_at=event.envelope.occurred_at,
+            )
+            db.add(item)
+            if auto_commit:
+                db.commit()
+                db.refresh(item)
+            return item
+        allowed_columns = columns_for_model(model)
         payload = filter_payload_for_model(model, event.payload)
+        extra_payload = {
+            key: value
+            for key, value in event.payload.items()
+            if key not in allowed_columns and value is not None
+        }
+        if extra_payload and "diagnostics_json" in allowed_columns and not payload.get("diagnostics_json"):
+            payload["diagnostics_json"] = dumps_sanitized(extra_payload)
         if hasattr(model, "event_id"):
             payload.setdefault("event_id", event.envelope.event_id)
         if hasattr(model, "event_type"):

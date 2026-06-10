@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.alert_event import AlertEvent
@@ -16,7 +16,6 @@ from app.services.billing_service import BillingService
 from app.services.cache_service import CacheService
 from app.services.log_service import LogService
 from app.services.provider_service import ProviderService
-from app.services.user_auth_service import UserAuthService
 from app.services.system_metrics_service import SystemMetricsService
 from app.utils.json_utils import dumps_json, safeJsonParse
 
@@ -24,6 +23,11 @@ from app.utils.json_utils import dumps_json, safeJsonParse
 class AlertService:
     DASHBOARD_CACHE_KEY = "alerts-dashboard-payload:v1"
     DASHBOARD_CACHE_TTL_SECONDS = 15
+    ALERT_USER_CANDIDATE_LIMIT = 500
+    ALERT_PROVIDER_EVENT_LIMIT = 100
+    ALERT_EVENT_LIST_LIMIT = 500
+    ALERT_RESOLVE_BATCH_SIZE = 500
+    ALERT_RESOLVE_MAX_BATCHES = 100
     PROVIDER_AVAILABILITY_LABELS = {
         "healthy": "全部可用",
         "degraded": "部分可用",
@@ -128,7 +132,7 @@ class AlertService:
         unhealthy_providers = [
             item for item in providers
             if item["health_status"] != "healthy" or item["circuit_state"] == "open"
-        ]
+        ][:AlertService.ALERT_PROVIDER_EVENT_LIMIT]
         abnormal_api_keys = AlertService.list_abnormal_api_keys(db, limit=100)
         alert_users = AlertService.list_alert_users(db, limit=100)
         recent_since = datetime.utcnow() - timedelta(hours=24)
@@ -217,23 +221,30 @@ class AlertService:
         now = datetime.utcnow()
         status_expr = ApiKeyAdminService._api_key_status_expr(now)
         rows = db.execute(
-            select(ApiClientKey, status_expr.label("status"))
+            select(
+                ApiClientKey,
+                status_expr.label("status"),
+                UserAccount.username.label("owner_username"),
+                UserAccount.balance_amount.label("owner_balance_amount"),
+            )
             .outerjoin(UserAccount, ApiClientKey.owner_user_id == UserAccount.id)
             .where(status_expr != "active")
             .order_by(ApiClientKey.last_used_at.desc(), ApiClientKey.id.desc())
             .limit(max(1, limit))
         ).all()
         items: list[dict] = []
-        for api_key, status in rows:
-            owner = db.get(UserAccount, api_key.owner_user_id) if api_key.owner_user_id else None
-            balance_amount = owner.balance_amount if owner is not None else None
+        for api_key, status, owner_username, owner_balance_amount in rows:
             items.append(
                 {
                     "id": api_key.id,
                     "name": api_key.name,
-                    "owner_user_name": owner.username if owner is not None else None,
+                    "owner_user_name": owner_username,
                     "status": status,
-                    "balance_amount": BillingService.to_float(balance_amount) if balance_amount is not None else None,
+                    "balance_amount": (
+                        BillingService.to_float(owner_balance_amount)
+                        if owner_balance_amount is not None
+                        else None
+                    ),
                     "last_used_at": api_key.last_used_at.isoformat() if api_key.last_used_at else None,
                 }
             )
@@ -241,10 +252,26 @@ class AlertService:
 
     @staticmethod
     def list_alert_users(db: Session, *, limit: int = 100) -> list[dict]:
-        users = [
-            item for item in UserAuthService.list_users(db)
-            if item.enabled
-        ]
+        users = list(
+            db.scalars(
+                select(UserAccount)
+                .where(
+                    UserAccount.enabled.is_(True),
+                    or_(
+                        UserAccount.balance_amount <= 0,
+                        (
+                            (UserAccount.balance_amount > 0)
+                            & (
+                                (UserAccount.balance_amount - UserAccount.frozen_amount)
+                                <= (UserAccount.balance_amount * 0.2)
+                            )
+                        ),
+                    ),
+                )
+                .order_by(UserAccount.balance_amount.asc(), UserAccount.id.asc())
+                .limit(AlertService.ALERT_USER_CANDIDATE_LIMIT)
+            )
+        )
         if not users:
             return []
 
@@ -351,8 +378,54 @@ class AlertService:
         return warnings
 
     @staticmethod
+    def upsert_alert(
+        db: Session,
+        *,
+        alert_key: str,
+        alert_type: str,
+        severity: str,
+        title: str,
+        message: str,
+        payload: dict | None = None,
+        status: str = "active",
+        auto_commit: bool = True,
+    ) -> AlertEvent:
+        now = datetime.utcnow()
+        item = db.scalar(select(AlertEvent).where(AlertEvent.alert_key == alert_key))
+        safe_payload = AlertService._json_safe(payload or {})
+        if item is None:
+            item = AlertEvent(
+                alert_key=alert_key,
+                alert_type=alert_type,
+                severity=severity,
+                title=title,
+                message=message,
+                payload_json=dumps_json(safe_payload),
+                status=status or "active",
+                first_seen_at=now,
+                last_seen_at=now,
+            )
+            db.add(item)
+        else:
+            item.alert_type = alert_type
+            item.severity = severity
+            item.title = title
+            item.message = message
+            item.payload_json = dumps_json(safe_payload)
+            item.status = status or "active"
+            item.last_seen_at = now
+            if item.status == "active":
+                item.resolved_at = None
+        if auto_commit:
+            db.commit()
+            db.refresh(item)
+            AlertService.invalidate_dashboard_cache()
+        return item
+
+    @staticmethod
     def _upsert_events(db: Session, active_events: dict[str, dict]) -> None:
-        existing_items = list(db.scalars(select(AlertEvent)))
+        active_keys = set(active_events.keys())
+        existing_items = AlertService._load_active_alert_events(db, active_keys)
         existing_by_key = {item.alert_key: item for item in existing_items}
         now = datetime.utcnow()
         changed = False
@@ -383,15 +456,37 @@ class AlertService:
             item.last_seen_at = now
             item.resolved_at = None
             changed = True
-        active_keys = set(active_events.keys())
-        for item in existing_items:
-            if item.alert_key in active_keys or item.status == "resolved":
-                continue
-            item.status = "resolved"
-            item.resolved_at = now
-            changed = True
+        changed = AlertService._resolve_inactive_alert_events(db, active_keys, now=now) or changed
         if changed:
             db.commit()
+
+    @staticmethod
+    def _load_active_alert_events(db: Session, active_keys: set[str]) -> list[AlertEvent]:
+        if not active_keys:
+            return []
+        return list(db.scalars(select(AlertEvent).where(AlertEvent.alert_key.in_(active_keys))))
+
+    @staticmethod
+    def _resolve_inactive_alert_events(db: Session, active_keys: set[str], *, now: datetime) -> bool:
+        changed = False
+        for _ in range(AlertService.ALERT_RESOLVE_MAX_BATCHES):
+            query = select(AlertEvent).where(AlertEvent.status != "resolved")
+            if active_keys:
+                query = query.where(AlertEvent.alert_key.not_in(active_keys))
+            stale_items = list(
+                db.scalars(
+                    query.order_by(AlertEvent.id.asc()).limit(AlertService.ALERT_RESOLVE_BATCH_SIZE)
+                )
+            )
+            if not stale_items:
+                break
+            for item in stale_items:
+                item.status = "resolved"
+                item.resolved_at = now
+                changed = True
+            if len(stale_items) < AlertService.ALERT_RESOLVE_BATCH_SIZE:
+                break
+        return changed
 
     @staticmethod
     def _normalize_alert_event_payload(event: dict) -> dict:
@@ -511,12 +606,13 @@ class AlertService:
 
     @staticmethod
     def list_events(db: Session, *, status: str = "active", limit: int = 50) -> list[dict]:
+        normalized_limit = max(1, min(int(limit or 50), AlertService.ALERT_EVENT_LIST_LIMIT))
         rows = list(
             db.scalars(
                 select(AlertEvent)
                 .where(AlertEvent.status == status)
                 .order_by(AlertEvent.last_seen_at.desc(), AlertEvent.id.desc())
-                .limit(max(1, limit))
+                .limit(normalized_limit)
             )
         )
         return [AlertService.serialize_event(item) for item in rows]

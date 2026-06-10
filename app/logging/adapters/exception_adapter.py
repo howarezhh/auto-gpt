@@ -29,6 +29,7 @@ class ExceptionLogRecorder:
         auto_commit: bool = True,
     ):
         stack_text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)) if exc is not None else None
+        sanitized_stack = dumps_sanitized(stack_text, max_string_length=1200, max_bytes=4000) if stack_text else None
         exception_type = exc.__class__.__name__ if exc is not None else "HandledException"
         event = LoggingDispatcher.build_event(
             event_type="exception",
@@ -48,8 +49,8 @@ class ExceptionLogRecorder:
                 "method": method,
                 "is_external_v1": is_external_v1,
                 "stack_hash": stack_hash(stack_text),
-                "stack_excerpt": stack_text[:4000] if stack_text else None,
-                "detail_json": dumps_sanitized(detail),
+                "stack_excerpt": sanitized_stack,
+                "detail_json": dumps_sanitized(detail, max_string_length=500, max_bytes=8192),
             },
         )
         return LoggingDispatcher.record(event, db=db, auto_commit=auto_commit)

@@ -25,10 +25,11 @@ router = APIRouter(prefix="/api/logs", tags=["logs"])
 @router.get("/filter-options", response_model=LogFilterOptionsResponse)
 def log_filter_options(
     exclude_health_checks: bool = Query(default=True),
+    limit: int = Query(default=200, ge=1, le=500),
     db: Session = Depends(get_db),
 ) -> LogFilterOptionsResponse:
     return LogFilterOptionsResponse.model_validate(
-        LogService.get_filter_options(db, exclude_health_checks=exclude_health_checks)
+        LogService.get_filter_options(db, exclude_health_checks=exclude_health_checks, limit=limit)
     )
 
 
@@ -57,6 +58,9 @@ async def list_logs(
     content_guard_final_strategy: str | None = None,
     content_guard_retry_count: int | None = Query(default=None, ge=0),
     content_guard_guard_stage: str | None = None,
+    content_guard_category: str | None = None,
+    content_guard_switched_provider: bool | None = None,
+    content_guard_adaptation_skipped: bool | None = None,
     exclude_health_checks: bool = Query(default=True),
     wait_for_latest: bool = Query(default=False),
     wait_timeout_ms: int = Query(default=2000, ge=0, le=10000),
@@ -95,20 +99,41 @@ async def list_logs(
         content_guard_final_strategy=content_guard_final_strategy,
         content_guard_retry_count=content_guard_retry_count,
         content_guard_guard_stage=content_guard_guard_stage,
+        content_guard_category=content_guard_category,
+        content_guard_switched_provider=content_guard_switched_provider,
+        content_guard_adaptation_skipped=content_guard_adaptation_skipped,
     )
     return LogListResponse(
         total=total,
-        items=[RequestLogOut.model_validate(item) for item in LogService.serialize_logs(items)],
+        items=[
+            RequestLogOut.model_validate(item)
+            for item in LogService.serialize_logs(
+                items,
+                include_payload_fields=False,
+                derive_image_observability=False,
+            )
+        ],
         summary=LogSummaryOut.model_validate(summary),
         queue_idle=None if queue_status is None else bool(queue_status.get("idle")),
         queue_timed_out=None if queue_status is None else bool(queue_status.get("timed_out")),
         queued_request_logs=None if queue_status is None else int(queue_status.get("queued") or 0),
         processing_request_logs=None if queue_status is None else int(queue_status.get("processing") or 0),
+        dead_letter_request_logs=None if queue_status is None else int(queue_status.get("dead_letter") or 0),
+        failed_request_log_writes=None if queue_status is None else int(queue_status.get("failure_count") or 0),
     )
 
 
 @router.delete("")
-def clear_logs(request: Request, db: Session = Depends(get_db)) -> dict:
+async def clear_logs(request: Request, db: Session = Depends(get_db)) -> dict:
+    queue_status = await RequestLogQueueService.wait_until_idle(
+        timeout_seconds=2,
+        poll_interval_seconds=0.05,
+    )
+    discarded_queue = (
+        RequestLogQueueService.discard_pending()
+        if not bool(queue_status.get("idle"))
+        else {"ingress": 0, "queued": 0, "processing": 0}
+    )
     deleted = LogService.clear_logs(db)
     _record_log_admin_audit(
         db,
@@ -118,11 +143,15 @@ def clear_logs(request: Request, db: Session = Depends(get_db)) -> dict:
         detail={"deleted": deleted},
         risk_level="high",
     )
-    return {"deleted": deleted}
+    return {
+        "deleted": deleted,
+        "queue_idle_before_clear": bool(queue_status.get("idle")),
+        "discarded_pending_request_logs": discarded_queue,
+    }
 
 
 @router.get("/export")
-def export_logs(
+async def export_logs(
     request: Request,
     log_type: str | None = None,
     provider_id: int | None = None,
@@ -145,10 +174,20 @@ def export_logs(
     content_guard_final_strategy: str | None = None,
     content_guard_retry_count: int | None = Query(default=None, ge=0),
     content_guard_guard_stage: str | None = None,
+    content_guard_category: str | None = None,
+    content_guard_switched_provider: bool | None = None,
+    content_guard_adaptation_skipped: bool | None = None,
     exclude_health_checks: bool = Query(default=True),
-    limit: int = Query(default=5000, ge=1, le=10000),
+    wait_for_latest: bool = Query(default=False),
+    wait_timeout_ms: int = Query(default=2000, ge=0, le=10000),
+    limit: int = Query(default=5000, ge=1, le=5000),
     db: Session = Depends(get_db),
 ) -> Response:
+    if wait_for_latest:
+        await RequestLogQueueService.wait_until_idle(
+            timeout_seconds=wait_timeout_ms / 1000,
+            poll_interval_seconds=0.05,
+        )
     csv_text = LogService.export_logs_csv(
         db,
         log_type=log_type,
@@ -174,6 +213,9 @@ def export_logs(
         content_guard_final_strategy=content_guard_final_strategy,
         content_guard_retry_count=content_guard_retry_count,
         content_guard_guard_stage=content_guard_guard_stage,
+        content_guard_category=content_guard_category,
+        content_guard_switched_provider=content_guard_switched_provider,
+        content_guard_adaptation_skipped=content_guard_adaptation_skipped,
         limit=limit,
     )
     filename = f"logs-export-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.csv"

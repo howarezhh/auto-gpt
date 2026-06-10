@@ -83,6 +83,8 @@ class RequestLogOut(BaseModel):
     content_guard_buffer_wait_ms: int | None = None
     content_guard_retry_provider_count: int | None = None
     content_guard_final_strategy: str | None = None
+    content_guard_confidence: float | None = None
+    content_guard_score_delta: int | None = None
     api_client_key_id: int | None
     api_client_key_name: str | None
     api_client_key_prefix: str | None
@@ -141,6 +143,8 @@ class LogListResponse(BaseModel):
     queue_timed_out: bool | None = None
     queued_request_logs: int | None = None
     processing_request_logs: int | None = None
+    dead_letter_request_logs: int | None = None
+    failed_request_log_writes: int | None = None
 
 
 class MetricItem(BaseModel):

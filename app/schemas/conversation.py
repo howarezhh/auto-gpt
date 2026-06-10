@@ -45,3 +45,5 @@ class ConversationReplay(BaseModel):
     latest_model: str | None = None
     latest_provider_name: str | None = None
     turns: list[ConversationTurn]
+    truncated: bool = False
+    log_limit: int | None = None
