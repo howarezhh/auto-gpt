@@ -28,6 +28,8 @@ class UpstreamClientService:
             settings.upstream_pool_timeout_s,
             settings.upstream_max_connections,
             settings.upstream_max_keepalive_connections,
+            settings.upstream_keepalive_expiry_seconds,
+            settings.upstream_dns_cache_ttl_seconds,
             http2,
         )
 
@@ -36,6 +38,8 @@ class UpstreamClientService:
         """返回支持 HTTP/2 的默认上游客户端。"""
         fingerprint = cls._build_fingerprint(http2=find_spec("h2") is not None)
         if cls._client is None or cls._client_fingerprint != fingerprint:
+            if cls._client is not None:
+                cls._schedule_client_close(cls._client)
             settings = get_settings()
             timeout = httpx.Timeout(
                 connect=settings.request_timeout_ms / 1000,
@@ -46,7 +50,7 @@ class UpstreamClientService:
             limits = httpx.Limits(
                 max_connections=settings.upstream_max_connections,
                 max_keepalive_connections=settings.upstream_max_keepalive_connections,
-                keepalive_expiry=30,
+                keepalive_expiry=settings.upstream_keepalive_expiry_seconds,
             )
             cls._client = httpx.AsyncClient(
                 timeout=timeout,
@@ -61,6 +65,8 @@ class UpstreamClientService:
         """返回强制 HTTP/1.1 的上游客户端。"""
         fingerprint = cls._build_fingerprint(http2=False)
         if cls._http1_client is None or cls._http1_client_fingerprint != fingerprint:
+            if cls._http1_client is not None:
+                cls._schedule_client_close(cls._http1_client)
             settings = get_settings()
             timeout = httpx.Timeout(
                 connect=settings.request_timeout_ms / 1000,
@@ -71,7 +77,7 @@ class UpstreamClientService:
             limits = httpx.Limits(
                 max_connections=settings.upstream_max_connections,
                 max_keepalive_connections=settings.upstream_max_keepalive_connections,
-                keepalive_expiry=30,
+                keepalive_expiry=settings.upstream_keepalive_expiry_seconds,
             )
             cls._http1_client = httpx.AsyncClient(
                 timeout=timeout,
@@ -86,6 +92,8 @@ class UpstreamClientService:
         """返回纯异步 HTTP/1.1 上游客户端，避免非流式 JSON 请求占用线程池。"""
         fingerprint = cls._build_fingerprint(http2=False)
         if cls._aiohttp_session is None or cls._aiohttp_session.closed or cls._aiohttp_fingerprint != fingerprint:
+            if cls._aiohttp_session is not None and not cls._aiohttp_session.closed:
+                cls._schedule_client_close(cls._aiohttp_session)
             settings = get_settings()
             timeout = aiohttp.ClientTimeout(
                 total=None,
@@ -96,13 +104,33 @@ class UpstreamClientService:
             connector = aiohttp.TCPConnector(
                 limit=settings.upstream_max_connections,
                 limit_per_host=settings.upstream_max_connections,
-                ttl_dns_cache=300,
-                keepalive_timeout=30,
+                ttl_dns_cache=settings.upstream_dns_cache_ttl_seconds,
+                use_dns_cache=settings.upstream_dns_cache_ttl_seconds > 0,
+                keepalive_timeout=settings.upstream_keepalive_expiry_seconds,
                 enable_cleanup_closed=True,
             )
             cls._aiohttp_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
             cls._aiohttp_fingerprint = fingerprint
         return cls._aiohttp_session
+
+    @staticmethod
+    def _schedule_client_close(client: httpx.AsyncClient | aiohttp.ClientSession) -> None:
+        """在配置热变更导致客户端重建时，异步释放旧连接池。"""
+        import asyncio
+
+        async def close_client() -> None:
+            if isinstance(client, httpx.AsyncClient):
+                await client.aclose()
+            else:
+                await client.close()
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(close_client())
+            return
+        task = loop.create_task(close_client())
+        task.add_done_callback(lambda item: item.exception() if not item.cancelled() else None)
 
     @classmethod
     async def aclose(cls) -> None:

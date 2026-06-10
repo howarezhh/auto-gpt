@@ -1,6 +1,5 @@
 import json
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 from types import SimpleNamespace
 
@@ -16,15 +15,13 @@ _settings = get_settings()
 
 DEFAULT_SETTING = {
     "id": 1,
-    "route_mode": "failover",
-    "default_provider_id": None,
-    "manual_allow_fallback": True,
     "global_timeout_ms": 30000,
     "global_max_retries": 2,
     "route_exhausted_retry_max_wait_seconds": 600,
     "route_exhausted_retry_infinite_enabled": False,
     "trusted_providers_only": False,
     "max_candidate_count": 10,
+    "route_candidate_expand_count": 5,
     "global_max_request_tokens": 0,
     "max_v1_request_body_bytes": 20971520,
     "max_v1_chat_request_body_bytes": 0,
@@ -37,6 +34,7 @@ DEFAULT_SETTING = {
     "content_guard_precheck_auto_enabled": False,
     "content_guard_block_on_high_risk": True,
     "content_guard_probe_interval_sec": 3600,
+    "content_guard_json_probe_enabled": False,
     "content_guard_max_scan_bytes": 16384,
     "content_guard_stream_buffer_max_bytes": 16384,
     "content_guard_low_trust_requires_buffer": True,
@@ -48,6 +46,13 @@ DEFAULT_SETTING = {
     "content_guard_url_allowlist_json": "",
     "content_guard_async_review_enabled": True,
     "content_guard_high_risk_confidence_threshold": 85,
+    "content_guard_enhanced_detection_enabled": True,
+    "content_guard_enhanced_illegal_enabled": True,
+    "content_guard_enhanced_ad_enabled": True,
+    "content_guard_enhanced_custom_enabled": True,
+    "content_guard_enhanced_obfuscation_enabled": True,
+    "content_guard_enhanced_threshold": 70,
+    "content_guard_enhanced_context_window_chars": 96,
     "circuit_breaker_threshold": 3,
     "auto_health_check": False,
     "health_check_interval_sec": 300,
@@ -67,10 +72,15 @@ DEFAULT_SETTING = {
     "background_job_log_retention_days": 90,
     "user_operation_log_retention_days": 180,
     "asset_log_retention_days": 180,
+    "alert_event_retention_days": 180,
     "route_candidate_cache_ttl_sec": 10,
     "model_list_cache_ttl_sec": 15,
     "provider_status_cache_ttl_sec": 10,
     "async_request_logging": True,
+    "global_qps_limit": _settings.global_qps_limit,
+    "global_rpm_limit": _settings.global_rpm_limit,
+    "account_qps_limit": _settings.account_qps_limit,
+    "account_rpm_limit": _settings.account_rpm_limit,
     "global_max_active_requests": _settings.global_max_active_requests,
     "global_max_active_streams": _settings.global_max_active_streams,
     "api_key_max_active_requests": _settings.api_key_max_active_requests,
@@ -158,11 +168,6 @@ class SettingService:
     def update(db: Session, payload: SettingUpdate) -> AppSetting:
         """更新系统设置，并在落库前执行关键约束校验。"""
         setting = SettingService.get_or_create(db)
-        SettingService._validate_route_configuration(
-            db,
-            route_mode=payload.route_mode,
-            default_provider_id=payload.default_provider_id,
-        )
         SettingService._validate_retention_configuration(
             payload=payload,
         )
@@ -203,25 +208,6 @@ class SettingService:
         )
         return payload
 
-    @staticmethod
-    def _validate_route_configuration(
-        db: Session,
-        *,
-        route_mode: str,
-        default_provider_id: int | None,
-    ) -> None:
-        """校验路由模式和默认 provider 配置是否合法。"""
-        if route_mode == "manual" and default_provider_id is None:
-            raise ValueError("manual route_mode requires default_provider_id")
-        if default_provider_id is None:
-            return
-        provider_exists = db.scalar(
-            select(Provider.id).where(Provider.id == default_provider_id)
-        )
-        if provider_exists is None:
-            raise ValueError("default_provider_id does not exist")
-
-    @staticmethod
     def _validate_retention_configuration(
         *,
         payload: SettingUpdate,
@@ -237,6 +223,7 @@ class SettingService:
             "background_job_log_retention_days",
             "user_operation_log_retention_days",
             "asset_log_retention_days",
+            "alert_event_retention_days",
         ]
         for field_name in retention_fields:
             if int(getattr(payload, field_name, 0) or 0) < 0:

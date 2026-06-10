@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from random import uniform
 from threading import Lock
 from typing import Any
 
@@ -24,6 +25,7 @@ class CacheService:
     _lock = Lock()
     _store: dict[str, CacheEntry] = {}
     _redis_prefix = "shared-cache:"
+    _redis_generation_prefix = "shared-cache-generation:"
     _stats: dict[str, int] = {
         "memory_hits": 0,
         "redis_hits": 0,
@@ -116,6 +118,7 @@ class CacheService:
     @classmethod
     def stats_snapshot(cls) -> dict[str, Any]:
         with cls._lock:
+            cls._prune_expired_locked(now=time.time())
             stats = dict(cls._stats)
             memory_entries = len(cls._store)
         total_reads = stats["memory_hits"] + stats["redis_hits"] + stats["misses"]
@@ -159,7 +162,32 @@ class CacheService:
     @classmethod
     def _redis_key(cls, key: str) -> str:
         """生成 Redis 中使用的真实缓存键名。"""
-        return f"{cls._redis_prefix}{key}"
+        namespace = cls._key_namespace(key)
+        generation = cls._redis_generation(namespace)
+        return f"{cls._redis_prefix}{namespace}:v{generation}:{key}"
+
+    @staticmethod
+    def _key_namespace(key: str) -> str:
+        """按缓存键首段划分失效命名空间。"""
+        normalized = str(key or "").strip()
+        if not normalized:
+            return "default"
+        return normalized.split(":", 1)[0]
+
+    @classmethod
+    def _redis_generation_key(cls, namespace: str) -> str:
+        return f"{cls._redis_generation_prefix}{namespace}"
+
+    @classmethod
+    def _redis_generation(cls, namespace: str) -> int:
+        try:
+            raw_value = RedisService.get_sync_client().get(cls._redis_generation_key(namespace))
+        except Exception:
+            return 0
+        try:
+            return max(0, int(raw_value or 0))
+        except (TypeError, ValueError):
+            return 0
 
     @classmethod
     def _redis_get(cls, key: str) -> Any | None:
@@ -177,10 +205,24 @@ class CacheService:
     def _redis_set(cls, key: str, value: Any, *, ttl_seconds: int) -> bool:
         """写入 Redis 缓存。"""
         try:
-            RedisService.get_sync_client().setex(cls._redis_key(key), int(ttl_seconds), dumps_json(value))
+            RedisService.get_sync_client().setex(
+                cls._redis_key(key),
+                cls._redis_ttl_seconds(ttl_seconds),
+                dumps_json(value),
+            )
             return True
         except Exception:
             return False
+
+    @staticmethod
+    def _redis_ttl_seconds(ttl_seconds: int) -> int:
+        base_ttl = max(1, int(ttl_seconds or 1))
+        ratio = float(getattr(get_settings(), "cache_redis_ttl_jitter_ratio", 0.0) or 0.0)
+        if ratio <= 0:
+            return base_ttl
+        bounded_ratio = max(0.0, min(ratio, 0.5))
+        jitter = uniform(0.0, bounded_ratio)
+        return max(1, int(round(base_ttl * (1.0 + jitter))))
 
     @classmethod
     def _redis_delete(cls, key: str) -> None:
@@ -192,13 +234,10 @@ class CacheService:
 
     @classmethod
     def _redis_invalidate_prefix(cls, prefix: str) -> None:
-        """删除 Redis 中指定前缀的缓存项。"""
+        """通过共享版本号失效 Redis 中指定前缀的缓存项，避免扫描大 keyspace。"""
         try:
-            client = RedisService.get_sync_client()
-            pattern = cls._redis_key(prefix) + "*"
-            keys = list(client.scan_iter(match=pattern, count=100))
-            if keys:
-                client.delete(*keys)
+            namespace = cls._key_namespace(prefix)
+            RedisService.get_sync_client().incr(cls._redis_generation_key(namespace))
         except Exception:
             return
 

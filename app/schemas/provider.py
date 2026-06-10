@@ -147,6 +147,10 @@ class ProviderModelConfigBase(BaseModel):
     context_window_tokens: int | None = Field(default=None, ge=1)
     max_input_tokens: int | None = Field(default=None, ge=1)
     max_output_tokens: int | None = Field(default=None, ge=1)
+    max_active_requests: int | None = Field(default=None, ge=0)
+    max_active_streams: int | None = Field(default=None, ge=0)
+    max_qps: int | None = Field(default=None, ge=0)
+    max_rpm: int | None = Field(default=None, ge=0)
     price_multiplier: float = Field(default=1.0, gt=0)
     input_price_per_1k: float | None = Field(default=None, ge=0)
     output_price_per_1k: float | None = Field(default=None, ge=0)
@@ -240,6 +244,10 @@ class ProviderModelConfigUpdate(BaseModel):
     context_window_tokens: int | None = Field(default=None, ge=1)
     max_input_tokens: int | None = Field(default=None, ge=1)
     max_output_tokens: int | None = Field(default=None, ge=1)
+    max_active_requests: int | None = Field(default=None, ge=0)
+    max_active_streams: int | None = Field(default=None, ge=0)
+    max_qps: int | None = Field(default=None, ge=0)
+    max_rpm: int | None = Field(default=None, ge=0)
     price_multiplier: float | None = Field(default=None, gt=0)
     input_price_per_1k: float | None = Field(default=None, ge=0)
     output_price_per_1k: float | None = Field(default=None, ge=0)
@@ -267,7 +275,7 @@ class ProviderBatchConnectivityTestRequest(BaseModel):
 
 
 class ProviderBatchImportRequest(BaseModel):
-    content: str = Field(..., min_length=1)
+    content: str = Field(..., min_length=1, max_length=200000)
     dry_run: bool = True
     skip_duplicates: bool = True
 
@@ -316,7 +324,6 @@ class ProviderBase(BaseModel):
     max_active_streams: int | None = Field(default=10, ge=0)
     max_qps: int | None = Field(default=20, ge=0)
     max_rpm: int | None = Field(default=20, ge=0)
-    max_error_rate: float | None = Field(default=80.0, ge=0, le=100)
     first_token_timeout_sec: int | None = Field(default=60, ge=1)
     maintenance_window: str | None = None
     maintenance_mode_enabled: bool = False
@@ -386,7 +393,6 @@ class ProviderUpdate(BaseModel):
     max_active_streams: int | None = Field(default=None, ge=0)
     max_qps: int | None = Field(default=None, ge=0)
     max_rpm: int | None = Field(default=None, ge=0)
-    max_error_rate: float | None = Field(default=None, ge=0, le=100)
     first_token_timeout_sec: int | None = Field(default=None, ge=1)
     maintenance_window: str | None = None
     maintenance_mode_enabled: bool | None = None
@@ -465,7 +471,6 @@ class ProviderOut(BaseModel):
     max_active_streams: int | None
     max_qps: int | None
     max_rpm: int | None
-    max_error_rate: float | None
     first_token_timeout_sec: int | None
     active_requests: int = 0
     active_streams: int = 0
@@ -492,6 +497,8 @@ class ProviderOut(BaseModel):
     buffer_stream_for_guard: bool
     models: list[str]
     model_configs: list[ProviderModelConfigOut]
+    model_config_count: int = 0
+    model_configs_truncated: bool = False
     health_status: str
     last_check_at: datetime | None
     last_latency_ms: int | None

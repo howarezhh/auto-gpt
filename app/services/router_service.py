@@ -1,6 +1,5 @@
 import hashlib
-import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from threading import Lock
 from typing import Any
@@ -17,7 +16,7 @@ from app.models.request_log import RequestLog
 from app.services.cache_service import CacheService
 from app.services.log_service import LogService
 from app.services.model_catalog_service import ModelCatalogService
-from app.services.provider_capacity_service import ProviderCapacityService, ProviderCapacitySnapshot
+from app.services.provider_capacity_service import ProviderCapacityService, ProviderCapacitySnapshot, ProviderCapacityUnavailableError
 from app.services.provider_health_state_service import ProviderHealthStateService
 from app.services.provider_service import ProviderService
 from app.services.setting_service import SettingService
@@ -34,10 +33,11 @@ class RouteCandidate:
     recent_success_rate: float = 1.0
     recent_avg_latency_ms: float | None = None
     route_score: float = 0.0
-    dynamic_weight: float = 100.0
     health_tier: int = 1
     sticky_affinity: float = 0.0
     load_factor: float = 0.0
+    score_breakdown: dict[str, Any] = field(default_factory=dict)
+    selection_reason: str | None = None
 
 
 @dataclass(slots=True)
@@ -59,8 +59,8 @@ class RoutePolicyContext:
     preferred_region_tags: list[str] | None = None
     latency_bias: int = 1
     success_rate_bias: int = 1
-    cost_bias: int = 0
     require_trusted_provider: bool = False
+    content_guard_required: bool = True
 
     def with_forced_provider_id(self, forced_provider_id: int | None) -> "RoutePolicyContext":
         """返回一个仅修改强制 provider 配置的新上下文对象。"""
@@ -71,8 +71,8 @@ class RoutePolicyContext:
             preferred_region_tags=list(self.preferred_region_tags) if self.preferred_region_tags is not None else None,
             latency_bias=self.latency_bias,
             success_rate_bias=self.success_rate_bias,
-            cost_bias=self.cost_bias,
             require_trusted_provider=self.require_trusted_provider,
+            content_guard_required=self.content_guard_required,
         )
 
 
@@ -83,6 +83,9 @@ class RouterService:
     ROUTE_DIAGNOSTIC_SAMPLE_LIMIT = 8
     MIN_CONTENT_INTEGRITY_SCORE = 20
     CAPABILITY_HEALTH_CACHE_PREFIX = "health-capability-probe"
+    CANDIDATE_CACHE_LOCK_LIMIT = 2048
+    RAW_CANDIDATE_LIMIT = 5000
+    ROUTE_SCORE_TIE_BUCKET = 10.0
     _candidate_cache_locks: dict[str, Lock] = {}
     _candidate_cache_locks_guard = Lock()
 
@@ -112,16 +115,42 @@ class RouterService:
         cached_candidates = CacheService.get(cache_key)
         if (
             isinstance(cached_candidates, list)
-            and all(isinstance(item, RouteCandidate) for item in cached_candidates)
+            and all(isinstance(item, dict) for item in cached_candidates)
         ):
-            return cached_candidates
+            return RouterService._hydrate_candidate_cache_entries(
+                db,
+                cached_candidates,
+                model_name=model_name,
+                route_context=route_context,
+                require_vision=require_vision,
+                require_stream=require_stream,
+                require_tools=require_tools,
+                require_image_generation=require_image_generation,
+                require_chat_completions=require_chat_completions,
+                require_responses=require_responses,
+            )
+        if isinstance(cached_candidates, list):
+            CacheService.invalidate(cache_key)
         with RouterService._candidate_cache_lock(cache_key):
             cached_candidates = CacheService.get(cache_key)
             if (
                 isinstance(cached_candidates, list)
-                and all(isinstance(item, RouteCandidate) for item in cached_candidates)
+                and all(isinstance(item, dict) for item in cached_candidates)
             ):
-                return cached_candidates
+                return RouterService._hydrate_candidate_cache_entries(
+                    db,
+                    cached_candidates,
+                    model_name=model_name,
+                    route_context=route_context,
+                    require_vision=require_vision,
+                    require_stream=require_stream,
+                    require_tools=require_tools,
+                    require_image_generation=require_image_generation,
+                    require_chat_completions=require_chat_completions,
+                    require_responses=require_responses,
+                )
+            if isinstance(cached_candidates, list):
+                CacheService.invalidate(cache_key)
             return RouterService._load_available_candidates_uncached(
                 db,
                 cache_key=cache_key,
@@ -140,6 +169,8 @@ class RouterService:
         with RouterService._candidate_cache_locks_guard:
             lock = RouterService._candidate_cache_locks.get(cache_key)
             if lock is None:
+                if len(RouterService._candidate_cache_locks) >= RouterService.CANDIDATE_CACHE_LOCK_LIMIT:
+                    RouterService._candidate_cache_locks.clear()
                 lock = Lock()
                 RouterService._candidate_cache_locks[cache_key] = lock
             return lock
@@ -171,6 +202,95 @@ class RouterService:
             if isinstance(payload, dict):
                 return payload.get("success") is False
         return False
+
+    @staticmethod
+    def _hydrate_candidate_cache_entries(
+        db: Session,
+        entries: list[dict[str, Any]],
+        *,
+        model_name: str | None = None,
+        route_context: RoutePolicyContext | None = None,
+        require_vision: bool = False,
+        require_stream: bool = False,
+        require_tools: bool = False,
+        require_image_generation: bool = False,
+        require_chat_completions: bool = False,
+        require_responses: bool = False,
+    ) -> list[RouteCandidate]:
+        if not entries:
+            return []
+        providers = ProviderService.list_runtime_providers(db)
+        provider_map = {provider.id: provider for provider in providers}
+        model_map: dict[tuple[int, int], ProviderModel] = {}
+        for provider in providers:
+            for provider_model in provider.provider_models:
+                model_map[(provider.id, provider_model.id)] = provider_model
+        metrics = LogService.route_metric_summary(db, window_minutes=RouterService.RECENT_WINDOW_MINUTES, requested_model=model_name)
+        enabled_model_names = ModelCatalogService.enabled_model_name_set(db)
+        required_endpoint_path = RouterService._required_endpoint_path(
+            require_chat_completions=require_chat_completions,
+            require_responses=require_responses,
+        )
+        capacity_provider_ids = {
+            provider_id
+            for entry in entries
+            for provider_id in (RouterService._parse_int(entry.get("provider_id")),)
+            if provider_id is not None
+        }
+        try:
+            capacity_snapshots = ProviderCapacityService.snapshots(capacity_provider_ids)
+        except ProviderCapacityUnavailableError:
+            raise
+        except Exception as exc:
+            raise ProviderCapacityUnavailableError(str(exc)) from exc
+        hydrated: list[RouteCandidate] = []
+        now = datetime.utcnow()
+        allowed_provider_ids = set(route_context.allowed_provider_ids) if route_context and route_context.allowed_provider_ids is not None else None
+        for entry in entries:
+            provider_id = RouterService._parse_int(entry.get("provider_id"))
+            provider_model_id = RouterService._parse_int(entry.get("provider_model_id"))
+            if provider_id is None or provider_model_id is None:
+                continue
+            provider = provider_map.get(provider_id)
+            provider_model = model_map.get((provider_id, provider_model_id))
+            if provider is None or provider_model is None:
+                continue
+            if not RouterService._candidate_passes_runtime_filters(
+                db,
+                provider=provider,
+                provider_model=provider_model,
+                model_name=model_name,
+                route_context=route_context,
+                allowed_provider_ids=allowed_provider_ids,
+                enabled_model_names=enabled_model_names,
+                required_endpoint_path=required_endpoint_path,
+                now=now,
+                require_vision=require_vision,
+                require_stream=require_stream,
+                require_tools=require_tools,
+                require_image_generation=require_image_generation,
+                require_chat_completions=require_chat_completions,
+                require_responses=require_responses,
+            ):
+                continue
+            hydrated.append(
+                RouterService._build_route_candidate(
+                    provider=provider,
+                    provider_model=provider_model,
+                    metrics=metrics,
+                    capacity_snapshot=capacity_snapshots.get(provider.id),
+                    route_context=route_context,
+                    is_stream=require_stream,
+                )
+            )
+        return hydrated
+
+    @staticmethod
+    def _parse_int(value: Any) -> int | None:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def _capability_probe_lookup_keys(capability: str, *, endpoint_path: str | None = None) -> list[str]:
@@ -209,107 +329,208 @@ class RouterService:
         metrics = LogService.route_metric_summary(db, window_minutes=RouterService.RECENT_WINDOW_MINUTES, requested_model=model_name)
         allowed_provider_ids = set(route_context.allowed_provider_ids) if route_context and route_context.allowed_provider_ids is not None else None
         enabled_model_names = ModelCatalogService.enabled_model_name_set(db)
-        try:
-            capacity_snapshots = ProviderCapacityService.snapshots({provider.id for provider in providers})
-        except Exception:
-            capacity_snapshots = {}
-
         required_endpoint_path = RouterService._required_endpoint_path(
             require_chat_completions=require_chat_completions,
             require_responses=require_responses,
         )
+        capacity_provider_ids = {
+            provider.id
+            for provider in providers
+            if provider.enabled
+            and provider.circuit_state != "open"
+            and not provider.maintenance_mode_enabled
+            and (allowed_provider_ids is None or provider.id in allowed_provider_ids)
+            and (not require_chat_completions or ProviderService.provider_supports_chat_completions(provider))
+            and (not require_responses or ProviderService.provider_supports_responses(provider))
+        }
+        try:
+            capacity_snapshots = ProviderCapacityService.snapshots(capacity_provider_ids)
+        except ProviderCapacityUnavailableError:
+            raise
+        except Exception as exc:
+            raise ProviderCapacityUnavailableError(str(exc)) from exc
+
         candidates: list[RouteCandidate] = []
         for provider in providers:
-            if not provider.enabled or provider.circuit_state == "open" or provider.maintenance_mode_enabled:
-                continue
-            if RouterService._provider_blocked_by_content_policy(provider, route_context=route_context):
-                continue
-            if allowed_provider_ids is not None and provider.id not in allowed_provider_ids:
-                continue
-            if require_chat_completions and not ProviderService.provider_supports_chat_completions(provider):
-                continue
-            if require_responses and not ProviderService.provider_supports_responses(provider):
-                continue
             for provider_model in provider.provider_models:
-                if not provider_model.enabled:
-                    continue
-                if RouterService._provider_model_blocked_by_content_policy(provider_model, provider=provider, route_context=route_context):
-                    continue
-                if provider_model.model_name not in enabled_model_names:
-                    continue
-                if model_name and provider_model.model_name != model_name:
-                    continue
-                if require_stream and not provider_model.supports_stream:
-                    continue
-                if require_chat_completions and not provider_model.supports_chat_completions:
-                    continue
-                if require_responses and not provider_model.supports_responses:
-                    continue
-                if require_vision and not provider_model.supports_vision:
-                    continue
-                if require_image_generation and not ProviderService.provider_model_supports_image_generation(provider_model):
-                    continue
-                if require_vision and RouterService._capability_probe_failed(
-                    provider,
-                    provider_model,
-                    "vision",
-                    endpoint_path=required_endpoint_path,
+                if not RouterService._candidate_passes_runtime_filters(
+                    db,
+                    provider=provider,
+                    provider_model=provider_model,
+                    model_name=model_name,
+                    route_context=route_context,
+                    allowed_provider_ids=allowed_provider_ids,
+                    enabled_model_names=enabled_model_names,
+                    required_endpoint_path=required_endpoint_path,
+                    now=now,
+                    require_vision=require_vision,
+                    require_stream=require_stream,
+                    require_tools=require_tools,
+                    require_image_generation=require_image_generation,
+                    require_chat_completions=require_chat_completions,
+                    require_responses=require_responses,
                 ):
                     continue
-                if require_image_generation and RouterService._capability_probe_failed(provider, provider_model, "image_generation"):
-                    continue
-                if provider_model.circuit_state == "open":
-                    if not RouterService._should_probe_open_model(
-                        provider=provider,
-                        provider_model=provider_model,
-                        recovery_interval_sec=ProviderService.get_effective_recovery_probe_interval_sec(db, provider),
-                        now=now,
-                    ):
-                        continue
-                    # 打开熔断后仅允许极少量探测流量进入 half-open 探针流程。
-                    if not RouterService._claim_half_open_probe(db, provider_model, now):
-                        continue
-                metric = metrics.get((provider.id, provider_model.model_name), {})
-                recent_failure_rate = float(metric.get("failure_rate", 0.0))
-                recent_success_rate = float(metric.get("success_rate", 1.0))
-                recent_avg_latency_ms = metric.get("avg_latency_ms")
-                model_health_state = ProviderHealthStateService.get_model_state(provider.id, provider_model.id)
-                provider_health_state = ProviderHealthStateService.get_provider_state(provider.id)
-                health_tier = RouterService._health_tier(
-                    provider=provider,
-                    provider_model=provider_model,
-                    model_health_state=model_health_state,
-                    provider_health_state=provider_health_state,
-                )
-                route_score = RouterService._route_score(
-                    provider=provider,
-                    provider_model=provider_model,
-                    recent_success_rate=recent_success_rate,
-                    recent_avg_latency_ms=recent_avg_latency_ms,
-                    is_stream=require_stream,
-                    model_health_state=model_health_state,
-                    provider_health_state=provider_health_state,
-                    capacity_snapshot=capacity_snapshots.get(provider.id),
-                    route_context=route_context,
-                )
                 candidates.append(
-                    RouteCandidate(
+                    RouterService._build_route_candidate(
                         provider=provider,
                         provider_model=provider_model,
-                        recent_failure_rate=recent_failure_rate,
-                        recent_success_rate=recent_success_rate,
-                        recent_avg_latency_ms=recent_avg_latency_ms,
-                        route_score=route_score,
-                        health_tier=health_tier,
+                        metrics=metrics,
+                        capacity_snapshot=capacity_snapshots.get(provider.id),
+                        route_context=route_context,
+                        is_stream=require_stream,
                     )
                 )
-        return CacheService.set(cache_key, candidates, ttl_seconds=RouterService._route_candidate_cache_ttl_seconds())
+                if len(candidates) >= RouterService.RAW_CANDIDATE_LIMIT:
+                    RouterService._cache_candidate_entries(cache_key, candidates)
+                    return candidates
+        RouterService._cache_candidate_entries(cache_key, candidates)
+        return candidates
+
+    @staticmethod
+    def _cache_candidate_entries(cache_key: str, candidates: list[RouteCandidate]) -> None:
+        entries = [
+            {
+                "provider_id": candidate.provider.id,
+                "provider_model_id": candidate.provider_model.id,
+            }
+            for candidate in candidates
+        ]
+        CacheService.set(cache_key, entries, ttl_seconds=RouterService._route_candidate_cache_ttl_seconds())
+
+    @staticmethod
+    def _candidate_passes_runtime_filters(
+        db: Session,
+        *,
+        provider: Provider,
+        provider_model: ProviderModel,
+        model_name: str | None,
+        route_context: RoutePolicyContext | None,
+        allowed_provider_ids: set[int] | None,
+        enabled_model_names: set[str],
+        required_endpoint_path: str | None,
+        now: datetime,
+        require_vision: bool,
+        require_stream: bool,
+        require_tools: bool,
+        require_image_generation: bool,
+        require_chat_completions: bool,
+        require_responses: bool,
+    ) -> bool:
+        if not provider.enabled or provider.circuit_state == "open" or provider.maintenance_mode_enabled:
+            return False
+        if RouterService._provider_blocked_by_content_policy(provider, route_context=route_context):
+            return False
+        if allowed_provider_ids is not None and provider.id not in allowed_provider_ids:
+            return False
+        if require_chat_completions and not ProviderService.provider_supports_chat_completions(provider):
+            return False
+        if require_responses and not ProviderService.provider_supports_responses(provider):
+            return False
+        if not provider_model.enabled:
+            return False
+        if RouterService._provider_model_blocked_by_content_policy(provider_model, provider=provider, route_context=route_context):
+            return False
+        if provider_model.model_name not in enabled_model_names:
+            return False
+        if model_name and provider_model.model_name != model_name:
+            return False
+        if require_stream and not provider_model.supports_stream:
+            return False
+        if require_chat_completions and not provider_model.supports_chat_completions:
+            return False
+        if require_responses and not provider_model.supports_responses:
+            return False
+        if require_vision and not provider_model.supports_vision:
+            return False
+        if require_tools and not provider_model.supports_tools:
+            return False
+        if require_image_generation and not ProviderService.provider_model_supports_image_generation(provider_model):
+            return False
+        if require_vision and RouterService._capability_probe_failed(
+            provider,
+            provider_model,
+            "vision",
+            endpoint_path=required_endpoint_path,
+        ):
+            return False
+        if require_tools and RouterService._capability_probe_failed(
+            provider,
+            provider_model,
+            "tools",
+            endpoint_path=required_endpoint_path,
+        ):
+            return False
+        if require_image_generation and RouterService._capability_probe_failed(provider, provider_model, "image_generation"):
+            return False
+        if provider_model.circuit_state == "open":
+            if not RouterService._should_probe_open_model(
+                provider=provider,
+                provider_model=provider_model,
+                recovery_interval_sec=ProviderService.get_effective_recovery_probe_interval_sec(db, provider),
+                now=now,
+            ):
+                return False
+            # 打开熔断后仅允许极少量探测流量进入 half-open 探针流程。
+            if not RouterService._claim_half_open_probe(db, provider_model, now):
+                return False
+        return True
+
+    @staticmethod
+    def _build_route_candidate(
+        *,
+        provider: Provider,
+        provider_model: ProviderModel,
+        metrics: dict[tuple[int, str], dict[str, Any]],
+        capacity_snapshot: ProviderCapacitySnapshot | None,
+        route_context: RoutePolicyContext | None,
+        is_stream: bool,
+    ) -> RouteCandidate:
+        metric = metrics.get((provider.id, provider_model.model_name), {})
+        recent_failure_rate = float(metric.get("failure_rate", 0.0))
+        recent_success_rate = float(metric.get("success_rate", 1.0))
+        recent_avg_latency_ms = metric.get("avg_latency_ms")
+        model_health_state = ProviderHealthStateService.get_model_state(provider.id, provider_model.id)
+        provider_health_state = ProviderHealthStateService.get_provider_state(provider.id)
+        health_tier = RouterService._health_tier(
+            provider=provider,
+            provider_model=provider_model,
+            model_health_state=model_health_state,
+            provider_health_state=provider_health_state,
+        )
+        score_breakdown = RouterService._route_score_breakdown(
+            provider=provider,
+            provider_model=provider_model,
+            recent_success_rate=recent_success_rate,
+            recent_avg_latency_ms=recent_avg_latency_ms,
+            is_stream=is_stream,
+            model_health_state=model_health_state,
+            provider_health_state=provider_health_state,
+            capacity_snapshot=capacity_snapshot,
+            route_context=route_context,
+        )
+        return RouteCandidate(
+            provider=provider,
+            provider_model=provider_model,
+            recent_failure_rate=recent_failure_rate,
+            recent_success_rate=recent_success_rate,
+            recent_avg_latency_ms=recent_avg_latency_ms,
+            route_score=float(score_breakdown.get("final_score") or 0.0),
+            health_tier=health_tier,
+            score_breakdown=score_breakdown,
+        )
 
     @staticmethod
     def _route_candidate_cache_ttl_seconds() -> int:
         try:
             setting = SettingService.get_cached()
-            return max(1, min(int(getattr(setting, "route_candidate_cache_ttl_sec", 10) or 10), 60))
+            raw_value = getattr(setting, "route_candidate_cache_ttl_sec", 10)
+            if raw_value is None:
+                return 10
+            value = int(raw_value)
+            if value <= 0:
+                return 0
+            return min(value, 60)
         except Exception:
             return 10
 
@@ -320,6 +541,7 @@ class RouterService:
         sticky_key: str | None = None,
         forced_provider_id: int | None = None,
         route_context: RoutePolicyContext | None = None,
+        excluded_candidate_keys: set[tuple[int, int]] | None = None,
         require_vision: bool = False,
         require_stream: bool = False,
         require_tools: bool = False,
@@ -348,6 +570,7 @@ class RouterService:
             candidates,
             sticky_key=sticky_key,
             route_context=route_context,
+            excluded_candidate_keys=excluded_candidate_keys,
         )
 
     @staticmethod
@@ -357,6 +580,7 @@ class RouterService:
         sticky_key: str | None = None,
         forced_provider_id: int | None = None,
         route_context: RoutePolicyContext | None = None,
+        excluded_candidate_keys: set[tuple[int, int]] | None = None,
         require_vision: bool = False,
         require_stream: bool = False,
         require_tools: bool = False,
@@ -385,6 +609,7 @@ class RouterService:
             candidates,
             sticky_key=sticky_key,
             route_context=route_context,
+            excluded_candidate_keys=excluded_candidate_keys,
         )
 
     @staticmethod
@@ -450,6 +675,7 @@ class RouterService:
         *,
         sticky_key: str | None,
         route_context: RoutePolicyContext | None,
+        excluded_candidate_keys: set[tuple[int, int]] | None = None,
     ) -> list[RouteCandidate]:
         db = SessionLocal()
         try:
@@ -458,6 +684,7 @@ class RouterService:
                 candidates,
                 sticky_key=sticky_key,
                 route_context=route_context,
+                excluded_candidate_keys=excluded_candidate_keys,
             )
         finally:
             db.close()
@@ -615,6 +842,14 @@ class RouterService:
                 ):
                     RouterService._record_diagnostic_reason(diagnostics, "vision_probe_unhealthy", provider=provider, provider_model=provider_model)
                     continue
+                if require_tools and RouterService._capability_probe_failed(
+                    provider,
+                    provider_model,
+                    "tools",
+                    endpoint_path=required_endpoint_path,
+                ):
+                    RouterService._record_diagnostic_reason(diagnostics, "tools_probe_unhealthy", provider=provider, provider_model=provider_model)
+                    continue
                 if require_image_generation and RouterService._capability_probe_failed(provider, provider_model, "image_generation"):
                     RouterService._record_diagnostic_reason(diagnostics, "image_generation_probe_unhealthy", provider=provider, provider_model=provider_model)
                     continue
@@ -658,18 +893,6 @@ class RouterService:
                     provider_model=candidate.provider_model,
                 )
                 continue
-            if (
-                candidate.provider.max_error_rate is not None
-                and candidate.provider.max_error_rate > 0
-                and candidate.recent_failure_rate * 100 >= candidate.provider.max_error_rate
-            ):
-                RouterService._record_diagnostic_reason(
-                    diagnostics,
-                    "provider_failure_rate_limited",
-                    provider=candidate.provider,
-                    provider_model=candidate.provider_model,
-                )
-                continue
             diagnostics["final_candidate_count"] += 1
         diagnostics["summary"] = RouterService._build_diagnostic_summary(diagnostics)
         return diagnostics
@@ -681,10 +904,8 @@ class RouterService:
         *,
         sticky_key: str | None,
         route_context: RoutePolicyContext | None,
+        excluded_candidate_keys: set[tuple[int, int]] | None = None,
     ) -> list[RouteCandidate]:
-        setting = None if route_context is not None else (
-            SettingService.get_or_create(db) if db is not None else SettingService.get_cached()
-        )
         if not candidates:
             return []
 
@@ -697,9 +918,21 @@ class RouterService:
         recent_route = RouterService.load_recent_session_route(db, sticky_key)
         sorted_candidates = RouterService._primary_route_order(
             candidates,
-            sticky_key=sticky_key,
             recent_route=recent_route,
+            route_context=route_context,
         )
+        if excluded_candidate_keys:
+            excluded = set(excluded_candidate_keys)
+            before_exclusion_count = len(sorted_candidates)
+            sorted_candidates = [
+                candidate
+                for candidate in sorted_candidates
+                if (candidate.provider.id, candidate.provider_model.id) not in excluded
+            ]
+            excluded_count = before_exclusion_count - len(sorted_candidates)
+            for candidate in sorted_candidates[: RouterService._effective_candidate_attempt_count(route_context)]:
+                candidate.score_breakdown["failed_candidate_exclusion_count"] = excluded_count
+                candidate.score_breakdown["candidate_window_after_exclusion"] = True
         return RouterService._trim_candidates(sorted_candidates, route_context=route_context)
 
     @staticmethod
@@ -744,8 +977,8 @@ class RouterService:
     def _primary_route_order(
         candidates: list[RouteCandidate],
         *,
-        sticky_key: str | None,
         recent_route: RecentSessionRoute | None,
+        route_context: RoutePolicyContext | None,
     ) -> list[RouteCandidate]:
         """统一主路由策略：硬筛选后优先复用同会话最近成功目标，再做健康优先分发。"""
         ordered: list[RouteCandidate] = []
@@ -753,6 +986,7 @@ class RouterService:
         recent_candidate = RouterService._recent_route_candidate(candidates, recent_route)
         if recent_candidate is not None:
             key = (recent_candidate.provider.id, recent_candidate.provider_model.id)
+            recent_candidate.selection_reason = "recent_session"
             ordered.append(recent_candidate)
             seen.add(key)
         for health_tier in sorted({candidate.health_tier for candidate in candidates}):
@@ -767,9 +1001,35 @@ class RouterService:
                 key = (candidate.provider.id, candidate.provider_model.id)
                 if key in seen:
                     continue
+                candidate.selection_reason = RouterService._selection_reason_for_balanced_candidate(
+                    candidate,
+                    tier_candidates,
+                    route_context=route_context,
+                )
                 ordered.append(candidate)
                 seen.add(key)
         return ordered
+
+    @staticmethod
+    def _selection_reason_for_balanced_candidate(
+        candidate: RouteCandidate,
+        tier_candidates: list[RouteCandidate],
+        *,
+        route_context: RoutePolicyContext | None,
+    ) -> str:
+        preferred_ids = set(route_context.preferred_provider_ids or []) if route_context is not None else set()
+        if candidate.provider.id in preferred_ids:
+            return "preferred_bonus"
+        same_score_bucket = [
+            item
+            for item in tier_candidates
+            if RouterService._route_score_tie_bucket(item.route_score) == RouterService._route_score_tie_bucket(candidate.route_score)
+        ]
+        if len(same_score_bucket) > 1:
+            min_load = min(float(item.load_factor or 0.0) for item in same_score_bucket)
+            if float(candidate.load_factor or 0.0) <= min_load:
+                return "low_load_tiebreak"
+        return "highest_score"
 
     @staticmethod
     def _recent_route_candidate(
@@ -798,7 +1058,7 @@ class RouterService:
 
     @staticmethod
     def _trim_candidates(candidates: list[RouteCandidate], *, route_context: RoutePolicyContext | None) -> list[RouteCandidate]:
-        return candidates[: RouterService._effective_max_candidate_count(route_context)]
+        return candidates[: RouterService._effective_candidate_attempt_count(route_context)]
 
     @staticmethod
     def _effective_max_candidate_count(route_context: RoutePolicyContext | None) -> int:
@@ -814,6 +1074,27 @@ class RouterService:
         return max(1, min(parsed, 500))
 
     @staticmethod
+    def _effective_candidate_expand_count(route_context: RoutePolicyContext | None) -> int:
+        try:
+            setting = SettingService.get_cached()
+            value = getattr(setting, "route_candidate_expand_count", 5)
+        except Exception:
+            value = 5
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = 5
+        return max(0, min(parsed, 100))
+
+    @staticmethod
+    def _effective_candidate_attempt_count(route_context: RoutePolicyContext | None) -> int:
+        return min(
+            RouterService.RAW_CANDIDATE_LIMIT,
+            RouterService._effective_max_candidate_count(route_context)
+            + RouterService._effective_candidate_expand_count(route_context),
+        )
+
+    @staticmethod
     def _filter_capacity_candidates(candidates: list[RouteCandidate], *, is_stream: bool) -> list[RouteCandidate]:
         if not candidates:
             return []
@@ -826,12 +1107,6 @@ class RouterService:
             if not ProviderCapacityService._has_capacity(candidate.provider, snapshot=snapshot, is_stream=is_stream):
                 continue
             candidate.load_factor = RouterService._capacity_load_factor(candidate.provider, snapshot, is_stream=is_stream)
-            if (
-                candidate.provider.max_error_rate is not None
-                and candidate.provider.max_error_rate > 0
-                and candidate.recent_failure_rate * 100 >= candidate.provider.max_error_rate
-            ):
-                continue
             filtered.append(candidate)
         return filtered
 
@@ -848,26 +1123,8 @@ class RouterService:
             if not ProviderCapacityService._has_capacity(candidate.provider, snapshot=snapshot, is_stream=is_stream):
                 continue
             candidate.load_factor = RouterService._capacity_load_factor(candidate.provider, snapshot, is_stream=is_stream)
-            if (
-                candidate.provider.max_error_rate is not None
-                and candidate.provider.max_error_rate > 0
-                and candidate.recent_failure_rate * 100 >= candidate.provider.max_error_rate
-            ):
-                continue
             filtered.append(candidate)
         return filtered
-
-    @staticmethod
-    def _filter_failure_rate_candidates(candidates: list[RouteCandidate]) -> list[RouteCandidate]:
-        return [
-            candidate
-            for candidate in candidates
-            if not (
-                candidate.provider.max_error_rate is not None
-                and candidate.provider.max_error_rate > 0
-                and candidate.recent_failure_rate * 100 >= candidate.provider.max_error_rate
-            )
-        ]
 
     @staticmethod
     def _health_tier(
@@ -892,24 +1149,6 @@ class RouterService:
         if "healthy" in statuses or "degraded" in statuses:
             return 0
         return 1
-
-    @staticmethod
-    def _sort_by_health_and_sticky(candidates: list[RouteCandidate], *, sticky_key: str | None) -> list[RouteCandidate]:
-        for candidate in candidates:
-            candidate.sticky_affinity = RouterService._sticky_affinity_score(candidate, sticky_key) if sticky_key else 0.0
-        return sorted(
-            candidates,
-            key=lambda item: (
-                item.health_tier,
-                -item.sticky_affinity,
-                item.load_factor,
-                -item.route_score,
-                item.provider_model.priority,
-                item.provider.priority,
-                item.provider.id,
-                item.provider_model.id,
-            ),
-        )
 
     @staticmethod
     def _record_diagnostic_reason(
@@ -966,12 +1205,12 @@ class RouterService:
             "model_unhealthy": "模型健康状态异常",
             "capacity_snapshot_unavailable": "未获取到容量快照",
             "provider_capacity_exceeded": "提供商容量已满",
-            "provider_failure_rate_limited": "提供商失败率超限",
             "provider_trust_blocked": "提供商信任等级已阻断",
             "provider_content_integrity_blocked": "提供商内容完整性已隔离",
             "provider_content_integrity_score_too_low": "提供商内容完整性评分过低",
             "provider_trusted_required": "当前策略要求可信及以上提供商",
             "model_content_integrity_blocked": "模型内容完整性已隔离",
+            "model_content_integrity_score_too_low": "模型内容完整性评分过低",
         }.get(reason_code, reason_code)
 
     @staticmethod
@@ -1007,20 +1246,35 @@ class RouterService:
             "chat" if require_chat_completions else "any-chat",
             "responses" if require_responses else "any-responses",
         ]
+        try:
+            content_guard_enabled = bool(getattr(SettingService.get_cached(), "content_guard_enabled", True))
+        except Exception:
+            content_guard_enabled = True
+        parts.append("guard-on" if content_guard_enabled else "guard-off")
         if route_context is not None:
             parts.extend(
                 [
-                    ",".join(str(item) for item in (route_context.allowed_provider_ids or [])),
-                    ",".join(str(item) for item in (route_context.preferred_provider_ids or [])),
-                    ",".join(item for item in (route_context.preferred_region_tags or [])),
+                    RouterService._cache_list_digest(route_context.allowed_provider_ids),
+                    RouterService._cache_list_digest(route_context.preferred_provider_ids),
+                    RouterService._cache_list_digest(route_context.preferred_region_tags),
                     str(RouterService._effective_max_candidate_count(route_context)),
+                    str(RouterService._effective_candidate_expand_count(route_context)),
                     str(route_context.latency_bias),
                     str(route_context.success_rate_bias),
-                    str(route_context.cost_bias),
                     "trusted" if route_context.require_trusted_provider else "any-trust",
+                    "runtime-guard" if route_context.content_guard_required else "runtime-guard-off",
                 ]
             )
         return "|".join(parts)
+
+    @staticmethod
+    def _cache_list_digest(values: list[Any] | None) -> str:
+        if values is None:
+            return "*"
+        if not values:
+            return "-"
+        normalized = ",".join(str(item) for item in values)
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
 
     @staticmethod
     def _route_score(
@@ -1035,6 +1289,34 @@ class RouterService:
         capacity_snapshot: ProviderCapacitySnapshot | None = None,
         route_context: RoutePolicyContext | None = None,
     ) -> float:
+        return float(
+            RouterService._route_score_breakdown(
+                provider=provider,
+                provider_model=provider_model,
+                recent_success_rate=recent_success_rate,
+                recent_avg_latency_ms=recent_avg_latency_ms,
+                is_stream=is_stream,
+                model_health_state=model_health_state,
+                provider_health_state=provider_health_state,
+                capacity_snapshot=capacity_snapshot,
+                route_context=route_context,
+            ).get("final_score")
+            or 0.0
+        )
+
+    @staticmethod
+    def _route_score_breakdown(
+        *,
+        provider: Provider,
+        provider_model: ProviderModel,
+        recent_success_rate: float,
+        recent_avg_latency_ms: float | None,
+        is_stream: bool = False,
+        model_health_state: dict[str, Any] | None = None,
+        provider_health_state: dict[str, Any] | None = None,
+        capacity_snapshot: ProviderCapacitySnapshot | None = None,
+        route_context: RoutePolicyContext | None = None,
+    ) -> dict[str, Any]:
         model_health_state = model_health_state or {}
         provider_health_state = provider_health_state or {}
         effective_health_status = str(model_health_state.get("health_status") or provider_model.health_status or "unknown")
@@ -1054,7 +1336,6 @@ class RouterService:
         provider_priority_score = max(0.0, 20.0 - float(provider.priority))
         latency_bias = route_context.latency_bias if route_context is not None else 1
         success_rate_bias = route_context.success_rate_bias if route_context is not None else 1
-        cost_bias = route_context.cost_bias if route_context is not None else 0
         success_rate = float(model_health_state.get("success_rate_5m") if model_health_state.get("success_rate_5m") is not None else recent_success_rate)
         failure_rate = float(model_health_state.get("failure_rate_5m") or max(0.0, 1.0 - success_rate))
         ewma_latency = model_health_state.get("ewma_latency_ms")
@@ -1065,26 +1346,38 @@ class RouterService:
         success_score = (success_rate * 40.0) * max(success_rate_bias, 0)
         recent_error_penalty = min(45.0, failure_rate * 100.0)
         saturation_penalty = RouterService._saturation_penalty(provider, capacity_snapshot, is_stream=is_stream)
-        cost_score = 0.0
-        if cost_bias > 0:
-            effective_cost = RouterService._effective_model_cost(provider_model)
-            if effective_cost is not None:
-                cost_score = max(0.0, 30.0 - effective_cost) * cost_bias
         region_bonus = 0.0
         if route_context and route_context.preferred_region_tags and provider.region_tag in set(route_context.preferred_region_tags):
             region_bonus = 20.0
-        return (
+        final_score = (
             health_score
             + priority_score
             + provider_priority_score
             + success_score
-            + cost_score
             + region_bonus
             - latency_penalty
             - ttfb_penalty
             - saturation_penalty
             - recent_error_penalty
         )
+        return {
+            "health_score": round(health_score, 4),
+            "model_priority_score": round(priority_score, 4),
+            "provider_priority_score": round(provider_priority_score, 4),
+            "success_score": round(success_score, 4),
+            "region_bonus": round(region_bonus, 4),
+            "latency_penalty": round(latency_penalty, 4),
+            "ttfb_penalty": round(ttfb_penalty, 4),
+            "saturation_penalty": round(saturation_penalty, 4),
+            "recent_error_penalty": round(recent_error_penalty, 4),
+            "success_rate": round(success_rate, 6),
+            "failure_rate": round(failure_rate, 6),
+            "latency_source_ms": float(latency_source or 0),
+            "ewma_ttfb_ms": float(ewma_ttfb or 0),
+            "health_status": effective_health_status,
+            "circuit_state": effective_circuit_state,
+            "final_score": round(final_score, 4),
+        }
 
     @staticmethod
     def _provider_blocked_by_content_policy(provider: Provider, *, route_context: RoutePolicyContext | None) -> bool:
@@ -1092,11 +1385,6 @@ class RouterService:
 
     @staticmethod
     def _content_policy_diagnostic_reason(provider: Provider, *, route_context: RoutePolicyContext | None) -> str | None:
-        try:
-            if not bool(getattr(SettingService.get_cached(), "content_guard_enabled", True)):
-                return None
-        except Exception:
-            pass
         decision = ContentTrustProbeService.get_trust_decision_for_route(
             provider,
             route_context=route_context,
@@ -1164,13 +1452,6 @@ class RouterService:
         return max(0.0, min(1.0, max(ratios)))
 
     @staticmethod
-    def _effective_model_cost(provider_model: ProviderModel) -> float | None:
-        values = [item for item in (provider_model.input_price_per_1k, provider_model.output_price_per_1k) if item is not None]
-        if not values:
-            return None
-        return sum(values) / len(values)
-
-    @staticmethod
     def _should_probe_open_model(provider: Provider, provider_model: ProviderModel, recovery_interval_sec: int, now: datetime) -> bool:
         if not provider.auto_recover_enabled:
             return False
@@ -1206,6 +1487,7 @@ class RouterService:
         return sorted(
             candidates,
             key=lambda item: (
+                -RouterService._route_score_tie_bucket(item.route_score),
                 item.load_factor,
                 -item.route_score,
                 item.provider_model.priority,
@@ -1216,44 +1498,7 @@ class RouterService:
         )
 
     @staticmethod
-    def _route_selection_weight(candidate: RouteCandidate) -> float:
-        health_multiplier = {
-            0: 1.0,
-            1: 0.35,
-            2: 0.05,
-            3: 0.01,
-        }.get(int(candidate.health_tier or 0), 0.05)
-        load_multiplier = max(0.01, 1.0 - max(0.0, min(1.0, float(candidate.load_factor or 0.0))))
-        dynamic_weight = max(0.0, float(candidate.dynamic_weight or 0.0))
-        route_score = max(1.0, float(candidate.route_score or 0.0))
-        return dynamic_weight * route_score * health_multiplier * load_multiplier
-
-    @staticmethod
-    def _sticky_order(candidates: list[RouteCandidate], sticky_key: str | None) -> list[RouteCandidate]:
-        if not candidates:
-            return []
-        if not sticky_key:
-            return RouterService._sort_by_health_and_sticky(candidates, sticky_key=None)
-        return sorted(
-            candidates,
-            key=lambda item: (
-                item.health_tier,
-                -RouterService._sticky_affinity_score(item, sticky_key),
-                item.load_factor,
-                -item.route_score,
-                item.provider_model.priority,
-                item.provider.priority,
-                item.provider.id,
-                item.provider_model.id,
-            ),
-        )
-
-    @staticmethod
-    def _sticky_affinity_score(candidate: RouteCandidate, sticky_key: str) -> float:
-        digest = hashlib.sha256(
-            f"{sticky_key}:{candidate.provider.id}:{candidate.provider_model.id}".encode("utf-8")
-        ).hexdigest()
-        raw_value = int(digest[:16], 16)
-        normalized = max(raw_value / 0xFFFFFFFFFFFFFFFF, 1e-12)
-        effective_score = max(candidate.route_score, 1.0)
-        return effective_score / -math.log(normalized)
+    def _route_score_tie_bucket(route_score: float | None) -> int:
+        score = max(0.0, float(route_score or 0.0))
+        bucket = max(1.0, RouterService.ROUTE_SCORE_TIE_BUCKET)
+        return int((score + bucket / 2.0) // bucket)

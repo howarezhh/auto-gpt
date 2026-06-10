@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, Integer, Text
+from sqlalchemy import Boolean, DateTime, Integer, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -25,7 +25,6 @@ class Provider(Base):
     max_active_streams: Mapped[int | None] = mapped_column(Integer, nullable=True, default=10)
     max_qps: Mapped[int | None] = mapped_column(Integer, nullable=True, default=20)
     max_rpm: Mapped[int | None] = mapped_column(Integer, nullable=True, default=20)
-    max_error_rate: Mapped[float | None] = mapped_column(Float, nullable=True, default=80.0)
     first_token_timeout_sec: Mapped[int | None] = mapped_column(Integer, nullable=True, default=60)
     maintenance_window: Mapped[str | None] = mapped_column(Text, nullable=True)
     maintenance_mode_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
@@ -47,6 +46,7 @@ class Provider(Base):
     failure_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     success_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     circuit_state: Mapped[str] = mapped_column(Text, nullable=False, default="closed")
+    circuit_opened_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     credential_rotated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     credential_hint: Mapped[str | None] = mapped_column(Text, nullable=True)
     remark: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -21,6 +21,7 @@ class ApiKeyAuthCache:
     _last_error: str | None = None
     _sync_client: Redis | None = None
     _local_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+    _local_negative_cache: dict[str, float] = {}
     _local_api_key_hashes: dict[int, str] = {}
 
     @classmethod
@@ -59,6 +60,10 @@ class ApiKeyAuthCache:
     @staticmethod
     def key_hash_cache_key(key_hash: str) -> str:
         return f"auth:key_hash:{key_hash}"
+
+    @staticmethod
+    def invalid_key_hash_cache_key(key_hash: str) -> str:
+        return f"auth:invalid_key_hash:{key_hash}"
 
     @staticmethod
     def api_key_hash_key(api_key_id: int) -> str:
@@ -100,11 +105,10 @@ class ApiKeyAuthCache:
 
     @classmethod
     def _get_sync_client(cls) -> Redis | None:
-        redis_url = get_settings().redis_url.strip()
-        if not redis_url:
+        if not get_settings().redis_url.strip():
             return None
         if cls._sync_client is None:
-            cls._sync_client = Redis.from_url(redis_url, decode_responses=True)
+            cls._sync_client = RedisService.create_sync_client()
         return cls._sync_client
 
     @classmethod
@@ -130,6 +134,51 @@ class ApiKeyAuthCache:
         return data
 
     @classmethod
+    def is_invalid_hash_cached(cls, key_hash: str) -> bool:
+        ttl = int(getattr(get_settings(), "api_key_auth_negative_cache_ttl_seconds", 0) or 0)
+        if ttl <= 0:
+            return False
+        now = time.monotonic()
+        expires_at = cls._local_negative_cache.get(key_hash)
+        if expires_at is not None:
+            if expires_at > now:
+                return True
+            cls._local_negative_cache.pop(key_hash, None)
+        try:
+            client = cls._get_sync_client()
+            if client is None:
+                return False
+            cached = client.get(cls.invalid_key_hash_cache_key(key_hash))
+        except Exception as exc:
+            cls._last_error = str(exc)
+            return False
+        if not cached:
+            return False
+        cls._local_negative_cache[key_hash] = now + ttl
+        cls._enforce_local_negative_cache_limit()
+        return True
+
+    @classmethod
+    async def async_set_invalid_hash(cls, key_hash: str) -> None:
+        ttl = int(getattr(get_settings(), "api_key_auth_negative_cache_ttl_seconds", 0) or 0)
+        if ttl <= 0:
+            return
+        try:
+            await RedisService.get_client().setex(cls.invalid_key_hash_cache_key(key_hash), ttl, "1")
+            cls._last_error = None
+        except Exception as exc:
+            cls._last_error = str(exc)
+
+    @classmethod
+    def set_invalid_hash(cls, key_hash: str) -> None:
+        ttl = int(getattr(get_settings(), "api_key_auth_negative_cache_ttl_seconds", 0) or 0)
+        if ttl <= 0:
+            return
+        cls._local_negative_cache[key_hash] = time.monotonic() + ttl
+        cls._enforce_local_negative_cache_limit()
+        cls._run_async_compat(cls.async_set_invalid_hash(key_hash))
+
+    @classmethod
     def _get_local(cls, key_hash: str) -> dict[str, Any] | None:
         ttl = float(getattr(get_settings(), "api_key_auth_l1_cache_ttl_seconds", 0) or 0)
         if ttl <= 0:
@@ -152,11 +201,57 @@ class ApiKeyAuthCache:
         ttl = float(getattr(get_settings(), "api_key_auth_l1_cache_ttl_seconds", 0) or 0)
         if ttl <= 0:
             return
+        cls._local_negative_cache.pop(key_hash, None)
+        cls._prune_local_cache()
         cls._local_cache[key_hash] = (time.monotonic() + ttl, data)
         api_key = data.get("api_key") if isinstance(data, dict) else None
         api_key_id = api_key.get("id") if isinstance(api_key, dict) else None
         if api_key_id is not None:
             cls._local_api_key_hashes[int(api_key_id)] = key_hash
+        cls._enforce_local_cache_limit()
+
+    @classmethod
+    def _prune_local_cache(cls) -> None:
+        now = time.monotonic()
+        expired_keys = [key for key, item in cls._local_cache.items() if item[0] <= now]
+        for key in expired_keys:
+            cls._local_cache.pop(key, None)
+        if expired_keys:
+            live_hashes = set(cls._local_cache)
+            cls._local_api_key_hashes = {
+                api_key_id: key_hash
+                for api_key_id, key_hash in cls._local_api_key_hashes.items()
+                if key_hash in live_hashes
+            }
+        expired_negative_keys = [key for key, expires_at in cls._local_negative_cache.items() if expires_at <= now]
+        for key in expired_negative_keys:
+            cls._local_negative_cache.pop(key, None)
+
+    @classmethod
+    def _enforce_local_cache_limit(cls) -> None:
+        max_entries = int(getattr(get_settings(), "api_key_auth_l1_max_entries", 10000) or 0)
+        if max_entries <= 0 or len(cls._local_cache) <= max_entries:
+            return
+        overflow = len(cls._local_cache) - max_entries
+        oldest_keys = sorted(cls._local_cache, key=lambda key: cls._local_cache[key][0])[:overflow]
+        for key in oldest_keys:
+            cls._local_cache.pop(key, None)
+        live_hashes = set(cls._local_cache)
+        cls._local_api_key_hashes = {
+            api_key_id: key_hash
+            for api_key_id, key_hash in cls._local_api_key_hashes.items()
+            if key_hash in live_hashes
+        }
+
+    @classmethod
+    def _enforce_local_negative_cache_limit(cls) -> None:
+        max_entries = int(getattr(get_settings(), "api_key_auth_l1_max_entries", 10000) or 0)
+        if max_entries <= 0 or len(cls._local_negative_cache) <= max_entries:
+            return
+        overflow = len(cls._local_negative_cache) - max_entries
+        oldest_keys = sorted(cls._local_negative_cache, key=lambda key: cls._local_negative_cache[key])[:overflow]
+        for key in oldest_keys:
+            cls._local_negative_cache.pop(key, None)
 
     @classmethod
     async def async_set_auth_context(
@@ -199,7 +294,6 @@ class ApiKeyAuthCache:
                 "preferred_region_tags_json": api_key.preferred_region_tags_json,
                 "latency_bias": api_key.latency_bias,
                 "success_rate_bias": api_key.success_rate_bias,
-                "cost_bias": api_key.cost_bias,
             },
             "owner_user": (
                 {
@@ -221,12 +315,15 @@ class ApiKeyAuthCache:
         try:
             client = RedisService.get_client()
             cache_key = cls.key_hash_cache_key(key_hash)
+            auxiliary_ttl = ttl + 60
             await client.setex(cache_key, ttl, dumps_json(payload))
+            await client.delete(cls.invalid_key_hash_cache_key(key_hash))
             if api_key.id is not None:
-                await client.set(cls.api_key_hash_key(api_key.id), key_hash)
+                await client.set(cls.api_key_hash_key(api_key.id), key_hash, ex=auxiliary_ttl)
             if api_key.owner_user_id is not None and api_key.id is not None:
                 user_key = cls.user_api_keys_key(api_key.owner_user_id)
                 await client.sadd(user_key, api_key.id)
+                await client.expire(user_key, auxiliary_ttl)
             cls._last_error = None
         except Exception as exc:
             cls._last_error = str(exc)
@@ -256,7 +353,6 @@ class ApiKeyAuthCache:
             preferred_region_tags=loads_json(api_key.preferred_region_tags_json, []),
             latency_bias=api_key.latency_bias,
             success_rate_bias=api_key.success_rate_bias,
-            cost_bias=api_key.cost_bias,
         )
         return api_key, route_context
 
@@ -265,7 +361,7 @@ class ApiKeyAuthCache:
         if not key_hash:
             return
         try:
-            await RedisService.get_client().delete(cls.key_hash_cache_key(key_hash))
+            await RedisService.get_client().delete(cls.key_hash_cache_key(key_hash), cls.invalid_key_hash_cache_key(key_hash))
             cls._last_error = None
         except Exception as exc:
             cls._last_error = str(exc)
@@ -284,7 +380,12 @@ class ApiKeyAuthCache:
                 if mapped_hash:
                     hashes.add(str(mapped_hash))
                 await client.delete(cls.api_key_hash_key(api_key_id))
-            keys = [cls.key_hash_cache_key(item) for item in hashes if item]
+            keys = [
+                key
+                for item in hashes
+                if item
+                for key in (cls.key_hash_cache_key(item), cls.invalid_key_hash_cache_key(item))
+            ]
             if keys:
                 await client.delete(*keys)
             cls._last_error = None
@@ -298,9 +399,13 @@ class ApiKeyAuthCache:
         try:
             client = RedisService.get_client()
             set_key = cls.user_api_keys_key(user_id)
-            api_key_ids = [int(item) for item in await client.smembers(set_key) or []]
-            for api_key_id in api_key_ids:
-                await cls.async_invalidate_api_key(api_key_id)
+            scanned = 0
+            scan_limit = int(getattr(get_settings(), "api_key_auth_user_invalidate_scan_limit", 5000) or 5000)
+            async for raw_api_key_id in client.sscan_iter(set_key, count=100):
+                scanned += 1
+                if scanned > scan_limit:
+                    break
+                await cls.async_invalidate_api_key(int(raw_api_key_id))
             await client.delete(set_key)
             cls._last_error = None
         except Exception as exc:
@@ -322,21 +427,25 @@ class ApiKeyAuthCache:
     def invalidate_hash(cls, key_hash: str | None) -> None:
         if key_hash:
             cls._local_cache.pop(key_hash, None)
+            cls._local_negative_cache.pop(key_hash, None)
         cls._run_async_compat(cls.async_invalidate_hash(key_hash))
 
     @classmethod
     def invalidate_api_key(cls, api_key_id: int | None, key_hash: str | None = None) -> None:
         if key_hash:
             cls._local_cache.pop(key_hash, None)
+            cls._local_negative_cache.pop(key_hash, None)
         if api_key_id is not None:
             mapped_hash = cls._local_api_key_hashes.pop(int(api_key_id), None)
             if mapped_hash:
                 cls._local_cache.pop(mapped_hash, None)
+                cls._local_negative_cache.pop(mapped_hash, None)
         cls._run_async_compat(cls.async_invalidate_api_key(api_key_id, key_hash))
 
     @classmethod
     def invalidate_user(cls, user_id: int | None) -> None:
         cls._local_cache.clear()
+        cls._local_negative_cache.clear()
         cls._local_api_key_hashes.clear()
         cls._run_async_compat(cls.async_invalidate_user(user_id))
 
@@ -344,6 +453,7 @@ class ApiKeyAuthCache:
     def close(cls) -> None:
         cls._last_error = None
         cls._local_cache.clear()
+        cls._local_negative_cache.clear()
         cls._local_api_key_hashes.clear()
         if cls._sync_client is not None:
             cls._sync_client.close()

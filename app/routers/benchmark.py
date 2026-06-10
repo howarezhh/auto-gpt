@@ -24,6 +24,16 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 REPORT_ROOT = PROJECT_ROOT / "data" / "benchmark-reports"
 SCRIPT_PATH = PROJECT_ROOT / "scripts" / "real_concurrency_benchmark.py"
 MAX_LOG_LINES = 600
+MAX_BENCHMARK_CONCURRENCY = 1000
+MAX_BENCHMARK_PROBE_CONCURRENCY = 2000
+MAX_BENCHMARK_SAMPLE_REQUESTS = 10000
+MAX_BENCHMARK_REQUESTS_PER_CONCURRENCY = 20
+MAX_BENCHMARK_STAGE_REQUESTS = 10000
+MAX_BENCHMARK_WARMUP_REQUESTS = 1000
+MAX_BENCHMARK_TIMEOUT_S = 600
+MAX_RETAINED_JOBS = 20
+MAX_RETAINED_REPORT_FILES = 80
+PROCESS_STOP_GRACE_SECONDS = 5
 BENCH_EVENT_PREFIX = "@@BENCH@@"
 
 router = APIRouter(prefix="/api/benchmark", tags=["benchmark"])
@@ -34,17 +44,17 @@ class RealConcurrencyBenchmarkRequest(BaseModel):
     raw_api_key: str = Field(..., min_length=1, max_length=4096)
     endpoint: str = Field(default="chat")
     model_names: list[str] = Field(default_factory=list, min_length=1)
-    concurrency: int = Field(default=100, ge=1, le=5000)
-    probe_min_concurrency: int = Field(default=0, ge=0, le=5000)
-    probe_max_concurrency: int = Field(default=0, ge=0, le=20000)
+    concurrency: int = Field(default=100, ge=1, le=MAX_BENCHMARK_CONCURRENCY)
+    probe_min_concurrency: int = Field(default=0, ge=0, le=MAX_BENCHMARK_CONCURRENCY)
+    probe_max_concurrency: int = Field(default=0, ge=0, le=MAX_BENCHMARK_PROBE_CONCURRENCY)
     max_probe_rounds: int = Field(default=10, ge=1, le=30)
     probe_scale: float = Field(default=1.5, ge=1.1, le=5)
-    sample_requests: int = Field(default=300, ge=1, le=200000)
-    requests_per_concurrency: int = Field(default=2, ge=1, le=100)
-    warmup_requests: int = Field(default=12, ge=0, le=10000)
+    sample_requests: int = Field(default=300, ge=1, le=MAX_BENCHMARK_SAMPLE_REQUESTS)
+    requests_per_concurrency: int = Field(default=2, ge=1, le=MAX_BENCHMARK_REQUESTS_PER_CONCURRENCY)
+    warmup_requests: int = Field(default=12, ge=0, le=MAX_BENCHMARK_WARMUP_REQUESTS)
     max_output_tokens: int = Field(default=128, ge=1, le=8192)
-    client_timeout_s: float = Field(default=180, ge=1, le=3600)
-    request_timeout_s: float = Field(default=180, ge=1, le=3600)
+    client_timeout_s: float = Field(default=180, ge=1, le=MAX_BENCHMARK_TIMEOUT_S)
+    request_timeout_s: float = Field(default=180, ge=1, le=MAX_BENCHMARK_TIMEOUT_S)
     boundary_max_rounds: int = Field(default=8, ge=0, le=20)
     progress_interval_s: float = Field(default=0.5, ge=0.1, le=10)
     success_rate_threshold: float = Field(default=0.99, ge=0, le=1)
@@ -91,6 +101,13 @@ class RealConcurrencyBenchmarkRequest(BaseModel):
     def normalize_text(cls, value: str) -> str:
         return value.strip()
 
+    @model_validator(mode="after")
+    def limit_stage_request_fanout(self) -> "RealConcurrencyBenchmarkRequest":
+        stage_requests = max(self.sample_requests, self.concurrency * self.requests_per_concurrency)
+        if stage_requests > MAX_BENCHMARK_STAGE_REQUESTS:
+            raise ValueError(f"单轮压测请求数不能超过 {MAX_BENCHMARK_STAGE_REQUESTS}")
+        return self
+
 
 @dataclass
 class BenchmarkJob:
@@ -119,6 +136,34 @@ _jobs_lock = threading.Lock()
 
 def _now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _prune_finished_jobs_locked() -> None:
+    finished_jobs = [item for item in _jobs.values() if item.status != "running"]
+    overflow = len(finished_jobs) - MAX_RETAINED_JOBS
+    if overflow <= 0:
+        return
+    finished_jobs.sort(key=lambda item: item.finished_at or item.created_at or "")
+    for job in finished_jobs[:overflow]:
+        _jobs.pop(job.job_id, None)
+
+
+def _cleanup_old_report_files() -> None:
+    try:
+        if not REPORT_ROOT.is_dir():
+            return
+        files = [item for item in REPORT_ROOT.iterdir() if item.is_file() and item.suffix.lower() in {".json", ".html"}]
+        overflow = len(files) - MAX_RETAINED_REPORT_FILES
+        if overflow <= 0:
+            return
+        files.sort(key=lambda item: item.stat().st_mtime)
+        for path in files[:overflow]:
+            try:
+                path.unlink()
+            except OSError:
+                continue
+    except OSError:
+        return
 
 
 def _sanitize_config(payload: RealConcurrencyBenchmarkRequest) -> dict[str, Any]:
@@ -283,22 +328,45 @@ def _read_process_output(job_id: str, process: subprocess.Popen[str]) -> None:
             for line in raw_line.splitlines():
                 _append_log(job, line)
         return_code = process.wait()
+        should_load_summary = False
         with _jobs_lock:
             job.return_code = return_code
             job.finished_at = _now_text()
+            job.process = None
             if job.status == "stopped":
+                _prune_finished_jobs_locked()
                 return
             if return_code == 0:
                 job.status = "completed"
-                _load_json_report_summary(job)
+                should_load_summary = True
             else:
                 job.status = "failed"
                 job.error_message = job.current_line or f"进程退出码 {return_code}"
+        if should_load_summary:
+            _load_json_report_summary(job)
+        with _jobs_lock:
+            _prune_finished_jobs_locked()
     except Exception as exc:
         with _jobs_lock:
             job.status = "failed"
             job.finished_at = _now_text()
+            job.process = None
             job.error_message = str(exc)
+            _prune_finished_jobs_locked()
+
+
+def _terminate_process_with_escalation(process: subprocess.Popen[str]) -> None:
+    try:
+        process.terminate()
+        process.wait(timeout=PROCESS_STOP_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+            process.wait(timeout=PROCESS_STOP_GRACE_SECONDS)
+        except Exception:
+            return
+    except Exception:
+        return
 
 
 def _load_json_report_summary(job: BenchmarkJob) -> None:
@@ -445,38 +513,47 @@ def start_real_concurrency_benchmark(
 ) -> dict[str, Any]:
     if not SCRIPT_PATH.is_file():
         raise HTTPException(status_code=500, detail="真实并发测试脚本不存在")
-    with _jobs_lock:
-        active_job = next((item for item in _jobs.values() if item.status == "running"), None)
-        if active_job is not None:
-            raise HTTPException(status_code=409, detail=f"已有压测任务运行中：{active_job.job_id}")
-
+    _cleanup_old_report_files()
     job_id = uuid4().hex
-    env = os.environ.copy()
-    env.setdefault("PYTHONIOENCODING", "utf-8")
-    process = subprocess.Popen(
-        _build_command(payload),
-        cwd=PROJECT_ROOT,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        bufsize=1,
-        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
-    )
     job = BenchmarkJob(
         job_id=job_id,
-        status="running",
+        status="starting",
         created_at=_now_text(),
-        started_at=_now_text(),
+        started_at=None,
         finished_at=None,
         return_code=None,
         config=_sanitize_config(payload),
-        process=process,
     )
     with _jobs_lock:
+        _prune_finished_jobs_locked()
+        active_job = next((item for item in _jobs.values() if item.status in {"starting", "running"}), None)
+        if active_job is not None:
+            raise HTTPException(status_code=409, detail=f"已有压测任务运行中：{active_job.job_id}")
         _jobs[job_id] = job
+
+    env = os.environ.copy()
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    try:
+        process = subprocess.Popen(
+            _build_command(payload),
+            cwd=PROJECT_ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
+        )
+    except Exception as exc:
+        with _jobs_lock:
+            _jobs.pop(job_id, None)
+        raise HTTPException(status_code=500, detail=f"压测进程启动失败：{exc}") from exc
+    with _jobs_lock:
+        job.status = "running"
+        job.started_at = _now_text()
+        job.process = process
     threading.Thread(target=_read_process_output, args=(job_id, process), daemon=True).start()
     _record_benchmark_audit(
         db,
@@ -493,6 +570,7 @@ def start_real_concurrency_benchmark(
 @router.get("/real-concurrency/jobs")
 def list_real_concurrency_jobs() -> list[dict[str, Any]]:
     with _jobs_lock:
+        _prune_finished_jobs_locked()
         jobs = sorted(_jobs.values(), key=lambda item: item.created_at, reverse=True)
         return [_job_to_response(item) for item in jobs[:10]]
 
@@ -535,7 +613,7 @@ def stop_real_concurrency_job(
             return _job_to_response(job)
         job.status = "stopped"
         job.finished_at = _now_text()
-    process.terminate()
+    threading.Thread(target=_terminate_process_with_escalation, args=(process,), daemon=True).start()
     _record_benchmark_audit(
         db,
         request=request,

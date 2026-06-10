@@ -39,7 +39,6 @@ class ApiClientKey(Base):
     preferred_region_tags_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     latency_bias: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     success_rate_bias: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
-    cost_bias: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(

@@ -30,7 +30,7 @@ router = APIRouter(tags=["models"])
 
 @router.get("/api/models", dependencies=[Depends(require_admin_api_user)])
 def list_models(
-    paginated: bool = Query(default=False),
+    paginated: bool = Query(default=True),
     keyword: str | None = Query(default=None),
     enabled: bool | None = Query(default=None),
     health_status: str | None = Query(default=None),
@@ -53,7 +53,7 @@ def list_models(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return ModelCatalogPageOut(**payload)
-    return [ModelCatalogOut(**item) for item in ModelCatalogService.list_model_dicts(db)]
+    return [ModelCatalogOut(**item) for item in ModelCatalogService.list_model_dicts(db)[:500]]
 
 
 @router.get("/api/models/options", response_model=list[ModelCatalogOptionOut], dependencies=[Depends(require_admin_api_user)])
@@ -114,11 +114,10 @@ def batch_update_model_context_window(
         summary=f"批量更新 {len(catalogs)} 个模型的最大上下文窗口",
         detail=payload.model_dump(),
     )
-    updated_names = {catalog.model_name for catalog in catalogs}
+    providers = ModelCatalogService._load_catalogs_and_providers(db)[1]
     return [
-        ModelCatalogOut(**item)
-        for item in ModelCatalogService.list_model_dicts(db)
-        if item["model_name"] in updated_names
+        ModelCatalogOut(**ModelCatalogService._serialize_catalog(catalog, providers))
+        for catalog in catalogs
     ]
 
 

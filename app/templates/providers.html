@@ -33,6 +33,9 @@
             <div class="panel-kicker">对象目录</div>
             <h2>提供商对象目录</h2>
         </div>
+        <div class="provider-model-page-actions">
+            <button class="btn btn-ghost interactive-btn" id="providers-trust-selected-btn" type="button" disabled>可信检测选中</button>
+        </div>
     </div>
     <div class="provider-toolbar provider-toolbar-stacked">
         <div class="table-toolbar filter-toolbar provider-toolbar-actions">
@@ -51,6 +54,9 @@
         <table class="data-table provider-data-table provider-registry-table">
             <thead>
                 <tr>
+                    <th class="provider-model-select-col">
+                        <input id="providers-select-all" type="checkbox" aria-label="选择当前提供商列表">
+                    </th>
                     <th>对象</th>
                     <th>状态</th>
                     <th>模型</th>
@@ -243,10 +249,6 @@
             <label for="provider-max-rpm">
                 <span>每分钟最多请求</span>
                 <input class="field-input" id="provider-max-rpm" type="number" inputmode="numeric" min="0" placeholder="0 或留空表示不限" value="20">
-            </label>
-            <label for="provider-max-error-rate">
-                <span>最大错误率 %</span>
-                <input class="field-input" id="provider-max-error-rate" type="number" inputmode="decimal" min="0" max="100" step="0.1" value="80">
             </label>
             <label for="provider-first-token-timeout-sec">
                 <span>首 Token 超时秒</span>

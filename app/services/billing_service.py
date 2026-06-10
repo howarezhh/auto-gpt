@@ -491,6 +491,7 @@ class BillingService:
         api_key_id: int,
         limit: int = 50,
     ) -> ApiKeyBillingSummaryOut:
+        normalized_limit = max(1, min(int(limit or 50), 500))
         api_key = db.get(ApiClientKey, api_key_id)
         if api_key is None:
             raise ValueError("API key not found")
@@ -501,7 +502,7 @@ class BillingService:
                 select(record_model)
                 .where(record_model.api_client_key_id == api_key_id)
                 .order_by(record_model.created_at.desc(), record_model.id.desc())
-                .limit(max(1, limit))
+                .limit(normalized_limit)
             )
         )
         recent_since = datetime.utcnow() - timedelta(hours=24)

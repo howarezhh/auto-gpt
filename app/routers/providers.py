@@ -1,9 +1,11 @@
 import asyncio
+import contextlib
 import json
 from collections.abc import Awaitable, Callable
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal, get_db
@@ -26,11 +28,11 @@ from app.schemas.provider import (
     ProviderSummaryOut,
     ProviderUpdate,
 )
+from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
 from app.services.health_service import HealthService
 from app.services.admin_audit_service import AdminAuditService
 from app.services.provider_service import ProviderService
-from app.services.setting_service import SettingService
 from app.services.user_auth_service import UserAuthService
 from app.utils.test_features import normalize_test_features, phase_keys_from_test_features
 
@@ -86,31 +88,53 @@ def _record_provider_audit(
 async def _stream_health_check_events(
     worker: Callable[[Callable[[dict], Awaitable[None]]], Awaitable[object]],
     on_finished: Callable[[], None] | None = None,
+    request: Request | None = None,
 ):
-    queue: asyncio.Queue[dict | None] = asyncio.Queue()
+    queue: asyncio.Queue[dict | None] = asyncio.Queue(maxsize=HealthService.HEALTH_STREAM_PROGRESS_QUEUE_SIZE)
+
+    def offer_event(payload: dict | None) -> None:
+        try:
+            queue.put_nowait(payload)
+        except asyncio.QueueFull:
+            try:
+                queue.get_nowait()
+                queue.task_done()
+            except asyncio.QueueEmpty:
+                pass
+            with contextlib.suppress(asyncio.QueueFull):
+                queue.put_nowait(payload)
 
     async def reporter(payload: dict) -> None:
-        await queue.put(payload)
+        offer_event(payload)
 
     async def run_worker() -> None:
         try:
             result = await worker(reporter)
-            await queue.put({"event": "completed", "result": result})
+            offer_event({"event": "completed", "result": result})
         except Exception as exc:
-            await queue.put({"event": "error", "message": str(exc)})
+            offer_event({"event": "error", "message": str(exc)})
         finally:
-            await queue.put(None)
+            offer_event(None)
 
     task = asyncio.create_task(run_worker())
     try:
         while True:
-            item = await queue.get()
+            if request is not None and await request.is_disconnected():
+                task.cancel()
+                break
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
             if item is None:
                 break
             yield _health_stream_line(item)
     finally:
         try:
-            await task
+            if not task.done():
+                task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
         finally:
             if on_finished is not None:
                 on_finished()
@@ -197,10 +221,6 @@ def list_provider_model_mounts(
 @router.post("", response_model=ProviderOut, status_code=status.HTTP_201_CREATED)
 def create_provider(payload: ProviderCreate, request: Request, db: Session = Depends(get_db)) -> ProviderOut:
     provider = ProviderService.create_provider(db, payload)
-    settings = SettingService.get_or_create(db)
-    if settings.default_provider_id is None:
-        settings.default_provider_id = provider.id
-        db.commit()
     provider_dict = ProviderService.provider_to_dict(provider, metrics=ProviderService._build_quality_metrics(db, [provider]))
     _record_provider_audit(
         db,
@@ -279,10 +299,6 @@ def delete_provider(provider_id: int, request: Request, db: Session = Depends(ge
     before = ProviderService.provider_to_dict(provider, metrics=ProviderService._build_quality_metrics(db, [provider]))
     provider_name = provider.name
     ProviderService.delete_provider(db, provider)
-    settings = SettingService.get_or_create(db)
-    if settings.default_provider_id == provider_id:
-        settings.default_provider_id = None
-        db.commit()
     _record_provider_audit(
         db,
         request=request,
@@ -455,7 +471,11 @@ async def test_provider_stream(provider_id: int, request: Request, payload: dict
             stream_db.close()
 
     return StreamingResponse(
-        _stream_health_check_events(worker, on_finished=lambda: HealthService.release_manual_check_slot(slot_key)),
+        _stream_health_check_events(
+            worker,
+            on_finished=lambda: HealthService.release_manual_check_slot(slot_key),
+            request=request,
+        ),
         media_type="application/x-ndjson",
         headers=_health_stream_headers(),
     )
@@ -469,10 +489,15 @@ async def test_provider_model(
     payload: dict | None = None,
     db: Session = Depends(get_db),
 ) -> dict:
-    provider = ProviderService.get_provider(db, provider_id)
+    provider = db.get(Provider, provider_id)
     if not provider:
         raise HTTPException(status_code=404, detail="Provider not found")
-    provider_model = next((item for item in provider.provider_models if item.id == provider_model_id), None)
+    provider_model = db.scalar(
+        select(ProviderModel).where(
+            ProviderModel.id == provider_model_id,
+            ProviderModel.provider_id == provider.id,
+        )
+    )
     if provider_model is None:
         raise HTTPException(status_code=404, detail="Provider model not found")
     body = payload or {}
@@ -571,7 +596,11 @@ async def test_all_providers_stream(request: Request, payload: dict | None = Non
             stream_db.close()
 
     return StreamingResponse(
-        _stream_health_check_events(worker, on_finished=lambda: HealthService.release_manual_check_slot(slot_key)),
+        _stream_health_check_events(
+            worker,
+            on_finished=lambda: HealthService.release_manual_check_slot(slot_key),
+            request=request,
+        ),
         media_type="application/x-ndjson",
         headers=_health_stream_headers(),
     )
@@ -583,9 +612,10 @@ async def test_provider_connectivity(
     request: Request,
     db: Session = Depends(get_db),
 ) -> list[dict]:
-    providers = ProviderService.list_providers(db)
     if payload.provider_ids:
-        existing_ids = {provider.id for provider in providers}
+        existing_ids = set(
+            db.scalars(select(Provider.id).where(Provider.id.in_(payload.provider_ids)))
+        )
         missing_ids = [provider_id for provider_id in payload.provider_ids if provider_id not in existing_ids]
         if missing_ids:
             raise HTTPException(status_code=404, detail=f"Provider not found: {', '.join(str(item) for item in missing_ids)}")

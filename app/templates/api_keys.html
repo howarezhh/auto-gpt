@@ -93,7 +93,7 @@
                 <option value="disabled">已禁用</option>
                 <option value="expired">已过期</option>
                 <option value="balance_exhausted">余额耗尽</option>
-                <option value="unbound">未绑定渠道</option>
+                <option value="unbound">未绑定提供商</option>
             </select>
             <select class="field-input" id="api-key-enabled-filter">
                 <option value="">全部启用状态</option>
@@ -120,7 +120,7 @@
                 <button class="btn btn-ghost interactive-btn" id="api-key-batch-rotate-btn" type="button">批量轮换</button>
                 <button class="btn btn-ghost interactive-btn" id="api-key-batch-expire-btn" type="button">批量过期</button>
                 <button class="btn btn-ghost interactive-btn" id="api-key-batch-template-btn" type="button">套用模板</button>
-                <button class="btn btn-ghost interactive-btn" id="api-key-batch-providers-btn" type="button">改渠道授权</button>
+                <button class="btn btn-ghost interactive-btn" id="api-key-batch-providers-btn" type="button">改提供商授权</button>
             </div>
             <div class="table-toolbar logs-pagination-bar workspace-pagination-bar">
                 <label class="logs-page-size">
@@ -128,7 +128,7 @@
                     <input id="api-key-check-all-visible" type="checkbox" aria-label="选择本页">
                 </label>
                 <div class="logs-page-actions">
-                    <button class="btn btn-ghost interactive-btn" id="api-key-authorize-all-btn" type="button">全部恢复全渠道授权</button>
+                    <button class="btn btn-ghost interactive-btn" id="api-key-authorize-all-btn" type="button">全部恢复全提供商授权</button>
                     <button class="btn btn-ghost interactive-btn" id="api-key-prev-page-btn" type="button">上一页</button>
                     <button class="btn btn-ghost interactive-btn" id="api-key-next-page-btn" type="button">下一页</button>
                 </div>
@@ -143,7 +143,7 @@
                         <th>归属用户</th>
                         <th>密钥</th>
                         <th>状态</th>
-                        <th>授权渠道</th>
+                        <th>授权提供商</th>
                         <th>频控</th>
                         <th>账单 / 余额</th>
                         <th>最近使用</th>
@@ -171,7 +171,7 @@
                 <thead>
                     <tr>
                         <th>名称</th>
-                        <th>授权渠道</th>
+                        <th>授权提供商</th>
                         <th>模型白名单</th>
                         <th>有效期</th>
                         <th>到期策略</th>
@@ -190,14 +190,14 @@
         <div class="section-subhead">
             <div>
                 <div class="panel-kicker">成本透视</div>
-                <h3>按用户 / 模型 / 渠道看成本</h3>
+                <h3>按用户 / 模型 / 提供商看成本</h3>
             </div>
         </div>
         <div class="table-toolbar filter-toolbar">
             <select class="field-input" id="api-key-insight-group-by">
                 <option value="user">按用户</option>
                 <option value="model">按模型</option>
-                <option value="provider">按渠道</option>
+                <option value="provider">按提供商</option>
             </select>
             <select class="field-input" id="api-key-insight-window-days">
                 <option value="7">最近 7 天</option>
@@ -302,7 +302,7 @@
                 <span>授权提供商</span>
                 <div class="settings-note">
                     <strong>授权规则</strong>
-                    <span>默认全选。保持全选时，该 API Key 会自动跟随后续渠道增删；只有取消部分勾选时，才会切换成单密钥自定义授权。</span>
+                    <span>默认全选。保持全选时，该 API Key 会自动跟随后续提供商增删；只有取消部分勾选时，才会切换成单密钥自定义授权。</span>
                 </div>
                 <div class="api-key-provider-selector" id="api-key-provider-selector">
                     <div class="playground-provider-list-empty">正在加载提供商...</div>
@@ -339,7 +339,7 @@
 <div class="modal-shell hidden" id="api-key-batch-provider-modal">
     <div class="modal-card modal-lg">
         <div class="modal-head">
-            <h3>批量更新渠道授权</h3>
+            <h3>批量更新提供商授权</h3>
             <button class="icon-btn interactive-btn" id="api-key-batch-provider-close" type="button">×</button>
         </div>
         <form id="api-key-batch-provider-form" class="form-grid">
@@ -347,7 +347,7 @@
                 <span>授权提供商</span>
                 <div class="settings-note">
                     <strong>批量规则</strong>
-                    <span>默认全选。若保持全选，所选 API Key 会统一恢复为自动同步全部渠道授权。</span>
+                    <span>默认全选。若保持全选，所选 API Key 会统一恢复为自动同步全部提供商授权。</span>
                 </div>
                 <div class="api-key-provider-selector" id="api-key-batch-provider-selector"></div>
             </div>

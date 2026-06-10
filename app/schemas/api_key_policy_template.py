@@ -2,14 +2,17 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field, field_validator
 
+MAX_TEMPLATE_ALLOWED_PROVIDER_IDS = 500
+MAX_TEMPLATE_ALLOWED_MODEL_NAMES = 500
+
 
 class ApiKeyPolicyTemplateBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     remark: str | None = None
     enabled: bool = True
     expires_in_days: int | None = Field(default=None, ge=0)
-    allowed_provider_ids: list[int] = Field(default_factory=list)
-    allowed_model_names: list[str] = Field(default_factory=list)
+    allowed_provider_ids: list[int] = Field(default_factory=list, max_length=MAX_TEMPLATE_ALLOWED_PROVIDER_IDS)
+    allowed_model_names: list[str] = Field(default_factory=list, max_length=MAX_TEMPLATE_ALLOWED_MODEL_NAMES)
 
     @field_validator("name")
     @classmethod
@@ -59,8 +62,8 @@ class ApiKeyPolicyTemplateUpdate(BaseModel):
     remark: str | None = None
     enabled: bool | None = None
     expires_in_days: int | None = Field(default=None, ge=0)
-    allowed_provider_ids: list[int] | None = None
-    allowed_model_names: list[str] | None = None
+    allowed_provider_ids: list[int] | None = Field(default=None, max_length=MAX_TEMPLATE_ALLOWED_PROVIDER_IDS)
+    allowed_model_names: list[str] | None = Field(default=None, max_length=MAX_TEMPLATE_ALLOWED_MODEL_NAMES)
 
     @field_validator("allowed_provider_ids")
     @classmethod

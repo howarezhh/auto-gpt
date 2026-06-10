@@ -5,10 +5,11 @@ from collections import defaultdict
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import delete, func, or_, select, update
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy import case, delete, func, or_, select, update
+from sqlalchemy.orm import Session, load_only, selectinload, with_loader_criteria
 
 from app.models.api_client_key import ApiClientKey
+from app.models.api_client_key_provider_binding import ApiClientKeyProviderBinding
 from app.models.api_key_policy_template import ApiKeyPolicyTemplate
 from app.models.model_catalog import ModelCatalog
 from app.models.provider import Provider
@@ -35,7 +36,11 @@ class ModelCatalogService:
     """负责模型目录管理、provider 绑定和目录同步。"""
 
     MODEL_HEALTH_MAX_PARALLEL_MODELS = 12
+    MODEL_HEALTH_TEST_ALL_LIMIT = 50
     INTERACTIVE_MODEL_TEST_TOTAL_TIMEOUT_SECONDS = 10.0
+    MODEL_OPTIONS_LIMIT = 500
+    MODEL_HEALTH_FILTER_SCAN_LIMIT = 1000
+    MODEL_MAPPING_NORMALIZE_BATCH_SIZE = 500
 
     @staticmethod
     def _backfill_default_protocol_support(db: Session) -> bool:
@@ -103,7 +108,7 @@ class ModelCatalogService:
         cached = CacheService.get(cache_key)
         if isinstance(cached, list):
             return cached
-        catalogs, providers = ModelCatalogService._load_catalogs_and_providers(db)
+        catalogs, providers = ModelCatalogService._load_catalogs_and_providers(db, catalog_limit=ModelCatalogService.MODEL_OPTIONS_LIMIT)
         items = [ModelCatalogService._serialize_catalog_option(catalog, providers) for catalog in catalogs]
         return CacheService.set(cache_key, items, ttl_seconds=ModelCatalogService._model_list_cache_ttl_seconds())
 
@@ -131,8 +136,10 @@ class ModelCatalogService:
                         enabled=enabled,
                         provider_id=provider_id,
                     ).order_by(ModelCatalog.model_name.asc())
+                    .limit(ModelCatalogService.MODEL_HEALTH_FILTER_SCAN_LIMIT)
                 )
             )
+            providers = ModelCatalogService._load_providers_for_catalogs(db, catalogs)
             filtered_items = [
                 item
                 for item in (ModelCatalogService._serialize_catalog(catalog, providers) for catalog in catalogs)
@@ -154,6 +161,7 @@ class ModelCatalogService:
                     .limit(page_size)
                 )
             )
+            providers = ModelCatalogService._load_providers_for_catalogs(db, catalogs)
             items = [ModelCatalogService._serialize_catalog(catalog, providers) for catalog in catalogs]
         return {
             "items": items,
@@ -167,23 +175,63 @@ class ModelCatalogService:
     @staticmethod
     def model_summary(db: Session) -> dict:
         """汇总模型目录的数量和可用性统计。"""
-        catalogs, providers = ModelCatalogService._load_catalogs_and_providers(db)
-        payloads = [ModelCatalogService._serialize_catalog(catalog, providers) for catalog in catalogs]
-        return {
-            "total": len(payloads),
-            "enabled": sum(1 for item in payloads if item["enabled"]),
-            "bound_providers": sum(item["provider_count"] for item in payloads),
-            "available_providers": sum(item["available_provider_count"] for item in payloads),
-            "enabled_providers": sum(item["enabled_provider_count"] for item in payloads),
-        }
+        cache_key = "model-catalog-summary:v2"
+        cached = CacheService.get(cache_key)
+        if isinstance(cached, dict):
+            return cached
+        catalog_row = db.execute(
+            select(
+                func.count(ModelCatalog.id).label("total"),
+                func.sum(case((ModelCatalog.enabled.is_(True), 1), else_=0)).label("enabled"),
+            )
+        ).one()
+        provider_model_row = db.execute(
+            select(
+                func.count(ProviderModel.id).label("bound_providers"),
+                func.sum(
+                    case(
+                        (
+                            ProviderModel.enabled.is_(True)
+                            & Provider.enabled.is_(True)
+                            & Provider.maintenance_mode_enabled.is_(False),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ).label("available_providers"),
+                func.sum(
+                    case(
+                        (
+                            ProviderModel.enabled.is_(True)
+                            & Provider.enabled.is_(True)
+                            & Provider.maintenance_mode_enabled.is_(False)
+                            & (Provider.circuit_state != "open")
+                            & (ProviderModel.circuit_state != "open")
+                            & (ProviderModel.health_status != "unhealthy"),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ).label("enabled_providers"),
+            )
+            .select_from(ProviderModel)
+            .join(Provider, Provider.id == ProviderModel.provider_id)
+        ).one()
+        return CacheService.set(cache_key, {
+            "total": int(catalog_row.total or 0),
+            "enabled": int(catalog_row.enabled or 0),
+            "bound_providers": int(provider_model_row.bound_providers or 0),
+            "available_providers": int(provider_model_row.available_providers or 0),
+            "enabled_providers": int(provider_model_row.enabled_providers or 0),
+        }, ttl_seconds=ModelCatalogService._model_list_cache_ttl_seconds())
 
     @staticmethod
     def get_model_detail(db: Session, model_name: str) -> dict | None:
         """返回单个模型目录的详细视图。"""
-        catalogs, providers = ModelCatalogService._load_catalogs_and_providers(db)
-        catalog = next((item for item in catalogs if item.model_name == model_name), None)
+        catalog = ModelCatalogService.get_catalog(db, model_name)
         if catalog is None:
             return None
+        providers = ProviderService.list_providers(db)
         return ModelCatalogService._serialize_catalog(catalog, providers, include_all_providers=True)
 
     @staticmethod
@@ -303,10 +351,10 @@ class ModelCatalogService:
     @staticmethod
     async def test_model_health(db: Session, model_name: str, *, phase_keys: frozenset[str] | None = None) -> dict[str, Any]:
         """并行测试单个目录模型在所有绑定渠道上的可用性。"""
-        catalogs, providers = ModelCatalogService._load_catalogs_and_providers(db)
-        catalog = next((item for item in catalogs if item.model_name == model_name), None)
+        catalog = ModelCatalogService.get_catalog(db, model_name)
         if catalog is None:
             raise ValueError("模型不存在")
+        providers = ModelCatalogService._load_providers_for_catalogs(db, [catalog])
         raw_result = await ModelCatalogService._probe_catalog_health(catalog, providers, quick_text_only=True, phase_keys=phase_keys)
         return ModelCatalogService._finalize_catalog_health_test(
             db,
@@ -317,7 +365,10 @@ class ModelCatalogService:
     @staticmethod
     async def test_all_model_health(db: Session, *, phase_keys: frozenset[str] | None = None) -> list[dict[str, Any]]:
         """并行测试全部目录模型；模型之间并行，单模型渠道之间也并行。"""
-        catalogs, providers = ModelCatalogService._load_catalogs_and_providers(db)
+        catalogs, providers = ModelCatalogService._load_catalogs_and_providers(
+            db,
+            catalog_limit=ModelCatalogService.MODEL_HEALTH_TEST_ALL_LIMIT,
+        )
         if not catalogs:
             return []
         model_semaphore = asyncio.Semaphore(ModelCatalogService.MODEL_HEALTH_MAX_PARALLEL_MODELS)
@@ -533,7 +584,13 @@ class ModelCatalogService:
             from app.services.setting_service import SettingService
 
             setting = SettingService.get_cached()
-            return max(5, min(int(getattr(setting, "model_list_cache_ttl_sec", 15) or 15), 300))
+            raw_value = getattr(setting, "model_list_cache_ttl_sec", 15)
+            if raw_value is None:
+                return 15
+            value = int(raw_value)
+            if value <= 0:
+                return 0
+            return min(value, 300)
         except Exception:
             return 15
 
@@ -544,12 +601,51 @@ class ModelCatalogService:
         CacheService.invalidate_prefix("model-enabled-names")
         CacheService.invalidate_prefix("model-catalog-limits")
         CacheService.invalidate_prefix("model-options")
+        CacheService.invalidate_prefix("model-catalog-summary")
 
     @staticmethod
-    def _load_catalogs_and_providers(db: Session) -> tuple[list[ModelCatalog], list[Provider]]:
-        catalogs = ModelCatalogService.list_catalogs(db)
-        providers = ProviderService.list_providers(db)
+    def _load_catalogs_and_providers(
+        db: Session,
+        *,
+        catalog_limit: int | None = None,
+    ) -> tuple[list[ModelCatalog], list[Provider]]:
+        if catalog_limit is None:
+            catalogs = ModelCatalogService.list_catalogs(db)
+        else:
+            catalogs = list(
+                db.scalars(
+                    select(ModelCatalog)
+                    .order_by(ModelCatalog.model_name.asc())
+                    .limit(max(1, int(catalog_limit)))
+                )
+            )
+        providers = ModelCatalogService._load_providers_for_catalogs(db, catalogs)
         return catalogs, providers
+
+    @staticmethod
+    def _load_providers_for_catalogs(db: Session, catalogs: list[ModelCatalog]) -> list[Provider]:
+        catalog_names = [item.model_name for item in catalogs if item.model_name]
+        if not catalog_names:
+            return []
+        return list(
+            db.scalars(
+                select(Provider)
+                .options(
+                    selectinload(Provider.provider_models),
+                    with_loader_criteria(
+                        ProviderModel,
+                        ProviderModel.model_name.in_(catalog_names),
+                        include_aliases=True,
+                    ),
+                )
+                .where(
+                    Provider.id.in_(
+                        select(ProviderModel.provider_id).where(ProviderModel.model_name.in_(catalog_names))
+                    )
+                )
+                .order_by(Provider.priority.asc(), Provider.id.asc())
+            )
+        )
 
     @staticmethod
     def _model_filter_query(
@@ -1181,7 +1277,12 @@ class ModelCatalogService:
         owned_keys = list(
             db.scalars(
                 select(ApiClientKey)
-                .options(selectinload(ApiClientKey.provider_bindings))
+                .options(
+                    load_only(ApiClientKey.id, ApiClientKey.allowed_model_names_json),
+                    selectinload(ApiClientKey.provider_bindings).load_only(
+                        ApiClientKeyProviderBinding.provider_id
+                    ),
+                )
                 .where(ApiClientKey.owner_user_id == user.id, ApiClientKey.enabled.is_(True))
             )
         )
@@ -1212,7 +1313,20 @@ class ModelCatalogService:
     def _remove_model_from_authorization_scopes(db: Session, model_name: str) -> None:
         from app.services.api_key_auth_cache import ApiKeyAuthCache
 
-        api_keys = list(db.scalars(select(ApiClientKey)))
+        api_keys = list(
+            db.scalars(
+                select(ApiClientKey)
+                .options(
+                    load_only(
+                        ApiClientKey.id,
+                        ApiClientKey.key_hash,
+                        ApiClientKey.owner_user_id,
+                        ApiClientKey.allowed_model_names_json,
+                    )
+                )
+                .where(ApiClientKey.allowed_model_names_json.contains(model_name))
+            )
+        )
         for api_key in api_keys:
             allowed_model_names = list(loads_json(api_key.allowed_model_names_json, []))
             if model_name not in allowed_model_names:
@@ -1223,7 +1337,15 @@ class ModelCatalogService:
             ApiKeyAuthCache.invalidate_api_key(api_key.id, api_key.key_hash)
             ApiKeyAuthCache.invalidate_user(api_key.owner_user_id)
 
-        templates = list(db.scalars(select(ApiKeyPolicyTemplate)))
+        templates = list(
+            db.scalars(
+                select(ApiKeyPolicyTemplate)
+                .options(
+                    load_only(ApiKeyPolicyTemplate.id, ApiKeyPolicyTemplate.allowed_model_names_json)
+                )
+                .where(ApiKeyPolicyTemplate.allowed_model_names_json.contains(model_name))
+            )
+        )
         for template in templates:
             allowed_model_names = list(loads_json(template.allowed_model_names_json, []))
             if model_name not in allowed_model_names:

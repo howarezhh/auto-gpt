@@ -18,6 +18,36 @@ class RateLimitExceededError(Exception):
 
 
 class RateLimitService:
+    _MULTI_WINDOW_LIMIT_LUA = """
+local count = tonumber(ARGV[1])
+local ttl = tonumber(ARGV[2])
+local index = 3
+
+for i = 1, count do
+  local key = ARGV[index]
+  local limit = tonumber(ARGV[index + 1])
+  local code = ARGV[index + 2]
+  local current = tonumber(redis.call('GET', key) or '0')
+  if limit ~= nil and limit > 0 and current >= limit then
+    return {code, key, current}
+  end
+  index = index + 3
+end
+
+index = 3
+local max_current = 0
+for i = 1, count do
+  local key = ARGV[index]
+  local current = tonumber(redis.call('INCR', key) or '0')
+  redis.call('EXPIRE', key, ttl)
+  if current > max_current then
+    max_current = current
+  end
+  index = index + 3
+end
+return {'ok', '', max_current}
+"""
+
     @staticmethod
     async def seed_realtime_quota_counters(
         *,
@@ -126,33 +156,111 @@ class RateLimitService:
         qps_limit: int | None = None,
         rpm_limit: int | None = None,
     ) -> None:
+        await RateLimitService.check_request_limits(
+            api_key_id=api_key_id,
+            api_key_qps_limit=qps_limit,
+            api_key_rpm_limit=rpm_limit,
+        )
+
+    @staticmethod
+    async def check_request_limits(
+        *,
+        api_key_id: int | None = None,
+        api_key_qps_limit: int | None = None,
+        api_key_rpm_limit: int | None = None,
+        account_id: int | None = None,
+        account_qps_limit: int | None = None,
+        account_rpm_limit: int | None = None,
+        global_qps_limit: int | None = None,
+        global_rpm_limit: int | None = None,
+    ) -> None:
         try:
-            if qps_limit and qps_limit > 0:
-                current_second = int(time.time())
-                key = f"rate:qps:{api_key_id}:{current_second}"
-                await RateLimitService._increment_and_check(
-                    key=key,
-                    ttl_seconds=3,
-                    limit=qps_limit,
-                    code="rate_limit_exceeded",
-                    message="Api key QPS limit exceeded",
+            current_second = int(time.time())
+            minute_key = datetime.utcnow().strftime("%Y%m%d%H%M")
+            qps_entries: list[tuple[str, int, str, str]] = []
+            rpm_entries: list[tuple[str, int, str, str]] = []
+            if global_qps_limit and global_qps_limit > 0:
+                qps_entries.append(
+                    (
+                        f"rate:global:qps:{current_second}",
+                        int(global_qps_limit),
+                        "rate_limit_exceeded",
+                        "Global QPS limit exceeded",
+                    )
                 )
-            if rpm_limit and rpm_limit > 0:
-                minute_key = datetime.utcnow().strftime("%Y%m%d%H%M")
-                key = f"rate:rpm:{api_key_id}:{minute_key}"
-                await RateLimitService._increment_and_check(
-                    key=key,
-                    ttl_seconds=120,
-                    limit=rpm_limit,
-                    code="rate_limit_exceeded",
-                    message="Api key RPM limit exceeded",
+            if api_key_id is not None and api_key_qps_limit and api_key_qps_limit > 0:
+                qps_entries.append(
+                    (
+                        f"rate:qps:{api_key_id}:{current_second}",
+                        int(api_key_qps_limit),
+                        "rate_limit_exceeded",
+                        "Api key QPS limit exceeded",
+                    )
                 )
+            if account_id is not None and account_qps_limit and account_qps_limit > 0:
+                qps_entries.append(
+                    (
+                        f"rate:account:qps:{account_id}:{current_second}",
+                        int(account_qps_limit),
+                        "rate_limit_exceeded",
+                        "Account QPS limit exceeded",
+                    )
+                )
+            if global_rpm_limit and global_rpm_limit > 0:
+                rpm_entries.append(
+                    (
+                        f"rate:global:rpm:{minute_key}",
+                        int(global_rpm_limit),
+                        "rate_limit_exceeded",
+                        "Global RPM limit exceeded",
+                    )
+                )
+            if api_key_id is not None and api_key_rpm_limit and api_key_rpm_limit > 0:
+                rpm_entries.append(
+                    (
+                        f"rate:rpm:{api_key_id}:{minute_key}",
+                        int(api_key_rpm_limit),
+                        "rate_limit_exceeded",
+                        "Api key RPM limit exceeded",
+                    )
+                )
+            if account_id is not None and account_rpm_limit and account_rpm_limit > 0:
+                rpm_entries.append(
+                    (
+                        f"rate:account:rpm:{account_id}:{minute_key}",
+                        int(account_rpm_limit),
+                        "rate_limit_exceeded",
+                        "Account RPM limit exceeded",
+                    )
+                )
+            await RateLimitService._check_window_limits(entries=qps_entries, ttl_seconds=3)
+            await RateLimitService._check_window_limits(entries=rpm_entries, ttl_seconds=120)
         except RateLimitExceededError:
             raise
         except Exception:
             if RateLimitService._allow_local_fallback():
                 return
             raise
+
+    @staticmethod
+    async def _check_window_limits(*, entries: list[tuple[str, int, str, str]], ttl_seconds: int) -> None:
+        if not entries:
+            return
+        client = RedisService.get_client()
+        args: list[str | int] = [len(entries), ttl_seconds]
+        messages: dict[str, str] = {}
+        for key, limit, code, message in entries:
+            args.extend([key, int(limit), code])
+            messages[key] = message
+        result = await client.eval(RateLimitService._MULTI_WINDOW_LIMIT_LUA, 0, *args)
+        code = result[0] if isinstance(result, list) and result else result
+        if code != "ok":
+            key = str(result[1] if isinstance(result, list) and len(result) > 1 else "")
+            raise RateLimitExceededError(
+                messages.get(key, "Rate limit exceeded"),
+                code=str(code or "rate_limit_exceeded"),
+                key=key,
+            )
 
     @staticmethod
     async def record_api_key_usage(

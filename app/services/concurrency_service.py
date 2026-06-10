@@ -28,6 +28,14 @@ class ConcurrencyLease:
     keys: list[str]
 
 
+@dataclass(slots=True)
+class IngressConcurrencyLease:
+    """表示入口层全局并发租约。"""
+
+    request_id: str
+    acquired: bool = True
+
+
 class ConcurrencyLimitExceededError(Exception):
     """表示并发控制命中上限。"""
 
@@ -35,6 +43,15 @@ class ConcurrencyLimitExceededError(Exception):
         super().__init__(message)
         self.code = code
         self.scope = scope
+        self.message = message
+
+
+class IngressConcurrencyLimitExceededError(Exception):
+    """表示入口层全局并发保护命中上限。"""
+
+    def __init__(self, message: str, *, code: str = "concurrency_limit_exceeded") -> None:
+        super().__init__(message)
+        self.code = code
         self.message = message
 
 
@@ -255,3 +272,91 @@ return 1
     def _allow_local_fallback() -> bool:
         """非生产环境允许 Redis 不可用时降级为本地放行。"""
         return not get_settings().is_production()
+
+
+class IngressConcurrencyService:
+    """基于独立 Redis 命名空间保护进入路由前的瞬时并发。"""
+
+    _ACQUIRE_LUA = """
+local lease_key = KEYS[1]
+local active_key = KEYS[2]
+local ttl = tonumber(ARGV[1])
+local limit = tonumber(ARGV[2])
+
+if limit ~= nil and limit > 0 then
+  local current = tonumber(redis.call('GET', active_key) or '0')
+  if current >= limit then
+    return {'concurrency_limit_exceeded', current}
+  end
+end
+
+if redis.call('EXISTS', lease_key) == 1 then
+  return {'ok', active_key}
+end
+
+redis.call('INCR', active_key)
+redis.call('EXPIRE', active_key, ttl + 60)
+redis.call('SET', lease_key, active_key, 'EX', ttl)
+return {'ok', active_key}
+"""
+
+    _RELEASE_LUA = """
+local lease_key = KEYS[1]
+local active_key = redis.call('GET', lease_key)
+if not active_key then
+  return 0
+end
+redis.call('DEL', lease_key)
+local value = tonumber(redis.call('DECR', active_key) or '0')
+if value <= 0 then
+  redis.call('DEL', active_key)
+end
+return 1
+"""
+
+    @classmethod
+    async def acquire(
+        cls,
+        *,
+        request_id: str,
+        ttl_seconds: int,
+        max_active_requests: int | None,
+    ) -> IngressConcurrencyLease:
+        limit = int(max_active_requests or 0)
+        if limit <= 0:
+            return IngressConcurrencyLease(request_id=request_id, acquired=False)
+        lease_key = f"ingress:lease:{request_id}"
+        active_key = "ingress:global:active"
+        try:
+            result = await RedisService.get_client().eval(
+                cls._ACQUIRE_LUA,
+                2,
+                lease_key,
+                active_key,
+                max(60, int(ttl_seconds or 60)),
+                limit,
+            )
+        except Exception:
+            if ConcurrencyService._allow_local_fallback():
+                return IngressConcurrencyLease(request_id=request_id, acquired=False)
+            raise
+        code = result[0] if isinstance(result, list) and result else result
+        if code != "ok":
+            raise IngressConcurrencyLimitExceededError("Ingress concurrency limit exceeded")
+        return IngressConcurrencyLease(request_id=request_id, acquired=True)
+
+    @classmethod
+    async def release(cls, lease: IngressConcurrencyLease | None) -> bool:
+        if lease is None or not lease.acquired:
+            return False
+        try:
+            result = await RedisService.get_client().eval(
+                cls._RELEASE_LUA,
+                1,
+                f"ingress:lease:{lease.request_id}",
+            )
+        except Exception:
+            if ConcurrencyService._allow_local_fallback():
+                return False
+            raise
+        return bool(int(result or 0))

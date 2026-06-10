@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import and_, case, func, or_, select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, load_only, selectinload
 
 from app.models.api_client_billing_record import ApiClientBillingRecord
 from app.models.api_client_key import ApiClientKey
@@ -37,8 +37,17 @@ from app.schemas.api_key import (
 from app.services.api_key_auth_cache import ApiKeyAuthCache
 from app.services.api_key_service import ApiKeyService
 from app.services.billing_service import BillingService
+from app.services.cache_service import CacheService
 from app.services.log_service import LogService
 from app.utils.json_utils import dumps_json, loads_json
+
+
+AUTO_PROVIDER_BINDING_BATCH_SIZE = 200
+AUTO_PROVIDER_BINDING_MAX_BATCHES = 10000
+API_KEY_LIST_MAX_LIMIT = 5000
+API_KEY_ANALYTICS_MODEL_LIMIT = 50
+API_KEY_ANALYTICS_RECENT_ERROR_LIMIT = 50
+API_KEY_RECENT_USAGE_MAX_WINDOW_HOURS = 720
 
 
 class ApiKeyAdminService:
@@ -76,6 +85,10 @@ class ApiKeyAdminService:
 
     @staticmethod
     def get_summary(db: Session) -> ApiKeySummaryOut:
+        cache_key = "api-key-admin-summary"
+        cached = CacheService.get(cache_key)
+        if isinstance(cached, dict):
+            return ApiKeySummaryOut.model_validate(cached)
         now = datetime.utcnow()
         has_provider = ApiKeyAdminService._api_key_has_provider_expr()
         balance_exhausted = ApiKeyAdminService._api_key_balance_exhausted_expr()
@@ -138,7 +151,7 @@ class ApiKeyAdminService:
         total_balance_amount = float(owner_balance_row.balance_amount or 0)
         total_recharge_amount = float(owner_balance_row.total_recharge_amount or 0)
 
-        return ApiKeySummaryOut(
+        summary = ApiKeySummaryOut(
             total_keys=int(key_count_row.total_keys or 0),
             enabled_keys=int(key_count_row.enabled_keys or 0),
             disabled_keys=int(key_count_row.disabled_keys or 0),
@@ -153,19 +166,21 @@ class ApiKeyAdminService:
             total_balance_amount=total_balance_amount,
             total_recharge_amount=total_recharge_amount,
         )
+        CacheService.set(cache_key, summary.model_dump(mode="json"), ttl_seconds=10)
+        return summary
 
     @staticmethod
-    def list_api_keys(db: Session) -> list[ApiClientKey]:
-        return list(
-            db.scalars(
-                select(ApiClientKey)
-                .options(
-                    selectinload(ApiClientKey.provider_bindings).selectinload(ApiClientKeyProviderBinding.provider),
-                    selectinload(ApiClientKey.owner_user),
-                )
-                .order_by(ApiClientKey.id.desc())
+    def list_api_keys(db: Session, *, limit: int | None = None) -> list[ApiClientKey]:
+        normalized_limit = API_KEY_LIST_MAX_LIMIT if limit is None else max(1, min(int(limit), API_KEY_LIST_MAX_LIMIT))
+        stmt = (
+            select(ApiClientKey)
+            .options(
+                selectinload(ApiClientKey.provider_bindings).selectinload(ApiClientKeyProviderBinding.provider),
+                selectinload(ApiClientKey.owner_user),
             )
+            .order_by(ApiClientKey.id.desc())
         )
+        return list(db.scalars(stmt.limit(normalized_limit)))
 
     @staticmethod
     def list_api_keys_paginated(
@@ -255,7 +270,8 @@ class ApiKeyAdminService:
             auto_sync_provider_bindings=auto_sync_provider_bindings,
             allowed_provider_ids=payload.allowed_provider_ids,
         )
-        ApiKeyAdminService._validate_provider_ids(db, resolved_allowed_provider_ids)
+        if not auto_sync_provider_bindings:
+            ApiKeyAdminService._validate_provider_ids(db, resolved_allowed_provider_ids)
         ApiKeyAdminService._validate_model_names(db, payload.allowed_model_names)
         ApiKeyAdminService._validate_owner_user(db, owner_user_id)
         raw_api_key = ApiKeyService.build_raw_api_key(payload.raw_api_key)
@@ -284,7 +300,6 @@ class ApiKeyAdminService:
             preferred_region_tags_json=dumps_json(payload.preferred_region_tags),
             latency_bias=payload.latency_bias,
             success_rate_bias=payload.success_rate_bias,
-            cost_bias=payload.cost_bias,
         )
         db.add(api_key)
         db.flush()
@@ -320,7 +335,8 @@ class ApiKeyAdminService:
             auto_sync_provider_bindings=desired_auto_sync_provider_bindings,
             allowed_provider_ids=allowed_provider_ids,
         )
-        ApiKeyAdminService._validate_provider_ids(db, resolved_allowed_provider_ids)
+        if not desired_auto_sync_provider_bindings:
+            ApiKeyAdminService._validate_provider_ids(db, resolved_allowed_provider_ids)
         if "allowed_model_names" in data:
             ApiKeyAdminService._validate_model_names(db, data["allowed_model_names"] or [])
         ApiKeyAdminService._validate_owner_user(db, owner_user_id)
@@ -463,7 +479,8 @@ class ApiKeyAdminService:
             auto_sync_provider_bindings=payload.auto_sync_provider_bindings,
             allowed_provider_ids=payload.allowed_provider_ids,
         )
-        ApiKeyAdminService._validate_provider_ids(db, resolved_allowed_provider_ids)
+        if not payload.auto_sync_provider_bindings:
+            ApiKeyAdminService._validate_provider_ids(db, resolved_allowed_provider_ids)
         items = list(
             db.scalars(
                 select(ApiClientKey)
@@ -491,29 +508,27 @@ class ApiKeyAdminService:
 
     @staticmethod
     def batch_authorize_all_providers(db: Session) -> ApiKeyBatchActionResultOut:
-        items = list(
-            db.scalars(
-                select(ApiClientKey)
-                .options(selectinload(ApiClientKey.provider_bindings))
-            )
-        )
         all_provider_ids = ApiKeyAdminService._list_all_provider_ids(db)
-        for item in items:
-            item.auto_sync_provider_bindings = True
-            ApiKeyAdminService._apply_provider_bindings(
-                db,
-                item,
-                allowed_provider_ids=all_provider_ids,
-                auto_sync_provider_bindings=True,
-            )
-        db.commit()
-        for item in items:
-            ApiKeyAuthCache.invalidate_api_key(item.id, item.key_hash)
-            ApiKeyAuthCache.invalidate_user(item.owner_user_id)
+        affected_ids: list[int] = []
+        for ids in ApiKeyAdminService._iter_api_key_id_batches(db):
+            items = ApiKeyAdminService._load_api_keys_for_batch(db, ids)
+            for item in items:
+                item.auto_sync_provider_bindings = True
+                ApiKeyAdminService._apply_provider_bindings(
+                    db,
+                    item,
+                    allowed_provider_ids=all_provider_ids,
+                    auto_sync_provider_bindings=True,
+                )
+            db.commit()
+            for item in items:
+                ApiKeyAuthCache.invalidate_api_key(item.id, item.key_hash)
+                ApiKeyAuthCache.invalidate_user(item.owner_user_id)
+                affected_ids.append(item.id)
         return ApiKeyBatchActionResultOut(
-            requested_count=len(items),
-            affected_count=len(items),
-            api_key_ids=[item.id for item in items],
+            requested_count=len(affected_ids),
+            affected_count=len(affected_ids),
+            api_key_ids=affected_ids,
         )
 
     @staticmethod
@@ -598,7 +613,12 @@ class ApiKeyAdminService:
         log_type: str | None,
         success: bool | None,
     ) -> tuple[int, list[RequestLog]]:
-        stmt = ApiKeyAdminService._scoped_route_traffic(select(RequestLog), api_key_id=api_key_id)
+        from app.services.log_service import LogService
+
+        stmt = ApiKeyAdminService._scoped_route_traffic(
+            select(RequestLog).options(*LogService._lightweight_log_load_options()),
+            api_key_id=api_key_id,
+        )
         count_stmt = ApiKeyAdminService._scoped_route_traffic(
             select(func.count()).select_from(RequestLog),
             api_key_id=api_key_id,
@@ -657,6 +677,8 @@ class ApiKeyAdminService:
         recent_error_limit: int = 8,
         model_limit: int = 12,
     ) -> ApiKeyAnalyticsOut:
+        normalized_model_limit = max(1, min(int(model_limit or 12), API_KEY_ANALYTICS_MODEL_LIMIT))
+        normalized_recent_error_limit = max(1, min(int(recent_error_limit or 8), API_KEY_ANALYTICS_RECENT_ERROR_LIMIT))
         model_name_expr = func.coalesce(RequestLog.requested_model, RequestLog.model_name, "unknown")
         model_distribution_rows = db.execute(ApiKeyAdminService._scoped_route_traffic(
             select(
@@ -669,17 +691,30 @@ class ApiKeyAdminService:
             )
             .group_by(model_name_expr)
             .order_by(func.count(RequestLog.id).desc(), model_name_expr.asc())
-            .limit(max(1, model_limit)),
+            .limit(normalized_model_limit),
             api_key_id=api_key_id,
         )).all()
 
         recent_error_rows = db.execute(ApiKeyAdminService._scoped_route_traffic(
             select(RequestLog)
+            .options(
+                load_only(
+                    RequestLog.id,
+                    RequestLog.created_at,
+                    RequestLog.request_path,
+                    RequestLog.requested_model,
+                    RequestLog.model_name,
+                    RequestLog.provider_name,
+                    RequestLog.status_code,
+                    RequestLog.api_client_auth_result,
+                    RequestLog.message,
+                )
+            )
             .where(
                 RequestLog.success.is_(False),
             )
             .order_by(RequestLog.created_at.desc(), RequestLog.id.desc())
-            .limit(max(1, recent_error_limit)),
+            .limit(normalized_recent_error_limit),
             api_key_id=api_key_id,
         )).scalars().all()
 
@@ -715,8 +750,12 @@ class ApiKeyAdminService:
         )
 
     @staticmethod
-    def serialize_api_key(api_key: ApiClientKey) -> dict:
-        raw_api_key = ApiKeyService.decrypt_raw_api_key(api_key.raw_key_encrypted)
+    def serialize_api_key(api_key: ApiClientKey, *, include_raw_api_key: bool = True) -> dict:
+        raw_api_key = (
+            ApiKeyService.decrypt_raw_api_key(api_key.raw_key_encrypted)
+            if include_raw_api_key
+            else None
+        )
         owner_balance_amount = BillingService.to_decimal(api_key.owner_user.balance_amount) if api_key.owner_user is not None else None
         owner_total_recharge_amount = BillingService.to_decimal(api_key.owner_user.total_recharge_amount) if api_key.owner_user is not None else None
         allowed_providers = [
@@ -753,7 +792,7 @@ class ApiKeyAdminService:
             "key_prefix": api_key.key_prefix,
             "key_masked": ApiKeyService.mask_key_prefix(api_key.key_prefix),
             "raw_api_key": raw_api_key,
-            "has_stored_raw_key": raw_api_key is not None,
+            "has_stored_raw_key": (raw_api_key is not None) if include_raw_api_key else bool(api_key.raw_key_encrypted),
             "expires_at": api_key.expires_at,
             "qps_limit": api_key.qps_limit,
             "rpm_limit": api_key.rpm_limit,
@@ -774,7 +813,6 @@ class ApiKeyAdminService:
             "preferred_region_tags": loads_json(api_key.preferred_region_tags_json, []),
             "latency_bias": api_key.latency_bias,
             "success_rate_bias": api_key.success_rate_bias,
-            "cost_bias": api_key.cost_bias,
             "allowed_providers": allowed_providers,
             "last_used_at": api_key.last_used_at,
             "created_at": api_key.created_at,
@@ -807,7 +845,7 @@ class ApiKeyAdminService:
         api_key_id: int,
         window_hours: int = 24,
     ) -> ApiKeyRecentUsageOut:
-        normalized_window_hours = max(1, window_hours)
+        normalized_window_hours = max(1, min(int(window_hours or 24), API_KEY_RECENT_USAGE_MAX_WINDOW_HOURS))
         since = datetime.utcnow() - timedelta(hours=normalized_window_hours)
         recent_stmt = select(
             func.count(RequestLog.id).label("recent_requests"),
@@ -942,6 +980,42 @@ class ApiKeyAdminService:
         return list(db.scalars(select(Provider.id).order_by(Provider.id.asc())).all())
 
     @staticmethod
+    def _iter_api_key_id_batches(
+        db: Session,
+        *,
+        auto_sync_only: bool = False,
+        batch_size: int = AUTO_PROVIDER_BINDING_BATCH_SIZE,
+    ):
+        last_id = 0
+        normalized_batch_size = max(1, min(batch_size, AUTO_PROVIDER_BINDING_BATCH_SIZE))
+        for _ in range(AUTO_PROVIDER_BINDING_MAX_BATCHES):
+            stmt = select(ApiClientKey.id).where(ApiClientKey.id > last_id)
+            if auto_sync_only:
+                stmt = stmt.where(ApiClientKey.auto_sync_provider_bindings.is_(True))
+            ids = list(
+                db.scalars(
+                    stmt.order_by(ApiClientKey.id.asc()).limit(normalized_batch_size)
+                )
+            )
+            if not ids:
+                break
+            yield ids
+            last_id = int(ids[-1])
+
+    @staticmethod
+    def _load_api_keys_for_batch(db: Session, ids: list[int]) -> list[ApiClientKey]:
+        if not ids:
+            return []
+        return list(
+            db.scalars(
+                select(ApiClientKey)
+                .options(selectinload(ApiClientKey.provider_bindings))
+                .where(ApiClientKey.id.in_(ids))
+                .order_by(ApiClientKey.id.asc())
+            )
+        )
+
+    @staticmethod
     def _resolve_allowed_provider_ids_for_write(
         db: Session,
         *,
@@ -976,49 +1050,82 @@ class ApiKeyAdminService:
 
     @staticmethod
     def sync_auto_provider_bindings(db: Session) -> int:
-        items = list(
-            db.scalars(
-                select(ApiClientKey)
-                .options(selectinload(ApiClientKey.provider_bindings))
-                .where(ApiClientKey.auto_sync_provider_bindings.is_(True))
-            )
-        )
         all_provider_ids = ApiKeyAdminService._list_all_provider_ids(db)
-        for item in items:
-            ApiKeyAdminService._apply_provider_bindings(
-                db,
-                item,
-                allowed_provider_ids=all_provider_ids,
-                auto_sync_provider_bindings=True,
-            )
-        db.commit()
-        for item in items:
-            ApiKeyAuthCache.invalidate_api_key(item.id, item.key_hash)
-            ApiKeyAuthCache.invalidate_user(item.owner_user_id)
-        return len(items)
+        total = 0
+        for ids in ApiKeyAdminService._iter_api_key_id_batches(db, auto_sync_only=True):
+            items = ApiKeyAdminService._load_api_keys_for_batch(db, ids)
+            for item in items:
+                ApiKeyAdminService._apply_provider_bindings(
+                    db,
+                    item,
+                    allowed_provider_ids=all_provider_ids,
+                    auto_sync_provider_bindings=True,
+                )
+            db.commit()
+            for item in items:
+                ApiKeyAuthCache.invalidate_api_key(item.id, item.key_hash)
+                ApiKeyAuthCache.invalidate_user(item.owner_user_id)
+            total += len(items)
+        return total
+
+    @staticmethod
+    def attach_provider_to_auto_synced_keys(db: Session, *, provider_id: int) -> int:
+        return ApiKeyAdminService.attach_providers_to_auto_synced_keys(db, provider_ids=[provider_id])
+
+    @staticmethod
+    def attach_providers_to_auto_synced_keys(db: Session, *, provider_ids: list[int]) -> int:
+        normalized_provider_ids = sorted({int(item) for item in provider_ids if item})
+        if not normalized_provider_ids:
+            return 0
+        inserted_count = 0
+        for key_ids in ApiKeyAdminService._iter_api_key_id_batches(db, auto_sync_only=True):
+            items = ApiKeyAdminService._load_api_keys_for_batch(db, key_ids)
+            if not items:
+                continue
+            existing_pairs = {
+                (int(row[0]), int(row[1]))
+                for row in db.execute(
+                    select(
+                        ApiClientKeyProviderBinding.api_client_key_id,
+                        ApiClientKeyProviderBinding.provider_id,
+                    ).where(
+                        ApiClientKeyProviderBinding.api_client_key_id.in_(key_ids),
+                        ApiClientKeyProviderBinding.provider_id.in_(normalized_provider_ids),
+                    )
+                )
+            }
+            for item in items:
+                for provider_id in normalized_provider_ids:
+                    if (item.id, provider_id) in existing_pairs:
+                        continue
+                    db.add(ApiClientKeyProviderBinding(api_client_key_id=item.id, provider_id=provider_id))
+                    inserted_count += 1
+            db.commit()
+            for item in items:
+                ApiKeyAuthCache.invalidate_api_key(item.id, item.key_hash)
+                ApiKeyAuthCache.invalidate_user(item.owner_user_id)
+        return inserted_count
 
     @staticmethod
     def backfill_all_api_keys_to_all_providers(db: Session) -> int:
-        items = list(
-            db.scalars(
-                select(ApiClientKey)
-                .options(selectinload(ApiClientKey.provider_bindings))
-            )
-        )
         all_provider_ids = ApiKeyAdminService._list_all_provider_ids(db)
-        for item in items:
-            item.auto_sync_provider_bindings = True
-            ApiKeyAdminService._apply_provider_bindings(
-                db,
-                item,
-                allowed_provider_ids=all_provider_ids,
-                auto_sync_provider_bindings=True,
-            )
-        db.commit()
-        for item in items:
-            ApiKeyAuthCache.invalidate_api_key(item.id, item.key_hash)
-            ApiKeyAuthCache.invalidate_user(item.owner_user_id)
-        return len(items)
+        total = 0
+        for ids in ApiKeyAdminService._iter_api_key_id_batches(db):
+            items = ApiKeyAdminService._load_api_keys_for_batch(db, ids)
+            for item in items:
+                item.auto_sync_provider_bindings = True
+                ApiKeyAdminService._apply_provider_bindings(
+                    db,
+                    item,
+                    allowed_provider_ids=all_provider_ids,
+                    auto_sync_provider_bindings=True,
+                )
+            db.commit()
+            for item in items:
+                ApiKeyAuthCache.invalidate_api_key(item.id, item.key_hash)
+                ApiKeyAuthCache.invalidate_user(item.owner_user_id)
+            total += len(items)
+        return total
 
     @staticmethod
     def _validate_provider_ids(

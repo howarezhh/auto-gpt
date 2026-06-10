@@ -92,11 +92,11 @@
                 <div class="benchmark-form-band-grid">
                     <label>
                         <span>基准并发</span>
-                        <input class="field-input" id="benchmark-concurrency" type="number" min="1" max="5000" value="100" required>
+                        <input class="field-input" id="benchmark-concurrency" type="number" min="1" max="1000" value="100" required>
                     </label>
                     <label>
                         <span>最大探测并发</span>
-                        <input class="field-input" id="benchmark-probe-max-concurrency" type="number" min="0" max="20000" value="0">
+                        <input class="field-input" id="benchmark-probe-max-concurrency" type="number" min="0" max="2000" value="0">
                     </label>
                     <label class="form-span-2">
                         <span>文本提示词</span>
@@ -141,7 +141,7 @@
                                 </div>
                             </span>
                         </span>
-                        <input class="field-input" id="benchmark-probe-min-concurrency" type="number" min="0" max="5000" value="0">
+                        <input class="field-input" id="benchmark-probe-min-concurrency" type="number" min="0" max="1000" value="0">
                     </label>
                     <label>
                         <span class="settings-field-label">
@@ -186,7 +186,7 @@
                                 </div>
                             </span>
                         </span>
-                        <input class="field-input" id="benchmark-sample-requests" type="number" min="1" max="200000" value="300">
+                        <input class="field-input" id="benchmark-sample-requests" type="number" min="1" max="10000" value="300">
                     </label>
                     <label>
                         <span class="settings-field-label">
@@ -201,7 +201,7 @@
                                 </div>
                             </span>
                         </span>
-                        <input class="field-input" id="benchmark-requests-per-concurrency" type="number" min="1" max="100" value="2">
+                        <input class="field-input" id="benchmark-requests-per-concurrency" type="number" min="1" max="20" value="2">
                     </label>
                     <label>
                         <span class="settings-field-label">
@@ -216,7 +216,7 @@
                                 </div>
                             </span>
                         </span>
-                        <input class="field-input" id="benchmark-warmup-requests" type="number" min="0" max="10000" value="12">
+                        <input class="field-input" id="benchmark-warmup-requests" type="number" min="0" max="1000" value="12">
                     </label>
                     <label>
                         <span class="settings-field-label">
@@ -231,7 +231,7 @@
                                 </div>
                             </span>
                         </span>
-                        <input class="field-input" id="benchmark-client-timeout-s" type="number" min="1" max="3600" step="1" value="180">
+                        <input class="field-input" id="benchmark-client-timeout-s" type="number" min="1" max="600" step="1" value="180">
                     </label>
                     <label>
                         <span class="settings-field-label">
@@ -246,7 +246,7 @@
                                 </div>
                             </span>
                         </span>
-                        <input class="field-input" id="benchmark-request-timeout-s" type="number" min="1" max="3600" step="1" value="180">
+                        <input class="field-input" id="benchmark-request-timeout-s" type="number" min="1" max="600" step="1" value="180">
                     </label>
                     <label>
                         <span class="settings-field-label">

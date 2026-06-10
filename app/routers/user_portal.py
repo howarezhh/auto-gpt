@@ -40,7 +40,9 @@ from app.services.request_log_queue_service import RequestLogQueueService
 from app.services.user_auth_service import USER_ROLE_ADMIN, UserAuthService
 from app.services.user_portal_service import UserPortalService
 from app.logging.adapters.user_operation_adapter import UserOperationLogRecorder
+from app.models.api_client_key import ApiClientKey
 from app.models.logging_events import UserOperationAuditLog
+from app.models.request_log import RequestLog
 from app.utils.display_format import register_display_filters
 from app.utils.json_utils import safeJsonParse, to_jsonable
 
@@ -53,6 +55,9 @@ SELF_TEST_IMAGE_MODES = {"none", "url", "upload", "generate"}
 SELF_TEST_TEXT_PROMPT = "请只回复 pong"
 SELF_TEST_IMAGE_PROMPT = "请确认你已看到这张测试图片，并用一句中文概括图片主体。"
 SELF_TEST_IMAGE_GENERATION_PROMPT = "请生成一张用于链路检测的简单图片，不要输出文字说明。"
+SELF_TEST_STREAM_MAX_BYTES = 1024 * 1024
+SELF_TEST_STREAM_MAX_EVENTS = 512
+SELF_TEST_STREAM_OUTPUT_MAX_CHARS = 4000
 
 
 def require_user_html(request: Request, db: Session):
@@ -233,10 +238,32 @@ async def _consume_self_test_stream(stream: AsyncIterator[bytes]) -> dict:
     event_preview: list[dict | str] = []
     generated_images: list[dict] = []
     seen_generated_image_urls: set[str] = set()
+    total_bytes = 0
+    event_count = 0
+    output_chars = 0
+
+    def append_limit_marker(reason: str) -> None:
+        if len(event_preview) < 20:
+            event_preview.append({"limit": reason})
+
+    def append_output_text(text: str) -> None:
+        nonlocal output_chars
+        if output_chars >= SELF_TEST_STREAM_OUTPUT_MAX_CHARS:
+            return
+        remaining = SELF_TEST_STREAM_OUTPUT_MAX_CHARS - output_chars
+        clipped = text[:remaining]
+        if not clipped:
+            return
+        output_parts.append(clipped)
+        output_chars += len(clipped)
 
     async for chunk in stream:
         if not chunk:
             continue
+        total_bytes += len(chunk)
+        if total_bytes > SELF_TEST_STREAM_MAX_BYTES:
+            append_limit_marker("self_test_stream_bytes_limit")
+            break
         event_buffer.extend(chunk)
         while True:
             separator_index = event_buffer.find(b"\n\n")
@@ -249,6 +276,14 @@ async def _consume_self_test_stream(stream: AsyncIterator[bytes]) -> dict:
                 line = line.strip()
                 if not line.startswith("data:"):
                     continue
+                event_count += 1
+                if event_count > SELF_TEST_STREAM_MAX_EVENTS:
+                    append_limit_marker("self_test_stream_events_limit")
+                    return {
+                        "output_text": "".join(output_parts) or None,
+                        "stream_event_preview": event_preview,
+                        "generated_images": generated_images,
+                    }
                 data = line[5:].strip()
                 if not data:
                     continue
@@ -262,7 +297,7 @@ async def _consume_self_test_stream(stream: AsyncIterator[bytes]) -> dict:
                 if isinstance(parsed, dict):
                     text = ProxyService._extract_response_display_text(parsed, limit_bytes=600)
                     if text and (not output_parts or output_parts[-1] != text):
-                        output_parts.append(text)
+                        append_output_text(text)
                     for image in ProxyService._extract_generated_images(parsed, limit_images=4):
                         url = image.get("url")
                         if not isinstance(url, str) or not url or url in seen_generated_image_urls:
@@ -984,9 +1019,7 @@ def user_operations_api(
     current_user = require_user_html(request, db)
     if isinstance(current_user, RedirectResponse):
         raise HTTPException(status_code=401, detail="unauthorized")
-    query = select(UserOperationAuditLog).where(UserOperationAuditLog.user_account_id == current_user.id)
-    count_query = select(func.count()).select_from(UserOperationAuditLog).where(UserOperationAuditLog.user_account_id == current_user.id)
-    conditions = []
+    conditions = [UserOperationAuditLog.user_account_id == current_user.id]
     if keyword:
         like = f"%{keyword.strip()}%"
         conditions.append(
@@ -1002,12 +1035,25 @@ def user_operations_api(
         conditions.append(UserOperationAuditLog.action == action)
     if result:
         conditions.append(UserOperationAuditLog.result == result)
+    count_query = select(func.count()).select_from(UserOperationAuditLog)
     for condition in conditions:
-        query = query.where(condition)
         count_query = count_query.where(condition)
     total = int(db.scalar(count_query) or 0)
-    rows = db.scalars(
-        query.order_by(desc(UserOperationAuditLog.created_at))
+    rows = db.execute(
+        select(
+            UserOperationAuditLog.id,
+            UserOperationAuditLog.action,
+            UserOperationAuditLog.entity_type,
+            UserOperationAuditLog.entity_id,
+            UserOperationAuditLog.entity_name,
+            UserOperationAuditLog.summary,
+            UserOperationAuditLog.source_ip,
+            UserOperationAuditLog.trace_id,
+            UserOperationAuditLog.result,
+            UserOperationAuditLog.created_at,
+        )
+        .where(*conditions)
+        .order_by(desc(UserOperationAuditLog.created_at), desc(UserOperationAuditLog.id))
         .offset((page - 1) * page_size)
         .limit(page_size)
     ).all()
@@ -1016,8 +1062,21 @@ def user_operations_api(
         "page_size": page_size,
         "total": total,
         "items": [
-            to_jsonable({column.name: getattr(item, column.name) for column in item.__table__.columns})
-            for item in rows
+            to_jsonable(
+                {
+                    "id": row.id,
+                    "action": row.action,
+                    "entity_type": row.entity_type,
+                    "entity_id": row.entity_id,
+                    "entity_name": row.entity_name,
+                    "summary": row.summary,
+                    "source_ip": row.source_ip,
+                    "trace_id": row.trace_id,
+                    "result": row.result,
+                    "created_at": row.created_at,
+                }
+            )
+            for row in rows
         ],
     }
 
@@ -1026,6 +1085,7 @@ def user_operations_api(
 def user_log_filter_options(
     request: Request,
     exclude_health_checks: bool = Query(default=True),
+    limit: int = Query(default=200, ge=1, le=500),
     db: Session = Depends(get_db),
 ) -> LogFilterOptionsResponse:
     current_user = require_user_html(request, db)
@@ -1036,6 +1096,7 @@ def user_log_filter_options(
             db,
             user=current_user,
             exclude_health_checks=exclude_health_checks,
+            limit=limit,
         )
     )
 
@@ -1057,6 +1118,15 @@ async def user_logs_api(
     app_name: str | None = None,
     environment_name: str | None = None,
     success: bool | None = None,
+    content_guard_result: str | None = None,
+    content_guard_risk_level: str | None = None,
+    content_guard_action: str | None = None,
+    content_guard_final_strategy: str | None = None,
+    content_guard_retry_count: int | None = Query(default=None, ge=0),
+    content_guard_guard_stage: str | None = None,
+    content_guard_category: str | None = None,
+    content_guard_switched_provider: bool | None = None,
+    content_guard_adaptation_skipped: bool | None = None,
     exclude_health_checks: bool = Query(default=True),
     wait_for_latest: bool = Query(default=False),
     wait_timeout_ms: int = Query(default=2000, ge=0, le=10000),
@@ -1088,7 +1158,17 @@ async def user_logs_api(
         app_name=app_name,
         environment_name=environment_name,
         success=success,
+        content_guard_result=content_guard_result,
+        content_guard_risk_level=content_guard_risk_level,
+        content_guard_action=content_guard_action,
+        content_guard_final_strategy=content_guard_final_strategy,
+        content_guard_retry_count=content_guard_retry_count,
+        content_guard_guard_stage=content_guard_guard_stage,
+        content_guard_category=content_guard_category,
+        content_guard_switched_provider=content_guard_switched_provider,
+        content_guard_adaptation_skipped=content_guard_adaptation_skipped,
         exclude_health_checks=exclude_health_checks,
+        include_api_key_options=False,
     )
     return LogListResponse(
         total=total,
@@ -1098,6 +1178,8 @@ async def user_logs_api(
         queue_timed_out=None if queue_status is None else bool(queue_status.get("timed_out")),
         queued_request_logs=None if queue_status is None else int(queue_status.get("queued") or 0),
         processing_request_logs=None if queue_status is None else int(queue_status.get("processing") or 0),
+        dead_letter_request_logs=None if queue_status is None else int(queue_status.get("dead_letter") or 0),
+        failed_request_log_writes=None if queue_status is None else int(queue_status.get("failure_count") or 0),
     )
 
 
@@ -1110,14 +1192,12 @@ def user_metrics_summary(
     current_user = require_user_html(request, db)
     if isinstance(current_user, RedirectResponse):
         raise HTTPException(status_code=401, detail="unauthorized")
-    api_key_ids = UserPortalService.list_owned_api_key_ids(db, user_id=current_user.id)
     items = [
         MetricItem.model_validate(item)
         for item in LogService.metric_summary(
             db,
             window_minutes=window_minutes,
             user_account_id=current_user.id,
-            api_client_key_ids=api_key_ids,
         )
     ]
     return MetricListResponse(window_minutes=window_minutes, items=items)
@@ -1133,7 +1213,6 @@ def user_metrics_timeseries(
     current_user = require_user_html(request, db)
     if isinstance(current_user, RedirectResponse):
         raise HTTPException(status_code=401, detail="unauthorized")
-    api_key_ids = UserPortalService.list_owned_api_key_ids(db, user_id=current_user.id)
     items = [
         MetricTimeSeriesItem.model_validate(item)
         for item in LogService.metric_timeseries(
@@ -1141,14 +1220,13 @@ def user_metrics_timeseries(
             window_minutes=window_minutes,
             bucket_minutes=bucket_minutes,
             user_account_id=current_user.id,
-            api_client_key_ids=api_key_ids,
         )
     ]
     return MetricTimeSeriesResponse(window_minutes=window_minutes, bucket_minutes=bucket_minutes, items=items)
 
 
 @router.get("/user/logs/export")
-def export_user_logs(
+async def export_user_logs(
     request: Request,
     log_type: str | None = None,
     provider_id: int | None = None,
@@ -1162,13 +1240,29 @@ def export_user_logs(
     app_name: str | None = None,
     environment_name: str | None = None,
     success: bool | None = None,
+    content_guard_result: str | None = None,
+    content_guard_risk_level: str | None = None,
+    content_guard_action: str | None = None,
+    content_guard_final_strategy: str | None = None,
+    content_guard_retry_count: int | None = Query(default=None, ge=0),
+    content_guard_guard_stage: str | None = None,
+    content_guard_category: str | None = None,
+    content_guard_switched_provider: bool | None = None,
+    content_guard_adaptation_skipped: bool | None = None,
     exclude_health_checks: bool = Query(default=True),
-    limit: int = Query(default=5000, ge=1, le=10000),
+    wait_for_latest: bool = Query(default=False),
+    wait_timeout_ms: int = Query(default=2000, ge=0, le=10000),
+    limit: int = Query(default=5000, ge=1, le=5000),
     db: Session = Depends(get_db),
 ):
     current_user = require_user_html(request, db)
     if isinstance(current_user, RedirectResponse):
         return current_user
+    if wait_for_latest:
+        await RequestLogQueueService.wait_until_idle(
+            timeout_seconds=wait_timeout_ms / 1000,
+            poll_interval_seconds=0.05,
+        )
     csv_text = LogService.export_logs_csv(
         db,
         log_type=log_type if log_type in LogService.USER_VISIBLE_LOG_TYPES else None,
@@ -1186,8 +1280,16 @@ def export_user_logs(
         app_name=app_name,
         environment_name=environment_name,
         success=success,
+        content_guard_result=content_guard_result,
+        content_guard_risk_level=content_guard_risk_level,
+        content_guard_action=content_guard_action,
+        content_guard_final_strategy=content_guard_final_strategy,
+        content_guard_retry_count=content_guard_retry_count,
+        content_guard_guard_stage=content_guard_guard_stage,
+        content_guard_category=content_guard_category,
+        content_guard_switched_provider=content_guard_switched_provider,
+        content_guard_adaptation_skipped=content_guard_adaptation_skipped,
         exclude_health_checks=exclude_health_checks,
-        api_client_key_ids=UserPortalService.list_owned_api_key_ids(db, user_id=current_user.id),
         limit=limit,
     )
     filename = f"user-logs-{current_user.username}-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.csv"
@@ -1260,7 +1362,16 @@ def user_log_timeline_api(
     current_user = require_user_html(request, db)
     if isinstance(current_user, RedirectResponse):
         return JSONResponse({"detail": "unauthorized"}, status_code=401)
-    log = UserPortalService.get_owned_request_log(db, user=current_user, log_id=log_id)
+    log = db.scalar(
+        select(RequestLog)
+        .options(*LogService._lightweight_log_load_options())
+        .where(
+            RequestLog.id == log_id,
+            RequestLog.api_client_key_id.in_(
+                select(ApiClientKey.id).where(ApiClientKey.owner_user_id == current_user.id)
+            ),
+        )
+    )
     if log is None:
         return JSONResponse({"detail": "not_found"}, status_code=404)
     return JSONResponse(build_request_log_timeline_payload(db, log))
@@ -1293,7 +1404,7 @@ def user_billing_page(
 @router.get("/user/billing/export")
 def export_user_billing(
     request: Request,
-    limit: int = Query(default=5000, ge=1, le=10000),
+    limit: int = Query(default=5000, ge=1, le=5000),
     db: Session = Depends(get_db),
 ):
     current_user = require_user_html(request, db)

@@ -22,6 +22,15 @@ DEFAULT_PROXY_BASE_URL = "http://127.0.0.1:8000"
 DEFAULT_REPORT_DIR = PROJECT_ROOT / "data" / "benchmark-reports"
 DEFAULT_TEXT_PROMPT = "请用两句话简洁回答：并发压测探针。"
 BENCH_EVENT_PREFIX = "@@BENCH@@"
+MAX_BENCHMARK_CONCURRENCY = 1000
+MAX_BENCHMARK_PROBE_CONCURRENCY = 2000
+MAX_BENCHMARK_SAMPLE_REQUESTS = 10000
+MAX_BENCHMARK_REQUESTS_PER_CONCURRENCY = 20
+MAX_BENCHMARK_STAGE_REQUESTS = 10000
+MAX_BENCHMARK_WARMUP_REQUESTS = 1000
+MAX_BENCHMARK_TIMEOUT_S = 600
+MAX_HTTP_CONNECTIONS = 2000
+MAX_HTTP_KEEPALIVE_CONNECTIONS = 1000
 
 
 @dataclass(slots=True)
@@ -132,6 +141,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--report-dir", default=str(DEFAULT_REPORT_DIR), help="报告输出目录。")
     parser.add_argument("--report-prefix", default="real-concurrency-benchmark", help="报告文件名前缀。")
     return parser.parse_args()
+
+
+def clamp_int(value: int, minimum: int, maximum: int) -> int:
+    return max(minimum, min(maximum, int(value)))
+
+
+def clamp_float(value: float, minimum: float, maximum: float) -> float:
+    return max(minimum, min(maximum, float(value)))
+
+
+def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
+    args.concurrency = clamp_int(args.concurrency, 1, MAX_BENCHMARK_CONCURRENCY)
+    args.probe_min_concurrency = clamp_int(args.probe_min_concurrency, 0, MAX_BENCHMARK_CONCURRENCY)
+    args.probe_max_concurrency = clamp_int(args.probe_max_concurrency, 0, MAX_BENCHMARK_PROBE_CONCURRENCY)
+    args.sample_requests = clamp_int(args.sample_requests, 1, MAX_BENCHMARK_SAMPLE_REQUESTS)
+    args.requests_per_concurrency = clamp_int(
+        args.requests_per_concurrency,
+        1,
+        MAX_BENCHMARK_REQUESTS_PER_CONCURRENCY,
+    )
+    args.warmup_requests = clamp_int(args.warmup_requests, 0, MAX_BENCHMARK_WARMUP_REQUESTS)
+    args.client_timeout_s = clamp_float(args.client_timeout_s, 1.0, MAX_BENCHMARK_TIMEOUT_S)
+    args.request_timeout_s = clamp_float(args.request_timeout_s, 1.0, MAX_BENCHMARK_TIMEOUT_S)
+    args.sample_requests = min(args.sample_requests, MAX_BENCHMARK_STAGE_REQUESTS)
+    return args
 
 
 def percentile(values: list[float], pct: float) -> float:
@@ -338,8 +372,8 @@ async def execute_stage(
     stats = {"done": 0, "success": 0, "failed": 0, "busy": 0, "timeout": 0}
     results: list[RequestResult] = []
     limits = httpx.Limits(
-        max_connections=max(concurrency * 2, 200),
-        max_keepalive_connections=max(concurrency, 50),
+        max_connections=min(max(concurrency * 2, 200), MAX_HTTP_CONNECTIONS),
+        max_keepalive_connections=min(max(concurrency, 50), MAX_HTTP_KEEPALIVE_CONNECTIONS),
     )
     timeout = httpx.Timeout(request_timeout_s)
     stage_started = time.perf_counter()
@@ -548,7 +582,10 @@ async def run_stage_probe(
     latency_p95_threshold_ms: float,
     first_event_p95_threshold_ms: float,
 ) -> StageMetrics:
-    total_requests = max(sample_requests, concurrency * max(1, requests_per_concurrency))
+    total_requests = min(
+        MAX_BENCHMARK_STAGE_REQUESTS,
+        max(sample_requests, concurrency * max(1, requests_per_concurrency)),
+    )
     results, duration_s = await execute_stage(
         model_name=model_name,
         endpoint=endpoint,
@@ -1051,6 +1088,8 @@ def save_report_files(report_dir: Path, report_prefix: str, report: BenchmarkRep
     base_name = f"{report_prefix}-{timestamp}"
     json_path = report_dir / f"{base_name}.json"
     html_path = report_dir / f"{base_name}.html"
+    report.json_report_path = str(json_path)
+    report.html_report_path = str(html_path)
     json_path.write_text(json.dumps(as_serializable(report), ensure_ascii=False, indent=2), encoding="utf-8")
     html_path.write_text(build_html_report(report), encoding="utf-8")
     return json_path, html_path
@@ -1112,10 +1151,6 @@ async def main_async(args: argparse.Namespace) -> int:
         json_report_path="",
     )
     json_path, html_path = save_report_files(Path(args.report_dir), args.report_prefix, report)
-    report.json_report_path = str(json_path)
-    report.html_report_path = str(html_path)
-    json_path.write_text(json.dumps(as_serializable(report), ensure_ascii=False, indent=2), encoding="utf-8")
-    html_path.write_text(build_html_report(report), encoding="utf-8")
 
     print("\n[result-summary]")
     for item in model_reports:
@@ -1127,7 +1162,7 @@ async def main_async(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
-    args = parse_args()
+    args = normalize_args(parse_args())
     try:
         return asyncio.run(main_async(args))
     except KeyboardInterrupt:

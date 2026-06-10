@@ -9,7 +9,7 @@ from urllib.parse import parse_qsl, urlencode
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -36,6 +36,7 @@ register_display_filters(templates)
 QUOTA_FIELD_DEFINITIONS = (
     ("frozen_amount", "冻结金额", "decimal", "0.000000"),
 )
+MAX_USER_QUOTA_BATCH_SIZE = 200
 
 
 def require_admin_html(request: Request, db: Session) -> UserAccount | RedirectResponse:
@@ -148,7 +149,12 @@ def _parse_optional_decimal(value: str | None, *, field_label: str) -> Decimal |
     return parsed
 
 
-def _parse_form_user_ids(user_ids: list[int] | None, user_ids_text: str | None) -> list[int]:
+def _parse_form_user_ids(
+    user_ids: list[int] | None,
+    user_ids_text: str | None,
+    *,
+    max_count: int | None = None,
+) -> list[int]:
     normalized: list[int] = []
     seen: set[int] = set()
     for item in user_ids or []:
@@ -156,6 +162,8 @@ def _parse_form_user_ids(user_ids: list[int] | None, user_ids_text: str | None) 
             continue
         seen.add(item)
         normalized.append(int(item))
+        if max_count is not None and len(normalized) > max_count:
+            raise ValueError(f"单次最多选择 {max_count} 个用户")
     for chunk in (user_ids_text or "").replace("，", ",").split(","):
         text = chunk.strip()
         if not text:
@@ -165,6 +173,8 @@ def _parse_form_user_ids(user_ids: list[int] | None, user_ids_text: str | None) 
             continue
         seen.add(value)
         normalized.append(value)
+        if max_count is not None and len(normalized) > max_count:
+            raise ValueError(f"单次最多选择 {max_count} 个用户")
     if not normalized:
         raise ValueError("至少选择一个用户")
     return normalized
@@ -510,7 +520,7 @@ def batch_update_user_quota_policy(
     if isinstance(current_user, RedirectResponse):
         return current_user
     try:
-        target_user_ids = _parse_form_user_ids(user_ids, user_ids_text)
+        target_user_ids = _parse_form_user_ids(user_ids, user_ids_text, max_count=MAX_USER_QUOTA_BATCH_SIZE)
         field_text_map = {
             "frozen_amount": frozen_amount,
         }
@@ -539,11 +549,15 @@ def batch_update_user_quota_policy(
         if _wants_json(request):
             return JSONResponse(status_code=400, content={"success": False, "message": str(exc)})
         return _redirect_users(request.url.query, error=str(exc))
+    target_users = list(
+        db.scalars(
+            select(UserAccount)
+            .where(UserAccount.id.in_(target_user_ids))
+            .order_by(UserAccount.id.asc())
+        )
+    )
     affected_user_ids: list[int] = []
-    for target_user_id in target_user_ids:
-        user = db.get(UserAccount, target_user_id)
-        if user is None:
-            continue
+    for user in target_users:
         _apply_quota_updates_to_user(user, parsed_updates)
         affected_user_ids.append(user.id)
     if not affected_user_ids:
@@ -600,7 +614,14 @@ def delete_user(
         return _redirect_users(return_to, error="not_found")
     if user.id == current_user.id:
         return _redirect_users(return_to, error="self_delete")
-    admin_total = sum(1 for item in UserAuthService.list_users(db) if item.role == USER_ROLE_ADMIN)
+    admin_total = int(
+        db.scalar(
+            select(func.count())
+            .select_from(UserAccount)
+            .where(UserAccount.role == USER_ROLE_ADMIN)
+        )
+        or 0
+    )
     if user.role == USER_ROLE_ADMIN and admin_total <= 1:
         return _redirect_users(return_to, error="last_admin")
     username = user.username
@@ -622,12 +643,19 @@ def delete_user(
 @router.get("/users/export")
 def export_users(
     request: Request,
+    limit: int = Query(default=5000, ge=1, le=5000),
     db: Session = Depends(get_db),
 ):
     current_user = require_admin_html(request, db)
     if isinstance(current_user, RedirectResponse):
         return current_user
-    users = UserAuthService.list_users(db)
+    users = list(
+        db.scalars(
+            select(UserAccount)
+            .order_by(UserAccount.id.desc())
+            .limit(limit)
+        )
+    )
     key_counts = UserPortalService.count_user_key_map(db, user_ids=[item.id for item in users])
     buffer = io.StringIO()
     writer = csv.writer(buffer)
@@ -652,6 +680,7 @@ def export_users(
         entity_id=None,
         entity_name="all_users",
         summary="导出用户列表 CSV",
+        detail={"limit": limit},
     )
     return Response(
         content=buffer.getvalue(),
@@ -663,15 +692,12 @@ def export_users(
 @router.get("/users/billing-export")
 def export_user_billing(
     request: Request,
-    limit: int = Query(default=5000, ge=1, le=10000),
+    limit: int = Query(default=5000, ge=1, le=5000),
     db: Session = Depends(get_db),
 ):
     current_user = require_admin_html(request, db)
     if isinstance(current_user, RedirectResponse):
         return current_user
-    key_rows = list(db.scalars(select(ApiClientKey).order_by(ApiClientKey.id.asc())))
-    key_name_map = {item.id: item.name for item in key_rows}
-    user_map = {item.id: item.username for item in UserAuthService.list_users(db)}
     items = list(
         db.scalars(
             select(UserAccountBillingRecord)
@@ -679,6 +705,16 @@ def export_user_billing(
             .limit(max(1, limit))
         )
     )
+    user_ids = sorted({item.user_account_id for item in items if item.user_account_id is not None})
+    key_ids = sorted({item.api_client_key_id for item in items if item.api_client_key_id is not None})
+    user_map = {
+        item.id: item.username
+        for item in db.scalars(select(UserAccount).where(UserAccount.id.in_(user_ids)))
+    } if user_ids else {}
+    key_name_map = {
+        item.id: item.name
+        for item in db.scalars(select(ApiClientKey).where(ApiClientKey.id.in_(key_ids)))
+    } if key_ids else {}
     buffer = io.StringIO()
     writer = csv.writer(buffer)
     writer.writerow(["created_at", "user_account_id", "owner_username", "api_client_key_id", "api_client_key_name", "record_type", "amount", "balance_after", "provider_name", "model_name", "total_tokens", "remark"])
@@ -717,6 +753,7 @@ def export_user_billing(
 
 @router.get("/api/users/options")
 def user_options(
+    limit: int = Query(default=500, ge=1, le=500),
     _: UserAccount = Depends(require_admin_api_user),
     db: Session = Depends(get_db),
 ):
@@ -728,8 +765,12 @@ def user_options(
             "role": user.role,
             "enabled": user.enabled,
         }
-        for user in UserAuthService.list_users(db)
-        if user.enabled
+        for user in db.scalars(
+            select(UserAccount)
+            .where(UserAccount.enabled.is_(True))
+            .order_by(UserAccount.id.desc())
+            .limit(limit)
+        )
     ]
     return JSONResponse(items)
 
@@ -741,11 +782,20 @@ def user_quota_preview(
     db: Session = Depends(get_db),
 ):
     try:
-        target_user_ids = _parse_form_user_ids(user_ids, ",".join(str(item) for item in user_ids))
+        target_user_ids = _parse_form_user_ids(
+            user_ids,
+            ",".join(str(item) for item in user_ids),
+            max_count=MAX_USER_QUOTA_BATCH_SIZE,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    users = [db.get(UserAccount, user_id) for user_id in target_user_ids]
-    normalized_users = [user for user in users if user is not None]
+    normalized_users = list(
+        db.scalars(
+            select(UserAccount)
+            .where(UserAccount.id.in_(target_user_ids))
+            .order_by(UserAccount.id.asc())
+        )
+    )
     if not normalized_users:
         raise HTTPException(status_code=404, detail="未找到可预览的有效用户")
     return JSONResponse(_build_quota_preview(normalized_users))

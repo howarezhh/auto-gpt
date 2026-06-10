@@ -6,7 +6,7 @@ import logging
 import math
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from functools import lru_cache
 from typing import Any
@@ -16,10 +16,11 @@ from redis import Redis
 
 try:
     import tiktoken
-except Exception:  # pragma: no cover - optional dependency during bootstrap
+except Exception:  # optional dependency during bootstrap
     tiktoken = None
 
 from sqlalchemy import or_, select, update
+from sqlalchemy.orm import load_only
 
 from app.config import get_settings
 from app.database import SessionLocal
@@ -28,9 +29,10 @@ from app.models.api_client_key import ApiClientKey
 from app.models.request_log import RequestLog
 from app.scheduler import scheduler
 from app.services.billing_service import BillingService
+from app.services.billing_reservation_service import BillingReservationService
 from app.services.log_service import LogService
 from app.utils.decimal_utils import money_to_scaled_int
-from app.utils.json_utils import safeJsonParse
+from app.utils.json_utils import dumps_json, safeJsonParse
 
 
 logger = logging.getLogger(__name__)
@@ -59,16 +61,46 @@ class _FinalizeJob:
 
 
 class TokenUsageService:
-    IMMEDIATE_DELAY_MS = 250
     BACKFILL_BATCH_SIZE = 50
+    MAX_FINALIZE_BATCH_SIZE = 500
     FINALIZE_DEDUPE_TTL_SECONDS = 900
-    MAX_FINALIZE_ATTEMPTS = 3
+    MAX_FINALIZE_ATTEMPTS = LogService.TOKEN_FINALIZE_MAX_ATTEMPTS
     RETRY_DELAYS_SECONDS = (2, 10, 30)
+    FINALIZE_DEAD_LETTER_KEY = "token_usage:finalize:dead_letter"
+    FINALIZE_FAILURE_COUNT_KEY = "token_usage:finalize:failure_count"
+    FINALIZE_DEAD_LETTER_LIMIT = 1000
     _redis_client: Redis | None = None
     _finalize_queue: asyncio.Queue[_FinalizeJob] | None = None
     _finalize_workers: list[asyncio.Task] = []
     _finalize_loop: asyncio.AbstractEventLoop | None = None
     _auth_cache_invalidation_at: dict[int, float] = {}
+
+    @staticmethod
+    def _fast_finalize_log_load_options():
+        return (
+            load_only(
+                RequestLog.id,
+                RequestLog.api_client_key_id,
+                RequestLog.user_account_id,
+                RequestLog.created_at,
+                RequestLog.billing_finalized_at,
+                RequestLog.billing_status,
+                RequestLog.billing_error,
+                RequestLog.token_finalize_attempt_count,
+                RequestLog.token_finalize_error,
+                RequestLog.prompt_tokens,
+                RequestLog.completion_tokens,
+                RequestLog.total_tokens,
+                RequestLog.cache_write_tokens,
+                RequestLog.prompt_cost,
+                RequestLog.completion_cost,
+                RequestLog.total_cost,
+                RequestLog.channel_price_input_per_1k,
+                RequestLog.channel_price_output_per_1k,
+                RequestLog.channel_price_cache_per_1k,
+                RequestLog.channel_price_cache_write_per_1k,
+            ),
+        )
 
     @staticmethod
     async def start_background_workers() -> None:
@@ -91,6 +123,11 @@ class TokenUsageService:
         TokenUsageService._finalize_workers = []
         TokenUsageService._finalize_queue = None
         TokenUsageService._finalize_loop = None
+        if TokenUsageService._redis_client is not None:
+            try:
+                TokenUsageService._redis_client.close()
+            finally:
+                TokenUsageService._redis_client = None
         if queue is not None:
             while True:
                 try:
@@ -112,7 +149,10 @@ class TokenUsageService:
                 return
             job = await queue.get()
             batch = [job]
-            batch_size = max(1, int(getattr(get_settings(), "token_finalize_batch_size", TokenUsageService.BACKFILL_BATCH_SIZE) or 1))
+            batch_size = min(
+                TokenUsageService.MAX_FINALIZE_BATCH_SIZE,
+                max(1, int(getattr(get_settings(), "token_finalize_batch_size", TokenUsageService.BACKFILL_BATCH_SIZE) or 1)),
+            )
             while len(batch) < batch_size:
                 try:
                     batch.append(queue.get_nowait())
@@ -252,7 +292,8 @@ class TokenUsageService:
             response_text=response_text,
             enable_usage_fill=enable_usage_fill,
         )
-        queued = TokenUsageService._enqueue_finalize_job(job, delay_ms=TokenUsageService.IMMEDIATE_DELAY_MS)
+        delay_ms = TokenUsageService._immediate_delay_ms()
+        queued = TokenUsageService._enqueue_finalize_job(job, delay_ms=delay_ms)
         if queued:
             return
         if TokenUsageService._finalize_queue is not None:
@@ -266,7 +307,7 @@ class TokenUsageService:
             response_payload=response_payload,
             response_text=response_text,
             enable_usage_fill=enable_usage_fill,
-            delay_ms=TokenUsageService.IMMEDIATE_DELAY_MS,
+            delay_ms=delay_ms,
         )
         if not scheduled:
             TokenUsageService._release_finalize_job(log_id)
@@ -293,6 +334,13 @@ class TokenUsageService:
             return False
 
     @staticmethod
+    def _immediate_delay_ms() -> int:
+        try:
+            return max(0, min(int(get_settings().token_finalize_immediate_delay_ms or 0), 5000))
+        except Exception:
+            return 0
+
+    @staticmethod
     async def _enqueue_finalize_job_from_thread(job: _FinalizeJob, *, delay_ms: int = 0) -> bool:
         return TokenUsageService._enqueue_finalize_job_on_loop(job, delay_ms=delay_ms)
 
@@ -302,7 +350,8 @@ class TokenUsageService:
         if queue is None:
             return False
         if delay_ms > 0:
-            asyncio.create_task(TokenUsageService._delayed_enqueue_finalize_job(job, delay_ms=delay_ms))
+            task = asyncio.create_task(TokenUsageService._delayed_enqueue_finalize_job(job, delay_ms=delay_ms))
+            task.add_done_callback(lambda item: item.exception() if not item.cancelled() else None)
             return True
         try:
             queue.put_nowait(job)
@@ -313,8 +362,15 @@ class TokenUsageService:
 
     @staticmethod
     async def _delayed_enqueue_finalize_job(job: _FinalizeJob, *, delay_ms: int) -> None:
-        await asyncio.sleep(max(0, delay_ms) / 1000)
-        if not TokenUsageService._enqueue_finalize_job_on_loop(job, delay_ms=0):
+        try:
+            await asyncio.sleep(max(0, delay_ms) / 1000)
+            if not TokenUsageService._enqueue_finalize_job_on_loop(job, delay_ms=0):
+                TokenUsageService._release_finalize_job(job.log_id)
+        except asyncio.CancelledError:
+            TokenUsageService._release_finalize_job(job.log_id)
+            raise
+        except Exception as exc:
+            logger.warning("Delayed token finalize enqueue failed for log %s: %s", job.log_id, exc)
             TokenUsageService._release_finalize_job(job.log_id)
 
     @staticmethod
@@ -354,11 +410,12 @@ class TokenUsageService:
     def _get_redis_client() -> Redis | None:
         if TokenUsageService._redis_client is not None:
             return TokenUsageService._redis_client
-        redis_url = get_settings().redis_url.strip()
-        if not redis_url:
+        if not get_settings().redis_url.strip():
             return None
         try:
-            TokenUsageService._redis_client = Redis.from_url(redis_url, decode_responses=True)
+            from app.services.redis_service import RedisService
+
+            TokenUsageService._redis_client = RedisService.create_sync_client()
             return TokenUsageService._redis_client
         except Exception:
             return None
@@ -367,6 +424,9 @@ class TokenUsageService:
     def _claim_finalize_job(log_id: int) -> bool:
         client = TokenUsageService._get_redis_client()
         if client is None:
+            if get_settings().is_production():
+                logger.error("Token finalize dedupe Redis unavailable in production; skip log %s to avoid duplicate billing", log_id)
+                return False
             return True
         try:
             return bool(
@@ -377,7 +437,10 @@ class TokenUsageService:
                     ex=TokenUsageService.FINALIZE_DEDUPE_TTL_SECONDS,
                 )
             )
-        except Exception:
+        except Exception as exc:
+            if get_settings().is_production():
+                logger.error("Token finalize dedupe Redis failed in production for log %s: %s", log_id, exc)
+                return False
             return True
 
     @staticmethod
@@ -405,6 +468,7 @@ class TokenUsageService:
         try:
             log = db.get(RequestLog, log_id)
             if log is None:
+                TokenUsageService._release_finalize_job(log_id)
                 return
             log.token_finalize_attempt_count = int(log.token_finalize_attempt_count or 0) + 1
             log.token_finalize_error = None
@@ -457,7 +521,13 @@ class TokenUsageService:
         redis_counter_logs: list[RequestLog] = []
         auth_cache_log_by_api_key: dict[int, RequestLog] = {}
         try:
-            logs = list(db.scalars(select(RequestLog).where(RequestLog.id.in_(log_ids))))
+            logs = list(
+                db.scalars(
+                    select(RequestLog)
+                    .options(*TokenUsageService._fast_finalize_log_load_options())
+                    .where(RequestLog.id.in_(log_ids))
+                )
+            )
             log_by_id = {int(log.id): log for log in logs if log.id is not None}
             usage_delta_by_api_key: dict[int, dict[str, int]] = {}
             now = datetime.utcnow()
@@ -530,6 +600,7 @@ class TokenUsageService:
                     billing_delta=Decimal("0"),
                     request_delta=1,
                 )
+                TokenUsageService._release_billing_reservation_for_log(log)
             for log_id in completed_ids:
                 TokenUsageService._release_finalize_job(log_id)
             return completed_ids
@@ -557,15 +628,16 @@ class TokenUsageService:
             logs = list(
                 db.scalars(
                     select(RequestLog)
-                    .where(LogService._token_billing_finalize_candidate_expr())
-                    .where(
-                        or_(
-                            RequestLog.prompt_tokens.is_(None),
-                            RequestLog.completion_tokens.is_(None),
-                            RequestLog.total_tokens.is_(None),
-                            RequestLog.billing_finalized_at.is_(None),
-                            RequestLog.billing_status == "pending_tokens",
+                    .options(
+                        load_only(
+                            RequestLog.id,
+                            RequestLog.model_name,
+                            RequestLog.requested_model,
+                            RequestLog.request_path,
                         )
+                    )
+                    .where(
+                        LogService._pending_token_billing_finalize_expr()
                     )
                     .order_by(RequestLog.created_at.desc(), RequestLog.id.desc())
                     .limit(max(1, limit))
@@ -623,6 +695,7 @@ class TokenUsageService:
                 return
             attempts = int(log.token_finalize_attempt_count or 0)
             if attempts >= TokenUsageService.MAX_FINALIZE_ATTEMPTS:
+                TokenUsageService._record_finalize_dead_letter(log)
                 TokenUsageService._release_finalize_job(log_id)
                 TokenUsageService._write_finalize_alert(db, log)
                 return
@@ -658,9 +731,50 @@ class TokenUsageService:
             TokenUsageService._release_finalize_job(log_id)
 
     @staticmethod
+    def _record_finalize_dead_letter(log: RequestLog) -> None:
+        client = TokenUsageService._get_redis_client()
+        if client is None:
+            return
+        try:
+            payload = dumps_json(
+                {
+                    "failed_at": datetime.now(UTC).isoformat(),
+                    "request_log_id": log.id,
+                    "trace_id": log.trace_id,
+                    "request_id": log.request_id,
+                    "api_client_key_id": log.api_client_key_id,
+                    "user_account_id": log.user_account_id,
+                    "attempts": int(log.token_finalize_attempt_count or 0),
+                    "billing_attempt_count": int(log.billing_attempt_count or 0),
+                    "billing_status": log.billing_status,
+                    "token_finalize_error": log.token_finalize_error,
+                    "billing_error": log.billing_error,
+                }
+            )
+            pipe = client.pipeline(transaction=True)
+            pipe.lpush(TokenUsageService.FINALIZE_DEAD_LETTER_KEY, payload)
+            pipe.ltrim(TokenUsageService.FINALIZE_DEAD_LETTER_KEY, 0, TokenUsageService.FINALIZE_DEAD_LETTER_LIMIT - 1)
+            pipe.incr(TokenUsageService.FINALIZE_FAILURE_COUNT_KEY)
+            pipe.execute()
+        except Exception as exc:
+            logger.warning("Failed to record token finalize dead letter for log %s: %s", getattr(log, "id", None), exc)
+
+    @staticmethod
+    def finalize_dead_letter_snapshot() -> dict[str, int | None]:
+        client = TokenUsageService._get_redis_client()
+        if client is None:
+            return {"dead_letter": None, "failure_count": None}
+        try:
+            return {
+                "dead_letter": int(client.llen(TokenUsageService.FINALIZE_DEAD_LETTER_KEY) or 0),
+                "failure_count": int(client.get(TokenUsageService.FINALIZE_FAILURE_COUNT_KEY) or 0),
+            }
+        except Exception:
+            return {"dead_letter": None, "failure_count": None}
+
+    @staticmethod
     def _write_finalize_alert(db, log: RequestLog) -> None:
         from app.models.alert_event import AlertEvent
-        from app.utils.json_utils import dumps_json
 
         now = datetime.utcnow()
         alert_key = f"billing_finalize:{log.id}"
@@ -931,6 +1045,17 @@ class TokenUsageService:
                 billing_delta=billing_delta,
                 request_delta=0 if usage_already_accounted else 1,
             )
+            TokenUsageService._release_billing_reservation_for_log(log)
+
+    @staticmethod
+    def _release_billing_reservation_for_log(log: RequestLog) -> None:
+        user_account_id = log.user_account_id
+        if user_account_id is None and log.api_client_key is not None:
+            user_account_id = log.api_client_key.owner_user_id
+        BillingReservationService.release(
+            user_account_id=user_account_id,
+            reservation_id=log.trace_id,
+        )
 
     @staticmethod
     def _can_fast_finalize_no_charge(log: RequestLog) -> bool:

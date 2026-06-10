@@ -11,19 +11,25 @@ from decimal import Decimal
 from typing import Any
 
 import httpx
+from sqlalchemy import delete, func, select
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from app.database import SessionLocal
+from app.models.api_client_billing_record import ApiClientBillingRecord
 from app.models.api_client_key import ApiClientKey
 from app.models.api_client_key_provider_binding import ApiClientKeyProviderBinding
 from app.models.model_catalog import ModelCatalog
 from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
+from app.models.request_log import RequestLog
 from app.models.user_account import UserAccount
+from app.models.user_account_billing_record import UserAccountBillingRecord
 from app.services.api_key_service import ApiKeyService
+from app.services.log_service import LogService
+from app.services.request_log_queue_service import RequestLogQueueService
 
 
 DEFAULT_PROVIDER_NAME = "benchmark-mock-provider"
@@ -32,6 +38,16 @@ DEFAULT_KEY_NAME = "benchmark-mock-key"
 DEFAULT_USER_NAME = "benchmark_user"
 DEFAULT_USER_EMAIL = "benchmark_user@example.com"
 DEFAULT_RAW_KEY = "sk-aotu-benchmark-0123456789abcdefghijklmnopqrstuvwxyz"
+MAX_BENCHMARK_REQUESTS = 10000
+MAX_BENCHMARK_CONCURRENCY = 500
+MAX_BENCHMARK_TIMEOUT_S = 600
+MAX_BENCHMARK_WARMUP = 1000
+MAX_BENCHMARK_RESPONSE_BYTES = 1 * 1024 * 1024
+MAX_HTTP_CONNECTIONS = 1000
+MAX_HTTP_KEEPALIVE_CONNECTIONS = 500
+DEFAULT_FIXTURE_CAPACITY = 500
+BENCHMARK_DELETE_BATCH_SIZE = 1000
+BENCHMARK_BACKGROUND_IDLE_TIMEOUT_S = 10.0
 
 
 @dataclass(slots=True)
@@ -60,7 +76,44 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def ensure_benchmark_data(*, mock_base_url: str, model_name: str, provider_name: str, api_key_name: str, raw_api_key: str) -> dict[str, Any]:
+def clamp_int(value: int, minimum: int, maximum: int) -> int:
+    return max(minimum, min(maximum, int(value)))
+
+
+def clamp_float(value: float, minimum: float, maximum: float) -> float:
+    return max(minimum, min(maximum, float(value)))
+
+
+def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
+    args.requests = clamp_int(args.requests, 1, MAX_BENCHMARK_REQUESTS)
+    args.concurrency = clamp_int(args.concurrency, 1, MAX_BENCHMARK_CONCURRENCY)
+    args.timeout_s = clamp_float(args.timeout_s, 1.0, MAX_BENCHMARK_TIMEOUT_S)
+    args.warmup = clamp_int(args.warmup, 0, MAX_BENCHMARK_WARMUP)
+    return args
+
+
+def delete_benchmark_rows_in_batches(db, model: type[Any], condition: Any, *, batch_size: int = BENCHMARK_DELETE_BATCH_SIZE) -> int:
+    deleted = 0
+    while True:
+        ids = list(db.scalars(select(model.id).where(condition).limit(batch_size)))
+        if not ids:
+            return deleted
+        result = db.execute(delete(model).where(model.id.in_(ids)))
+        db.commit()
+        deleted += int(result.rowcount or 0)
+        if len(ids) < batch_size:
+            return deleted
+
+
+def ensure_benchmark_data(
+    *,
+    mock_base_url: str,
+    model_name: str,
+    provider_name: str,
+    api_key_name: str,
+    raw_api_key: str,
+    capacity_limit: int = DEFAULT_FIXTURE_CAPACITY,
+) -> dict[str, Any]:
     db = SessionLocal()
     try:
         user = (
@@ -97,10 +150,9 @@ def ensure_benchmark_data(*, mock_base_url: str, model_name: str, provider_name:
         provider.priority = 1
         provider.timeout_ms = 30000
         provider.max_retries = 1
-        provider.max_active_requests = 10000
-        provider.max_active_streams = 10000
-        provider.max_qps = None
-        provider.max_error_rate = 100.0
+        provider.max_active_requests = capacity_limit
+        provider.max_active_streams = capacity_limit
+        provider.max_qps = capacity_limit
         provider.health_status = "healthy"
         provider.circuit_state = "closed"
         provider.failure_count = 0
@@ -172,9 +224,6 @@ def ensure_benchmark_data(*, mock_base_url: str, model_name: str, provider_name:
         api_key.owner_user_id = user.id
         api_key.balance_amount = Decimal("1000")
         api_key.total_recharge_amount = Decimal("1000")
-        api_key.default_provider_id = provider.id
-        api_key.route_mode = "failover"
-        api_key.manual_allow_fallback = True
         api_key.allowed_model_names_json = json.dumps([model_name], ensure_ascii=False)
         api_key.allowed_endpoint_paths_json = json.dumps(
             ["/v1/chat/completions", "/v1/responses", "/v1/models"],
@@ -187,8 +236,8 @@ def ensure_benchmark_data(*, mock_base_url: str, model_name: str, provider_name:
         api_key.latency_bias = 1
         api_key.success_rate_bias = 1
         api_key.cost_bias = 0
-        api_key.qps_limit = None
-        api_key.rpm_limit = None
+        api_key.qps_limit = capacity_limit
+        api_key.rpm_limit = capacity_limit * 60
         api_key.tpm_limit = None
         db.flush()
 
@@ -203,7 +252,19 @@ def ensure_benchmark_data(*, mock_base_url: str, model_name: str, provider_name:
         if binding is None:
             db.add(ApiClientKeyProviderBinding(api_client_key_id=api_key.id, provider_id=provider.id))
 
+        db.flush()
         db.commit()
+        delete_benchmark_rows_in_batches(
+            db,
+            ApiClientBillingRecord,
+            ApiClientBillingRecord.api_client_key_id == api_key.id,
+        )
+        delete_benchmark_rows_in_batches(
+            db,
+            UserAccountBillingRecord,
+            UserAccountBillingRecord.api_client_key_id == api_key.id,
+        )
+        delete_benchmark_rows_in_batches(db, RequestLog, RequestLog.api_client_key_id == api_key.id)
         return {
             "provider_id": provider.id,
             "api_key_id": api_key.id,
@@ -251,6 +312,9 @@ async def run_single_request(
                 status_code = response.status_code
                 async for chunk in response.aiter_bytes():
                     bytes_read += len(chunk)
+                    if bytes_read > MAX_BENCHMARK_RESPONSE_BYTES:
+                        error = "response_too_large"
+                        break
                 if response.status_code >= 400:
                     error = f"http_{response.status_code}"
         else:
@@ -260,7 +324,13 @@ async def run_single_request(
             if response.status_code >= 400:
                 error = f"http_{response.status_code}"
         latency_ms = (time.perf_counter() - started) * 1000
-        return RequestResult(ok=(status_code is not None and status_code < 400), status_code=status_code, latency_ms=latency_ms, bytes_read=bytes_read, error=error)
+        return RequestResult(
+            ok=(status_code is not None and status_code < 400 and error is None),
+            status_code=status_code,
+            latency_ms=latency_ms,
+            bytes_read=bytes_read,
+            error=error,
+        )
     except Exception as exc:
         latency_ms = (time.perf_counter() - started) * 1000
         return RequestResult(ok=False, status_code=status_code, latency_ms=latency_ms, bytes_read=bytes_read, error=f"{type(exc).__name__}: {exc}")
@@ -299,7 +369,9 @@ async def run_load(
     for index in range(total_requests):
         queue.put_nowait(index)
 
-    limits = httpx.Limits(max_connections=max(concurrency * 2, 100), max_keepalive_connections=max(concurrency, 20))
+    max_connections = min(max(concurrency * 2, 100), MAX_HTTP_CONNECTIONS)
+    max_keepalive_connections = min(max(concurrency, 20), MAX_HTTP_KEEPALIVE_CONNECTIONS)
+    limits = httpx.Limits(max_connections=max_connections, max_keepalive_connections=max_keepalive_connections)
     timeout = httpx.Timeout(timeout_s)
     async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
         async def worker() -> None:
@@ -352,14 +424,53 @@ def print_summary(*, title: str, duration_s: float, results: list[RequestResult]
         print(f"errors={json.dumps(dict(error_counts), ensure_ascii=False)}")
 
 
+def _count_pending_benchmark_token_logs(api_key_id: int) -> int:
+    db = SessionLocal()
+    try:
+        return int(
+            db.scalar(
+                select(func.count())
+                .select_from(RequestLog)
+                .where(
+                    RequestLog.api_client_key_id == api_key_id,
+                    LogService._pending_token_billing_finalize_expr(),
+                )
+            )
+            or 0
+        )
+    finally:
+        db.close()
+
+
+async def wait_for_benchmark_background_idle(api_key_id: int, *, timeout_s: float = BENCHMARK_BACKGROUND_IDLE_TIMEOUT_S) -> None:
+    queue_state = await RequestLogQueueService.wait_until_idle(timeout_seconds=timeout_s)
+    deadline = time.monotonic() + timeout_s
+    pending_token_logs = _count_pending_benchmark_token_logs(api_key_id)
+    while pending_token_logs > 0 and time.monotonic() < deadline:
+        await asyncio.sleep(0.1)
+        pending_token_logs = _count_pending_benchmark_token_logs(api_key_id)
+    print(
+        "benchmark_background_idle="
+        + json.dumps(
+            {
+                "request_log_queue": queue_state,
+                "pending_token_logs": pending_token_logs,
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
 async def main_async() -> None:
-    args = parse_args()
+    args = normalize_args(parse_args())
+    capacity_limit = max(args.concurrency, min(DEFAULT_FIXTURE_CAPACITY, MAX_BENCHMARK_CONCURRENCY))
     prepared = ensure_benchmark_data(
         mock_base_url=args.mock_base_url,
         model_name=args.model_name,
         provider_name=args.provider_name,
         api_key_name=args.api_key_name,
         raw_api_key=args.raw_api_key,
+        capacity_limit=capacity_limit,
     )
 
     if args.warmup > 0:
@@ -388,6 +499,7 @@ async def main_async() -> None:
         timeout_s=args.timeout_s,
     )
     duration_s = time.perf_counter() - started
+    await wait_for_benchmark_background_idle(int(prepared["api_key_id"]))
 
     print(f"benchmark_provider_id={prepared['provider_id']}")
     print(f"benchmark_api_key_id={prepared['api_key_id']}")

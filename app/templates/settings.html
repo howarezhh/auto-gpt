@@ -17,16 +17,6 @@
     </div>
     <form class="form-grid" id="settings-form">
         <label>
-            <span>路由主策略</span>
-            <select class="field-input" id="setting-route-mode">
-                <option value="failover">健康优先 | 同层复用近期会话，随后按负载与得分分发</option>
-            </select>
-        </label>
-        <label>
-            <span>默认提供商</span>
-            <select class="field-input" id="setting-default-provider-id"></select>
-        </label>
-        <label>
             <span>全局超时（ms）</span>
             <input class="field-input" id="setting-global-timeout-ms" type="number">
         </label>
@@ -147,15 +137,30 @@
                             </button>
                             <div class="settings-tooltip-content hidden">
                                 <div class="settings-tooltip-title">最大候选数说明</div>
-                                <div class="settings-tooltip-copy">每次路由在完成权限、能力、健康、容量筛选和健康优先排序后，最多保留多少个候选提供商参与后续尝试。默认 10；API Key 单独配置候选数时会覆盖这里的全局值。</div>
-                            </div>
-                        </span>
-                    </span>
-                    <input class="field-input" id="setting-max-candidate-count" type="number" min="1" max="500" step="1" required placeholder="默认 10">
-                </label>
-                <label>
-                    <span>长输出非流式阈值（tok）</span>
-                    <input class="field-input" id="setting-long-output-stream-threshold-tokens" type="number" min="0" placeholder="0 表示不强制">
+                        <div class="settings-tooltip-copy">每次路由在完成权限、能力、健康、容量筛选和健康优先排序后，基础保留多少个候选提供商参与后续尝试。默认 10。</div>
+                    </div>
+                </span>
+            </span>
+            <input class="field-input" id="setting-max-candidate-count" type="number" min="1" max="500" step="1" required placeholder="默认 10">
+        </label>
+        <label>
+            <span class="settings-field-label">
+                <span>候选扩展数</span>
+                <span class="settings-help">
+                    <button class="settings-help-btn" type="button" aria-label="查看候选扩展数说明" data-settings-tooltip-trigger="true">
+                        <i class="bi bi-question-circle" aria-hidden="true"></i>
+                    </button>
+                    <div class="settings-tooltip-content hidden">
+                        <div class="settings-tooltip-title">候选扩展数说明</div>
+                        <div class="settings-tooltip-copy">当基础候选 N 个全部失败时，同一轮会继续尝试排序后的额外 M 个候选，再进入下一轮等待重试。默认 5；0 表示不扩展。</div>
+                    </div>
+                </span>
+            </span>
+            <input class="field-input" id="setting-route-candidate-expand-count" type="number" min="0" max="100" step="1" required placeholder="默认 5">
+        </label>
+        <label>
+            <span>长输出非流式阈值（tok）</span>
+            <input class="field-input" id="setting-long-output-stream-threshold-tokens" type="number" min="0" placeholder="0 表示不强制">
                 </label>
             </div>
         </div>
@@ -206,6 +211,22 @@
         <label>
             <span>审计日志保留（d）</span>
             <input class="field-input" id="setting-admin-audit-log-retention-days" type="number" min="0">
+        </label>
+        <label>
+            <span>全局 QPS</span>
+            <input class="field-input" id="setting-global-qps-limit" type="number" min="0" value="20">
+        </label>
+        <label>
+            <span>全局 RPM</span>
+            <input class="field-input" id="setting-global-rpm-limit" type="number" min="0" value="20">
+        </label>
+        <label>
+            <span>单账户 QPS</span>
+            <input class="field-input" id="setting-account-qps-limit" type="number" min="0" value="20">
+        </label>
+        <label>
+            <span>单账户 RPM</span>
+            <input class="field-input" id="setting-account-rpm-limit" type="number" min="0" value="20">
         </label>
         <label>
             <span>全局最大活跃请求</span>
@@ -322,15 +343,6 @@
             </div>
         </div>
         <div class="form-span-2 settings-switch-grid">
-            <label class="settings-switch-card">
-                <span class="settings-switch-copy">
-                    <strong>默认提供商不可用时允许回退</strong>
-                </span>
-                <span class="settings-switch-control">
-                    <input id="setting-manual-allow-fallback" type="checkbox">
-                    <span class="settings-switch-slider"></span>
-                </span>
-            </label>
             <label class="settings-switch-card">
                 <span class="settings-switch-copy">
                     <strong>记录 token 使用量</strong>

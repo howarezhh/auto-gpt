@@ -4,10 +4,13 @@ from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.admin_audit_log import AdminAuditLog
+from app.services.cache_service import CacheService
 from app.utils.json_utils import dumps_json, safeJsonParse
 
 
 class AdminAuditService:
+    AUDIT_JSON_MAX_BYTES = 65536
+
     @staticmethod
     def create_log(
         db: Session,
@@ -29,12 +32,10 @@ class AdminAuditService:
         risk_level: str = "low",
         auto_commit: bool = True,
     ) -> AdminAuditLog:
-        payload = None
-        if detail is not None:
-            payload = detail if isinstance(detail, str) else dumps_json(detail)
-        before_json = before if isinstance(before, str) else dumps_json(before) if before is not None else None
-        after_json = after if isinstance(after, str) else dumps_json(after) if after is not None else None
-        changed_fields_json = changed_fields if isinstance(changed_fields, str) else dumps_json(changed_fields) if changed_fields is not None else None
+        payload = AdminAuditService._bounded_json_text(detail)
+        before_json = AdminAuditService._bounded_json_text(before)
+        after_json = AdminAuditService._bounded_json_text(after)
+        changed_fields_json = AdminAuditService._bounded_json_text(changed_fields)
         item = AdminAuditLog(
             actor_user_id=actor_user_id,
             actor_username=actor_username,
@@ -57,6 +58,17 @@ class AdminAuditService:
             db.commit()
             db.refresh(item)
         return item
+
+    @staticmethod
+    def _bounded_json_text(value: dict | list | str | None) -> str | None:
+        if value is None:
+            return None
+        text = value if isinstance(value, str) else dumps_json(value)
+        encoded = text.encode("utf-8", errors="ignore")
+        if len(encoded) <= AdminAuditService.AUDIT_JSON_MAX_BYTES:
+            return text
+        clipped = encoded[: AdminAuditService.AUDIT_JSON_MAX_BYTES].decode("utf-8", errors="ignore")
+        return f"{clipped}...[truncated]"
 
     @staticmethod
     def list_logs(
@@ -99,21 +111,29 @@ class AdminAuditService:
         return total, items
 
     @staticmethod
-    def get_filter_options(db: Session) -> dict[str, list[str]]:
+    def get_filter_options(db: Session, *, limit: int = 200) -> dict[str, list[str]]:
+        normalized_limit = max(1, min(int(limit or 200), 500))
+        cache_key = f"admin-audit:filter-options:limit={normalized_limit}"
+        cached = CacheService.get(cache_key)
+        if isinstance(cached, dict):
+            return cached
         actions = list(
             db.scalars(
                 select(AdminAuditLog.action).distinct().order_by(AdminAuditLog.action.asc())
+                .limit(normalized_limit)
             )
         )
         entity_types = list(
             db.scalars(
                 select(AdminAuditLog.entity_type).distinct().order_by(AdminAuditLog.entity_type.asc())
+                .limit(normalized_limit)
             )
         )
-        return {
+        result = {
             "actions": [item for item in actions if item],
             "entity_types": [item for item in entity_types if item],
         }
+        return CacheService.set(cache_key, result, ttl_seconds=30)
 
     @staticmethod
     def serialize_detail(detail_json: str | None) -> str:

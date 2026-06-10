@@ -17,6 +17,31 @@ class RedisService:
     _loop_thread_id: int | None = None
 
     @classmethod
+    def client_kwargs(cls) -> dict:
+        settings = get_settings()
+        return {
+            "decode_responses": True,
+            "max_connections": settings.redis_max_connections,
+            "socket_connect_timeout": settings.redis_socket_connect_timeout_seconds,
+            "socket_timeout": settings.redis_socket_timeout_seconds,
+            "health_check_interval": settings.redis_health_check_interval_seconds,
+        }
+
+    @classmethod
+    def create_async_client(cls) -> Redis:
+        settings = get_settings()
+        if not settings.redis_url.strip():
+            raise RuntimeError("REDIS_URL is empty")
+        return Redis.from_url(settings.redis_url, **cls.client_kwargs())
+
+    @classmethod
+    def create_sync_client(cls) -> SyncRedis:
+        settings = get_settings()
+        if not settings.redis_url.strip():
+            raise RuntimeError("REDIS_URL is empty")
+        return SyncRedis.from_url(settings.redis_url, **cls.client_kwargs())
+
+    @classmethod
     async def init(cls) -> None:
         cls._loop = asyncio.get_running_loop()
         cls._loop_thread_id = threading.get_ident()
@@ -26,7 +51,7 @@ class RedisService:
             cls._last_error = "REDIS_URL is empty"
             return
         if cls._client is None:
-            cls._client = Redis.from_url(settings.redis_url, decode_responses=True)
+            cls._client = cls.create_async_client()
         try:
             await cls._client.ping()
             cls._last_error = None
@@ -36,19 +61,13 @@ class RedisService:
     @classmethod
     def get_client(cls) -> Redis:
         if cls._client is None:
-            settings = get_settings()
-            if not settings.redis_url.strip():
-                raise RuntimeError("REDIS_URL is empty")
-            cls._client = Redis.from_url(settings.redis_url, decode_responses=True)
+            cls._client = cls.create_async_client()
         return cls._client
 
     @classmethod
     def get_sync_client(cls) -> SyncRedis:
         if cls._sync_client is None:
-            settings = get_settings()
-            if not settings.redis_url.strip():
-                raise RuntimeError("REDIS_URL is empty")
-            cls._sync_client = SyncRedis.from_url(settings.redis_url, decode_responses=True)
+            cls._sync_client = cls.create_sync_client()
         return cls._sync_client
 
     @classmethod

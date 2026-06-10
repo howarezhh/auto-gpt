@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 from datetime import datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import case, func, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.models.api_client_billing_record import ApiClientBillingRecord
 from app.models.api_client_key import ApiClientKey
+from app.models.api_client_key_provider_binding import ApiClientKeyProviderBinding
 from app.models.request_log import RequestLog
 from app.models.logging_events import UserOperationAuditLog
 from app.models.user_account import UserAccount
@@ -19,6 +21,7 @@ from app.schemas.log import RequestLogOut
 from app.services.api_key_admin_service import ApiKeyAdminService
 from app.services.api_key_service import ApiKeyService
 from app.services.billing_service import BillingService
+from app.services.cache_service import CacheService
 from app.services.conversation_service import ConversationService
 from app.services.log_service import LogService
 from app.services.router_service import RoutePolicyContext, RouterService
@@ -27,11 +30,18 @@ from app.services.user_quota_service import UserQuotaService
 
 
 class UserPortalService:
+    USER_CONVERSATION_COUNT_CACHE_TTL_SECONDS = 30
+    USER_SELF_TEST_MODEL_OPTION_LIMIT = 500
+
     @staticmethod
     def list_owned_api_keys(db: Session, *, user_id: int) -> list[ApiClientKey]:
         return list(
             db.scalars(
                 select(ApiClientKey)
+                .options(
+                    selectinload(ApiClientKey.owner_user),
+                    selectinload(ApiClientKey.provider_bindings).selectinload(ApiClientKeyProviderBinding.provider),
+                )
                 .where(ApiClientKey.owner_user_id == user_id)
                 .order_by(ApiClientKey.id.desc())
             )
@@ -69,14 +79,10 @@ class UserPortalService:
             "conversation_count": 0,
         }
         if key_ids:
-            totals["conversation_count"] = int(
-                db.scalar(
-                    select(func.count(func.distinct(RequestLog.conversation_key))).where(
-                        RequestLog.api_client_key_id.in_(key_ids),
-                        RequestLog.conversation_key.is_not(None),
-                    )
-                )
-                or 0
+            totals["conversation_count"] = UserPortalService._cached_user_conversation_count(
+                db,
+                user_id=user.id,
+                key_ids=key_ids,
             )
 
         return {
@@ -84,7 +90,7 @@ class UserPortalService:
             "totals": totals,
             "account_summary": account_summary,
             "quota_warnings": quota_warnings,
-            "usage_trend": UserPortalService.get_usage_trend(db, user=user, days=7),
+            "usage_trend": UserPortalService.get_usage_trend(db, user=user, days=7, key_ids=key_ids),
             "integration_profiles": UserPortalService.build_integration_profiles(serialized_keys),
         }
 
@@ -107,14 +113,29 @@ class UserPortalService:
         app_name: str | None = None,
         environment_name: str | None = None,
         success: bool | None = None,
+        content_guard_result: str | None = None,
+        content_guard_risk_level: str | None = None,
+        content_guard_action: str | None = None,
+        content_guard_final_strategy: str | None = None,
+        content_guard_retry_count: int | None = None,
+        content_guard_guard_stage: str | None = None,
+        content_guard_category: str | None = None,
+        content_guard_switched_provider: bool | None = None,
+        content_guard_adaptation_skipped: bool | None = None,
         exclude_health_checks: bool = True,
+        include_api_key_options: bool = True,
     ) -> tuple[int, list[RequestLogOut], dict[str, int | float], list[dict]]:
-        owned_keys = UserPortalService.list_owned_api_keys(db, user_id=user.id)
-        key_ids = [item.id for item in owned_keys]
+        if include_api_key_options:
+            owned_keys = UserPortalService.list_owned_api_keys(db, user_id=user.id)
+            key_ids = [item.id for item in owned_keys]
+            api_key_options = [ApiKeyAdminService.serialize_api_key(item) for item in owned_keys]
+        else:
+            key_ids = UserPortalService.list_owned_api_key_ids(db, user_id=user.id)
+            api_key_options = []
         if not key_ids:
             return 0, [], {"total_requests": 0, "success_requests": 0, "failed_requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "total_cost": 0, "matched_api_keys": 0}, []
         if api_client_key_id is not None and api_client_key_id not in key_ids:
-            return 0, [], {"total_requests": 0, "success_requests": 0, "failed_requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "total_cost": 0, "matched_api_keys": 0}, [ApiKeyAdminService.serialize_api_key(item) for item in owned_keys]
+            return 0, [], {"total_requests": 0, "success_requests": 0, "failed_requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "total_cost": 0, "matched_api_keys": 0}, api_key_options
         effective_log_type = log_type if log_type in LogService.USER_VISIBLE_LOG_TYPES else None
         total, items, summary = LogService.list_logs(
             db,
@@ -135,10 +156,26 @@ class UserPortalService:
             app_name=app_name,
             environment_name=environment_name,
             success=success,
+            content_guard_result=content_guard_result,
+            content_guard_risk_level=content_guard_risk_level,
+            content_guard_action=content_guard_action,
+            content_guard_final_strategy=content_guard_final_strategy,
+            content_guard_retry_count=content_guard_retry_count,
+            content_guard_guard_stage=content_guard_guard_stage,
+            content_guard_category=content_guard_category,
+            content_guard_switched_provider=content_guard_switched_provider,
+            content_guard_adaptation_skipped=content_guard_adaptation_skipped,
             exclude_health_checks=exclude_health_checks,
             api_client_key_ids=key_ids,
         )
-        return total, [RequestLogOut.model_validate(item) for item in LogService.serialize_logs(items)], summary, [ApiKeyAdminService.serialize_api_key(item) for item in owned_keys]
+        return total, [
+            RequestLogOut.model_validate(item)
+            for item in LogService.serialize_logs(
+                items,
+                include_payload_fields=False,
+                derive_image_observability=False,
+            )
+        ], summary, api_key_options
 
     @staticmethod
     def get_log_filter_options(
@@ -146,9 +183,14 @@ class UserPortalService:
         *,
         user: UserAccount,
         exclude_health_checks: bool = True,
+        limit: int = 200,
     ) -> dict[str, list[dict[str, str]]]:
-        owned_keys = UserPortalService.list_owned_api_keys(db, user_id=user.id)
-        key_ids = [item.id for item in owned_keys]
+        owned_key_rows = db.execute(
+            select(ApiClientKey.id, ApiClientKey.name, ApiClientKey.key_prefix)
+            .where(ApiClientKey.owner_user_id == user.id)
+            .order_by(ApiClientKey.id.desc())
+        ).all()
+        key_ids = [int(item.id) for item in owned_key_rows]
         if not key_ids:
             return {
                 "providers": [],
@@ -165,21 +207,22 @@ class UserPortalService:
             db,
             exclude_health_checks=exclude_health_checks,
             user_account_id=user.id,
-            api_client_key_ids=key_ids,
+            limit=limit,
         )
+        owned_key_id_values = {str(key_id) for key_id in key_ids}
         owned_key_options = [
             item
             for item in all_options["api_client_key_ids"]
-            if str(item.get("value")) in {str(key_id) for key_id in key_ids}
+            if str(item.get("value")) in owned_key_id_values
         ]
         owned_query_values = {
             item.key_prefix or item.name or str(item.id)
-            for item in owned_keys
+            for item in owned_key_rows
         }
         masked_values = {
-            serialized.get("key_masked")
-            for serialized in [ApiKeyAdminService.serialize_api_key(key) for key in owned_keys]
-            if serialized.get("key_masked")
+            ApiKeyService.mask_key_prefix(item.key_prefix)
+            for item in owned_key_rows
+            if item.key_prefix
         }
         owned_query_options = [
             item
@@ -205,6 +248,7 @@ class UserPortalService:
         user: UserAccount,
         limit: int = 50,
     ) -> dict:
+        normalized_limit = max(1, min(int(limit or 50), 200))
         owned_keys = UserPortalService.list_owned_api_keys(db, user_id=user.id)
         key_ids = [item.id for item in owned_keys]
         quota_snapshot = UserQuotaService.get_usage_snapshot(db, user=user)
@@ -234,7 +278,7 @@ class UserPortalService:
                 select(UserAccountBillingRecord)
                 .where(UserAccountBillingRecord.user_account_id == user.id)
                 .order_by(UserAccountBillingRecord.created_at.desc(), UserAccountBillingRecord.id.desc())
-                .limit(max(1, limit))
+                .limit(normalized_limit)
             )
         )
         key_name_map = {item.id: item.name for item in owned_keys}
@@ -258,7 +302,7 @@ class UserPortalService:
             "key_summaries": key_summaries,
             "records": serialized_records,
             "account_summary": account_summary,
-            "usage_trend": UserPortalService.get_usage_trend(db, user=user, days=7),
+            "usage_trend": UserPortalService.get_usage_trend(db, user=user, days=7, key_ids=key_ids),
         }
 
     @staticmethod
@@ -308,6 +352,7 @@ class UserPortalService:
             recent_logs = list(
                 db.scalars(
                     select(RequestLog)
+                    .options(*LogService._lightweight_log_load_options())
                     .where(RequestLog.api_client_key_id.in_(key_ids))
                     .order_by(RequestLog.created_at.desc(), RequestLog.id.desc())
                     .limit(20)
@@ -335,10 +380,42 @@ class UserPortalService:
             "totals": overview["totals"],
             "account_summary": overview["account_summary"],
             "conversation_count": conversation_count,
-            "recent_logs": [RequestLogOut.model_validate(item) for item in LogService.serialize_logs(recent_logs)],
+            "recent_logs": [
+                RequestLogOut.model_validate(item)
+                for item in LogService.serialize_logs(
+                    recent_logs,
+                    include_payload_fields=False,
+                    derive_image_observability=False,
+                )
+            ],
             "recent_billing": [BillingService.serialize_user_billing_record(item) for item in recent_billing],
             "recent_operations": recent_operations,
         }
+
+    @staticmethod
+    def _cached_user_conversation_count(db: Session, *, user_id: int, key_ids: list[int]) -> int:
+        if not key_ids:
+            return 0
+        key_digest = hashlib.sha256(",".join(str(item) for item in sorted(key_ids)).encode("utf-8")).hexdigest()[:16]
+        cache_key = f"user-portal-conversation-count:{user_id}:{len(key_ids)}:{key_digest}"
+        cached = CacheService.get(cache_key)
+        if isinstance(cached, int):
+            return cached
+        count = int(
+            db.scalar(
+                select(func.count(func.distinct(RequestLog.conversation_key))).where(
+                    RequestLog.api_client_key_id.in_(key_ids),
+                    RequestLog.conversation_key.is_not(None),
+                )
+            )
+            or 0
+        )
+        CacheService.set(
+            cache_key,
+            count,
+            ttl_seconds=UserPortalService.USER_CONVERSATION_COUNT_CACHE_TTL_SECONDS,
+        )
+        return count
 
     @staticmethod
     def list_users(
@@ -412,6 +489,7 @@ class UserPortalService:
         recent_logs = list(
             db.scalars(
                 select(RequestLog)
+                .options(*LogService._lightweight_log_load_options())
                 .where(RequestLog.api_client_key_id == api_key.id)
                 .order_by(RequestLog.created_at.desc(), RequestLog.id.desc())
                 .limit(max(1, log_limit))
@@ -421,18 +499,24 @@ class UserPortalService:
             "api_key": detail,
             "analytics": analytics,
             "billing_summary": billing_summary,
-            "recent_logs": [RequestLogOut.model_validate(item) for item in LogService.serialize_logs(recent_logs)],
+            "recent_logs": [
+                RequestLogOut.model_validate(item)
+                for item in LogService.serialize_logs(
+                    recent_logs,
+                    include_payload_fields=False,
+                    derive_image_observability=False,
+                )
+            ],
         }
 
     @staticmethod
     def get_owned_request_log(db: Session, *, user: UserAccount, log_id: int) -> RequestLog | None:
-        key_ids = UserPortalService.list_owned_api_key_ids(db, user_id=user.id)
-        if not key_ids:
-            return None
         return db.scalar(
             select(RequestLog).where(
                 RequestLog.id == log_id,
-                RequestLog.api_client_key_id.in_(key_ids),
+                RequestLog.api_client_key_id.in_(
+                    select(ApiClientKey.id).where(ApiClientKey.owner_user_id == user.id)
+                ),
             )
         )
 
@@ -469,13 +553,20 @@ class UserPortalService:
         ])
         if not key_ids:
             return buffer.getvalue()
-        key_name_map = {item.id: item.name for item in UserPortalService.list_owned_api_keys(db, user_id=user.id)}
+        key_name_map = {
+            int(row.id): row.name
+            for row in db.execute(
+                select(ApiClientKey.id, ApiClientKey.name)
+                .where(ApiClientKey.id.in_(key_ids))
+                .order_by(ApiClientKey.id.asc())
+            )
+        }
         items = list(
             db.scalars(
                 select(UserAccountBillingRecord)
                 .where(UserAccountBillingRecord.user_account_id == user.id)
                 .order_by(UserAccountBillingRecord.created_at.desc(), UserAccountBillingRecord.id.desc())
-                .limit(max(1, min(limit, 10000)))
+                .limit(max(1, min(limit, 5000)))
             )
         )
         for item in items:
@@ -501,8 +592,9 @@ class UserPortalService:
         *,
         user: UserAccount,
         days: int = 7,
+        key_ids: list[int] | None = None,
     ) -> list[dict]:
-        key_ids = UserPortalService.list_owned_api_key_ids(db, user_id=user.id)
+        key_ids = key_ids if key_ids is not None else UserPortalService.list_owned_api_key_ids(db, user_id=user.id)
         normalized_days = max(1, min(days, 30))
         day_map: dict[str, dict] = {}
         for offset in range(normalized_days - 1, -1, -1):
@@ -590,12 +682,12 @@ class UserPortalService:
                     continue
                 if model.provider_model.model_name not in names:
                     names.append(model.provider_model.model_name)
+                    if len(names) >= UserPortalService.USER_SELF_TEST_MODEL_OPTION_LIMIT:
+                        break
             return sorted(names)
 
-        models = sorted({model_name for api_key in owned_api_keys for model_name in collect_models_for_key(api_key)})
         selected_key = next((item for item in owned_api_keys if item.id == selected_api_key_id), None) or (owned_api_keys[0] if owned_api_keys else None)
-        if selected_key is not None:
-            models = collect_models_for_key(selected_key)
+        models = collect_models_for_key(selected_key) if selected_key is not None else []
         selected_model = selected_model_name if selected_model_name in models else (models[0] if models else None)
         checks: list[dict] = []
         candidates_payload: list[dict] = []

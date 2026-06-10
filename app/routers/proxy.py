@@ -11,6 +11,7 @@ from starlette.datastructures import FormData, Headers
 from starlette.concurrency import run_in_threadpool
 from starlette.formparsers import MultiPartParser
 
+from app.config import get_settings
 from app.database import SessionLocal
 from app.services.asset_service import AssetService
 from app.services.api_key_service import ApiClientAuthContext, ApiClientAuthError, ApiKeyService, require_api_client_auth
@@ -23,11 +24,13 @@ from app.services.concurrency_service import (
 from app.services.log_service import LogService
 from app.services.proxy_service import ProxyService
 from app.services.openai_error_service import OpenAIErrorService
+from app.services.request_log_queue_service import RequestLogQueueService
 from app.services.responses_chat_adapter_service import ResponsesChatAdapterService
 from app.services.setting_service import SettingService
 from app.utils.json_utils import dumps_json
 from app.utils.http_headers import build_proxy_response_headers
 from app.utils.request_body_structure import summarize_request_body_structure
+from app.utils.request_stream import RequestBodyReadTimeout, RequestBodyTooLarge, read_limited_request_body
 
 
 router = APIRouter(tags=["proxy"])
@@ -142,33 +145,58 @@ async def _read_limited_v1_json_payload(request: Request, *, endpoint_path: str)
             },
         )
 
-    body = bytearray()
-    async for chunk in request.stream():
-        if not chunk:
-            continue
-        if limit > 0 and len(body) + len(chunk) > limit:
-            # 流式读取时也要持续检查累计大小，避免大包绕过 Content-Length 预检。
-            request.state.v1_request_body_structure_json = _truncate_json_for_log(
-                {
-                    "_summary": "request body structure omitted because streamed body exceeds application limit",
-                    "structure": {
-                        "type": "bytes",
-                        "bytes_read": len(body),
-                        "max_v1_request_body_bytes": limit,
-                    },
-                },
-                max_logged_body_bytes,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                detail={
-                    "message": f"请求体大小超过应用层上限 {limit} 字节",
-                    "code": "request_body_too_large",
+    try:
+        body = await read_limited_request_body(
+            request.stream(),
+            max_bytes=limit,
+            total_timeout_seconds=_v1_request_body_total_timeout_seconds(),
+            idle_timeout_seconds=_v1_request_body_idle_timeout_seconds(),
+        )
+    except RequestBodyTooLarge as exc:
+        # 流式读取时也要持续检查累计大小，避免大包绕过 Content-Length 预检。
+        request.state.v1_request_body_structure_json = _truncate_json_for_log(
+            {
+                "_summary": "request body structure omitted because streamed body exceeds application limit",
+                "structure": {
+                    "type": "bytes",
+                    "bytes_read": exc.bytes_read,
                     "max_v1_request_body_bytes": limit,
-                    "endpoint_path": f"/v1{endpoint_path}",
                 },
-            )
-        body.extend(chunk)
+            },
+            max_logged_body_bytes,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail={
+                "message": f"请求体大小超过应用层上限 {limit} 字节",
+                "code": "request_body_too_large",
+                "max_v1_request_body_bytes": limit,
+                "endpoint_path": f"/v1{endpoint_path}",
+            },
+        ) from exc
+    except RequestBodyReadTimeout as exc:
+        request.state.v1_request_body_structure_json = _truncate_json_for_log(
+            {
+                "_summary": "request body structure omitted because client upload timed out",
+                "structure": {
+                    "type": "bytes",
+                    "bytes_read": exc.bytes_read,
+                    "timeout_kind": exc.timeout_kind,
+                    "timeout_seconds": exc.timeout_seconds,
+                },
+            },
+            max_logged_body_bytes,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_408_REQUEST_TIMEOUT,
+            detail={
+                "message": "客户端上传请求体超时",
+                "code": "request_timeout",
+                "timeout_kind": exc.timeout_kind,
+                "timeout_seconds": exc.timeout_seconds,
+                "endpoint_path": f"/v1{endpoint_path}",
+            },
+        ) from exc
 
     if not body:
         request.state.v1_request_body_structure_json = _truncate_json_for_log(
@@ -254,33 +282,58 @@ async def _prepare_v1_body_limit_context(request: Request, *, endpoint_path: str
 async def _read_limited_v1_raw_body(request: Request, *, endpoint_path: str) -> tuple[bytes, int]:
     """按应用层上限流式读取非 JSON 请求体，避免 multipart 绕过 Content-Length。"""
     setting, limit, max_logged_body_bytes = await _prepare_v1_body_limit_context(request, endpoint_path=endpoint_path)
-    body = bytearray()
-    async for chunk in request.stream():
-        if not chunk:
-            continue
-        if limit > 0 and len(body) + len(chunk) > limit:
-            request.state.v1_request_body_structure_json = _truncate_json_for_log(
-                {
-                    "_summary": "request body structure omitted because streamed multipart body exceeds application limit",
-                    "structure": {
-                        "type": "bytes",
-                        "bytes_read": len(body),
-                        "max_v1_request_body_bytes": limit,
-                    },
-                },
-                max_logged_body_bytes,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                detail={
-                    "message": f"请求体大小超过应用层上限 {limit} 字节",
-                    "code": "request_body_too_large",
+    try:
+        body = await read_limited_request_body(
+            request.stream(),
+            max_bytes=limit,
+            total_timeout_seconds=_v1_request_body_total_timeout_seconds(),
+            idle_timeout_seconds=_v1_request_body_idle_timeout_seconds(),
+        )
+    except RequestBodyTooLarge as exc:
+        request.state.v1_request_body_structure_json = _truncate_json_for_log(
+            {
+                "_summary": "request body structure omitted because streamed multipart body exceeds application limit",
+                "structure": {
+                    "type": "bytes",
+                    "bytes_read": exc.bytes_read,
                     "max_v1_request_body_bytes": limit,
-                    "endpoint_path": f"/v1{endpoint_path}",
                 },
-            )
-        body.extend(chunk)
-    return bytes(body), max_logged_body_bytes
+            },
+            max_logged_body_bytes,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail={
+                "message": f"请求体大小超过应用层上限 {limit} 字节",
+                "code": "request_body_too_large",
+                "max_v1_request_body_bytes": limit,
+                "endpoint_path": f"/v1{endpoint_path}",
+            },
+        ) from exc
+    except RequestBodyReadTimeout as exc:
+        request.state.v1_request_body_structure_json = _truncate_json_for_log(
+            {
+                "_summary": "request body structure omitted because client multipart upload timed out",
+                "structure": {
+                    "type": "bytes",
+                    "bytes_read": exc.bytes_read,
+                    "timeout_kind": exc.timeout_kind,
+                    "timeout_seconds": exc.timeout_seconds,
+                },
+            },
+            max_logged_body_bytes,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_408_REQUEST_TIMEOUT,
+            detail={
+                "message": "客户端上传请求体超时",
+                "code": "request_timeout",
+                "timeout_kind": exc.timeout_kind,
+                "timeout_seconds": exc.timeout_seconds,
+                "endpoint_path": f"/v1{endpoint_path}",
+            },
+        ) from exc
+    return body, max_logged_body_bytes
 
 
 async def _parse_limited_v1_multipart_form(request: Request, *, endpoint_path: str) -> tuple[FormData, int]:
@@ -1725,6 +1778,14 @@ def _build_v1_cors_headers(request: Request) -> dict[str, str]:
     }
 
 
+def _v1_request_body_total_timeout_seconds() -> float:
+    return max(1.0, float(get_settings().request_timeout_ms or 60000) / 1000.0)
+
+
+def _v1_request_body_idle_timeout_seconds() -> float:
+    return float(get_settings().v1_request_body_idle_timeout_seconds or 15)
+
+
 def _truncate_json_for_log(value, limit_bytes: int) -> str:
     serialized = dumps_json(value)
     encoded = serialized.encode("utf-8", errors="ignore")
@@ -1746,34 +1807,36 @@ def _log_unsupported_v1_endpoint(
     request_body_json: str | None,
 ) -> None:
     api_key = api_client_auth.api_client_key
+    log_kwargs = {
+        "log_type": "unsupported_endpoint",
+        "trace_id": trace_id,
+        "request_path": request_path,
+        "source_ip": source_ip,
+        "http_method": http_method,
+        "success": False,
+        "status_code": status.HTTP_404_NOT_FOUND,
+        "message": message,
+        "error_type": "invalid_request_error",
+        "error_code": "unsupported_endpoint",
+        "retryable": False,
+        "api_client_key_id": api_key.id,
+        "api_client_key_name": api_key.name,
+        "api_client_key_prefix": api_key.key_prefix,
+        "user_account_id": api_key.owner_user_id,
+        "user_account_name": api_key.owner_user.username if api_key.owner_user else None,
+        "api_client_auth_result": "authenticated",
+        "api_client_policy_snapshot_json": api_client_auth.policy_snapshot_json,
+        "request_body_json": request_body_json,
+        "response_body_json": dumps_json({"error": detail}),
+        "trace": [{"result": "unsupported_endpoint", "error": "unsupported_endpoint", "latency_ms": 0}],
+        "attempt_count": 1,
+        "schedule_token_fill": False,
+    }
+    if RequestLogQueueService.enqueue(**log_kwargs):
+        return
     db = SessionLocal()
     try:
-        LogService.create_log(
-            db,
-            log_type="unsupported_endpoint",
-            trace_id=trace_id,
-            request_path=request_path,
-            source_ip=source_ip,
-            http_method=http_method,
-            success=False,
-            status_code=status.HTTP_404_NOT_FOUND,
-            message=message,
-            error_type="invalid_request_error",
-            error_code="unsupported_endpoint",
-            retryable=False,
-            api_client_key_id=api_key.id,
-            api_client_key_name=api_key.name,
-            api_client_key_prefix=api_key.key_prefix,
-            user_account_id=api_key.owner_user_id,
-            user_account_name=api_key.owner_user.username if api_key.owner_user else None,
-            api_client_auth_result="authenticated",
-            api_client_policy_snapshot_json=api_client_auth.policy_snapshot_json,
-            request_body_json=request_body_json,
-            response_body_json=dumps_json({"error": detail}),
-            trace=[{"result": "unsupported_endpoint", "error": "unsupported_endpoint", "latency_ms": 0}],
-            attempt_count=1,
-            schedule_token_fill=False,
-        )
+        LogService.create_log(db, **log_kwargs)
     finally:
         db.close()
 
@@ -1784,23 +1847,25 @@ def _log_v1_preflight(
     trace_id: str | None,
     source_ip: str | None,
 ) -> None:
+    log_kwargs = {
+        "log_type": "v1_preflight",
+        "trace_id": trace_id,
+        "request_path": request_path,
+        "source_ip": source_ip,
+        "http_method": "OPTIONS",
+        "success": True,
+        "status_code": status.HTTP_204_NO_CONTENT,
+        "message": "CORS preflight accepted",
+        "api_client_auth_result": "preflight",
+        "trace": [{"result": "preflight", "latency_ms": 0}],
+        "attempt_count": 1,
+        "schedule_token_fill": False,
+    }
+    if RequestLogQueueService.enqueue(**log_kwargs):
+        return
     db = SessionLocal()
     try:
-        LogService.create_log(
-            db,
-            log_type="v1_preflight",
-            trace_id=trace_id,
-            request_path=request_path,
-            source_ip=source_ip,
-            http_method="OPTIONS",
-            success=True,
-            status_code=status.HTTP_204_NO_CONTENT,
-            message="CORS preflight accepted",
-            api_client_auth_result="preflight",
-            trace=[{"result": "preflight", "latency_ms": 0}],
-            attempt_count=1,
-            schedule_token_fill=False,
-        )
+        LogService.create_log(db, **log_kwargs)
     finally:
         db.close()
 

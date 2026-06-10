@@ -129,6 +129,93 @@ class ProviderHealthStateService:
         )
 
     @classmethod
+    def record_runtime_metrics(
+        cls,
+        provider: Provider,
+        provider_model: ProviderModel,
+        metrics: dict[str, Any],
+        *,
+        health_status: str | None = None,
+        circuit_state: str | None = None,
+        status_update_reason: str | None = None,
+    ) -> dict[str, Any]:
+        """写入统一状态模块计算出的短窗口运行指标。
+
+        provider_model.id 是唯一模型挂载 ID；model_name 仅作为自定义展示名保留在观测 payload 中。
+        """
+        now = cls._now()
+        existing = cls.get_model_state(provider.id, provider_model.id) or {}
+        total_requests = int(metrics.get("total_requests") or 0)
+        success_rate = float(metrics.get("success_rate") if metrics.get("success_rate") is not None else 1.0)
+        upstream_failure_rate = float(metrics.get("upstream_failure_rate") or 0.0)
+        avg_latency_ms = metrics.get("avg_latency_ms")
+        avg_ttfb_ms = metrics.get("avg_ttfb_ms")
+        payload = {
+            **existing,
+            "recent_runtime_window_seconds": int(metrics.get("window_seconds") or 5),
+            "recent_total_requests": total_requests,
+            "recent_success_requests": int(metrics.get("success_requests") or 0),
+            "recent_failed_requests": int(metrics.get("failed_requests") or 0),
+            "recent_upstream_failure_requests": int(metrics.get("upstream_failure_requests") or 0),
+            "recent_ignored_failure_requests": int(metrics.get("ignored_failure_requests") or 0),
+            "recent_success_rate": success_rate,
+            "recent_upstream_failure_rate": upstream_failure_rate,
+            "success_rate_5m": success_rate,
+            "failure_rate_5m": upstream_failure_rate,
+            "recent_avg_latency_ms": avg_latency_ms,
+            "recent_p95_latency_ms": metrics.get("p95_latency_ms"),
+            "recent_avg_ttfb_ms": avg_ttfb_ms,
+            "recent_p95_ttfb_ms": metrics.get("p95_ttfb_ms"),
+            "recent_runtime_decision": metrics.get("decision"),
+            "recent_runtime_confidence": metrics.get("confidence"),
+            "runtime_model_name": metrics.get("model_name") or provider_model.model_name,
+            "runtime_requested_model": metrics.get("requested_model"),
+            "last_runtime_log_at": metrics.get("latest_log_at"),
+            "last_runtime_state_update_at": now,
+            "updated_at": now,
+        }
+        if avg_latency_ms is not None:
+            payload["ewma_latency_ms"] = cls._ewma(existing.get("ewma_latency_ms"), int(float(avg_latency_ms)))
+        if avg_ttfb_ms is not None:
+            payload["ewma_ttfb_ms"] = cls._ewma(existing.get("ewma_ttfb_ms"), int(float(avg_ttfb_ms)))
+        if metrics.get("latest_error_code") or metrics.get("latest_error_message"):
+            payload.update(
+                {
+                    "last_error": str(metrics.get("latest_error_message") or "")[:500],
+                    "last_error_code": metrics.get("latest_error_code"),
+                    "last_error_category": metrics.get("latest_error_category"),
+                    "last_status_code": metrics.get("latest_status_code"),
+                    "last_trace_id": metrics.get("latest_trace_id"),
+                    "last_runtime_error_at": metrics.get("latest_error_at"),
+                }
+            )
+        elif total_requests > 0 and int(metrics.get("upstream_failure_requests") or 0) <= 0:
+            payload.update(
+                {
+                    "last_error": None,
+                    "last_error_code": None,
+                    "last_error_category": None,
+                    "last_status_code": None,
+                    "last_trace_id": None,
+                }
+            )
+        if health_status is not None:
+            payload["health_status"] = health_status
+            payload["runtime_health_status"] = health_status
+        else:
+            payload.setdefault("health_status", provider_model.health_status)
+        if circuit_state is not None:
+            payload["circuit_state"] = circuit_state
+            payload["runtime_circuit_state"] = circuit_state
+        else:
+            payload.setdefault("circuit_state", provider_model.circuit_state)
+        if status_update_reason:
+            payload["last_runtime_state_update_reason"] = status_update_reason
+        payload["health_score"] = cls._health_score(payload)
+        cls._set_json(cls.model_key(provider.id, provider_model.id), payload, ttl_seconds=cls.STATE_TTL_SECONDS)
+        return payload
+
+    @classmethod
     def record_route_success(
         cls,
         provider: Provider,
@@ -172,23 +259,17 @@ class ProviderHealthStateService:
     ) -> None:
         cls._increment_route_bucket(provider.id, provider_model.id, success=success)
         rates = cls._route_rates(provider.id, provider_model.id)
-        health_status = "healthy" if success else ("unhealthy" if force_unhealthy else "degraded")
-        circuit_state = "closed" if success else ("open" if force_unhealthy else provider_model.circuit_state)
-        cls.record_model_probe(
-            provider,
-            provider_model,
-            success=success,
-            health_status=health_status,
-            circuit_state=circuit_state,
-            latency_ms=latency_ms,
-            ttfb_ms=ttfb_ms,
-        )
         payload = cls.get_model_state(provider.id, provider_model.id) or {}
         payload.update(
             {
+                "health_status": payload.get("health_status") or provider_model.health_status,
+                "circuit_state": payload.get("circuit_state") or provider_model.circuit_state,
                 "success_rate_5m": rates["success_rate_5m"],
                 "failure_rate_5m": rates["failure_rate_5m"],
+                "ewma_latency_ms": cls._ewma(payload.get("ewma_latency_ms"), latency_ms),
+                "ewma_ttfb_ms": cls._ewma(payload.get("ewma_ttfb_ms"), ttfb_ms) if ttfb_ms is not None else payload.get("ewma_ttfb_ms"),
                 "last_error": None if success else str(error_message or "")[:500],
+                "updated_at": cls._now(),
             }
         )
         payload["health_score"] = cls._health_score(payload)

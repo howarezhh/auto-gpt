@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Text
+from sqlalchemy import Boolean, DateTime, Integer, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -11,15 +11,13 @@ class AppSetting(Base):
     __tablename__ = "app_settings"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
-    route_mode: Mapped[str] = mapped_column(Text, nullable=False, default="failover")
-    default_provider_id: Mapped[int | None] = mapped_column(ForeignKey("providers.id"), nullable=True)
-    manual_allow_fallback: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     global_timeout_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=30000)
     global_max_retries: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
     route_exhausted_retry_max_wait_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=600)
     route_exhausted_retry_infinite_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     trusted_providers_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     max_candidate_count: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
+    route_candidate_expand_count: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
     global_max_request_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     max_v1_request_body_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=20971520)
     max_v1_chat_request_body_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -32,6 +30,7 @@ class AppSetting(Base):
     content_guard_precheck_auto_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=content_guard_default("content_guard_precheck_auto_enabled"))
     content_guard_block_on_high_risk: Mapped[bool] = mapped_column(Boolean, nullable=False, default=content_guard_default("content_guard_block_on_high_risk"))
     content_guard_probe_interval_sec: Mapped[int] = mapped_column(Integer, nullable=False, default=content_guard_default("content_guard_probe_interval_sec"))
+    content_guard_json_probe_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=content_guard_default("content_guard_json_probe_enabled"))
     content_guard_max_scan_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=content_guard_default("content_guard_max_scan_bytes"))
     content_guard_stream_buffer_max_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=content_guard_default("content_guard_stream_buffer_max_bytes"))
     content_guard_low_trust_requires_buffer: Mapped[bool] = mapped_column(Boolean, nullable=False, default=content_guard_default("content_guard_low_trust_requires_buffer"))
@@ -43,6 +42,13 @@ class AppSetting(Base):
     content_guard_url_allowlist_json: Mapped[str] = mapped_column(Text, nullable=False, default=content_guard_default("content_guard_url_allowlist_json"))
     content_guard_async_review_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=content_guard_default("content_guard_async_review_enabled"))
     content_guard_high_risk_confidence_threshold: Mapped[int] = mapped_column(Integer, nullable=False, default=content_guard_default("content_guard_high_risk_confidence_threshold"))
+    content_guard_enhanced_detection_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=content_guard_default("content_guard_enhanced_detection_enabled"))
+    content_guard_enhanced_illegal_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=content_guard_default("content_guard_enhanced_illegal_enabled"))
+    content_guard_enhanced_ad_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=content_guard_default("content_guard_enhanced_ad_enabled"))
+    content_guard_enhanced_custom_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=content_guard_default("content_guard_enhanced_custom_enabled"))
+    content_guard_enhanced_obfuscation_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=content_guard_default("content_guard_enhanced_obfuscation_enabled"))
+    content_guard_enhanced_threshold: Mapped[int] = mapped_column(Integer, nullable=False, default=content_guard_default("content_guard_enhanced_threshold"))
+    content_guard_enhanced_context_window_chars: Mapped[int] = mapped_column(Integer, nullable=False, default=content_guard_default("content_guard_enhanced_context_window_chars"))
     circuit_breaker_threshold: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
     auto_health_check: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     health_check_interval_sec: Mapped[int] = mapped_column(Integer, nullable=False, default=300)
@@ -62,10 +68,15 @@ class AppSetting(Base):
     background_job_log_retention_days: Mapped[int] = mapped_column(Integer, nullable=False, default=90)
     user_operation_log_retention_days: Mapped[int] = mapped_column(Integer, nullable=False, default=180)
     asset_log_retention_days: Mapped[int] = mapped_column(Integer, nullable=False, default=180)
+    alert_event_retention_days: Mapped[int] = mapped_column(Integer, nullable=False, default=180)
     route_candidate_cache_ttl_sec: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
     model_list_cache_ttl_sec: Mapped[int] = mapped_column(Integer, nullable=False, default=15)
     provider_status_cache_ttl_sec: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
     async_request_logging: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    global_qps_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=20)
+    global_rpm_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=20)
+    account_qps_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=20)
+    account_rpm_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=20)
     global_max_active_requests: Mapped[int] = mapped_column(Integer, nullable=False, default=20)
     global_max_active_streams: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
     api_key_max_active_requests: Mapped[int] = mapped_column(Integer, nullable=False, default=20)

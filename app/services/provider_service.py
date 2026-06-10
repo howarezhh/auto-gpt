@@ -7,15 +7,15 @@ from decimal import Decimal
 
 from httpx import HTTPError
 from sqlalchemy import delete, func, or_, select, update
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, load_only, selectinload
 
 from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
 from app.models.model_catalog import ModelCatalog
 from app.models.request_log import RequestLog
+from app.models.logging_events import RequestContentGuardEvent
 from app.models.api_client_key_provider_binding import ApiClientKeyProviderBinding
 from app.models.api_client_key import ApiClientKey
-from app.models.app_setting import AppSetting
 from app.schemas.provider import (
     CONTENT_INTEGRITY_STATUS_LABELS,
     MODEL_TRUST_STATUS_LABELS,
@@ -52,9 +52,15 @@ from app.utils.json_utils import dumps_json, loads_json
 class ProviderService:
     """负责 provider 及其模型挂载的管理、能力推断与状态维护。"""
 
+    MAX_BATCH_IMPORT_ITEMS = 100
     QUALITY_WINDOW_MINUTES = 24 * 60
+    QUALITY_LOG_SAMPLE_LIMIT = 10000
     QUALITY_CACHE_TTL_SECONDS = 15
     AVAILABILITY_CACHE_TTL_SECONDS = 30
+    AVAILABILITY_LOG_SAMPLE_LIMIT = 10000
+    RECENT_CONTENT_GUARD_EVENT_LIMIT = 500
+    PROVIDER_LIST_MODEL_CONFIG_LIMIT = 500
+    PROVIDER_LIGHT_LIST_CACHE_TTL_SECONDS = 15
     VISION_MODEL_HINTS = (
         "gpt-4o",
         "gpt-4.1",
@@ -281,7 +287,13 @@ API Key: sk-yyyy
     def _runtime_provider_cache_ttl_seconds() -> int:
         try:
             setting = SettingService.get_cached()
-            return max(2, min(int(getattr(setting, "route_candidate_cache_ttl_sec", 10) or 10), 60))
+            raw_value = getattr(setting, "route_candidate_cache_ttl_sec", 10)
+            if raw_value is None:
+                return 10
+            value = int(raw_value)
+            if value <= 0:
+                return 0
+            return min(value, 60)
         except Exception:
             return 10
 
@@ -296,6 +308,7 @@ API Key: sk-yyyy
                 provider,
                 metrics=metrics,
                 recent_content_guard_events=recent_content_events.get(provider.id, []),
+                model_config_limit=ProviderService.PROVIDER_LIST_MODEL_CONFIG_LIMIT,
             )
             for provider in providers
         ]
@@ -372,20 +385,95 @@ API Key: sk-yyyy
     @staticmethod
     def list_provider_option_dicts(db: Session) -> list[dict]:
         """返回适合下拉框和筛选器使用的轻量 provider 列表。"""
-        providers = ProviderService.list_providers(db)
-        return [ProviderService.provider_to_option_dict(provider) for provider in providers]
+        cache_key = "provider-light-lists:options:v1"
+        cached = CacheService.get(cache_key)
+        if isinstance(cached, list):
+            return cached
+        providers = ProviderService._list_providers_for_model_name_lists(db)
+        items = [ProviderService.provider_to_option_dict(provider) for provider in providers]
+        return CacheService.set(cache_key, items, ttl_seconds=ProviderService.PROVIDER_LIGHT_LIST_CACHE_TTL_SECONDS)
 
     @staticmethod
     def list_provider_playground_dicts(db: Session) -> list[dict]:
         """返回适合调用测试等页面使用的轻量 provider 列表。"""
-        providers = ProviderService.list_providers(db)
-        return [ProviderService.provider_to_playground_dict(provider) for provider in providers]
+        cache_key = "provider-light-lists:playground:v1"
+        cached = CacheService.get(cache_key)
+        if isinstance(cached, list):
+            return cached
+        providers = ProviderService._list_providers_for_playground_lists(db)
+        items = [ProviderService.provider_to_playground_dict(provider) for provider in providers]
+        return CacheService.set(cache_key, items, ttl_seconds=ProviderService.PROVIDER_LIGHT_LIST_CACHE_TTL_SECONDS)
 
     @staticmethod
     def list_provider_summary_dicts(db: Session) -> list[dict]:
         """返回适合概览页使用的轻量 provider 列表。"""
-        providers = ProviderService.list_providers(db)
-        return [ProviderService.provider_to_summary_dict(provider) for provider in providers]
+        cache_key = "provider-light-lists:summary:v1"
+        cached = CacheService.get(cache_key)
+        if isinstance(cached, list):
+            return cached
+        providers = ProviderService._list_providers_for_model_name_lists(db)
+        items = [ProviderService.provider_to_summary_dict(provider) for provider in providers]
+        return CacheService.set(cache_key, items, ttl_seconds=ProviderService.PROVIDER_LIGHT_LIST_CACHE_TTL_SECONDS)
+
+    @staticmethod
+    def _list_providers_for_model_name_lists(db: Session) -> list[Provider]:
+        """轻量 provider 列表只需要 provider 摘要字段和模型名。"""
+        return list(
+            db.scalars(
+                select(Provider)
+                .options(
+                    load_only(
+                        Provider.id,
+                        Provider.name,
+                        Provider.group_name,
+                        Provider.region_tag,
+                        Provider.enabled,
+                        Provider.priority,
+                        Provider.health_status,
+                        Provider.protocol_type,
+                        Provider.circuit_state,
+                        Provider.last_latency_ms,
+                    ),
+                    selectinload(Provider.provider_models).load_only(ProviderModel.model_name),
+                )
+                .order_by(Provider.priority.asc(), Provider.id.asc())
+            )
+        )
+
+    @staticmethod
+    def _list_providers_for_playground_lists(db: Session) -> list[Provider]:
+        """Playground 列表只需要 provider 摘要、Base URL 和模型能力字段。"""
+        return list(
+            db.scalars(
+                select(Provider)
+                .options(
+                    load_only(
+                        Provider.id,
+                        Provider.name,
+                        Provider.base_url,
+                        Provider.group_name,
+                        Provider.region_tag,
+                        Provider.enabled,
+                        Provider.priority,
+                        Provider.health_status,
+                        Provider.protocol_type,
+                    ),
+                    selectinload(Provider.provider_models).load_only(
+                        ProviderModel.id,
+                        ProviderModel.model_name,
+                        ProviderModel.enabled,
+                        ProviderModel.priority,
+                        ProviderModel.supports_stream,
+                        ProviderModel.supports_vision,
+                        ProviderModel.supports_tools,
+                        ProviderModel.supports_image_generation,
+                        ProviderModel.supports_chat_completions,
+                        ProviderModel.supports_responses,
+                    ),
+                )
+                .order_by(Provider.priority.asc(), Provider.id.asc())
+            )
+        )
 
     @staticmethod
     def list_provider_model_mounts(
@@ -483,7 +571,13 @@ API Key: sk-yyyy
             raise ValueError(f"提供商最大重试次数不能大于全局最大重试次数 {global_max_retries}")
 
     @staticmethod
-    def create_provider(db: Session, payload: ProviderCreate) -> Provider:
+    def create_provider(
+        db: Session,
+        payload: ProviderCreate,
+        *,
+        sync_model_catalogs: bool = True,
+        sync_auto_bindings: bool = True,
+    ) -> Provider:
         """创建 provider，并同步初始化模型挂载和模型目录。"""
         from app.services.api_key_admin_service import ApiKeyAdminService
         from app.services.model_catalog_service import ModelCatalogService
@@ -505,7 +599,6 @@ API Key: sk-yyyy
             max_active_streams=payload.max_active_streams,
             max_qps=payload.max_qps,
             max_rpm=payload.max_rpm,
-            max_error_rate=payload.max_error_rate,
             first_token_timeout_sec=payload.first_token_timeout_sec,
             maintenance_window=payload.maintenance_window,
             maintenance_mode_enabled=payload.maintenance_mode_enabled,
@@ -526,9 +619,11 @@ API Key: sk-yyyy
         ProviderService._replace_provider_models(db, provider, ProviderService._resolve_model_configs(payload))
         ProviderService.refresh_provider_state(provider)
         db.flush()
-        ModelCatalogService.sync_model_catalogs(db)
+        if sync_model_catalogs:
+            ModelCatalogService.sync_model_catalogs(db)
         db.commit()
-        ApiKeyAdminService.sync_auto_provider_bindings(db)
+        if sync_auto_bindings:
+            ApiKeyAdminService.attach_provider_to_auto_synced_keys(db, provider_id=provider.id)
         ProviderService.invalidate_provider_runtime_cache()
         db.refresh(provider)
         return provider
@@ -537,8 +632,11 @@ API Key: sk-yyyy
     def batch_import_providers(db: Session, payload: ProviderBatchImportRequest) -> ProviderBatchImportResponse:
         """按模板解析并批量创建 provider。"""
         parsed_items = ProviderService._parse_batch_import_content(payload.content)
+        if len(parsed_items) > ProviderService.MAX_BATCH_IMPORT_ITEMS:
+            raise ValueError(f"单次最多导入 {ProviderService.MAX_BATCH_IMPORT_ITEMS} 个提供商")
         existing_names = set(db.scalars(select(Provider.name)))
         result_items: list[dict] = []
+        created_provider_ids: list[int] = []
         created_count = 0
         skipped_count = 0
         failed_count = 0
@@ -562,12 +660,14 @@ API Key: sk-yyyy
 
             if provider_payload and not errors and not payload.dry_run and not skipped:
                 try:
-                    provider = ProviderService.create_provider(db, ProviderCreate(**provider_payload))
-                    settings = SettingService.get_or_create(db)
-                    if settings.default_provider_id is None:
-                        settings.default_provider_id = provider.id
-                        db.commit()
+                    provider = ProviderService.create_provider(
+                        db,
+                        ProviderCreate(**provider_payload),
+                        sync_model_catalogs=False,
+                        sync_auto_bindings=False,
+                    )
                     existing_names.add(provider.name)
+                    created_provider_ids.append(provider.id)
                     provider_dict = ProviderService.provider_to_dict(
                         provider,
                         metrics=ProviderService._build_quality_metrics(db, [provider]),
@@ -591,6 +691,14 @@ API Key: sk-yyyy
                 "errors": errors,
                 "provider": provider_dict,
             })
+
+        if created_provider_ids and not payload.dry_run:
+            from app.services.api_key_admin_service import ApiKeyAdminService
+            from app.services.model_catalog_service import ModelCatalogService
+
+            ModelCatalogService.sync_model_catalogs(db)
+            ApiKeyAdminService.attach_providers_to_auto_synced_keys(db, provider_ids=created_provider_ids)
+            ProviderService.invalidate_provider_runtime_cache()
 
         valid_count = sum(1 for item in result_items if item["valid"])
         return ProviderBatchImportResponse(
@@ -737,10 +845,6 @@ API Key: sk-yyyy
             "rpm": "max_rpm",
             "maxrpm": "max_rpm",
             "max_rpm": "max_rpm",
-            "最大错误率": "max_error_rate",
-            "最大错误率%": "max_error_rate",
-            "maxerrorrate": "max_error_rate",
-            "max_error_rate": "max_error_rate",
             "首token超时秒": "first_token_timeout_sec",
             "首tok超时秒": "first_token_timeout_sec",
             "firsttokentimeoutsec": "first_token_timeout_sec",
@@ -810,7 +914,6 @@ API Key: sk-yyyy
             "max_active_streams": ProviderService._parse_batch_nullable_int(normalized.get("max_active_streams"), default=10),
             "max_qps": ProviderService._parse_batch_nullable_int(normalized.get("max_qps"), default=20),
             "max_rpm": ProviderService._parse_batch_nullable_int(normalized.get("max_rpm"), default=20),
-            "max_error_rate": ProviderService._parse_batch_float(normalized.get("max_error_rate"), default=80.0),
             "first_token_timeout_sec": ProviderService._parse_batch_nullable_int(normalized.get("first_token_timeout_sec"), default=60),
             "models": model_names,
             "model_configs": model_configs,
@@ -931,16 +1034,6 @@ API Key: sk-yyyy
         return parsed if parsed > 0 else None
 
     @staticmethod
-    def _parse_batch_float(value, *, default: float) -> float:
-        text = str(value or "").strip().replace("%", "")
-        if text == "":
-            return default
-        try:
-            return float(text)
-        except Exception:
-            return default
-
-    @staticmethod
     def update_provider(db: Session, provider: Provider, payload: ProviderUpdate) -> Provider:
         """更新 provider 基础信息及模型挂载。"""
         from app.services.api_key_admin_service import ApiKeyAdminService
@@ -969,7 +1062,6 @@ API Key: sk-yyyy
         ProviderService.refresh_provider_state(provider)
         ModelCatalogService.sync_model_catalogs(db)
         db.commit()
-        ApiKeyAdminService.sync_auto_provider_bindings(db)
         ProviderService.invalidate_provider_runtime_cache()
         db.refresh(provider)
         return provider
@@ -993,7 +1085,6 @@ API Key: sk-yyyy
             for binding in affected_bindings
             if binding.api_client_key is not None
         ]
-        db.execute(update(AppSetting).where(AppSetting.default_provider_id == provider_id).values(default_provider_id=None))
         db.execute(update(RequestLog).where(RequestLog.provider_id == provider_id).values(provider_id=None))
         db.execute(delete(ApiClientKeyProviderBinding).where(ApiClientKeyProviderBinding.provider_id == provider_id))
         db.delete(provider)
@@ -1001,7 +1092,6 @@ API Key: sk-yyyy
         for api_key_id, key_hash, owner_user_id in set(affected_key_refs):
             ApiKeyAuthCache.invalidate_api_key(api_key_id, key_hash)
             ApiKeyAuthCache.invalidate_user(owner_user_id)
-        ApiKeyAdminService.sync_auto_provider_bindings(db)
         ProviderService.invalidate_provider_runtime_cache()
         ModelCatalogService.sync_model_catalogs(db)
 
@@ -1096,12 +1186,13 @@ API Key: sk-yyyy
                 },
             ]
         else:
+            guard_result = "block" if status == "blocked" else "review"
             manual_results = [
                 {
                     "phase_key": "manual",
                     "endpoint_label": "管理员手动标记",
                     "success": False,
-                    "content_guard_result": "review",
+                    "content_guard_result": guard_result,
                     "content_guard_reason": reason,
                     "message": reason,
                 }
@@ -1115,7 +1206,7 @@ API Key: sk-yyyy
                     "phase_key": "manual",
                     "endpoint_label": "管理员手动标记",
                     "success": status == "passed",
-                    "content_guard_result": "pass" if status == "passed" else "review",
+                    "content_guard_result": "pass" if status == "passed" else ("block" if status == "blocked" else "review"),
                     "content_guard_reason": reason,
                     "message": reason,
                 },
@@ -1184,6 +1275,7 @@ API Key: sk-yyyy
         *,
         metrics: dict | None = None,
         recent_content_guard_events: list[dict] | None = None,
+        model_config_limit: int | None = None,
     ) -> dict:
         metrics = metrics or {"providers": {}, "provider_models": {}}
         provider_metric = metrics["providers"].get(provider.id, {})
@@ -1200,6 +1292,10 @@ API Key: sk-yyyy
             default=None,
         )
         trust_summary = ProviderService.provider_trust_summary(provider)
+        model_config_source = list(provider.provider_models)
+        model_config_total = len(model_config_source)
+        if model_config_limit is not None and model_config_limit >= 0:
+            model_config_source = model_config_source[:model_config_limit]
         return {
             "id": provider.id,
             "name": provider.name,
@@ -1219,7 +1315,6 @@ API Key: sk-yyyy
             "max_active_streams": provider.max_active_streams,
             "max_qps": provider.max_qps,
             "max_rpm": provider.max_rpm,
-            "max_error_rate": provider.max_error_rate,
             "first_token_timeout_sec": provider.first_token_timeout_sec,
             "active_requests": capacity_snapshot.active_requests,
             "active_streams": capacity_snapshot.active_streams,
@@ -1247,8 +1342,10 @@ API Key: sk-yyyy
             "models": [item.model_name for item in provider.provider_models],
             "model_configs": [
                 ProviderService.provider_model_to_dict(item, metrics=metrics["provider_models"].get(item.id))
-                for item in provider.provider_models
+                for item in model_config_source
             ],
+            "model_config_count": model_config_total,
+            "model_configs_truncated": len(model_config_source) < model_config_total,
             "health_status": provider.health_status,
             "last_check_at": provider.last_check_at,
             "last_latency_ms": provider.last_latency_ms,
@@ -1345,11 +1442,22 @@ API Key: sk-yyyy
         provider.credential_rotated_at = datetime.utcnow()
         provider.health_status = "unknown"
         provider.circuit_state = "closed"
+        provider.circuit_opened_at = None
+        provider.content_integrity_status = "unknown"
+        provider.trust_level = "standard"
+        provider.content_integrity_score = 80
+        provider.content_violation_count = 0
+        provider.last_content_violation_at = None
         for provider_model in provider.provider_models:
             provider_model.health_status = "unknown"
             provider_model.circuit_state = "closed"
             provider_model.circuit_opened_at = None
             provider_model.last_error = None
+            provider_model.content_integrity_status = "unknown"
+            provider_model.content_probe_last_passed_at = None
+            provider_model.content_probe_last_failed_at = None
+            provider_model.content_probe_failure_count = 0
+            provider_model.content_probe_results_json = None
         db.commit()
         ProviderService.invalidate_provider_runtime_cache()
         db.refresh(provider)
@@ -1409,13 +1517,14 @@ API Key: sk-yyyy
         discovered_items = [
             ProviderDiscoveredModelOut(
                 model_name=model_name,
-                supports_stream=ProviderService._infer_model_capabilities(model_name)["supports_stream"],
-                supports_vision=ProviderService._infer_model_capabilities(model_name)["supports_vision"],
-                supports_tools=ProviderService._infer_model_capabilities(model_name)["supports_tools"],
+                supports_stream=capabilities["supports_stream"],
+                supports_vision=capabilities["supports_vision"],
+                supports_tools=capabilities["supports_tools"],
                 supports_image_generation=False,
                 already_configured=model_name in existing_names,
             )
             for model_name in discovered_names
+            for capabilities in (ProviderService._infer_model_capabilities(model_name),)
         ]
         return ProviderDiscoverModelsResponse(
             provider_name=provider.name if provider else None,
@@ -1441,6 +1550,7 @@ API Key: sk-yyyy
         since = datetime.utcnow() - timedelta(hours=normalized_window_hours)
         logs = db.execute(
             select(
+                RequestLog.id,
                 RequestLog.created_at,
                 RequestLog.success,
                 RequestLog.latency_ms,
@@ -1450,10 +1560,11 @@ API Key: sk-yyyy
                 RequestLog.created_at >= since,
                 LogService._route_traffic_expr(),
             )
-            .order_by(RequestLog.created_at.asc(), RequestLog.id.asc())
+            .order_by(RequestLog.created_at.desc(), RequestLog.id.desc())
+            .limit(ProviderService.AVAILABILITY_LOG_SAMPLE_LIMIT)
         ).all()
         buckets: dict[datetime, dict] = {}
-        for created_at, success, latency_ms in logs:
+        for _, created_at, success, latency_ms in sorted(logs, key=lambda row: (row[1] or datetime.min, row[0] or 0)):
             if created_at is None:
                 continue
             minute_floor = created_at.replace(second=0, microsecond=0)
@@ -1523,6 +1634,10 @@ API Key: sk-yyyy
             "context_window_tokens": provider_model.context_window_tokens,
             "max_input_tokens": provider_model.max_input_tokens,
             "max_output_tokens": provider_model.max_output_tokens,
+            "max_active_requests": provider_model.max_active_requests,
+            "max_active_streams": provider_model.max_active_streams,
+            "max_qps": provider_model.max_qps,
+            "max_rpm": provider_model.max_rpm,
             "price_multiplier": provider_model.price_multiplier,
             "input_price_per_1k": provider_model.input_price_per_1k,
             "output_price_per_1k": provider_model.output_price_per_1k,
@@ -1552,34 +1667,53 @@ API Key: sk-yyyy
         provider_ids = [provider.id for provider in providers]
         if not provider_ids:
             return {}
+        total_limit = min(
+            ProviderService.RECENT_CONTENT_GUARD_EVENT_LIMIT,
+            max(1, len(provider_ids)) * max(1, per_provider_limit),
+        )
         rows = list(
-            db.scalars(
-                select(RequestLog)
-                .where(
-                    RequestLog.provider_id.in_(provider_ids),
-                    RequestLog.content_guard_result.isnot(None),
+            db.execute(
+                select(
+                    RequestContentGuardEvent.id,
+                    RequestContentGuardEvent.request_log_id,
+                    RequestContentGuardEvent.created_at,
+                    RequestContentGuardEvent.guard_result,
+                    RequestContentGuardEvent.risk_level,
+                    RequestContentGuardEvent.matched_categories_json,
+                    RequestContentGuardEvent.reason,
+                    RequestContentGuardEvent.action,
+                    RequestContentGuardEvent.excerpt,
+                    RequestContentGuardEvent.trace_id,
+                    RequestLog.id.label("log_id"),
+                    RequestLog.provider_id,
+                    RequestLog.model_name,
+                    RequestLog.requested_model,
+                    RequestLog.trace_id.label("request_trace_id"),
                 )
-                .order_by(RequestLog.created_at.desc(), RequestLog.id.desc())
-                .limit(max(1, len(provider_ids)) * max(1, per_provider_limit))
+                .join(RequestLog, RequestContentGuardEvent.request_log_id == RequestLog.id)
+                .where(RequestLog.provider_id.in_(provider_ids))
+                .order_by(RequestContentGuardEvent.created_at.desc(), RequestContentGuardEvent.id.desc())
+                .limit(total_limit)
             )
         )
         results: dict[int, list[dict]] = {provider_id: [] for provider_id in provider_ids}
-        for item in rows:
-            provider_id = item.provider_id
+        for row in rows:
+            provider_id = row.provider_id
             if provider_id is None or len(results.get(provider_id, [])) >= per_provider_limit:
                 continue
             results.setdefault(provider_id, []).append(
                 {
-                    "id": item.id,
-                    "created_at": item.created_at,
-                    "model_name": item.model_name or item.requested_model,
-                    "content_guard_result": item.content_guard_result,
-                    "content_guard_risk_level": item.content_guard_risk_level,
-                    "content_guard_categories_json": item.content_guard_categories_json,
-                    "content_guard_reason": item.content_guard_reason,
-                    "content_guard_action": item.content_guard_action,
-                    "content_guard_excerpt": item.content_guard_excerpt,
-                    "trace_id": item.trace_id,
+                    "id": row.id,
+                    "request_log_id": row.log_id,
+                    "created_at": row.created_at,
+                    "model_name": row.model_name or row.requested_model,
+                    "content_guard_result": row.guard_result,
+                    "content_guard_risk_level": row.risk_level,
+                    "content_guard_categories_json": row.matched_categories_json,
+                    "content_guard_reason": row.reason,
+                    "content_guard_action": row.action,
+                    "content_guard_excerpt": row.excerpt,
+                    "trace_id": row.trace_id or row.request_trace_id,
                 }
             )
         return results
@@ -1664,6 +1798,8 @@ API Key: sk-yyyy
         if statuses == {"healthy"}:
             provider.health_status = "healthy"
             provider.circuit_state = "closed"
+            if hasattr(provider, "circuit_opened_at"):
+                provider.circuit_opened_at = None
             ProviderService._refresh_provider_content_integrity_state(provider, enabled_models)
             return
         if statuses == {"unhealthy"}:
@@ -1674,11 +1810,15 @@ API Key: sk-yyyy
         if "healthy" in statuses or "degraded" in statuses:
             provider.health_status = "degraded"
             provider.circuit_state = "closed"
+            if hasattr(provider, "circuit_opened_at"):
+                provider.circuit_opened_at = None
             ProviderService._refresh_provider_content_integrity_state(provider, enabled_models)
             return
 
         provider.health_status = "unknown"
         provider.circuit_state = "closed"
+        if hasattr(provider, "circuit_opened_at"):
+            provider.circuit_opened_at = None
         ProviderService._refresh_provider_content_integrity_state(provider, enabled_models)
 
     @staticmethod
@@ -1696,12 +1836,15 @@ API Key: sk-yyyy
             provider.content_integrity_score = max(80, int(provider.content_integrity_score or 80))
             if provider.circuit_state == "open" and provider.health_status != "unhealthy":
                 provider.circuit_state = "closed"
+                if hasattr(provider, "circuit_opened_at"):
+                    provider.circuit_opened_at = None
             return
         if "blocked" in statuses:
             provider.content_integrity_status = "blocked"
-            provider.trust_level = "blocked"
             provider.content_integrity_score = min(20, int(provider.content_integrity_score or 20))
             provider.circuit_state = "open"
+            if hasattr(provider, "circuit_opened_at") and provider.circuit_opened_at is None:
+                provider.circuit_opened_at = datetime.utcnow()
             return
         if "degraded" in statuses:
             provider.content_integrity_status = "degraded"
@@ -1737,6 +1880,10 @@ API Key: sk-yyyy
                 context_window_tokens=item.context_window_tokens,
                 max_input_tokens=item.max_input_tokens,
                 max_output_tokens=item.max_output_tokens,
+                max_active_requests=item.max_active_requests,
+                max_active_streams=item.max_active_streams,
+                max_qps=item.max_qps,
+                max_rpm=item.max_rpm,
                 price_multiplier=item.price_multiplier or 1.0,
                 input_price_per_1k=item.input_price_per_1k,
                 output_price_per_1k=item.output_price_per_1k,
@@ -1775,6 +1922,10 @@ API Key: sk-yyyy
             provider_model.supports_vision = bool(config.supports_vision)
             provider_model.supports_tools = bool(config.supports_tools)
             provider_model.supports_image_generation = bool(config.supports_image_generation)
+            provider_model.max_active_requests = config.max_active_requests
+            provider_model.max_active_streams = config.max_active_streams
+            provider_model.max_qps = config.max_qps
+            provider_model.max_rpm = config.max_rpm
             if provider_model.health_status not in {"healthy", "degraded", "unhealthy"}:
                 provider_model.health_status = "unknown"
             if not provider_model.circuit_state:
@@ -1871,6 +2022,7 @@ API Key: sk-yyyy
         CacheService.invalidate_prefix("providers-runtime")
         CacheService.invalidate_prefix("provider-quality")
         CacheService.invalidate_prefix("provider-availability")
+        CacheService.invalidate_prefix("provider-light-lists")
 
     @staticmethod
     def _build_quality_metrics(db: Session, providers: list[Provider]) -> dict[str, dict]:
@@ -1927,6 +2079,8 @@ API Key: sk-yyyy
                 RequestLog.created_at >= since,
                 LogService._route_traffic_expr(),
             )
+            .order_by(RequestLog.created_at.desc(), RequestLog.id.desc())
+            .limit(ProviderService.QUALITY_LOG_SAMPLE_LIMIT)
         ).all()
 
         provider_stats: dict[int, dict] = defaultdict(ProviderService._empty_quality_accumulator)

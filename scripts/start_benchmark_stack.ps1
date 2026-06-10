@@ -170,6 +170,7 @@ import json
 from sqlalchemy import func
 from app.database import SessionLocal
 from app.models.request_log import RequestLog
+from app.services.log_service import LogService
 from app.services.redis_service import RedisService
 
 client = RedisService.get_sync_client()
@@ -180,7 +181,7 @@ try:
         db.query(func.count(RequestLog.id))
         .filter(
             RequestLog.api_client_key_prefix == "$ApiKeyPrefix",
-            RequestLog.billing_finalized_at.is_(None),
+            LogService._pending_token_billing_finalize_expr(),
         )
         .scalar()
         or 0

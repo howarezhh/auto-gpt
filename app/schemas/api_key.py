@@ -1,10 +1,15 @@
 from datetime import datetime
-from typing import Literal
-
 from pydantic import BaseModel, Field, field_validator
 
 
-RouteMode = Literal["manual", "failover", "weighted", "sticky"]
+MAX_API_KEY_BATCH_SIZE = 200
+MAX_BATCH_ALLOWED_PROVIDER_IDS = 500
+MAX_ALLOWED_PROVIDER_IDS = 500
+MAX_ALLOWED_MODEL_NAMES = 500
+MAX_ALLOWED_ENDPOINT_PATHS = 100
+MAX_ALLOWED_SOURCE_IPS = 500
+MAX_PREFERRED_PROVIDER_IDS = 500
+MAX_PREFERRED_REGION_TAGS = 100
 
 
 class ApiKeyProviderOut(BaseModel):
@@ -28,15 +33,14 @@ class ApiKeyBase(BaseModel):
     rpm_limit: int | None = Field(default=20, ge=0)
     owner_user_id: int | None = None
     auto_sync_provider_bindings: bool = True
-    allowed_provider_ids: list[int] = Field(default_factory=list)
-    allowed_model_names: list[str] = Field(default_factory=list)
-    allowed_endpoint_paths: list[str] = Field(default_factory=list)
-    allowed_source_ips: list[str] = Field(default_factory=list)
-    preferred_provider_ids: list[int] = Field(default_factory=list)
-    preferred_region_tags: list[str] = Field(default_factory=list)
+    allowed_provider_ids: list[int] = Field(default_factory=list, max_length=MAX_ALLOWED_PROVIDER_IDS)
+    allowed_model_names: list[str] = Field(default_factory=list, max_length=MAX_ALLOWED_MODEL_NAMES)
+    allowed_endpoint_paths: list[str] = Field(default_factory=list, max_length=MAX_ALLOWED_ENDPOINT_PATHS)
+    allowed_source_ips: list[str] = Field(default_factory=list, max_length=MAX_ALLOWED_SOURCE_IPS)
+    preferred_provider_ids: list[int] = Field(default_factory=list, max_length=MAX_PREFERRED_PROVIDER_IDS)
+    preferred_region_tags: list[str] = Field(default_factory=list, max_length=MAX_PREFERRED_REGION_TAGS)
     latency_bias: int = Field(default=1, ge=0, le=10)
     success_rate_bias: int = Field(default=1, ge=0, le=10)
-    cost_bias: int = Field(default=0, ge=0, le=10)
 
     @field_validator("name")
     @classmethod
@@ -124,15 +128,14 @@ class ApiKeyUpdate(BaseModel):
     rpm_limit: int | None = Field(default=None, ge=0)
     owner_user_id: int | None = None
     auto_sync_provider_bindings: bool | None = None
-    allowed_provider_ids: list[int] | None = None
-    allowed_model_names: list[str] | None = None
-    allowed_endpoint_paths: list[str] | None = None
-    allowed_source_ips: list[str] | None = None
-    preferred_provider_ids: list[int] | None = None
-    preferred_region_tags: list[str] | None = None
+    allowed_provider_ids: list[int] | None = Field(default=None, max_length=MAX_ALLOWED_PROVIDER_IDS)
+    allowed_model_names: list[str] | None = Field(default=None, max_length=MAX_ALLOWED_MODEL_NAMES)
+    allowed_endpoint_paths: list[str] | None = Field(default=None, max_length=MAX_ALLOWED_ENDPOINT_PATHS)
+    allowed_source_ips: list[str] | None = Field(default=None, max_length=MAX_ALLOWED_SOURCE_IPS)
+    preferred_provider_ids: list[int] | None = Field(default=None, max_length=MAX_PREFERRED_PROVIDER_IDS)
+    preferred_region_tags: list[str] | None = Field(default=None, max_length=MAX_PREFERRED_REGION_TAGS)
     latency_bias: int | None = Field(default=None, ge=0, le=10)
     success_rate_bias: int | None = Field(default=None, ge=0, le=10)
-    cost_bias: int | None = Field(default=None, ge=0, le=10)
 
     @field_validator("name")
     @classmethod
@@ -221,7 +224,6 @@ class ApiKeyOut(BaseModel):
     preferred_region_tags: list[str]
     latency_bias: int
     success_rate_bias: int
-    cost_bias: int
     allowed_providers: list[ApiKeyProviderOut]
     last_used_at: datetime | None
     created_at: datetime
@@ -285,7 +287,7 @@ class ApiKeyListResponse(BaseModel):
 
 
 class ApiKeyBatchActionIn(BaseModel):
-    api_key_ids: list[int] = Field(default_factory=list)
+    api_key_ids: list[int] = Field(default_factory=list, max_length=MAX_API_KEY_BATCH_SIZE)
 
     @field_validator("api_key_ids")
     @classmethod
@@ -321,7 +323,7 @@ class ApiKeyBatchRotateResultOut(ApiKeyBatchActionResultOut):
 
 class ApiKeyBatchProviderUpdateIn(ApiKeyBatchActionIn):
     auto_sync_provider_bindings: bool = False
-    allowed_provider_ids: list[int] = Field(default_factory=list)
+    allowed_provider_ids: list[int] = Field(default_factory=list, max_length=MAX_BATCH_ALLOWED_PROVIDER_IDS)
 
     @field_validator("allowed_provider_ids")
     @classmethod

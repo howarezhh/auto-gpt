@@ -124,12 +124,12 @@ class ApiKeyService:
 
     @staticmethod
     def extract_source_ip(request: Request) -> str | None:
-        """优先从代理头中提取来源 IP，失败时回退到直连地址。"""
-        forwarded_for = request.headers.get("x-forwarded-for")
-        if forwarded_for:
-            candidate = forwarded_for.split(",")[0].strip()
-            if candidate:
-                return candidate
+        """返回可信来源 IP；未完成可信代理解析时只使用直连地址。"""
+        decision = getattr(request.state, "ip_management", None)
+        resolution = getattr(decision, "resolution", None)
+        resolved_client_ip = getattr(resolution, "resolved_client_ip", None)
+        if resolved_client_ip:
+            return str(resolved_client_ip)
         if request.client is None:
             return None
         return request.client.host
@@ -335,12 +335,20 @@ class ApiKeyService:
                 request_path=request_path,
                 source_ip=source_ip,
             )
+        if ApiKeyAuthCache.is_invalid_hash_cached(key_hash):
+            raise ApiClientAuthError(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                code="invalid_api_key",
+                message="Invalid api key",
+                api_client_key_prefix=ApiKeyService.extract_key_prefix(raw_key),
+            )
         api_client_key = db.scalar(
             select(ApiClientKey)
             .options(selectinload(ApiClientKey.provider_bindings), selectinload(ApiClientKey.owner_user))
             .where(ApiClientKey.key_hash == key_hash)
         )
         if api_client_key is None:
+            ApiKeyAuthCache.set_invalid_hash(key_hash)
             raise ApiClientAuthError(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 code="invalid_api_key",
@@ -377,7 +385,6 @@ class ApiKeyService:
             "preferred_region_tags": loads_json(api_client_key.preferred_region_tags_json, []),
             "latency_bias": api_client_key.latency_bias,
             "success_rate_bias": api_client_key.success_rate_bias,
-            "cost_bias": api_client_key.cost_bias,
             "tenant_name": api_client_key.tenant_name,
             "project_name": api_client_key.project_name,
             "app_name": api_client_key.app_name,
@@ -480,7 +487,6 @@ class ApiKeyService:
             preferred_region_tags=loads_json(api_client_key.preferred_region_tags_json, []),
             latency_bias=api_client_key.latency_bias,
             success_rate_bias=api_client_key.success_rate_bias,
-            cost_bias=api_client_key.cost_bias,
         )
         ApiKeyAuthCache.set_auth_context(
             key_hash=key_hash,
@@ -571,6 +577,7 @@ class ApiKeyService:
     @staticmethod
     async def validate_redis_rate_limits(auth_context: ApiClientAuthContext, *, request_path: str | None = None) -> None:
         api_client_key = auth_context.api_client_key
+        setting = SettingService.get_cached()
         has_api_key_limits = any(
             value is not None
             for value in (
@@ -578,13 +585,27 @@ class ApiKeyService:
                 api_client_key.rpm_limit,
             )
         )
-        if not has_api_key_limits:
+        has_shared_limits = any(
+            int(value or 0) > 0
+            for value in (
+                getattr(setting, "global_qps_limit", 20),
+                getattr(setting, "global_rpm_limit", 20),
+                getattr(setting, "account_qps_limit", 20),
+                getattr(setting, "account_rpm_limit", 20),
+            )
+        )
+        if not has_api_key_limits and not has_shared_limits:
             return
         try:
-            await RateLimitService.check_api_key_limits(
+            await RateLimitService.check_request_limits(
                 api_key_id=api_client_key.id,
-                qps_limit=api_client_key.qps_limit,
-                rpm_limit=api_client_key.rpm_limit,
+                api_key_qps_limit=api_client_key.qps_limit,
+                api_key_rpm_limit=api_client_key.rpm_limit,
+                account_id=api_client_key.owner_user_id,
+                account_qps_limit=getattr(setting, "account_qps_limit", 20),
+                account_rpm_limit=getattr(setting, "account_rpm_limit", 20),
+                global_qps_limit=getattr(setting, "global_qps_limit", 20),
+                global_rpm_limit=getattr(setting, "global_rpm_limit", 20),
             )
         except RateLimitExceededError as exc:
             raise ApiClientAuthError(

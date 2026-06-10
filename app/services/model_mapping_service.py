@@ -30,10 +30,19 @@ class ModelMappingService:
     """负责模型映射规则管理和路由前目标模型选择。"""
 
     CACHE_PREFIX = "model-mappings"
+    LIST_LIMIT = 500
+    NORMALIZE_BATCH_SIZE = 500
+    NORMALIZE_MAX_BATCHES = 100
 
     @staticmethod
     def list_mappings(db: Session) -> list[dict[str, Any]]:
-        mappings = list(db.scalars(select(ModelMapping).order_by(ModelMapping.source_model_name.asc())))
+        mappings = list(
+            db.scalars(
+                select(ModelMapping)
+                .order_by(ModelMapping.source_model_name.asc())
+                .limit(ModelMappingService.LIST_LIMIT)
+            )
+        )
         return [ModelMappingService.serialize_mapping(item) for item in mappings]
 
     @staticmethod
@@ -101,18 +110,39 @@ class ModelMappingService:
     @staticmethod
     def normalize_legacy_mapping_data(db: Session) -> bool:
         """清理模型映射目标历史冗余字段。"""
+        any_changed = False
         changed = False
-        mappings = list(db.scalars(select(ModelMapping)))
-        for mapping in mappings:
-            normalized_targets = ModelMappingService._parse_targets(mapping.targets_json)
-            normalized_raw = dumps_json(normalized_targets)
-            if mapping.targets_json != normalized_raw:
-                mapping.targets_json = normalized_raw
-                changed = True
+        last_id = 0
+        for _ in range(ModelMappingService.NORMALIZE_MAX_BATCHES):
+            mappings = list(
+                db.scalars(
+                    select(ModelMapping)
+                    .where(ModelMapping.id > last_id)
+                    .order_by(ModelMapping.id.asc())
+                    .limit(ModelMappingService.NORMALIZE_BATCH_SIZE)
+                )
+            )
+            if not mappings:
+                break
+            for mapping in mappings:
+                last_id = max(last_id, int(mapping.id or 0))
+                normalized_targets = ModelMappingService._parse_targets(mapping.targets_json)
+                normalized_raw = dumps_json(normalized_targets)
+                if mapping.targets_json != normalized_raw:
+                    mapping.targets_json = normalized_raw
+                    changed = True
+                    any_changed = True
+            if changed:
+                db.commit()
+                changed = False
+                ModelMappingService.invalidate_cache()
+            if len(mappings) < ModelMappingService.NORMALIZE_BATCH_SIZE:
+                break
         if changed:
             db.commit()
             ModelMappingService.invalidate_cache()
-        return changed
+            any_changed = True
+        return any_changed
 
     @staticmethod
     async def resolve_for_request(

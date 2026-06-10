@@ -36,8 +36,14 @@ router = APIRouter(prefix="/api/api-keys", tags=["api-keys"])
 
 
 @router.get("", response_model=list[ApiKeyOut])
-def list_api_keys(db: Session = Depends(get_db)) -> list[ApiKeyOut]:
-    return [ApiKeyOut(**ApiKeyAdminService.serialize_api_key(item)) for item in ApiKeyAdminService.list_api_keys(db)]
+def list_api_keys(
+    limit: int = Query(default=500, ge=1, le=500),
+    db: Session = Depends(get_db),
+) -> list[ApiKeyOut]:
+    return [
+        ApiKeyOut(**ApiKeyAdminService.serialize_api_key(item))
+        for item in ApiKeyAdminService.list_api_keys(db, limit=limit)
+    ]
 
 
 @router.get("/query", response_model=ApiKeyListResponse)
@@ -68,15 +74,16 @@ def api_key_summary(db: Session = Depends(get_db)) -> ApiKeySummaryOut:
 
 @router.get("/export")
 def export_api_keys(
+    limit: int = Query(default=5000, ge=1, le=5000),
     db: Session = Depends(get_db),
     current_user=Depends(require_admin_api_user),
 ) -> Response:
-    items = ApiKeyAdminService.list_api_keys(db)
+    items = ApiKeyAdminService.list_api_keys(db, limit=limit)
     buffer = io.StringIO()
     writer = csv.writer(buffer)
     writer.writerow(["id", "name", "owner_user_name", "key_prefix", "status", "enabled", "allowed_provider_count", "account_balance", "total_cost_used", "created_at", "last_used_at"])
     for item in items:
-        serialized = ApiKeyAdminService.serialize_api_key(item)
+        serialized = ApiKeyAdminService.serialize_api_key(item, include_raw_api_key=False)
         writer.writerow([
             serialized["id"],
             serialized["name"],
@@ -99,6 +106,7 @@ def export_api_keys(
         entity_id=None,
         entity_name="all_api_keys",
         summary="导出 API Key 列表 CSV",
+        detail={"limit": limit},
     )
     return Response(
         content=buffer.getvalue(),
@@ -460,7 +468,18 @@ def api_key_logs(
         log_type=log_type,
         success=success,
     )
-    return LogListResponse(total=total, items=[RequestLogOut.model_validate(item) for item in LogService.serialize_logs(items)], summary=None)
+    return LogListResponse(
+        total=total,
+        items=[
+            RequestLogOut.model_validate(item)
+            for item in LogService.serialize_logs(
+                items,
+                include_payload_fields=False,
+                derive_image_observability=False,
+            )
+        ],
+        summary=None,
+    )
 
 
 @router.get("/{api_key_id}/stats", response_model=ApiKeyStatsOut)

@@ -21,6 +21,8 @@ DEFAULT_MAX_QPS = 20
 DEFAULT_MAX_RPM = 20
 DEFAULT_MAX_ACTIVE_REQUESTS = 20
 DEFAULT_MAX_ACTIVE_STREAMS = 10
+AUTH_CACHE_INVALIDATE_SCAN_LIMIT = 10000
+AUTH_CACHE_INVALIDATE_DELETE_BATCH = 500
 
 
 def _columns(db, table_name: str) -> set[str]:
@@ -65,9 +67,18 @@ def _invalidate_auth_cache_keys() -> None:
     try:
         client = RedisService.get_sync_client()
         for prefix in ("auth:key_hash:", "auth:api_key:", "auth:user:"):
-            keys = list(client.scan_iter(match=f"{prefix}*", count=100))
-            if keys:
-                client.delete(*keys)
+            batch = []
+            scanned = 0
+            for key in client.scan_iter(match=f"{prefix}*", count=100):
+                batch.append(key)
+                scanned += 1
+                if len(batch) >= AUTH_CACHE_INVALIDATE_DELETE_BATCH:
+                    client.delete(*batch)
+                    batch.clear()
+                if scanned >= AUTH_CACHE_INVALIDATE_SCAN_LIMIT:
+                    break
+            if batch:
+                client.delete(*batch)
     except Exception:
         return
 

@@ -69,7 +69,7 @@
     <article class="metric-card user-key-summary-card">
         <span>需关注</span>
         <strong>{{ ns.risk }}</strong>
-        <small>过期、配额不足、余额不足或未绑定渠道</small>
+        <small>过期、配额不足、余额不足或未绑定提供商</small>
     </article>
     <article class="metric-card user-key-summary-card">
         <span>可复制明文</span>
@@ -121,7 +121,7 @@
                     else '余额耗尽' if item.status == 'quota_exhausted'
                     else '余额耗尽' if item.status == 'cost_quota_exhausted'
                     else '余额耗尽' if item.status == 'balance_exhausted'
-                    else '未绑定渠道' if item.status == 'unbound'
+                    else '未绑定提供商' if item.status == 'unbound'
                     else item.status
                 ) %}
                 <article
@@ -246,10 +246,10 @@
                                     </div>
                                 </div>
                                 <div class="form-span-2">
-                                    <span>渠道授权</span>
+                                    <span>提供商授权</span>
                                     <div class="settings-note">
                                         <strong>管理员统一维护</strong>
-                                        <span>当前 API Key 的可授权提供商由管理员侧统一配置。普通用户侧默认继承全部可用渠道，并随渠道增删自动同步。</span>
+                                        <span>当前 API Key 的可授权提供商由管理员侧统一配置。普通用户侧默认继承全部可用提供商，并随提供商增删自动同步。</span>
                                     </div>
                                 </div>
                                 <div class="form-actions form-span-2">
@@ -316,10 +316,10 @@
                     </div>
                 </div>
                 <div class="form-span-2">
-                    <span>渠道授权</span>
+                    <span>提供商授权</span>
                     <div class="settings-note">
-                        <strong>默认全渠道</strong>
-                        <span>新建密钥后会默认授权全部可用提供商，并在管理员调整渠道集合时自动同步，无需在用户侧单独勾选。</span>
+                        <strong>默认全提供商</strong>
+                        <span>新建密钥后会默认授权全部可用提供商，并在管理员调整提供商集合时自动同步，无需在用户侧单独勾选。</span>
                     </div>
                 </div>
                 <div class="form-actions form-span-2">

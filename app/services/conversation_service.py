@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import case, func, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from app.models.request_log import RequestLog
 from app.schemas.conversation import ConversationReplay, ConversationSummaryItem, ConversationTurn
@@ -11,6 +11,9 @@ from app.utils.json_utils import loads_json
 
 
 class ConversationService:
+    REPLAY_LOG_LIMIT = 200
+    TURN_CONTENT_MAX_CHARS = 4000
+
     @staticmethod
     def list_conversations(
         db: Session,
@@ -67,7 +70,7 @@ class ConversationService:
             .scalar_subquery()
         )
         latest_preview_subquery = (
-            select(func.coalesce(RequestLog.response_text, RequestLog.message))
+            select(func.substr(func.coalesce(RequestLog.response_text, RequestLog.message), 1, 180))
             .where(RequestLog.conversation_key == grouped.c.conversation_key)
             .order_by(RequestLog.created_at.desc(), RequestLog.id.desc())
             .limit(1)
@@ -89,7 +92,7 @@ class ConversationService:
 
         items: list[ConversationSummaryItem] = []
         for row in rows:
-            preview_text = row.preview_text[:180] if row.preview_text else None
+            preview_text = row.preview_text if row.preview_text else None
             items.append(
                 ConversationSummaryItem(
                     conversation_key=row.conversation_key,
@@ -121,8 +124,25 @@ class ConversationService:
         logs = list(
             db.scalars(
                 select(RequestLog)
+                .options(
+                    load_only(
+                        RequestLog.id,
+                        RequestLog.created_at,
+                        RequestLog.request_id,
+                        RequestLog.requested_model,
+                        RequestLog.provider_name,
+                        RequestLog.total_tokens,
+                        RequestLog.success,
+                        RequestLog.request_body_json,
+                        RequestLog.response_text,
+                        RequestLog.is_stream,
+                        RequestLog.has_image,
+                        RequestLog.conversation_key,
+                    )
+                )
                 .where(*filters)
                 .order_by(RequestLog.created_at.asc(), RequestLog.id.asc())
+                .limit(ConversationService.REPLAY_LOG_LIMIT)
             )
         )
         if not logs:
@@ -160,10 +180,11 @@ class ConversationService:
                 )
 
             if log.response_text:
+                response_text = ConversationService._clip_turn_content(log.response_text)
                 turns.append(
                     ConversationTurn(
                         role="assistant",
-                        content=log.response_text,
+                        content=response_text,
                         created_at=log.created_at,
                         request_id=log.request_id,
                         requested_model=log.requested_model,
@@ -174,11 +195,12 @@ class ConversationService:
                         has_image=log.has_image,
                     )
                 )
-                history_messages = request_messages + [{"role": "assistant", "content": log.response_text}]
+                history_messages = request_messages + [{"role": "assistant", "content": response_text}]
             else:
                 history_messages = request_messages
 
         latest_log = logs[-1]
+        truncated = len(logs) >= ConversationService.REPLAY_LOG_LIMIT
         return ConversationReplay(
             conversation_key=conversation_key,
             request_count=len(logs),
@@ -190,6 +212,8 @@ class ConversationService:
             latest_model=latest_log.requested_model,
             latest_provider_name=latest_log.provider_name,
             turns=turns,
+            truncated=truncated,
+            log_limit=ConversationService.REPLAY_LOG_LIMIT,
         )
 
     @staticmethod
@@ -217,7 +241,7 @@ class ConversationService:
         normalized: list[dict[str, str]] = []
         for message in messages:
             if isinstance(message, str):
-                normalized.append({"role": "user", "content": message})
+                normalized.append({"role": "user", "content": ConversationService._clip_turn_content(message)})
                 continue
             if not isinstance(message, dict):
                 continue
@@ -226,8 +250,15 @@ class ConversationService:
             if not content and isinstance(message.get("input_text"), str):
                 content = message["input_text"]
             if content:
-                normalized.append({"role": role, "content": content})
+                normalized.append({"role": role, "content": ConversationService._clip_turn_content(content)})
         return normalized
+
+    @staticmethod
+    def _clip_turn_content(value: str) -> str:
+        text = str(value or "")
+        if len(text) <= ConversationService.TURN_CONTENT_MAX_CHARS:
+            return text
+        return f"{text[:ConversationService.TURN_CONTENT_MAX_CHARS]}..."
 
     @staticmethod
     def _normalize_content(content: Any) -> str:

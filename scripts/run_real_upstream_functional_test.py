@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 import httpx
+from sqlalchemy.orm import load_only
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -17,6 +18,8 @@ if str(PROJECT_ROOT) not in sys.path:
 from app.database import SessionLocal
 from app.models.api_client_key import ApiClientKey
 from app.models.request_log import RequestLog
+
+MAX_FUNCTIONAL_SUBPROCESS_OUTPUT_BYTES = 1 * 1024 * 1024
 
 
 def parse_args() -> argparse.Namespace:
@@ -32,9 +35,9 @@ def parse_args() -> argparse.Namespace:
 
 
 def wait_for_live(proxy_port: int, *, timeout_s: float = 45.0) -> bool:
-    deadline = time.time() + timeout_s
+    deadline = time.monotonic() + timeout_s
     url = f"http://127.0.0.1:{proxy_port}/live"
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         try:
             response = httpx.get(url, timeout=2.0)
             if response.status_code == 200:
@@ -61,18 +64,33 @@ def terminate_process(process: subprocess.Popen[bytes], *, timeout_s: float = 10
 def print_log_summary() -> None:
     db = SessionLocal()
     try:
-        api_key = db.query(ApiClientKey).filter(ApiClientKey.name == "real-upstream-functional-key").first()
-        if api_key is None:
+        api_key_id = db.query(ApiClientKey.id).filter(ApiClientKey.name == "real-upstream-functional-key").scalar()
+        if api_key_id is None:
             print("db_log_summary key_id=None log_count=0", flush=True)
             return
         logs = (
             db.query(RequestLog)
-            .filter(RequestLog.api_client_key_id == api_key.id)
+            .options(
+                load_only(
+                    RequestLog.id,
+                    RequestLog.api_client_key_id,
+                    RequestLog.request_path,
+                    RequestLog.is_stream,
+                    RequestLog.success,
+                    RequestLog.status_code,
+                    RequestLog.error_code,
+                    RequestLog.duration_ms,
+                    RequestLog.ttfb_ms,
+                    RequestLog.message,
+                    RequestLog.created_at,
+                )
+            )
+            .filter(RequestLog.api_client_key_id == api_key_id)
             .order_by(RequestLog.created_at.desc(), RequestLog.id.desc())
             .limit(30)
             .all()
         )
-        print(f"db_log_summary key_id={api_key.id} log_count={len(logs)}", flush=True)
+        print(f"db_log_summary key_id={api_key_id} log_count={len(logs)}", flush=True)
         for item in logs:
             print(
                 "db_log id={id} path={path} stream={stream} success={success} status={status} "
@@ -91,6 +109,19 @@ def print_log_summary() -> None:
             )
     finally:
         db.close()
+
+
+def print_subprocess_output(path: Path, *, stream, label: str, max_bytes: int = MAX_FUNCTIONAL_SUBPROCESS_OUTPUT_BYTES) -> None:
+    if not path.exists():
+        return
+    data = path.read_bytes()
+    truncated = len(data) > max_bytes
+    if truncated:
+        data = data[-max_bytes:]
+        print(f"[{label} truncated to last {max_bytes} bytes]", file=stream, flush=True)
+    text = data.decode("utf-8", errors="replace")
+    if text:
+        print(text, end="", file=stream, flush=True)
 
 
 def main() -> int:
@@ -122,6 +153,7 @@ def main() -> int:
             "ACCOUNT_MAX_ACTIVE_STREAMS": "30",
             "UPSTREAM_JSON_CLIENT": "aiohttp",
             "UPSTREAM_STREAM_CLIENT": "aiohttp",
+            "PYTHONIOENCODING": "utf-8",
         }
     )
     server = subprocess.Popen(
@@ -165,32 +197,33 @@ def main() -> int:
             "--client-timeout-s",
             str(max(1.0, args.client_timeout_s)),
         ]
-        test_process = subprocess.Popen(
-            test_command,
-            cwd=PROJECT_ROOT,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
+        test_out_path = log_dir / "python-runner-test.out.log"
+        test_err_path = log_dir / "python-runner-test.err.log"
         try:
-            stdout, stderr = test_process.communicate(timeout=args.test_timeout_s)
-            if stdout:
-                print(stdout, end="", flush=True)
-            if stderr:
-                print(stderr, end="", file=sys.stderr, flush=True)
-            return_code = int(test_process.returncode or 0)
+            with test_out_path.open("wb") as test_out, test_err_path.open("wb") as test_err:
+                test_process = subprocess.Popen(
+                    test_command,
+                    cwd=PROJECT_ROOT,
+                    env=env,
+                    stdout=test_out,
+                    stderr=test_err,
+                )
+                try:
+                    test_process.wait(timeout=args.test_timeout_s)
+                    return_code = int(test_process.returncode or 0)
+                except subprocess.TimeoutExpired:
+                    terminate_process(test_process)
+                    print(
+                        f"functional test subprocess timed out after {args.test_timeout_s:.0f}s",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    return_code = 124
         except subprocess.TimeoutExpired:
-            terminate_process(test_process)
-            stdout, stderr = test_process.communicate()
-            if stdout:
-                print(stdout, end="", flush=True)
-            if stderr:
-                print(stderr, end="", file=sys.stderr, flush=True)
             print(f"functional test subprocess timed out after {args.test_timeout_s:.0f}s", file=sys.stderr, flush=True)
             return_code = 124
+        print_subprocess_output(test_out_path, stream=sys.stdout, label="functional-test-stdout")
+        print_subprocess_output(test_err_path, stream=sys.stderr, label="functional-test-stderr")
         print_log_summary()
         return return_code
     finally:

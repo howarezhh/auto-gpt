@@ -62,6 +62,10 @@ class ResponsesChatAdapterService:
     """Responses→Chat 单向兼容适配层。"""
 
     _memory_sessions: dict[str, tuple[dict[str, Any], float | None]] = {}
+    DATABASE_CLEANUP_BATCH_SIZE = 5000
+    DATABASE_CLEANUP_MAX_BATCHES = 100
+    MEMORY_SESSION_MAX_ENTRIES = 10000
+    ENV_UPSTREAM_SPEC_LIMIT = 500
 
     @staticmethod
     def enabled() -> bool:
@@ -894,8 +898,25 @@ class ResponsesChatAdapterService:
 
     @staticmethod
     def _save_state_memory(response_id: str, payload: dict[str, Any], ttl_seconds: int) -> None:
+        ResponsesChatAdapterService._prune_memory_sessions()
         expires_at = time.time() + ttl_seconds if ttl_seconds > 0 else None
         ResponsesChatAdapterService._memory_sessions[response_id] = (payload, expires_at)
+        while len(ResponsesChatAdapterService._memory_sessions) > ResponsesChatAdapterService.MEMORY_SESSION_MAX_ENTRIES:
+            oldest_key = next(iter(ResponsesChatAdapterService._memory_sessions), None)
+            if oldest_key is None:
+                break
+            ResponsesChatAdapterService._memory_sessions.pop(oldest_key, None)
+
+    @staticmethod
+    def _prune_memory_sessions() -> None:
+        now = time.time()
+        expired_keys = [
+            response_id
+            for response_id, (_, expires_at) in ResponsesChatAdapterService._memory_sessions.items()
+            if expires_at is not None and expires_at < now
+        ]
+        for response_id in expired_keys:
+            ResponsesChatAdapterService._memory_sessions.pop(response_id, None)
 
     @staticmethod
     async def _load_state_redis(response_id: str) -> AdapterConversationState | None:
@@ -963,14 +984,36 @@ class ResponsesChatAdapterService:
 
     @staticmethod
     def cleanup_expired_database_sessions(db: Session) -> int:
-        result = db.execute(
-            delete(ResponsesChatAdapterSession).where(
-                ResponsesChatAdapterSession.expires_at.is_not(None),
-                ResponsesChatAdapterSession.expires_at < datetime.utcnow(),
+        total_deleted = 0
+        cutoff = datetime.utcnow()
+        batch_count = 0
+        while True:
+            if batch_count >= ResponsesChatAdapterService.DATABASE_CLEANUP_MAX_BATCHES:
+                break
+            response_ids = list(
+                db.scalars(
+                    select(ResponsesChatAdapterSession.response_id)
+                    .where(
+                        ResponsesChatAdapterSession.expires_at.is_not(None),
+                        ResponsesChatAdapterSession.expires_at < cutoff,
+                    )
+                    .order_by(ResponsesChatAdapterSession.response_id.asc())
+                    .limit(ResponsesChatAdapterService.DATABASE_CLEANUP_BATCH_SIZE)
+                )
             )
-        )
-        db.commit()
-        return int(result.rowcount or 0)
+            if not response_ids:
+                break
+            result = db.execute(
+                delete(ResponsesChatAdapterSession).where(
+                    ResponsesChatAdapterSession.response_id.in_(response_ids)
+                )
+            )
+            db.commit()
+            batch_count += 1
+            total_deleted += int(result.rowcount or 0)
+            if len(response_ids) < ResponsesChatAdapterService.DATABASE_CLEANUP_BATCH_SIZE:
+                break
+        return total_deleted
 
     @staticmethod
     def _extract_completed_response_from_sse_chunk(chunk: bytes) -> dict[str, Any] | None:
@@ -1049,6 +1092,8 @@ class ResponsesChatAdapterService:
                         "api_key": api_key,
                     }
                 )
+                if len(specs) >= ResponsesChatAdapterService.ENV_UPSTREAM_SPEC_LIMIT:
+                    return specs
         single_base_url = settings.responses_chat_adapter_upstream_base_url.strip().rstrip("/")
         single_api_key = settings.responses_chat_adapter_upstream_api_key.strip()
         mapping = safeJsonParse(settings.responses_chat_adapter_model_map_json or "")
@@ -1067,6 +1112,8 @@ class ResponsesChatAdapterService:
                             "api_key": single_api_key,
                         }
                     )
+                    if len(specs) >= ResponsesChatAdapterService.ENV_UPSTREAM_SPEC_LIMIT:
+                        return specs
         return specs
 
     @staticmethod

@@ -11,6 +11,7 @@ from typing import Any
 
 import httpx
 from sqlalchemy import delete, select
+from sqlalchemy.orm import load_only
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
@@ -35,6 +36,10 @@ DEFAULT_USER_NAME = "real_upstream_functional_user"
 DEFAULT_USER_EMAIL = "real_upstream_functional_user@example.com"
 DEFAULT_API_KEY_NAME = "real-upstream-functional-key"
 DEFAULT_CANDIDATE_MODELS = ("gpt-5.5", "gpt-5.4")
+FUNCTIONAL_DELETE_BATCH_SIZE = 1000
+MAX_UPSTREAM_MODEL_OPTIONS = 1000
+MAX_FUNCTIONAL_STREAM_EVENTS = 1024
+MAX_FUNCTIONAL_STREAM_BYTES = 1 * 1024 * 1024
 
 
 @dataclass(slots=True)
@@ -45,6 +50,19 @@ class CallResult:
     latency_ms: float
     stream_events: int = 0
     error: str | None = None
+
+
+def delete_functional_rows_in_batches(db, model: type[Any], condition: Any, *, batch_size: int = FUNCTIONAL_DELETE_BATCH_SIZE) -> int:
+    deleted = 0
+    while True:
+        ids = list(db.scalars(select(model.id).where(condition).limit(batch_size)))
+        if not ids:
+            return deleted
+        result = db.execute(delete(model).where(model.id.in_(ids)))
+        db.commit()
+        deleted += int(result.rowcount or 0)
+        if len(ids) < batch_size:
+            return deleted
 
 
 def parse_args() -> argparse.Namespace:
@@ -110,7 +128,6 @@ def ensure_fixture(
         provider.max_active_requests = 30
         provider.max_active_streams = 30
         provider.max_qps = None
-        provider.max_error_rate = 100.0
         provider.health_status = "healthy"
         provider.circuit_state = "closed"
         provider.failure_count = 0
@@ -183,9 +200,6 @@ def ensure_fixture(
         api_key.owner_user_id = user.id
         api_key.balance_amount = Decimal("1000")
         api_key.total_recharge_amount = Decimal("1000")
-        api_key.default_provider_id = provider.id
-        api_key.route_mode = "failover"
-        api_key.manual_allow_fallback = True
         api_key.allowed_model_names_json = dumps_json([model_name])
         api_key.allowed_endpoint_paths_json = dumps_json(["/v1/chat/completions", "/v1/responses", "/v1/models"])
         api_key.allowed_source_ips_json = "[]"
@@ -212,10 +226,18 @@ def ensure_fixture(
             db.add(ApiClientKeyProviderBinding(api_client_key_id=api_key.id, provider_id=provider.id))
 
         db.flush()
-        db.execute(delete(ApiClientBillingRecord).where(ApiClientBillingRecord.api_client_key_id == api_key.id))
-        db.execute(delete(UserAccountBillingRecord).where(UserAccountBillingRecord.api_client_key_id == api_key.id))
-        db.execute(delete(RequestLog).where(RequestLog.api_client_key_id == api_key.id))
         db.commit()
+        delete_functional_rows_in_batches(
+            db,
+            ApiClientBillingRecord,
+            ApiClientBillingRecord.api_client_key_id == api_key.id,
+        )
+        delete_functional_rows_in_batches(
+            db,
+            UserAccountBillingRecord,
+            UserAccountBillingRecord.api_client_key_id == api_key.id,
+        )
+        delete_functional_rows_in_batches(db, RequestLog, RequestLog.api_client_key_id == api_key.id)
         return {
             "provider_id": provider.id,
             "api_key_id": api_key.id,
@@ -246,11 +268,36 @@ def print_call_result(result: CallResult) -> None:
 async def _call_stream(client: httpx.AsyncClient, url: str, headers: dict[str, str], payload: dict[str, Any], label: str) -> CallResult:
     started = time.perf_counter()
     events = 0
+    bytes_read = 0
     try:
         async with client.stream("POST", url, headers=headers, json=payload) as response:
             async for line in response.aiter_lines():
                 if line:
-                    events += 1
+                    bytes_read += len(line.encode("utf-8"))
+                    if bytes_read > MAX_FUNCTIONAL_STREAM_BYTES:
+                        latency_ms = (time.perf_counter() - started) * 1000
+                        return CallResult(
+                            label=label,
+                            ok=False,
+                            status_code=response.status_code,
+                            latency_ms=latency_ms,
+                            stream_events=events,
+                            error="stream_response_too_large",
+                        )
+                if line.startswith("data:"):
+                    data = line[5:].strip()
+                    if data and data != "[DONE]":
+                        events += 1
+                        if events > MAX_FUNCTIONAL_STREAM_EVENTS:
+                            latency_ms = (time.perf_counter() - started) * 1000
+                            return CallResult(
+                                label=label,
+                                ok=False,
+                                status_code=response.status_code,
+                                latency_ms=latency_ms,
+                                stream_events=events,
+                                error="stream_events_too_many",
+                            )
             latency_ms = (time.perf_counter() - started) * 1000
             return CallResult(
                 label=label,
@@ -361,13 +408,33 @@ async def run_suite(*, proxy_base_url: str, raw_api_key: str, model_name: str, m
 
 
 def wait_for_logs(*, api_key_id: int, expected_count: int, timeout_s: int = 90) -> list[RequestLog]:
-    deadline = time.time() + timeout_s
+    deadline = time.monotonic() + timeout_s
     db = SessionLocal()
+    summary_options = (
+        load_only(
+            RequestLog.id,
+            RequestLog.api_client_key_id,
+            RequestLog.request_path,
+            RequestLog.is_stream,
+            RequestLog.success,
+            RequestLog.status_code,
+            RequestLog.trace_id,
+            RequestLog.latency_ms,
+            RequestLog.ttfb_ms,
+            RequestLog.duration_ms,
+            RequestLog.prompt_tokens,
+            RequestLog.completion_tokens,
+            RequestLog.total_tokens,
+            RequestLog.billing_status,
+            RequestLog.created_at,
+        ),
+    )
     try:
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             logs = list(
                 db.scalars(
                     select(RequestLog)
+                    .options(*summary_options)
                     .where(RequestLog.api_client_key_id == api_key_id)
                     .order_by(RequestLog.created_at.desc(), RequestLog.id.desc())
                     .limit(expected_count + 10)
@@ -379,6 +446,7 @@ def wait_for_logs(*, api_key_id: int, expected_count: int, timeout_s: int = 90) 
         return list(
             db.scalars(
                 select(RequestLog)
+                .options(*summary_options)
                 .where(RequestLog.api_client_key_id == api_key_id)
                 .order_by(RequestLog.created_at.desc(), RequestLog.id.desc())
                 .limit(expected_count + 10)
@@ -474,6 +542,8 @@ def query_upstream_models(upstream_base_url: str, upstream_api_key: str) -> list
     for item in data:
         if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"].strip():
             result.append(item["id"].strip())
+            if len(result) >= MAX_UPSTREAM_MODEL_OPTIONS:
+                break
     return result
 
 
