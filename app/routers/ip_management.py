@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from datetime import datetime, timedelta
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models.ip_management import IpAccessRule
+from app.models.ip_management import IpAccessRule, IpManagementEvent
 from app.schemas.ip_management import (
     IpAccessRuleCreate,
     IpAccessRuleUpdate,
@@ -127,6 +129,7 @@ def delete_ip_rule(rule_id: int, db: Session = Depends(get_db), current_user=Dep
     name = rule.name
     db.delete(rule)
     db.commit()
+    IpManagementService.invalidate_rule_cache()
     AdminAuditService.create_log(
         db,
         actor_user_id=current_user.id,
@@ -157,6 +160,7 @@ def _set_rule_enabled(db: Session, current_user, rule_id: int, enabled: bool) ->
     rule.enabled = enabled
     db.commit()
     db.refresh(rule)
+    IpManagementService.invalidate_rule_cache()
     AdminAuditService.create_log(
         db,
         actor_user_id=current_user.id,
@@ -172,15 +176,34 @@ def _set_rule_enabled(db: Session, current_user, rule_id: int, enabled: bool) ->
 
 @router.get("/events")
 def list_ip_events(
+    request: Request,
     keyword: str | None = None,
     ip: str | None = None,
     decision: str | None = None,
     scope: str | None = None,
+    status_code: int | None = None,
+    started_at: datetime | None = None,
+    ended_at: datetime | None = None,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
     db: Session = Depends(get_db),
 ) -> dict:
-    total, rows = IpManagementEventService.list_events(db, keyword=keyword, ip=ip, decision=decision, scope=scope, page=page, page_size=page_size)
+    if "api_key" in request.query_params:
+        raise HTTPException(status_code=422, detail="IP 管理事件暂不支持 API Key 前缀筛选")
+    if started_at is None and ended_at is None and not any((keyword, ip, decision, scope, status_code is not None)):
+        started_at = datetime.utcnow() - timedelta(days=7)
+    total, rows = IpManagementEventService.list_events(
+        db,
+        keyword=keyword,
+        ip=ip,
+        decision=decision,
+        scope=scope,
+        status_code=status_code,
+        started_at=started_at,
+        ended_at=ended_at,
+        page=page,
+        page_size=page_size,
+    )
     return {"total": total, "items": [IpManagementService.serialize_event(item) for item in rows], "page": page, "page_size": page_size}
 
 
@@ -199,6 +222,14 @@ def cleanup_ip_events(db: Session = Depends(get_db), current_user=Depends(requir
         summary=f"清理 IP 管理事件 {count} 条",
     )
     return {"deleted": count}
+
+
+@router.get("/events/{event_id}")
+def get_ip_event(event_id: int, db: Session = Depends(get_db)) -> dict:
+    event = db.get(IpManagementEvent, event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="IP 管理事件不存在")
+    return {"event": IpManagementService.serialize_event(event)}
 
 
 @router.post("/test-resolution")

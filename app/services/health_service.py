@@ -6,10 +6,13 @@ from typing import Any
 
 import httpx
 import requests
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
+from sqlalchemy.orm import selectinload
 
 from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
+from app.database import SessionLocal
 from app.schemas.content_guard import ContentGuardRunRequest
 from app.services.cache_service import CacheService
 from app.services.content_guard_probe_service import ContentGuardProbeService
@@ -20,6 +23,7 @@ from app.logging.adapters.health_adapter import HealthLogRecorder
 from app.services.provider_health_state_service import ProviderHealthStateService
 from app.services.provider_service import ProviderService
 from app.services.proxy_service import ProxyService, StreamTimeoutPolicy
+from app.services.redis_service import RedisService
 from app.services.setting_service import SettingService
 from app.services.upstream_client import UpstreamClientService
 
@@ -33,24 +37,32 @@ class HealthService:
     PROBE_RETRY_MAX_ATTEMPTS = 2
     PROBE_RETRY_DELAY_SEC = 0.35
     MAX_PARALLEL_MODEL_PROBES = 16
+    MAX_GLOBAL_PHASE_PROVIDERS = 4
     INTERACTIVE_TEXT_PROBE_PHASE_KEYS = frozenset({"text_stream"})
     INTERACTIVE_TEXT_PROBE_MAX_TOKENS = 1
     INTERACTIVE_CAPABILITY_PROBE_MAX_TOKENS = 1
     INTERACTIVE_PROBE_TIMEOUT_SECONDS = 8.0
     INTERACTIVE_STREAM_CONNECT_TIMEOUT_SECONDS = 4
     INTERACTIVE_STREAM_FIRST_TOKEN_TIMEOUT_SECONDS = 4
+    HEALTH_STREAM_PROGRESS_QUEUE_SIZE = 200
+    MANUAL_PROVIDER_SCAN_LIMIT = 200
     SCHEDULED_ACTIVE_MODEL_WINDOW_MINUTES = 30
     SCHEDULED_TEXT_PROBE_MAX_TOKENS = 4
     SCHEDULED_CAPABILITY_PROBE_MAX_TOKENS = 8
+    SCHEDULED_CONTENT_INTEGRITY_MODEL_LIMIT = 20
+    SCHEDULED_CONTENT_INTEGRITY_CONCURRENCY = 3
+    SCHEDULED_PROVIDER_SCAN_LIMIT = 200
     SCHEDULED_CAPABILITY_RESULT_TTL_SECONDS = 60 * 30
+    AUTO_MODEL_PROBE_LIMIT_PER_MINUTE = 2
     CONTENT_GUARD_PROBE_PHASE_AUDIT_KEYS = (
         "content_fixed_answer",
         "content_pollution_rules",
         "content_json",
         "content_sse",
-        "content_tools",
     )
-    CONTENT_GUARD_PROBE_PHASE_KEYS = ContentGuardProbeService.PROBE_PHASE_KEYS
+    CONTENT_GUARD_PROBE_PHASE_KEYS = frozenset(
+        f"content_{probe_key}" for probe_key in ContentTrustProbeService.REQUIRED_TRUST_PROBE_KEYS
+    )
 
     @staticmethod
     def cached_provider_status_summary(db: Session) -> dict:
@@ -59,15 +71,44 @@ class HealthService:
         cached = CacheService.get(cache_key)
         if cached is not None:
             return cached
-        providers = ProviderService.list_providers(db)
+        row = db.execute(
+            select(
+                func.count(Provider.id).label("provider_count"),
+                func.coalesce(func.sum(case((Provider.health_status == "healthy", 1), else_=0)), 0).label("healthy_provider_count"),
+                func.coalesce(func.sum(case((Provider.health_status == "degraded", 1), else_=0)), 0).label("degraded_provider_count"),
+                func.coalesce(func.sum(case((Provider.health_status == "unhealthy", 1), else_=0)), 0).label("unhealthy_provider_count"),
+                func.coalesce(func.sum(case((Provider.circuit_state == "open", 1), else_=0)), 0).label("open_circuit_provider_count"),
+            )
+        ).one()
         payload = {
-            "provider_count": len(providers),
-            "healthy_provider_count": len([item for item in providers if item.health_status == "healthy"]),
-            "degraded_provider_count": len([item for item in providers if item.health_status == "degraded"]),
-            "unhealthy_provider_count": len([item for item in providers if item.health_status == "unhealthy"]),
-            "open_circuit_provider_count": len([item for item in providers if item.circuit_state == "open"]),
+            "provider_count": int(row.provider_count or 0),
+            "healthy_provider_count": int(row.healthy_provider_count or 0),
+            "degraded_provider_count": int(row.degraded_provider_count or 0),
+            "unhealthy_provider_count": int(row.unhealthy_provider_count or 0),
+            "open_circuit_provider_count": int(row.open_circuit_provider_count or 0),
         }
         return CacheService.set(cache_key, payload, ttl_seconds=max(0, int(setting.provider_status_cache_ttl_sec)))
+
+    @staticmethod
+    def _scheduled_enabled_providers(
+        db: Session,
+        *,
+        content_guard_only: bool = False,
+        apply_scan_limit: bool = True,
+        include_models: bool = True,
+    ) -> list[Provider]:
+        options = [selectinload(Provider.provider_models)] if include_models else []
+        stmt = (
+            select(Provider)
+            .options(*options)
+            .where(Provider.enabled.is_(True))
+            .order_by(Provider.priority.asc(), Provider.id.asc())
+        )
+        if content_guard_only:
+            stmt = stmt.where(Provider.content_guard_enabled.is_(True))
+        if apply_scan_limit:
+            stmt = stmt.limit(HealthService.SCHEDULED_PROVIDER_SCAN_LIMIT)
+        return list(db.scalars(stmt))
 
     @staticmethod
     async def check_provider(
@@ -137,7 +178,17 @@ class HealthService:
             if interactive_mode
             else None
         )
-        providers = ProviderService.list_providers(db)
+        if provider_ids:
+            providers = list(
+                db.scalars(
+                    select(Provider)
+                    .options(selectinload(Provider.provider_models))
+                    .where(Provider.id.in_(provider_ids))
+                    .order_by(Provider.priority.asc(), Provider.id.asc())
+                )
+            )
+        else:
+            providers = ProviderService.list_providers(db)
         if provider_ids:
             provider_map = {provider.id: provider for provider in providers}
             providers = [provider_map[provider_id] for provider_id in provider_ids if provider_id in provider_map]
@@ -211,6 +262,45 @@ class HealthService:
         parallel_phases: bool = False,
         single_endpoint_mode: bool = False,
     ) -> dict:
+        if not interactive_mode and not HealthService._claim_auto_model_probe_slot(provider.id, provider_model.id):
+            now = datetime.utcnow()
+            provider_model.health_status = "unhealthy"
+            provider_model.circuit_state = "open"
+            provider_model.circuit_opened_at = now
+            provider_model.last_check_at = now
+            provider_model.last_error = "自动健康探针频率超过每分钟 2 次限制，未继续触发上游探针，按异常状态处理"
+            ProviderService.refresh_provider_state(provider)
+            db.commit()
+            ProviderHealthStateService.record_model_probe(
+                provider,
+                provider_model,
+                success=False,
+                health_status="unhealthy",
+                circuit_state="open",
+                latency_ms=0,
+            )
+            return {
+                "model_name": provider_model.model_name,
+                "success": False,
+                "provider_success": False,
+                "health_status": "unhealthy",
+                "latency_ms": 0,
+                "status_code": 429,
+                "message": provider_model.last_error,
+                "probe_rate_limited": True,
+                "endpoint_results": [
+                    {
+                        "provider_model_id": provider_model.id,
+                        "model_name": provider_model.model_name,
+                        "endpoint_label": "自动健康探针频率限制",
+                        "capability_key": "auto_probe_rate_limit",
+                        "success": False,
+                        "status_code": 429,
+                        "latency_ms": 0,
+                        "message": provider_model.last_error,
+                    }
+                ],
+            }
         run = (
             HealthLogRecorder.start_run(
                 db,
@@ -238,25 +328,44 @@ class HealthService:
         )[0]
         HealthService._persist_model_health_result(db, provider, provider_model, model_result)
         if interactive_mode:
-            content_result = (
-                await HealthService._run_provider_model_checks(
-                    provider,
-                    [provider_model],
-                    phase_keys=ContentGuardProbeService.PROBE_PHASE_KEYS,
-                    text_probe_max_tokens=text_probe_max_tokens,
-                    capability_probe_max_tokens=capability_probe_max_tokens,
-                    interactive_mode=interactive_mode,
-                    parallel_phases=parallel_phases,
-                    single_endpoint_mode=False,
+            try:
+                trust_probe_result = await ContentTrustProbeService.run_trust_probe(
+                    db,
+                    ContentGuardRunRequest(
+                        target_type="internal",
+                        provider_id=provider.id,
+                        provider_model_id=provider_model.id,
+                        probe_keys=list(ContentTrustProbeService.REQUIRED_TRUST_PROBE_KEYS),
+                        persist_internal_result=True,
+                    ),
+                    detection_source="manual_health_trust_probe",
                 )
-            )[0]
-            HealthService._persist_model_health_result(
+                content_result = HealthService._content_trust_probe_model_result(provider_model, trust_probe_result)
+            except Exception as exc:
+                content_result = HealthService._content_trust_probe_error_result(provider_model, exc)
+                ContentTrustProbeService.update_provider_model_trust_status(
+                    db,
+                    provider,
+                    provider_model,
+                    content_guard_result=content_result["endpoint_results"][0]["content_guard"],
+                    endpoint_results=content_result["endpoint_results"],
+                    detection_source="manual_health_trust_probe",
+                )
+            LogService.create_log(
                 db,
-                provider,
-                provider_model,
-                content_result,
+                log_type="health_check_model",
+                provider_id=provider.id,
+                provider_name=provider.name,
+                model_name=provider_model.model_name,
                 request_path="/content-integrity-test",
-                update_health_state=False,
+                success=bool(content_result.get("success")),
+                status_code=content_result.get("status_code"),
+                latency_ms=int(content_result.get("latency_ms") or 0),
+                message=content_result.get("message"),
+                capability_result={
+                    "endpoint_results": content_result.get("endpoint_results") or [],
+                    "content_probe_summary": content_result.get("content_probe_summary"),
+                },
             )
             model_result["trust_status"] = ProviderService.provider_model_trust_status(provider_model)
             model_result["trust_status_label"] = ProviderService.provider_model_to_dict(provider_model).get("trust_status_label")
@@ -272,6 +381,20 @@ class HealthService:
             HealthService._record_run_results(db, run_id=run.run_id, provider_results=[provider_result])
             HealthLogRecorder.finish_run(db, run_id=run.run_id, results=[model_result])
         return model_result
+
+    @staticmethod
+    def _claim_auto_model_probe_slot(provider_id: int, provider_model_id: int) -> bool:
+        try:
+            minute_bucket = int(datetime.utcnow().timestamp() // 60)
+            key = f"health:auto-model-probe-rate:{provider_id}:{provider_model_id}:{minute_bucket}"
+            client = RedisService.get_sync_client()
+            pipe = client.pipeline()
+            pipe.incr(key)
+            pipe.expire(key, 90)
+            count, _ = pipe.execute()
+            return int(count or 0) <= HealthService.AUTO_MODEL_PROBE_LIMIT_PER_MINUTE
+        except Exception:
+            return False
 
     @staticmethod
     async def _probe_native_tools(
@@ -725,7 +848,13 @@ class HealthService:
             if interactive_mode
             else None
         )
-        providers = [provider for provider in ProviderService.list_providers(db) if provider.enabled]
+        providers = HealthService._scheduled_enabled_providers(
+            db,
+            apply_scan_limit=True,
+            include_models=True,
+        )
+        if progress_callback is not None:
+            providers = providers[:HealthService.MANUAL_PROVIDER_SCAN_LIMIT]
         route_metrics = LogService.route_metric_summary(
             db,
             window_minutes=HealthService.SCHEDULED_ACTIVE_MODEL_WINDOW_MINUTES,
@@ -782,9 +911,11 @@ class HealthService:
         }
         phase_count = max((len(groups) for groups in phase_groups_by_provider.values()), default=0)
         for phase_index in range(phase_count):
-            await asyncio.gather(
-                *(
-                    HealthService._run_provider_phase_group(
+            provider_semaphore = asyncio.Semaphore(HealthService.MAX_GLOBAL_PHASE_PROVIDERS)
+
+            async def run_provider_phase(provider: Provider) -> None:
+                async with provider_semaphore:
+                    await HealthService._run_provider_phase_group(
                         provider,
                         provider_models_map[provider.id],
                         phase_groups_by_provider[provider.id][phase_index],
@@ -793,6 +924,10 @@ class HealthService:
                         progress_callback=progress_callback,
                         interactive_mode=interactive_mode,
                     )
+
+            await asyncio.gather(
+                *(
+                    run_provider_phase(provider)
                     for provider in providers
                     if phase_index < len(phase_groups_by_provider[provider.id])
                 )
@@ -865,7 +1000,7 @@ class HealthService:
             scope_type="all",
             phase_keys=["connectivity"],
         )
-        providers = [provider for provider in ProviderService.list_providers(db) if provider.enabled]
+        providers = HealthService._scheduled_enabled_providers(db, apply_scan_limit=False)
         results: list[dict] = []
         total_providers = len(providers)
         for provider_index, provider in enumerate(providers, start=1):
@@ -936,7 +1071,7 @@ class HealthService:
             window_minutes=HealthService.SCHEDULED_ACTIVE_MODEL_WINDOW_MINUTES,
         )
         active_model_keys = set(route_metrics.keys())
-        providers = [provider for provider in ProviderService.list_providers(db) if provider.enabled]
+        providers = HealthService._scheduled_enabled_providers(db, apply_scan_limit=False)
         results = await HealthService._check_scheduled_provider_models(
             db,
             providers,
@@ -967,7 +1102,7 @@ class HealthService:
             scope_type="model",
             phase_keys=["tools", "vision"],
         )
-        providers = [provider for provider in ProviderService.list_providers(db) if provider.enabled]
+        providers = HealthService._scheduled_enabled_providers(db, apply_scan_limit=False)
         results = await HealthService._check_scheduled_provider_models(
             db,
             providers,
@@ -994,17 +1129,19 @@ class HealthService:
         setting = SettingService.get_or_create(db)
         if not bool(getattr(setting, "content_guard_enabled", True)):
             return []
+        if progress_callback is None and not bool(getattr(setting, "content_guard_precheck_auto_enabled", False)):
+            return []
         run = HealthLogRecorder.start_run(
             db,
             trigger_type="manual_batch" if progress_callback is not None else "scheduled_l3",
             scope_type="model",
             phase_keys=list(HealthService.CONTENT_GUARD_PROBE_PHASE_KEYS),
         )
-        providers = [
-            provider
-            for provider in ProviderService.list_providers(db)
-            if provider.enabled and bool(getattr(provider, "content_guard_enabled", True))
-        ]
+        providers = HealthService._scheduled_enabled_providers(
+            db,
+            content_guard_only=True,
+            apply_scan_limit=progress_callback is None,
+        )
         results = await HealthService._run_scheduled_content_trust_probes(
             db,
             providers,
@@ -1025,7 +1162,10 @@ class HealthService:
     ) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         total_providers = len(providers)
+        remaining_model_budget = HealthService.SCHEDULED_CONTENT_INTEGRITY_MODEL_LIMIT
         for provider_index, provider in enumerate(providers, start=1):
+            if remaining_model_budget <= 0:
+                break
             models_to_check = [
                 provider_model
                 for provider_model in provider.provider_models
@@ -1036,8 +1176,13 @@ class HealthService:
                     setting=setting,
                 )
             ]
-            model_results: list[dict[str, Any]] = []
-            for provider_model in models_to_check:
+            if len(models_to_check) > remaining_model_budget:
+                models_to_check = models_to_check[:remaining_model_budget]
+            semaphore = asyncio.Semaphore(
+                max(1, min(HealthService.SCHEDULED_CONTENT_INTEGRITY_CONCURRENCY, len(models_to_check)))
+            )
+
+            async def run_model_probe(provider_model: ProviderModel) -> dict[str, Any]:
                 await HealthService._emit_progress(
                     progress_callback,
                     {
@@ -1051,28 +1196,11 @@ class HealthService:
                         "model_name": provider_model.model_name,
                     },
                 )
-                try:
-                    probe_result = await ContentTrustProbeService.run_trust_probe(
-                        db,
-                        ContentGuardRunRequest(
-                            target_type="internal",
-                            provider_id=provider.id,
-                            provider_model_id=provider_model.id,
-                            probe_keys=list(ContentTrustProbeService.REQUIRED_TRUST_PROBE_KEYS),
-                            persist_internal_result=True,
-                        ),
+                async with semaphore:
+                    model_result = await HealthService._run_scheduled_content_trust_probe_for_model(
+                        provider.id,
+                        provider_model.id,
                     )
-                    model_result = HealthService._content_trust_probe_model_result(provider_model, probe_result)
-                except Exception as exc:
-                    model_result = HealthService._content_trust_probe_error_result(provider_model, exc)
-                    ContentTrustProbeService.update_provider_model_trust_status(
-                        db,
-                        provider,
-                        provider_model,
-                        content_guard_result=model_result["endpoint_results"][0]["content_guard"],
-                        endpoint_results=model_result["endpoint_results"],
-                    )
-                model_results.append(model_result)
                 await HealthService._emit_progress(
                     progress_callback,
                     {
@@ -1087,12 +1215,24 @@ class HealthService:
                         "success": model_result.get("success"),
                     },
                 )
+                return model_result
+
+            model_results = await asyncio.gather(*(run_model_probe(provider_model) for provider_model in models_to_check))
+            remaining_model_budget -= len(model_results)
+            for provider_model, model_result in zip(models_to_check, model_results, strict=False):
+                if not model_result.get("model_name"):
+                    model_result["model_name"] = provider_model.model_name
+                if model_result.get("provider_model_id") is None:
+                    model_result["provider_model_id"] = provider_model.id
+                for endpoint_result in model_result.get("endpoint_results") or []:
+                    endpoint_result.setdefault("provider_model_id", provider_model.id)
             models_total = len(models_to_check)
             models_success = sum(1 for item in model_results if item.get("success"))
             models_failed = max(0, models_total - models_success)
-            provider_success = models_success > 0 if model_results else False
+            skipped_no_due_models = models_total == 0
+            provider_success = True if skipped_no_due_models else models_success > 0
             latency_ms = max((int(item.get("latency_ms") or 0) for item in model_results), default=0)
-            status_code = next((item.get("status_code") for item in model_results if not item.get("success")), 200 if provider_success else None)
+            status_code = next((item.get("status_code") for item in model_results if not item.get("success")), 204 if skipped_no_due_models else (200 if provider_success else None))
             message = (
                 f"内容可信预检完成，模型 {models_success}/{models_total} 可信"
                 if models_total
@@ -1103,6 +1243,7 @@ class HealthService:
                 "provider_name": provider.name,
                 "success": provider_success and models_failed == 0,
                 "provider_success": provider_success,
+                "skipped": skipped_no_due_models,
                 "health_status": provider.health_status,
                 "latency_ms": latency_ms,
                 "status_code": status_code,
@@ -1131,6 +1272,67 @@ class HealthService:
         return results
 
     @staticmethod
+    async def _run_scheduled_content_trust_probe_for_model(
+        provider_id: int,
+        provider_model_id: int,
+    ) -> dict[str, Any]:
+        probe_db = SessionLocal()
+        try:
+            provider = probe_db.get(Provider, provider_id)
+            provider_model = probe_db.get(ProviderModel, provider_model_id)
+            if provider is None or provider_model is None:
+                model_name = f"provider_model:{provider_model_id}"
+                return {
+                    "provider_model_id": provider_model_id,
+                    "model_name": model_name,
+                    "success": False,
+                    "provider_success": False,
+                    "health_status": "unknown",
+                    "content_integrity_status": "unknown",
+                    "latency_ms": 0,
+                    "status_code": None,
+                    "message": "内容可信预检目标不存在",
+                    "endpoint_results": [
+                        {
+                            "provider_model_id": provider_model_id,
+                            "capability_key": "content_trust_probe",
+                            "endpoint_label": "内容可信预检",
+                            "endpoint_path": None,
+                            "success": False,
+                            "support_mode": "target_not_found",
+                            "message": "内容可信预检目标不存在",
+                            "retryable": False,
+                        }
+                    ],
+                }
+            try:
+                probe_result = await ContentTrustProbeService.run_trust_probe(
+                    probe_db,
+                    ContentGuardRunRequest(
+                        target_type="internal",
+                        provider_id=provider.id,
+                        provider_model_id=provider_model.id,
+                        probe_keys=list(ContentTrustProbeService.REQUIRED_TRUST_PROBE_KEYS),
+                        persist_internal_result=True,
+                    ),
+                    detection_source="automatic_trust_probe",
+                )
+                return HealthService._content_trust_probe_model_result(provider_model, probe_result)
+            except Exception as exc:
+                model_result = HealthService._content_trust_probe_error_result(provider_model, exc)
+                ContentTrustProbeService.update_provider_model_trust_status(
+                    probe_db,
+                    provider,
+                    provider_model,
+                    content_guard_result=model_result["endpoint_results"][0]["content_guard"],
+                    endpoint_results=model_result["endpoint_results"],
+                    detection_source="automatic_trust_probe",
+                )
+                return model_result
+        finally:
+            probe_db.close()
+
+    @staticmethod
     def _content_trust_probe_model_result(provider_model: ProviderModel, probe_result: dict[str, Any]) -> dict[str, Any]:
         summary = probe_result.get("summary") or {}
         endpoint_results = list(probe_result.get("probe_results") or [])
@@ -1156,6 +1358,7 @@ class HealthService:
     @staticmethod
     def _content_trust_probe_error_result(provider_model: ProviderModel, exc: Exception) -> dict[str, Any]:
         reason = str(exc)[:500] or "内容可信预检异常"
+        retryable = HealthService._content_probe_exception_retryable(exc)
         content_guard = {
             "content_guard_result": ContentGuardRuleService.RESULT_REVIEW,
             "content_guard_risk_level": "medium",
@@ -1178,7 +1381,7 @@ class HealthService:
             "status_code": None,
             "message": reason,
             "trace": [],
-            "retryable": True,
+            "retryable": retryable,
             "content_guard": content_guard,
         }
         return {
@@ -1316,6 +1519,7 @@ class HealthService:
                     )
                     continue
                 for endpoint_result in endpoint_results:
+                    endpoint_path = endpoint_result.get("endpoint_path")
                     HealthLogRecorder.record_probe(
                         db,
                         run_id=run_id,
@@ -1323,8 +1527,8 @@ class HealthService:
                         provider_model_id=endpoint_result.get("provider_model_id"),
                         model_name=model_result.get("model_name"),
                         probe_type=str(endpoint_result.get("capability_key") or endpoint_result.get("endpoint_label") or "probe"),
-                        endpoint_path=endpoint_result.get("endpoint_path"),
-                        protocol_type="chat_completions" if endpoint_result.get("endpoint_path") == "/chat/completions" else "responses",
+                        endpoint_path=endpoint_path,
+                        protocol_type="chat_completions" if endpoint_path == "/chat/completions" else ("responses" if endpoint_path == "/responses" else None),
                         success=bool(endpoint_result.get("success")),
                         status_code=endpoint_result.get("status_code"),
                         latency_ms=endpoint_result.get("latency_ms"),
@@ -1354,6 +1558,25 @@ class HealthService:
             provider_model.id: []
             for provider_model in models_to_check
         }
+        manual_probe = bool(interactive_mode or progress_callback is not None)
+        actual_models_to_check: list[ProviderModel] = []
+        for provider_model in models_to_check:
+            if manual_probe or HealthService._claim_auto_model_probe_slot(provider.id, provider_model.id):
+                actual_models_to_check.append(provider_model)
+                continue
+            endpoint_results_by_model_id[provider_model.id].append(
+                {
+                    "provider_model_id": provider_model.id,
+                    "model_name": provider_model.model_name,
+                    "endpoint_label": "自动健康探针频率限制",
+                    "capability_key": "auto_probe_rate_limit",
+                    "success": False,
+                    "status_code": 429,
+                    "latency_ms": 0,
+                    "message": "自动健康探针频率超过每分钟 2 次限制，未继续触发上游探针，按异常状态处理",
+                }
+            )
+        models_to_probe = actual_models_to_check
         phase_specs = HealthService._build_probe_phase_groups(
             provider,
             stream_probe=stream_probe,
@@ -1364,12 +1587,12 @@ class HealthService:
             interactive_mode=interactive_mode,
             single_endpoint_mode=single_endpoint_mode,
         )
-        if interactive_mode and parallel_phases:
+        if models_to_probe and interactive_mode and parallel_phases:
             phase_results = await asyncio.gather(
                 *(
                     HealthService._run_provider_phase_group(
                         provider,
-                        models_to_check,
+                        models_to_probe,
                         phase_spec,
                         phase_index=phase_index,
                         endpoint_results_by_model_id=endpoint_results_by_model_id,
@@ -1380,11 +1603,11 @@ class HealthService:
                 )
             )
             _ = phase_results
-        else:
+        elif models_to_probe:
             for phase_index, phase_spec in enumerate(phase_specs, start=1):
                 await HealthService._run_provider_phase_group(
                     provider,
-                    models_to_check,
+                    models_to_probe,
                     phase_spec,
                     phase_index=phase_index,
                     endpoint_results_by_model_id=endpoint_results_by_model_id,
@@ -1790,6 +2013,7 @@ class HealthService:
             ContentGuardProbeService.build_health_phase_specs(
                 provider,
                 should_test_endpoint=_should_test_endpoint,
+                include_json_probe=ContentTrustProbeService.json_probe_enabled(),
             )
         )
         if phase_keys is None:
@@ -2079,6 +2303,7 @@ class HealthService:
                 provider_model,
                 content_guard_result=content_guard_result,
                 endpoint_results=endpoint_results,
+                detection_source="automatic_health_probe",
             )
         LogService.create_log(
             db,
@@ -2176,10 +2401,6 @@ class HealthService:
         interval_seconds = max(300, int(getattr(setting, "content_guard_probe_interval_sec", 3600) or 3600))
         if provider_model.content_integrity_status == "blocked":
             return False
-        if provider_model.content_probe_last_passed_at is None and provider_model.content_probe_last_failed_at is None:
-            return True
-        if provider_model.content_integrity_status in {"unknown", "degraded"}:
-            return True
         last_probe_at = max(
             (
                 item
@@ -2625,6 +2846,32 @@ class HealthService:
         return True
 
     @staticmethod
+    def _content_probe_exception_retryable(exc: Exception) -> bool:
+        if isinstance(exc, (httpx.TimeoutException, httpx.TransportError, requests.RequestException)):
+            return True
+        if isinstance(exc, (ValueError, TypeError, AttributeError, KeyError)):
+            return False
+        normalized_message = str(exc or "").strip().lower()
+        non_retryable_hints = (
+            "不存在",
+            "停用",
+            "不属于",
+            "没有可检测",
+            "未启用",
+            "必须",
+            "invalid",
+            "unsupported",
+            "does not support",
+            "not implemented",
+            "model_not_found",
+            "bad_response_status_code",
+        )
+        if any(hint in normalized_message for hint in non_retryable_hints):
+            return False
+        transient_hints = ("timeout", "temporarily", "connection", "network", "rate_limit", "429", "503")
+        return any(hint in normalized_message for hint in transient_hints)
+
+    @staticmethod
     def _is_probe_failure_retryable(
         *,
         status_code: int | None,
@@ -2936,6 +3183,10 @@ class HealthService:
             provider_model.success_count += 1
             provider_model.circuit_state = "closed"
             provider_model.circuit_opened_at = None
+            if provider_model.content_integrity_status in {"blocked", "degraded"}:
+                provider_model.content_integrity_status = "unknown"
+                provider_model.content_probe_last_failed_at = None
+                provider_model.content_probe_failure_count = 0
         elif health_status == "degraded":
             provider_model.failure_count = 0
             provider_model.success_count += 1
@@ -3014,7 +3265,14 @@ class HealthService:
     @staticmethod
     async def _safe_error_text(response: httpx.Response) -> str:
         try:
-            await response.aread()
+            body = bytearray()
+            async for chunk in response.aiter_bytes():
+                if not chunk:
+                    continue
+                if len(body) + len(chunk) > 65536:
+                    body.extend(chunk[: max(0, 65536 - len(body))])
+                    break
+                body.extend(chunk)
         except Exception:
             return f"upstream status {response.status_code}"
-        return response.text[:500]
+        return bytes(body).decode("utf-8", errors="ignore")[:500]

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import hashlib
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.ip_management import IpManagementEvent, IpManagementSetting
@@ -11,6 +12,9 @@ from app.utils.json_utils import dumps_json
 
 
 class IpManagementEventService:
+    CLEANUP_BATCH_SIZE = 5000
+    CLEANUP_MAX_BATCHES = 100
+
     @staticmethod
     def mask_ip(ip_value: str | None) -> str | None:
         if not ip_value:
@@ -43,7 +47,53 @@ class IpManagementEventService:
     ) -> IpManagementEvent | None:
         if not setting.event_logging_enabled:
             return None
+        sample_rate = max(0, min(100, int(setting.event_sample_rate or 0)))
+        if sample_rate <= 0:
+            return None
+        if sample_rate < 100:
+            sample_seed = "|".join(
+                [
+                    trace_id or "",
+                    request_path or "",
+                    scope or "",
+                    resolution.resolved_client_ip or "",
+                    decision,
+                    decision_reason or "",
+                ]
+            )
+            sample_bucket = int(hashlib.sha256(sample_seed.encode("utf-8")).hexdigest()[:8], 16) % 100
+            if sample_bucket >= sample_rate:
+                return None
+        if trace_id:
+            exists = db.scalar(
+                select(IpManagementEvent.id)
+                .where(
+                    IpManagementEvent.trace_id == trace_id,
+                    IpManagementEvent.request_path == request_path,
+                    IpManagementEvent.http_method == http_method,
+                    IpManagementEvent.scope == scope,
+                    IpManagementEvent.resolved_client_ip == resolution.resolved_client_ip,
+                    IpManagementEvent.direct_client_ip == resolution.direct_client_ip,
+                    IpManagementEvent.resolution_source == resolution.resolution_source,
+                    IpManagementEvent.resolution_status == resolution.resolution_status,
+                    IpManagementEvent.decision == decision,
+                    IpManagementEvent.decision_reason == decision_reason,
+                    IpManagementEvent.matched_rule_id == matched_rule_id,
+                    IpManagementEvent.enforced.is_(enforced),
+                    IpManagementEvent.status_code == status_code,
+                )
+                .limit(1)
+            )
+            if exists:
+                return None
         display_ip = IpManagementEventService.mask_ip(resolution.resolved_client_ip) if setting.ip_masking_enabled else resolution.resolved_client_ip
+        forwarded_chain_payload = {
+            "chain": resolution.forwarded_chain if setting.store_raw_headers_enabled else [],
+            "chain_count": len(resolution.forwarded_chain),
+            "ignored_headers": resolution.ignored_headers,
+            "warnings": resolution.warnings,
+            "raw_header_summary_stored": bool(setting.store_raw_headers_enabled),
+        }
         event = IpManagementEvent(
             trace_id=trace_id,
             request_path=request_path,
@@ -55,13 +105,7 @@ class IpManagementEventService:
             resolution_source=resolution.resolution_source,
             resolution_status=resolution.resolution_status,
             trusted_proxy_matched=resolution.trusted_proxy_matched,
-            forwarded_chain_json=dumps_json(
-                {
-                    "chain": resolution.forwarded_chain,
-                    "ignored_headers": resolution.ignored_headers,
-                    "warnings": resolution.warnings,
-                }
-            ),
+            forwarded_chain_json=dumps_json(forwarded_chain_payload),
             matched_rule_id=matched_rule_id,
             matched_rule_name=matched_rule_name,
             decision=decision,
@@ -82,6 +126,9 @@ class IpManagementEventService:
         ip: str | None = None,
         decision: str | None = None,
         scope: str | None = None,
+        status_code: int | None = None,
+        started_at: datetime | None = None,
+        ended_at: datetime | None = None,
         page: int = 1,
         page_size: int = 20,
     ) -> tuple[int, list[IpManagementEvent]]:
@@ -103,6 +150,12 @@ class IpManagementEventService:
             filters.append(IpManagementEvent.decision == decision.strip())
         if scope:
             filters.append(IpManagementEvent.scope == scope.strip())
+        if status_code is not None:
+            filters.append(IpManagementEvent.status_code == status_code)
+        if started_at is not None:
+            filters.append(IpManagementEvent.created_at >= started_at)
+        if ended_at is not None:
+            filters.append(IpManagementEvent.created_at <= ended_at)
         for item in filters:
             stmt = stmt.where(item)
             count_stmt = count_stmt.where(item)
@@ -119,8 +172,21 @@ class IpManagementEventService:
     @staticmethod
     def cleanup_old_events(db: Session, *, retention_days: int) -> int:
         cutoff = datetime.utcnow() - timedelta(days=max(1, int(retention_days or 30)))
-        rows = list(db.scalars(select(IpManagementEvent).where(IpManagementEvent.created_at < cutoff).limit(5000)))
-        for row in rows:
-            db.delete(row)
-        db.commit()
-        return len(rows)
+        total_deleted = 0
+        for _ in range(IpManagementEventService.CLEANUP_MAX_BATCHES):
+            ids = list(
+                db.scalars(
+                    select(IpManagementEvent.id)
+                    .where(IpManagementEvent.created_at < cutoff)
+                    .order_by(IpManagementEvent.id.asc())
+                    .limit(IpManagementEventService.CLEANUP_BATCH_SIZE)
+                )
+            )
+            if not ids:
+                break
+            result = db.execute(delete(IpManagementEvent).where(IpManagementEvent.id.in_(ids)))
+            db.commit()
+            total_deleted += int(result.rowcount or 0)
+            if len(ids) < IpManagementEventService.CLEANUP_BATCH_SIZE:
+                break
+        return total_deleted

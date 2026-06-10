@@ -1,21 +1,25 @@
 import re
 import ipaddress
+import json
 import socket
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.utils.content_guard_config import (
+    CONTENT_GUARD_MAX_SCAN_BYTES_LIMIT,
+    CONTENT_GUARD_PROBE_INTERVAL_MAX_SECONDS,
     CONTENT_GUARD_RULE_ACTIONS,
     CONTENT_GUARD_RULE_MATCH_TYPES,
     CONTENT_GUARD_RULE_RISK_LEVELS,
+    CONTENT_GUARD_STREAM_BUFFER_MAX_BYTES_LIMIT,
     content_guard_default,
     validate_content_guard_settings,
 )
 
 
-ContentGuardProbeKey = Literal["fixed_answer", "pollution_rules", "json", "sse", "tools"]
+ContentGuardProbeKey = Literal["fixed_answer", "pollution_rules", "json", "sse"]
 ContentGuardEndpointPath = Literal["/chat/completions", "/responses"]
 ContentGuardRuleMatchType = Literal["keyword_any", "regex", "unexpected_url"]
 ContentGuardRuleRiskLevel = Literal["low", "medium", "high"]
@@ -28,9 +32,14 @@ class ContentGuardSettingsUpdate(BaseModel):
     content_guard_enabled: bool = content_guard_default("content_guard_enabled")
     content_guard_precheck_auto_enabled: bool = content_guard_default("content_guard_precheck_auto_enabled")
     content_guard_block_on_high_risk: bool = content_guard_default("content_guard_block_on_high_risk")
-    content_guard_probe_interval_sec: int = Field(default=content_guard_default("content_guard_probe_interval_sec"), ge=300)
-    content_guard_max_scan_bytes: int = Field(default=content_guard_default("content_guard_max_scan_bytes"), ge=1024)
-    content_guard_stream_buffer_max_bytes: int = Field(default=content_guard_default("content_guard_stream_buffer_max_bytes"), ge=1024)
+    content_guard_json_probe_enabled: bool = content_guard_default("content_guard_json_probe_enabled")
+    content_guard_probe_interval_sec: int = Field(
+        default=content_guard_default("content_guard_probe_interval_sec"),
+        ge=300,
+        le=CONTENT_GUARD_PROBE_INTERVAL_MAX_SECONDS,
+    )
+    content_guard_max_scan_bytes: int = Field(default=content_guard_default("content_guard_max_scan_bytes"), ge=1024, le=CONTENT_GUARD_MAX_SCAN_BYTES_LIMIT)
+    content_guard_stream_buffer_max_bytes: int = Field(default=content_guard_default("content_guard_stream_buffer_max_bytes"), ge=1024, le=CONTENT_GUARD_STREAM_BUFFER_MAX_BYTES_LIMIT)
     content_guard_low_trust_requires_buffer: bool = content_guard_default("content_guard_low_trust_requires_buffer")
     content_guard_high_risk_strategy: ContentGuardHighRiskStrategy = content_guard_default("content_guard_high_risk_strategy")
     content_guard_max_detection_delay_ms: int = Field(default=content_guard_default("content_guard_max_detection_delay_ms"), ge=0, le=500)
@@ -43,11 +52,53 @@ class ContentGuardSettingsUpdate(BaseModel):
         ge=0,
         le=100,
     )
+    content_guard_enhanced_detection_enabled: bool = content_guard_default("content_guard_enhanced_detection_enabled")
+    content_guard_enhanced_illegal_enabled: bool = content_guard_default("content_guard_enhanced_illegal_enabled")
+    content_guard_enhanced_ad_enabled: bool = content_guard_default("content_guard_enhanced_ad_enabled")
+    content_guard_enhanced_custom_enabled: bool = content_guard_default("content_guard_enhanced_custom_enabled")
+    content_guard_enhanced_obfuscation_enabled: bool = content_guard_default("content_guard_enhanced_obfuscation_enabled")
+    content_guard_enhanced_threshold: int = Field(
+        default=content_guard_default("content_guard_enhanced_threshold"),
+        ge=0,
+        le=100,
+    )
+    content_guard_enhanced_context_window_chars: int = Field(
+        default=content_guard_default("content_guard_enhanced_context_window_chars"),
+        ge=24,
+        le=512,
+    )
 
     @model_validator(mode="after")
     def validate_cross_fields(self) -> "ContentGuardSettingsUpdate":
         validate_content_guard_settings(self.model_dump())
         return self
+
+    @field_validator("content_guard_url_allowlist_json")
+    @classmethod
+    def validate_url_allowlist_json(cls, value: str) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            return "[]"
+        try:
+            parsed = json.loads(normalized)
+        except json.JSONDecodeError as exc:
+            raise ValueError("URL 白名单必须是 JSON 字符串数组") from exc
+        if not isinstance(parsed, list):
+            raise ValueError("URL 白名单必须是 JSON 字符串数组")
+        cleaned: list[str] = []
+        for item in parsed:
+            if not isinstance(item, str):
+                raise ValueError("URL 白名单只允许字符串域名")
+            domain = item.strip().lower().rstrip(".")
+            if "://" in domain:
+                parsed_domain = urlparse(domain).hostname or ""
+                domain = parsed_domain.strip().lower().rstrip(".")
+            domain = domain.removeprefix("www.")
+            if not domain or len(domain) > 253 or not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+", domain):
+                raise ValueError(f"URL 白名单域名无效：{item}")
+            if domain not in cleaned:
+                cleaned.append(domain)
+        return json.dumps(cleaned, ensure_ascii=False)
 
 
 class ContentGuardRulePayload(BaseModel):
@@ -118,14 +169,17 @@ class ContentGuardRulePayload(BaseModel):
         if self.match_type == "regex":
             for pattern in self.patterns:
                 try:
+                    from app.services.content_guard_rule_service import ContentGuardRuleService
+
+                    ContentGuardRuleService.validate_regex_pattern(pattern)
                     re.compile(pattern)
-                except re.error as exc:
+                except (re.error, ValueError) as exc:
                     raise ValueError(f"正则规则无效：{pattern}") from exc
         return self
 
 
 class ContentGuardRulesUpdate(BaseModel):
-    rules: list[ContentGuardRulePayload] = Field(default_factory=list, max_length=200)
+    rules: list[ContentGuardRulePayload] = Field(default_factory=list, min_length=1, max_length=200)
 
     @field_validator("rules")
     @classmethod
@@ -139,14 +193,45 @@ class ContentGuardRulesUpdate(BaseModel):
 
 
 class ContentGuardTextInspectRequest(BaseModel):
-    text: str = Field(..., min_length=1)
+    text: str = Field(..., min_length=1, max_length=CONTENT_GUARD_MAX_SCAN_BYTES_LIMIT)
     endpoint_path: ContentGuardEndpointPath | None = None
     request_payload: dict | None = None
-    max_scan_bytes: int = Field(default=16384, ge=1024)
+    max_scan_bytes: int = Field(default=16384, ge=1024, le=CONTENT_GUARD_MAX_SCAN_BYTES_LIMIT)
+
+    @field_validator("request_payload")
+    @classmethod
+    def validate_request_payload_size(cls, value: dict | None) -> dict | None:
+        if value is None:
+            return None
+        encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if len(encoded) > CONTENT_GUARD_MAX_SCAN_BYTES_LIMIT:
+            raise ValueError("请求上下文不能超过内容防护最大扫描字节数")
+
+        def walk(item: Any, *, depth: int = 0) -> int:
+            if depth > 12:
+                raise ValueError("请求上下文嵌套层级不能超过 12 层")
+            if isinstance(item, dict):
+                total = 1
+                for nested in item.values():
+                    total += walk(nested, depth=depth + 1)
+                    if total > 2000:
+                        raise ValueError("请求上下文结构节点不能超过 2000 个")
+                return total
+            if isinstance(item, list):
+                total = 1
+                for nested in item:
+                    total += walk(nested, depth=depth + 1)
+                    if total > 2000:
+                        raise ValueError("请求上下文结构节点不能超过 2000 个")
+                return total
+            return 1
+
+        walk(value)
+        return value
 
 
 class ContentGuardExternalTarget(BaseModel):
-    base_url: str = Field(..., min_length=1, max_length=2048)
+    base_url: str = Field(..., min_length=1, max_length=512)
     api_key: str = Field(..., min_length=1, max_length=4096)
     model_name: str = Field(..., min_length=1, max_length=256)
     endpoint_path: ContentGuardEndpointPath = "/responses"
@@ -157,14 +242,22 @@ class ContentGuardExternalTarget(BaseModel):
         normalized = value.strip().rstrip("/")
         if not normalized:
             raise ValueError("接口地址不能为空")
+        if len(normalized.encode("utf-8")) > 512:
+            raise ValueError("外部提供商接口地址不能超过 512 字节")
         parsed = urlparse(normalized)
         if parsed.scheme != "https":
-            raise ValueError("外部渠道接口地址必须使用 https://")
+            raise ValueError("外部提供商接口地址必须使用 https://")
         if not parsed.hostname:
             raise ValueError("接口地址必须包含有效主机名")
+        if parsed.username or parsed.password:
+            raise ValueError("外部提供商接口地址禁止包含用户名或密码")
+        if parsed.query or parsed.fragment:
+            raise ValueError("外部提供商接口地址禁止包含查询参数或片段")
         hostname = parsed.hostname.lower().strip(".")
+        if hostname in {"169.254.169.254", "metadata.google.internal"} or hostname.endswith(".internal"):
+            raise ValueError("外部提供商接口地址禁止使用云元数据或内部主机名")
         if hostname in {"localhost", "localhost.localdomain"} or hostname.endswith(".localhost"):
-            raise ValueError("外部渠道接口地址禁止使用 localhost")
+            raise ValueError("外部提供商接口地址禁止使用 localhost")
         try:
             host_ip = ipaddress.ip_address(hostname)
         except ValueError:
@@ -177,12 +270,12 @@ class ContentGuardExternalTarget(BaseModel):
             or host_ip.is_reserved
             or host_ip.is_unspecified
         ):
-            raise ValueError("外部渠道接口地址禁止使用内网、回环、链路本地或保留地址")
+            raise ValueError("外部提供商接口地址禁止使用内网、回环、链路本地或保留地址")
         if host_ip is None:
             try:
                 resolved_hosts = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
             except socket.gaierror as exc:
-                raise ValueError("外部渠道接口地址主机名无法解析") from exc
+                raise ValueError("外部提供商接口地址主机名无法解析") from exc
             for resolved in resolved_hosts:
                 address = resolved[4][0]
                 try:
@@ -197,7 +290,7 @@ class ContentGuardExternalTarget(BaseModel):
                     or resolved_ip.is_reserved
                     or resolved_ip.is_unspecified
                 ):
-                    raise ValueError("外部渠道接口地址解析到内网、回环、链路本地或保留地址")
+                    raise ValueError("外部提供商接口地址解析到内网、回环、链路本地或保留地址")
         return normalized
 
     @field_validator("api_key", "model_name")
@@ -214,7 +307,10 @@ class ContentGuardRunRequest(BaseModel):
     provider_id: int | None = None
     provider_model_id: int | None = None
     external: ContentGuardExternalTarget | None = None
-    probe_keys: list[ContentGuardProbeKey] = Field(default_factory=lambda: ["fixed_answer", "pollution_rules", "sse"])
+    probe_keys: list[ContentGuardProbeKey] = Field(
+        default_factory=lambda: ["fixed_answer", "pollution_rules", "sse"],
+        max_length=4,
+    )
     persist_internal_result: bool = True
 
     @field_validator("probe_keys")

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import time
 from datetime import datetime
 from typing import Any
 from urllib.parse import urlparse
@@ -12,6 +14,8 @@ from app.models.provider_model import ProviderModel
 from app.schemas.content_guard import ContentGuardRunRequest
 from app.services.content_guard_probe_service import ContentGuardProbeService
 from app.services.content_guard_rule_service import ContentGuardRuleService
+from app.services.setting_service import SettingService
+from app.utils.json_utils import loads_json
 
 
 class ContentTrustProbeService:
@@ -22,13 +26,61 @@ class ContentTrustProbeService:
         "pollution_rules": "外链广告识别",
         "json": "严格 JSON",
         "sse": "流式污染检测",
-        "tools": "工具调用",
     }
     REQUIRED_TRUST_PROBE_KEYS = ["fixed_answer", "pollution_rules", "sse"]
     MIN_CONTENT_INTEGRITY_SCORE = 20
+    PROBE_TIMEOUT_SECONDS = {
+        "fixed_answer": 12,
+        "json": 12,
+        "sse": ContentGuardProbeService.STREAM_CONNECT_TIMEOUT_SECONDS
+        + ContentGuardProbeService.STREAM_FIRST_TOKEN_TIMEOUT_SECONDS
+        + ContentGuardProbeService.SSE_PROBE_MAX_DURATION_SECONDS
+        + 2,
+        "pollution_rules": ContentGuardProbeService.POLLUTION_PROBE_TIMEOUT_SECONDS + 2,
+    }
+    COMBINABLE_TEXT_PROBE_KEYS = ("fixed_answer", "pollution_rules")
 
     @staticmethod
-    async def run_trust_probe(db: Session, payload: ContentGuardRunRequest) -> dict[str, Any]:
+    def _required_probe_phase_keys() -> set[str]:
+        return {f"content_{key}" for key in ContentTrustProbeService.REQUIRED_TRUST_PROBE_KEYS}
+
+    @staticmethod
+    def _model_content_integrity_score(provider_model: ProviderModel | None) -> int | None:
+        if provider_model is None:
+            return None
+        status = str(getattr(provider_model, "content_integrity_status", "unknown") or "unknown")
+        if status == "blocked":
+            return 0
+        if status == "passed":
+            return 100
+        probe_results = loads_json(getattr(provider_model, "content_probe_results_json", None), {})
+        if isinstance(probe_results, dict):
+            last_result = probe_results.get("last_result")
+            if isinstance(last_result, dict):
+                guard_result = str(last_result.get("content_guard_result") or "")
+                if guard_result == ContentGuardRuleService.RESULT_BLOCK:
+                    return 0
+                if guard_result == ContentGuardRuleService.RESULT_REVIEW:
+                    return 60
+                if guard_result == ContentGuardRuleService.RESULT_PASS:
+                    return 100
+            serialized_status = str(probe_results.get("status") or "")
+            if serialized_status == "blocked":
+                return 0
+            if serialized_status == "passed":
+                return 100
+        if status == "degraded":
+            failure_count = int(getattr(provider_model, "content_probe_failure_count", 0) or 0)
+            return max(21, 60 - min(failure_count, 2) * 15)
+        return None
+
+    @staticmethod
+    async def run_trust_probe(
+        db: Session,
+        payload: ContentGuardRunRequest,
+        *,
+        detection_source: str = "manual_trust_probe",
+    ) -> dict[str, Any]:
         probe_keys = ContentTrustProbeService.merge_required_probe_keys(payload.probe_keys)
         forced_payload = payload.model_copy(
             update={
@@ -36,7 +88,11 @@ class ContentTrustProbeService:
                 "persist_internal_result": payload.target_type == "internal",
             }
         )
-        return await ContentTrustProbeService.run_capability_probe(db, forced_payload)
+        return await ContentTrustProbeService.run_capability_probe(
+            db,
+            forced_payload,
+            detection_source=detection_source,
+        )
 
     @staticmethod
     def merge_required_probe_keys(probe_keys: list[str]) -> list[str]:
@@ -48,30 +104,81 @@ class ContentTrustProbeService:
         return merged
 
     @staticmethod
-    async def run_capability_probe(db: Session, payload: ContentGuardRunRequest) -> dict[str, Any]:
+    async def run_capability_probe(
+        db: Session,
+        payload: ContentGuardRunRequest,
+        *,
+        detection_source: str = "manual_probe",
+    ) -> dict[str, Any]:
         provider, provider_model, target = ContentTrustProbeService._resolve_probe_target(db, payload)
         endpoint_path = ContentTrustProbeService._resolve_endpoint_path(provider, provider_model, payload)
-        probe_results: list[dict[str, Any]] = []
-        for probe_key in payload.probe_keys:
+        ordered_probe_slots: list[tuple[int, dict[str, Any] | None]] = []
+        runnable_probes: list[tuple[int, str]] = []
+        for index, probe_key in enumerate(payload.probe_keys):
+            if probe_key == "json" and not ContentTrustProbeService.json_probe_enabled():
+                ordered_probe_slots.append((
+                    index,
+                    ContentTrustProbeService.skipped_probe(
+                        probe_key=probe_key,
+                        endpoint_path=endpoint_path,
+                        message="严格 JSON 探针未在内容防护配置中启用",
+                    ),
+                ))
+                continue
             if probe_key == "sse" and not bool(getattr(provider_model, "supports_stream", True)):
-                probe_results.append(
+                ordered_probe_slots.append((
+                    index,
                     ContentTrustProbeService.skipped_probe(
                         probe_key=probe_key,
                         endpoint_path=endpoint_path,
                         message="模型未启用流式能力",
+                    ),
+                ))
+                continue
+            runnable_probes.append((index, probe_key))
+        runnable_index_by_key = {probe_key: index for index, probe_key in runnable_probes}
+        combined_text_indexes: dict[str, int] = {}
+        if all(key in runnable_index_by_key for key in ContentTrustProbeService.COMBINABLE_TEXT_PROBE_KEYS):
+            combined_text_indexes = {
+                key: runnable_index_by_key[key]
+                for key in ContentTrustProbeService.COMBINABLE_TEXT_PROBE_KEYS
+            }
+            combined_keys = set(combined_text_indexes)
+            runnable_probes = [(index, key) for index, key in runnable_probes if key not in combined_keys]
+        runnable_tasks = [
+            asyncio.create_task(
+                ContentTrustProbeService.run_single_probe_with_boundary(
+                    provider,
+                    provider_model,
+                    endpoint_path,
+                    probe_key,
+                    order_index=index,
+                )
+            )
+            for index, probe_key in runnable_probes
+        ]
+        if combined_text_indexes:
+            runnable_tasks.append(
+                asyncio.create_task(
+                    ContentTrustProbeService.run_combined_text_probe_with_boundary(
+                        provider,
+                        provider_model,
+                        endpoint_path,
+                        order_indexes=combined_text_indexes,
                     )
                 )
-                continue
-            if probe_key == "tools" and not bool(getattr(provider_model, "supports_tools", True)):
-                probe_results.append(
-                    ContentTrustProbeService.skipped_probe(
-                        probe_key=probe_key,
-                        endpoint_path=endpoint_path,
-                        message="模型未启用工具调用能力",
-                    )
-                )
-                continue
-            probe_results.append(await ContentTrustProbeService.run_single_probe(provider, provider_model, endpoint_path, probe_key))
+            )
+        runnable_results = await asyncio.gather(*runnable_tasks, return_exceptions=False) if runnable_tasks else []
+        for item in runnable_results:
+            if isinstance(item, tuple):
+                ordered_probe_slots.append(item)
+            elif isinstance(item, list):
+                ordered_probe_slots.extend(item)
+        probe_results = [
+            result
+            for _, result in sorted(ordered_probe_slots, key=lambda item: item[0])
+            if result is not None
+        ]
         summary = ContentTrustProbeService.summarize_probe_results(probe_results)
         selected_probe_keys = {str(item) for item in payload.probe_keys or []}
         can_persist_trust_status = set(ContentTrustProbeService.REQUIRED_TRUST_PROBE_KEYS).issubset(selected_probe_keys)
@@ -84,6 +191,7 @@ class ContentTrustProbeService:
                     provider_model,
                     content_guard_result=aggregate_guard,
                     endpoint_results=probe_results,
+                    detection_source=detection_source,
                 )
         return {
             "target": target,
@@ -101,6 +209,7 @@ class ContentTrustProbeService:
         *,
         content_guard_result: dict[str, Any],
         endpoint_results: list[dict[str, Any]] | None = None,
+        detection_source: str = "automatic_probe",
     ) -> None:
         ContentGuardProbeService.apply_content_probe_health(
             db,
@@ -108,6 +217,7 @@ class ContentTrustProbeService:
             provider_model,
             content_guard_result=content_guard_result,
             endpoint_results=endpoint_results,
+            detection_source=detection_source,
         )
 
     @staticmethod
@@ -130,71 +240,48 @@ class ContentTrustProbeService:
             reason = "provider_content_integrity_score_too_low"
         elif require_trusted and trust_level not in {"official", "trusted"}:
             reason = "provider_trusted_required"
+        model_status: str | None = None
+        model_integrity_score: int | None = None
         if reason is None and provider_model is not None:
             model_status = str(getattr(provider_model, "content_integrity_status", "unknown") or "unknown")
+            model_integrity_score = ContentTrustProbeService._model_content_integrity_score(provider_model)
             if model_status == "blocked":
                 reason = "model_content_integrity_blocked"
+            elif model_integrity_score is not None and model_integrity_score <= ContentTrustProbeService.MIN_CONTENT_INTEGRITY_SCORE:
+                reason = "model_content_integrity_score_too_low"
+        elif provider_model is not None:
+            model_status = str(getattr(provider_model, "content_integrity_status", "unknown") or "unknown")
+            model_integrity_score = ContentTrustProbeService._model_content_integrity_score(provider_model)
         return {
             "allowed": reason is None,
             "reason": reason,
             "trust_level": trust_level,
             "content_integrity_status": integrity_status,
             "content_integrity_score": integrity_score,
+            "model_content_integrity_status": model_status,
+            "model_content_integrity_score": model_integrity_score,
         }
 
     @staticmethod
     def _resolve_probe_target(db: Session, payload: ContentGuardRunRequest) -> tuple[Provider, ProviderModel, dict[str, Any]]:
         if payload.target_type == "external":
             if payload.external is None:
-                raise ValueError("外部渠道检测必须提供接口地址、密钥和模型名")
-            external = payload.external
-            target_identity = ContentTrustProbeService._external_target_identity(
-                base_url=external.base_url,
-                endpoint_path=external.endpoint_path,
-                model_name=external.model_name,
-            )
-            provider = Provider(
-                id=target_identity["provider_id"],
-                name=target_identity["provider_name"],
-                base_url=external.base_url,
-                api_key=external.api_key,
-                provider_type="openai_compatible",
-                protocol_type="responses" if external.endpoint_path == "/responses" else "chat_completions",
-                enabled=True,
-                trust_level="standard",
-                content_integrity_status="unknown",
-                content_integrity_score=80,
-                content_guard_enabled=True,
-            )
-            provider_model = ProviderModel(
-                id=target_identity["provider_model_id"],
-                provider_id=target_identity["provider_id"],
-                model_name=external.model_name,
-                enabled=True,
-                supports_stream=True,
-                supports_tools=True,
-                supports_chat_completions=external.endpoint_path == "/chat/completions",
-                supports_responses=external.endpoint_path == "/responses",
-                protocol_type="responses" if external.endpoint_path == "/responses" else "chat_completions",
-            )
-            provider_model.provider = provider
-            return provider, provider_model, {
-                "type": "external",
-                "name": target_identity["provider_name"],
-                "target_id": target_identity["target_id"],
-                "endpoint_path": external.endpoint_path,
-                "model_name": external.model_name,
-            }
+                raise ValueError("外部提供商检测必须提供接口地址、密钥和模型名")
+            return ContentTrustProbeService.resolve_external_probe_target(payload.external)
         if payload.provider_id is None:
             raise ValueError("本项目提供商检测必须选择提供商")
         provider = db.get(Provider, payload.provider_id)
         if provider is None:
             raise ValueError("提供商不存在")
+        if not bool(getattr(provider, "enabled", True)):
+            raise ValueError("已停用的提供商不能执行内容防护探针")
         provider_model = None
         if payload.provider_model_id is not None:
             provider_model = db.get(ProviderModel, payload.provider_model_id)
             if provider_model is None or provider_model.provider_id != provider.id:
                 raise ValueError("模型不属于当前提供商")
+            if not bool(getattr(provider_model, "enabled", True)):
+                raise ValueError("已停用的模型不能执行内容防护探针")
         if provider_model is None:
             provider_model = next((item for item in provider.provider_models if item.enabled), None)
         if provider_model is None:
@@ -206,6 +293,48 @@ class ContentTrustProbeService:
             "provider_model_id": provider_model.id,
             "model_name": provider_model.model_name,
         }
+
+    @staticmethod
+    def resolve_external_probe_target(external: Any) -> tuple[Provider, ProviderModel, dict[str, Any]]:
+        target_identity = ContentTrustProbeService._external_target_identity(
+            base_url=external.base_url,
+            endpoint_path=external.endpoint_path,
+            model_name=external.model_name,
+        )
+        protocol_type = "responses" if external.endpoint_path == "/responses" else "chat_completions"
+        provider = Provider(
+            id=target_identity["provider_id"],
+            name=target_identity["provider_name"],
+            base_url=external.base_url,
+            api_key=external.api_key,
+            provider_type="external_probe",
+            protocol_type=protocol_type,
+            enabled=True,
+            trust_level="standard",
+            content_integrity_status="unknown",
+            content_integrity_score=80,
+            content_guard_enabled=True,
+        )
+        provider_model = ProviderModel(
+            id=target_identity["provider_model_id"],
+            provider_id=target_identity["provider_id"],
+            model_name=external.model_name,
+            enabled=True,
+            supports_stream=False,
+            supports_tools=False,
+            supports_chat_completions=external.endpoint_path == "/chat/completions",
+            supports_responses=external.endpoint_path == "/responses",
+            protocol_type=protocol_type,
+        )
+        provider_model.provider = provider
+        target = {
+            "type": "external",
+            "name": target_identity["provider_name"],
+            "target_id": target_identity["target_id"],
+            "endpoint_path": external.endpoint_path,
+            "model_name": external.model_name,
+        }
+        return provider, provider_model, target
 
     @staticmethod
     def _external_target_identity(*, base_url: str, endpoint_path: str, model_name: str) -> dict[str, Any]:
@@ -220,7 +349,7 @@ class ContentTrustProbeService:
             "host": host,
             "provider_id": provider_id,
             "provider_model_id": provider_model_id,
-            "provider_name": f"外部渠道 {fingerprint[:8]}",
+            "provider_name": f"外部提供商 {fingerprint[:8]}",
         }
 
     @staticmethod
@@ -242,8 +371,6 @@ class ContentTrustProbeService:
             result = await ContentGuardProbeService.probe_json(provider, provider_model, endpoint_path=endpoint_path)
         elif probe_key == "sse":
             result = await ContentGuardProbeService.probe_sse(provider, provider_model, endpoint_path=endpoint_path)
-        elif probe_key == "tools":
-            result = await ContentGuardProbeService.probe_tools(provider, provider_model, endpoint_path=endpoint_path)
         else:
             result = ContentTrustProbeService.invalid_probe(
                 probe_key=probe_key,
@@ -256,7 +383,120 @@ class ContentTrustProbeService:
         return result
 
     @staticmethod
+    def json_probe_enabled() -> bool:
+        try:
+            return bool(getattr(SettingService.get_cached(), "content_guard_json_probe_enabled", False))
+        except Exception:
+            return False
+
+    @staticmethod
+    async def run_combined_text_probe_with_boundary(
+        provider: Provider,
+        provider_model: ProviderModel,
+        endpoint_path: str,
+        *,
+        order_indexes: dict[str, int],
+    ) -> list[tuple[int, dict[str, Any]]]:
+        started = time.perf_counter()
+        timeout_seconds = ContentGuardProbeService.COMBINED_TEXT_PROBE_TIMEOUT_SECONDS
+        try:
+            result_map = await asyncio.wait_for(
+                ContentGuardProbeService.probe_fixed_answer_and_pollution_rules(
+                    provider,
+                    provider_model,
+                    endpoint_path=endpoint_path,
+                ),
+                timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            result_map = {
+                probe_key: ContentTrustProbeService.probe_error(
+                    probe_key=probe_key,
+                    endpoint_path=endpoint_path,
+                    message=f"{ContentTrustProbeService.PROBE_LABELS.get(probe_key, probe_key)}组合探针超过 {timeout_seconds:.1f}s 限制",
+                    category="content_trust_probe_timeout",
+                    latency_ms=int((time.perf_counter() - started) * 1000),
+                )
+                for probe_key in ContentTrustProbeService.COMBINABLE_TEXT_PROBE_KEYS
+            }
+        except Exception as exc:
+            result_map = {
+                probe_key: ContentTrustProbeService.probe_error(
+                    probe_key=probe_key,
+                    endpoint_path=endpoint_path,
+                    message=str(exc) or "组合探针执行异常",
+                    category="content_trust_probe_exception",
+                    latency_ms=int((time.perf_counter() - started) * 1000),
+                )
+                for probe_key in ContentTrustProbeService.COMBINABLE_TEXT_PROBE_KEYS
+            }
+        results: list[tuple[int, dict[str, Any]]] = []
+        for probe_key in ContentTrustProbeService.COMBINABLE_TEXT_PROBE_KEYS:
+            result = dict(result_map.get(probe_key) or {})
+            result["capability_key"] = f"content_{probe_key}"
+            result["probe_key"] = probe_key
+            result["probe_label"] = ContentTrustProbeService.PROBE_LABELS.get(probe_key, probe_key)
+            result["combined_probe_key"] = "fixed_answer_pollution_rules"
+            result["combined_probe_label"] = "固定答案 + 外链广告识别"
+            results.append((order_indexes.get(probe_key, 999), result))
+        return results
+
+    @staticmethod
+    async def run_single_probe_with_boundary(
+        provider: Provider,
+        provider_model: ProviderModel,
+        endpoint_path: str,
+        probe_key: str,
+        *,
+        order_index: int,
+    ) -> tuple[int, dict[str, Any]]:
+        started = time.perf_counter()
+        timeout_seconds = ContentTrustProbeService.PROBE_TIMEOUT_SECONDS.get(str(probe_key), 12)
+        try:
+            result = await asyncio.wait_for(
+                ContentTrustProbeService.run_single_probe(provider, provider_model, endpoint_path, probe_key),
+                timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            result = ContentTrustProbeService.probe_error(
+                probe_key=probe_key,
+                endpoint_path=endpoint_path,
+                message=f"{ContentTrustProbeService.PROBE_LABELS.get(probe_key, probe_key)}超过 {timeout_seconds:.1f}s 限制",
+                category="content_trust_probe_timeout",
+                latency_ms=int((time.perf_counter() - started) * 1000),
+            )
+        except Exception as exc:
+            result = ContentTrustProbeService.probe_error(
+                probe_key=probe_key,
+                endpoint_path=endpoint_path,
+                message=str(exc) or "探针执行异常",
+                category="content_trust_probe_exception",
+                latency_ms=int((time.perf_counter() - started) * 1000),
+            )
+        return order_index, result
+
+    @staticmethod
+    def probe_error(*, probe_key: str, endpoint_path: str, message: str, category: str, latency_ms: int) -> dict[str, Any]:
+        probe_label = ContentTrustProbeService.PROBE_LABELS.get(probe_key, probe_key)
+        return ContentGuardProbeService.probe_failure(
+            endpoint_path=endpoint_path,
+            endpoint_label=probe_label,
+            support_label=f"{probe_label}未通过",
+            latency_ms=latency_ms,
+            status_code=None,
+            guard_result=ContentGuardProbeService.review_result(
+                message,
+                category=category,
+            ),
+        ) | {
+            "capability_key": f"content_{probe_key}",
+            "probe_key": probe_key,
+            "probe_label": probe_label,
+        }
+
+    @staticmethod
     def skipped_probe(*, probe_key: str, endpoint_path: str, message: str) -> dict[str, Any]:
+        is_required = probe_key in ContentTrustProbeService.REQUIRED_TRUST_PROBE_KEYS
         return ContentGuardProbeService.mark_detection_result({
             "capability_key": f"content_{probe_key}",
             "probe_key": probe_key,
@@ -266,13 +506,22 @@ class ContentTrustProbeService:
             "success": False,
             "native_success": False,
             "adapted_success": False,
-            "support_mode": "skipped",
-            "support_label": "已跳过",
+            "support_mode": "required_missing" if is_required else "skipped",
+            "support_label": "必需能力缺失" if is_required else "已跳过",
             "latency_ms": 0,
             "status_code": None,
             "message": message,
             "trace": [],
             "retryable": False,
+            "required_probe": is_required,
+            "required_missing": is_required,
+            "content_guard": {
+                "content_guard_result": ContentGuardRuleService.RESULT_BLOCK if is_required else ContentGuardRuleService.RESULT_REVIEW,
+                "content_guard_risk_level": "high" if is_required else "medium",
+                "content_guard_categories_json": '["content_trust_required_missing"]' if is_required else '["content_trust_probe_skipped"]',
+                "content_guard_reason": f"必需可信探针不可用：{message}" if is_required else message,
+                "content_guard_action": "block" if is_required else "record",
+            },
         })
 
     @staticmethod
@@ -303,13 +552,6 @@ class ContentTrustProbeService:
 
     @staticmethod
     def summarize_probe_results(results: list[dict[str, Any]]) -> dict[str, Any]:
-        total = len(results)
-        passed = sum(1 for item in results if item.get("success") is True)
-        content_results = [
-            str((item.get("content_guard") or {}).get("content_guard_result") or "")
-            for item in results
-            if isinstance(item.get("content_guard"), dict)
-        ]
         aggregate_guard = ContentTrustProbeService.aggregate_content_guard_result(results) or {
             "content_guard_result": ContentGuardRuleService.RESULT_PASS,
             "content_guard_reason": "未返回内容防护结果",
@@ -318,38 +560,8 @@ class ContentTrustProbeService:
             [ContentGuardProbeService.summarize_probe_result(item) for item in results],
             aggregate_guard,
         )
-        result = str(decision.get("content_guard_result") or "")
-        if result == ContentGuardRuleService.RESULT_BLOCK or ContentGuardRuleService.RESULT_BLOCK in content_results:
-            status = "blocked"
-            result = ContentGuardRuleService.RESULT_BLOCK
-        elif result == ContentGuardRuleService.RESULT_REVIEW or ContentGuardRuleService.RESULT_REVIEW in content_results or passed < total:
-            status = "review"
-            result = ContentGuardRuleService.RESULT_REVIEW
-        else:
-            status = "passed"
-            result = ContentGuardRuleService.RESULT_PASS
-        return {
-            "status": status,
-            "content_guard_result": result,
-            "content_guard_reason": decision.get("content_guard_reason"),
-            "total": total,
-            "passed": passed,
-            "failed": max(0, total - passed),
-        }
+        return ContentGuardRuleService.summarize_probe_guard_results(results, decision=decision)
 
     @staticmethod
     def aggregate_content_guard_result(results: list[dict[str, Any]]) -> dict[str, Any] | None:
-        candidates = [
-            item.get("content_guard")
-            for item in results
-            if isinstance(item.get("content_guard"), dict)
-        ]
-        if not candidates:
-            return None
-        priority = {
-            ContentGuardRuleService.RESULT_BLOCK: 3,
-            ContentGuardRuleService.RESULT_REVIEW: 2,
-            ContentGuardRuleService.RESULT_ERROR: 2,
-            ContentGuardRuleService.RESULT_PASS: 1,
-        }
-        return max(candidates, key=lambda item: priority.get(str(item.get("content_guard_result") or ""), 0))
+        return ContentGuardRuleService.aggregate_probe_guard_result(results)

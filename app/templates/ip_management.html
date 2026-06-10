@@ -1,14 +1,31 @@
 {% extends "base.html" %}
 
+{% macro help_icon(title, copy) -%}
+<span class="settings-help">
+    <button class="settings-help-btn" type="button" aria-label="{{ title }}" data-settings-tooltip-trigger="true" data-settings-tooltip-title="{{ title }}" data-settings-tooltip-copy="{{ copy }}">
+        <i class="bi bi-question-circle" aria-hidden="true"></i>
+    </button>
+</span>
+{%- endmacro %}
+
+{% macro field_title(label, title, copy) -%}
+<span class="ip-field-title"><span>{{ label }}</span>{{ help_icon(title, copy) }}</span>
+{%- endmacro %}
+
+{% macro action_help_attrs(title, copy) -%}
+data-settings-tooltip-trigger="true" data-settings-tooltip-title="{{ title }}" data-settings-tooltip-copy="{{ copy }}"
+{%- endmacro %}
+
 {% block content %}
 <section class="page-heading ip-management-heading">
     <div>
         <div class="panel-kicker">访问治理</div>
         <h1>IP 管理</h1>
     </div>
-    <button class="topbar-btn interactive-btn" id="ip-management-refresh-btn" type="button">
+    <button class="topbar-btn interactive-btn" id="ip-management-refresh-btn" type="button" {{ action_help_attrs("刷新说明", "重新拉取模块概览、规则列表和事件列表。用于确认最新设置、规则命中和处置事件；修改配置或规则后可手动点一次。") }}>
         <i class="bi bi-arrow-clockwise" aria-hidden="true"></i>
         <span>刷新</span>
+        <i class="bi bi-question-circle ip-action-help-icon" aria-hidden="true"></i>
     </button>
 </section>
 
@@ -24,92 +41,99 @@
 </section>
 
 <nav class="content-guard-tabs ip-management-tabs" role="tablist" aria-label="IP 管理分区">
-    <button class="content-guard-tab is-active" type="button" role="tab" aria-selected="true" data-ip-tab="settings">设置</button>
-    <button class="content-guard-tab" type="button" role="tab" aria-selected="false" data-ip-tab="rules">规则</button>
-    <button class="content-guard-tab" type="button" role="tab" aria-selected="false" data-ip-tab="events">事件</button>
-    <button class="content-guard-tab" type="button" role="tab" aria-selected="false" data-ip-tab="test">测试</button>
+    <button class="content-guard-tab is-active" type="button" role="tab" aria-selected="true" data-ip-tab="settings" {{ action_help_attrs("设置分区说明", "集中管理 IP 管理总开关、作用范围、可信代理解析和事件保留参数。首次启用前建议先配置可信代理 CIDR，再逐项开启能力。") }}>设置 <i class="bi bi-question-circle ip-action-help-icon" aria-hidden="true"></i></button>
+    <button class="content-guard-tab" type="button" role="tab" aria-selected="false" data-ip-tab="rules" {{ action_help_attrs("规则分区说明", "管理按 IP、CIDR 或 IP 范围匹配的访问规则。用于放行、记录、限流或阻断特定来源；规则按优先级从小到大匹配。") }}>规则 <i class="bi bi-question-circle ip-action-help-icon" aria-hidden="true"></i></button>
+    <button class="content-guard-tab" type="button" role="tab" aria-selected="false" data-ip-tab="events" {{ action_help_attrs("事件分区说明", "查看 IP 解析、规则命中和处置结果。用于审计来源 IP、排查转发头、确认阻断或限流是否实际执行。") }}>事件 <i class="bi bi-question-circle ip-action-help-icon" aria-hidden="true"></i></button>
+    <button class="content-guard-tab" type="button" role="tab" aria-selected="false" data-ip-tab="test" {{ action_help_attrs("测试分区说明", "在不真实拦截请求的情况下模拟 IP 解析和规则匹配。用于上线前验证可信代理、转发头优先级和规则动作是否符合预期。") }}>测试 <i class="bi bi-question-circle ip-action-help-icon" aria-hidden="true"></i></button>
 </nav>
 
 <section class="panel-card ip-management-panel" data-ip-panel="settings">
     <form id="ip-settings-form">
         <div class="section-subhead content-guard-panel-head">
             <div><h2>模块设置</h2></div>
-            <button class="topbar-btn interactive-btn" id="ip-settings-save-btn" type="submit"><i class="bi bi-check2" aria-hidden="true"></i><span>保存</span></button>
+            <button class="topbar-btn interactive-btn" id="ip-settings-save-btn" type="submit" {{ action_help_attrs("保存设置说明", "提交当前模块设置到后端并立即影响后续请求。建议先保持仅观察或测试确认，再开启阻断和限流等执行型能力。") }}><i class="bi bi-check2" aria-hidden="true"></i><span>保存</span><i class="bi bi-question-circle ip-action-help-icon" aria-hidden="true"></i></button>
         </div>
         <div class="settings-switch-grid ip-management-switch-grid">
             {% for item in [
-                ("enabled", "模块总开关", "关闭时不解析、不记录、不处置。"),
-                ("observe_only_enabled", "仅观察", "启用后只记录决策，不执行阻断或限流。"),
-                ("trusted_proxy_resolution_enabled", "可信代理解析", "仅信任命中 CIDR 的代理转发头。"),
-                ("apply_external_v1_enabled", "/v1/* 生效", "作用于外部 OpenAI 兼容入口。"),
-                ("apply_internal_api_enabled", "/api/* 生效", "作用于内部管理 API。"),
-                ("apply_user_pages_enabled", "用户端生效", "作用于用户端页面请求。"),
-                ("rule_engine_enabled", "规则引擎", "启用后按规则匹配动作。"),
-                ("block_action_enabled", "允许阻断", "命中 block 规则时才真正拒绝请求。"),
-                ("rate_limit_enabled", "IP 限流", "命中限流规则后使用 Redis 计数。"),
-                ("event_logging_enabled", "事件记录", "记录解析、规则和处置结果。"),
-                ("store_raw_headers_enabled", "头摘要", "保留转发头摘要用于排查。"),
-                ("ip_masking_enabled", "IP 掩码", "事件展示时隐藏部分 IP。"),
-                ("fail_open_enabled", "失败放行", "模块异常时继续放行请求。")
+                ("enabled", "模块总开关", "关闭时不解析、不记录、不处置。", "模块总开关说明", "控制 IP 管理模块是否参与请求处理。关闭时不解析真实 IP、不匹配规则、不记录事件、不改变现有鉴权和转发行为；启用前建议先配置可信代理并开启仅观察。"),
+                ("observe_only_enabled", "仅观察", "启用后只记录决策，不执行阻断或限流。", "仅观察说明", "把规则结果作为审计事件记录，但不真正阻断或限流。适合新规则灰度验证；确认命中范围准确后再关闭仅观察并开启执行动作。"),
+                ("trusted_proxy_resolution_enabled", "可信代理解析", "仅信任命中 CIDR 的代理转发头。", "可信代理解析说明", "只有直连来源 IP 命中可信代理 CIDR 时，才按可信头优先级解析真实客户端 IP。反代、CDN 或负载均衡场景应开启；直连部署可保持关闭。"),
+                ("apply_external_v1_enabled", "/v1/* 生效", "作用于外部 OpenAI 兼容入口。", "/v1/* 生效说明", "让 IP 管理作用于外部模型代理接口。用于保护正式 API 调用流量；需要先确认规则不会误伤生产调用方。"),
+                ("apply_internal_api_enabled", "/api/* 生效", "作用于内部管理 API。", "/api/* 生效说明", "让 IP 管理作用于后台内部 API。用于限制管理接口来源；开启前应确保管理员出口 IP 或办公网已被允许，避免把自己挡在后台外。"),
+                ("apply_user_pages_enabled", "用户端生效", "作用于用户端页面请求。", "用户端生效说明", "让 IP 管理作用于用户端页面访问。用于限制用户控制台来源；若用户来源分散，建议先仅观察再逐步收紧。"),
+                ("rule_engine_enabled", "规则引擎", "启用后按规则匹配动作。", "规则引擎说明", "控制是否执行 IP 规则匹配。关闭时模块仍可做解析和事件记录，但不会按规则决定放行、记录、限流或阻断。"),
+                ("block_action_enabled", "允许阻断", "命中 block 规则时才真正拒绝请求。", "允许阻断说明", "控制 block 规则是否真的拒绝请求。建议先开启规则引擎和事件记录观察命中结果，确认无误后再打开。"),
+                ("rate_limit_enabled", "IP 限流", "命中限流规则后使用 Redis 计数。", "IP 限流说明", "控制 rate_limit 规则是否实际限速。需要 Redis 计数能力可用；规则中 QPS 或 RPM 至少配置一个正数。"),
+                ("event_logging_enabled", "事件记录", "记录解析、规则和处置结果。", "事件记录说明", "记录解析来源、命中规则、决策动作和执行结果。用于审计、排障和调参；生产建议开启，但可配合采样率降低写入量。"),
+                ("store_raw_headers_enabled", "头摘要", "保留转发头摘要用于排查。", "头摘要说明", "保存 X-Forwarded-For、Forwarded、CF-Connecting-IP 等转发头摘要，帮助分析代理链。涉及来源信息，建议只在排查期间或安全审计需要时开启。"),
+                ("ip_masking_enabled", "IP 掩码", "事件展示时隐藏部分 IP。", "IP 掩码说明", "在事件展示中隐藏部分客户端 IP，降低敏感信息暴露。需要精确排查时可临时关闭；日常审计建议开启。"),
+                ("fail_open_enabled", "失败放行", "模块异常时继续放行请求。", "失败放行说明", "当 IP 模块异常、Redis 不可用或规则处理失败时是否放行请求。生产默认建议开启以避免误阻断；高安全场景可在充分验证后关闭。")
             ] %}
-            <label class="settings-switch-card" for="ip-setting-{{ item[0] }}">
-                <span class="settings-switch-copy"><strong>{{ item[1] }}</strong><small>{{ item[2] }}</small></span>
-                <span class="settings-switch-control">
+            <div class="settings-switch-card">
+                <span class="settings-switch-copy"><span class="ip-switch-title"><strong>{{ item[1] }}</strong>{{ help_icon(item[3], item[4]) }}</span><small>{{ item[2] }}</small></span>
+                <label class="settings-switch-control" for="ip-setting-{{ item[0] }}" aria-label="{{ item[1] }}">
                     <input id="ip-setting-{{ item[0] }}" name="{{ item[0] }}" type="checkbox">
                     <span class="settings-switch-slider"></span>
-                </span>
-            </label>
+                </label>
+            </div>
             {% endfor %}
         </div>
         <div class="ip-management-settings-grid">
-            <label class="content-guard-label"><span>可信代理 CIDR</span><textarea class="field-input" id="ip-setting-trusted-proxy-cidrs" rows="4" placeholder="127.0.0.1/32&#10;10.0.0.0/8"></textarea></label>
-            <label class="content-guard-label"><span>可信头优先级</span><select class="field-input" id="ip-setting-trusted-header-order" multiple size="3"><option value="forwarded">Forwarded</option><option value="x_forwarded_for">X-Forwarded-For</option><option value="cf_connecting_ip">CF-Connecting-IP</option></select></label>
-            <label class="content-guard-label"><span>事件采样 %</span><input class="field-input" id="ip-setting-event-sample-rate" type="number" min="0" max="100"></label>
-            <label class="content-guard-label"><span>事件保留 d</span><input class="field-input" id="ip-setting-event-retention-days" type="number" min="1" max="3650"></label>
+            <label class="content-guard-label">{{ field_title("可信代理 CIDR", "可信代理 CIDR 说明", "填写允许被信任的反向代理、负载均衡、CDN 或网关直连 IP 段，一行一个 CIDR。只有直连来源命中这里，系统才会读取转发头解析真实客户端 IP；不要填写普通用户网段。") }}<textarea class="field-input" id="ip-setting-trusted-proxy-cidrs" rows="4" placeholder="127.0.0.1/32&#10;10.0.0.0/8"></textarea></label>
+            <label class="content-guard-label">{{ field_title("可信头优先级", "可信头优先级说明", "设置在可信代理命中后读取真实客户端 IP 的头字段顺序。上游代理明确写入 Forwarded 时优先选 Forwarded；Cloudflare 场景可把 CF-Connecting-IP 放前；不确定时保持默认顺序并用解析测试验证。") }}<select class="field-input" id="ip-setting-trusted-header-order" multiple size="3"><option value="forwarded">Forwarded</option><option value="x_forwarded_for">X-Forwarded-For</option><option value="cf_connecting_ip">CF-Connecting-IP</option></select></label>
+            <label class="content-guard-label">{{ field_title("事件采样 %", "事件采样说明", "控制事件记录比例，0 表示不采样，100 表示全部记录。排查阶段建议 100；高流量生产可降低以减少日志写入，但阻断和限流决策仍按规则执行。") }}<input class="field-input" id="ip-setting-event-sample-rate" type="number" min="0" max="100"></label>
+            <label class="content-guard-label">{{ field_title("事件保留 d", "事件保留说明", "设置 IP 管理事件保留天数，单位 d。值越大越便于审计追溯，也会占用更多数据库空间；常规可设 30 d，合规或排障期可延长。") }}<input class="field-input" id="ip-setting-event-retention-days" type="number" min="1" max="3650"></label>
         </div>
     </form>
 </section>
 
 <section class="panel-card ip-management-panel" data-ip-panel="rules" hidden>
-    <div class="section-subhead content-guard-panel-head"><div><h2>IP 规则</h2></div><button class="topbar-btn interactive-btn" id="ip-rule-new-btn" type="button"><i class="bi bi-plus-lg" aria-hidden="true"></i><span>新建</span></button></div>
+    <div class="section-subhead content-guard-panel-head"><div><h2>IP 规则</h2></div><button class="topbar-btn interactive-btn" id="ip-rule-new-btn" type="button" {{ action_help_attrs("新建规则说明", "打开规则表单创建新的 IP 匹配规则。建议先用记录或仅观察验证命中范围，再改为限流或阻断。") }}><i class="bi bi-plus-lg" aria-hidden="true"></i><span>新建</span><i class="bi bi-question-circle ip-action-help-icon" aria-hidden="true"></i></button></div>
     <form class="ip-management-filter-grid" id="ip-rule-filter-form">
-        <input class="field-input" id="ip-rule-keyword" type="search" placeholder="搜索规则名">
-        <select class="field-input" id="ip-rule-scope"><option value="">全部作用域</option><option value="external_v1">/v1/*</option><option value="internal_api">/api/*</option><option value="user_pages">用户端</option><option value="all">全部</option></select>
-        <select class="field-input" id="ip-rule-action"><option value="">全部动作</option><option value="allow">放行</option><option value="record">记录</option><option value="rate_limit">限流</option><option value="block">阻断</option></select>
-        <select class="field-input" id="ip-rule-enabled"><option value="">全部状态</option><option value="true">启用</option><option value="false">停用</option></select>
-        <button class="topbar-btn interactive-btn" type="submit"><i class="bi bi-search" aria-hidden="true"></i><span>查询</span></button>
+        <label class="content-guard-label">{{ field_title("关键词", "规则关键词说明", "按规则名检索 IP 规则。适合规则数量较多时快速定位；为空表示不过滤关键词。") }}<input class="field-input" id="ip-rule-keyword" type="search" placeholder="搜索规则名"></label>
+        <label class="content-guard-label">{{ field_title("作用域", "规则作用域筛选说明", "按规则作用范围筛选。/v1/* 面向外部模型代理，/api/* 面向管理 API，用户端面向用户页面，全部表示跨范围规则。") }}<select class="field-input" id="ip-rule-scope"><option value="">全部作用域</option><option value="external_v1">/v1/*</option><option value="internal_api">/api/*</option><option value="user_pages">用户端</option><option value="all">全部</option></select></label>
+        <label class="content-guard-label">{{ field_title("动作", "规则动作筛选说明", "按规则最终决策筛选。放行用于显式允许，记录用于审计，限流用于速率控制，阻断用于拒绝访问。") }}<select class="field-input" id="ip-rule-action"><option value="">全部动作</option><option value="allow">放行</option><option value="record">记录</option><option value="rate_limit">限流</option><option value="block">阻断</option></select></label>
+        <label class="content-guard-label">{{ field_title("状态", "规则状态筛选说明", "按启用或停用筛选规则。停用规则保留配置但不参与匹配，适合临时下线或灰度回滚。") }}<select class="field-input" id="ip-rule-enabled"><option value="">全部状态</option><option value="true">启用</option><option value="false">停用</option></select></label>
+        <button class="topbar-btn interactive-btn" type="submit" {{ action_help_attrs("查询规则说明", "按当前筛选条件重新加载规则列表。筛选只影响列表展示，不改变规则本身。") }}><i class="bi bi-search" aria-hidden="true"></i><span>查询</span><i class="bi bi-question-circle ip-action-help-icon" aria-hidden="true"></i></button>
     </form>
-    <div class="table-shell"><table class="data-table"><thead><tr><th>规则</th><th>状态</th><th>作用域</th><th>匹配</th><th>动作</th><th>限流</th><th>优先级</th><th>操作</th></tr></thead><tbody id="ip-rule-body"></tbody></table></div>
+    <div class="table-shell"><table class="data-table"><thead><tr><th><span class="ip-table-heading">规则{{ help_icon("规则列说明", "显示规则名称和原因。名称用于识别规则，原因用于说明创建背景；建议写清楚来源、目的和处理依据。") }}</span></th><th><span class="ip-table-heading">状态{{ help_icon("状态列说明", "显示规则是否启用。只有启用规则会参与匹配；停用规则不会影响请求。") }}</span></th><th><span class="ip-table-heading">作用域{{ help_icon("作用域列说明", "显示规则在哪类请求中生效。选择全部时会覆盖外部 /v1、内部 /api 和用户端页面。") }}</span></th><th><span class="ip-table-heading">匹配{{ help_icon("匹配列说明", "显示匹配类型和规范化后的 IP、CIDR 或范围。用于确认系统实际参与判断的匹配值。") }}</span></th><th><span class="ip-table-heading">动作{{ help_icon("动作列说明", "显示规则命中后的决策动作。阻断和限流还会受模块总开关、仅观察、允许阻断和 IP 限流开关共同控制。") }}</span></th><th><span class="ip-table-heading">限流{{ help_icon("限流列说明", "显示该规则的 QPS 和 RPM 限制。动作不是限流时通常为 0；限流规则至少需要配置一个正数。") }}</span></th><th><span class="ip-table-heading">优先级{{ help_icon("优先级列说明", "数字越小越先匹配。建议把显式放行和高风险阻断规则放在更小优先级，兜底记录规则放在更大优先级。") }}</span></th><th><span class="ip-table-heading">操作{{ help_icon("规则操作说明", "编辑用于修改规则，启用/停用控制是否参与匹配，测试会带入测试分区，删除会移除规则。") }}</span></th></tr></thead><tbody id="ip-rule-body"></tbody></table></div>
+    <div class="ip-management-pagination" id="ip-rule-pagination"></div>
 </section>
 
 <section class="panel-card ip-management-panel" data-ip-panel="events" hidden>
-    <div class="section-subhead content-guard-panel-head"><div><h2>处置事件</h2></div><button class="topbar-btn interactive-btn" id="ip-event-cleanup-btn" type="button"><i class="bi bi-trash3" aria-hidden="true"></i><span>清理</span></button></div>
+    <div class="section-subhead content-guard-panel-head"><div><h2>处置事件</h2></div><button class="topbar-btn interactive-btn" id="ip-event-cleanup-btn" type="button" {{ action_help_attrs("清理事件说明", "按当前事件保留天数删除过期 IP 管理事件。用于控制数据库体积；执行前会二次确认。") }}><i class="bi bi-trash3" aria-hidden="true"></i><span>清理</span><i class="bi bi-question-circle ip-action-help-icon" aria-hidden="true"></i></button></div>
     <form class="ip-management-filter-grid" id="ip-event-filter-form">
-        <input class="field-input" id="ip-event-keyword" type="search" placeholder="路径 / Trace / 规则"><input class="field-input" id="ip-event-ip" type="text" placeholder="解析 IP">
-        <select class="field-input" id="ip-event-scope"><option value="">全部作用域</option><option value="external_v1">/v1/*</option><option value="internal_api">/api/*</option><option value="user_pages">用户端</option></select>
-        <select class="field-input" id="ip-event-decision"><option value="">全部动作</option><option value="allow">放行</option><option value="record">记录</option><option value="rate_limit">限流</option><option value="block">阻断</option></select>
-        <button class="topbar-btn interactive-btn" type="submit"><i class="bi bi-search" aria-hidden="true"></i><span>查询</span></button>
+        <label class="content-guard-label">{{ field_title("关键词", "事件关键词说明", "按请求路径、Trace ID 或规则名称检索事件。用于快速定位一次异常访问、一次阻断或某条规则的命中记录。") }}<input class="field-input" id="ip-event-keyword" type="search" placeholder="路径 / Trace / 规则"></label>
+        <label class="content-guard-label">{{ field_title("解析 IP", "解析 IP 筛选说明", "按系统最终识别出的客户端 IP 过滤事件。该值可能来自直连 IP，也可能来自可信代理转发头解析结果。") }}<input class="field-input" id="ip-event-ip" type="text" placeholder="203.0.113.7"></label>
+        <label class="content-guard-label">{{ field_title("作用域", "事件作用域筛选说明", "按事件发生的请求范围筛选，便于区分外部 API、内部管理 API 和用户端页面访问。") }}<select class="field-input" id="ip-event-scope"><option value="">全部作用域</option><option value="external_v1">/v1/*</option><option value="internal_api">/api/*</option><option value="user_pages">用户端</option></select></label>
+        <label class="content-guard-label">{{ field_title("动作", "事件动作筛选说明", "按事件决策动作筛选。用于分别查看放行、记录、限流或阻断事件。") }}<select class="field-input" id="ip-event-decision"><option value="">全部动作</option><option value="allow">放行</option><option value="record">记录</option><option value="rate_limit">限流</option><option value="block">阻断</option></select></label>
+        <label class="content-guard-label">{{ field_title("状态码", "状态码筛选说明", "按 HTTP 状态码过滤事件。例如 403 常用于阻断，429 常用于限流；留空表示不过滤状态码。") }}<input class="field-input" id="ip-event-status-code" type="number" min="100" max="599" placeholder="403"></label>
+        <label class="content-guard-label">{{ field_title("开始时间", "开始时间说明", "事件查询时间范围起点。留空且没有其它筛选条件时，默认查询最近 7 d，避免一次加载过多历史事件。") }}<input class="field-input" id="ip-event-started-at" type="datetime-local"></label>
+        <label class="content-guard-label">{{ field_title("结束时间", "结束时间说明", "事件查询时间范围终点。通常与开始时间一起使用；结束时间应晚于开始时间。") }}<input class="field-input" id="ip-event-ended-at" type="datetime-local"></label>
+        <button class="topbar-btn interactive-btn" type="submit" {{ action_help_attrs("查询事件说明", "按当前筛选条件重新加载事件列表。筛选只影响展示，不会清理或修改事件数据。") }}><i class="bi bi-search" aria-hidden="true"></i><span>查询</span><i class="bi bi-question-circle ip-action-help-icon" aria-hidden="true"></i></button>
     </form>
-    <div class="table-shell"><table class="data-table"><thead><tr><th>时间</th><th>解析 IP</th><th>直连 IP</th><th>路径</th><th>动作</th><th>执行</th><th>规则</th><th>Trace</th></tr></thead><tbody id="ip-event-body"></tbody></table></div>
+    <div class="table-shell"><table class="data-table"><thead><tr><th><span class="ip-table-heading">时间{{ help_icon("时间列说明", "事件创建时间，用于还原请求发生顺序和排查异常时间窗口。") }}</span></th><th><span class="ip-table-heading">解析 IP{{ help_icon("解析 IP 列说明", "系统最终识别出的客户端 IP。开启 IP 掩码时会展示脱敏值，详情中仍保留审计字段。") }}</span></th><th><span class="ip-table-heading">直连 IP{{ help_icon("直连 IP 列说明", "应用层看到的直接连接来源 IP。可信代理解析开启时，它通常是反向代理或 CDN 节点地址。") }}</span></th><th><span class="ip-table-heading">路径{{ help_icon("路径列说明", "显示请求方法、路径和解析状态。可用于判断事件发生在外部 /v1、内部 /api 还是用户端页面。") }}</span></th><th><span class="ip-table-heading">动作{{ help_icon("事件动作列说明", "显示该事件最终决策。动作可能是规则命中结果，也可能受模块关闭、仅观察或执行开关影响。") }}</span></th><th><span class="ip-table-heading">执行{{ help_icon("执行列说明", "表示决策是否真实执行。仅观察、阻断开关关闭或限流开关关闭时，可能有命中但未执行。") }}</span></th><th><span class="ip-table-heading">规则{{ help_icon("规则列说明", "显示命中的 IP 规则名称。为空表示未命中规则或事件只记录了解析结果。") }}</span></th><th><span class="ip-table-heading">Trace{{ help_icon("Trace 列说明", "请求追踪 ID，用于和请求日志、错误响应或告警记录关联排查。") }}</span></th><th><span class="ip-table-heading">操作{{ help_icon("事件操作说明", "详情会打开该事件的完整 JSON，包括解析来源、代理链摘要、规则命中和处置结果。") }}</span></th></tr></thead><tbody id="ip-event-body"></tbody></table></div>
+    <div class="ip-management-pagination" id="ip-event-pagination"></div>
 </section>
 
 <section class="ip-management-test-grid ip-management-panel" data-ip-panel="test" hidden>
     <form class="panel-card" id="ip-resolution-test-form">
         <div class="section-subhead"><h2>解析测试</h2></div>
-        <label class="content-guard-label"><span>直连 IP</span><input class="field-input" id="ip-test-direct-ip" type="text" placeholder="10.0.0.1"></label>
-        <label class="content-guard-label"><span>X-Forwarded-For</span><input class="field-input" id="ip-test-xff" type="text"></label>
-        <label class="content-guard-label"><span>Forwarded</span><input class="field-input" id="ip-test-forwarded" type="text"></label>
-        <label class="content-guard-label"><span>CF-Connecting-IP</span><input class="field-input" id="ip-test-cf" type="text"></label>
-        <label class="content-guard-label"><span>可信代理 CIDR</span><textarea class="field-input" id="ip-test-cidrs" rows="3"></textarea></label>
-        <button class="topbar-btn interactive-btn" type="submit"><i class="bi bi-play" aria-hidden="true"></i><span>测试</span></button>
+        <label class="content-guard-label">{{ field_title("直连 IP", "解析测试直连 IP 说明", "模拟应用服务器直接看到的来源 IP。若该 IP 命中可信代理 CIDR，系统才会继续读取转发头；否则会把它当作真实客户端 IP。") }}<input class="field-input" id="ip-test-direct-ip" type="text" placeholder="10.0.0.1"></label>
+        <label class="content-guard-label">{{ field_title("X-Forwarded-For", "X-Forwarded-For 说明", "模拟代理链传入的 X-Forwarded-For 头。通常包含一个或多个 IP，系统只会在直连 IP 可信时按配置解析。") }}<input class="field-input" id="ip-test-xff" type="text"></label>
+        <label class="content-guard-label">{{ field_title("Forwarded", "Forwarded 说明", "模拟标准 Forwarded 头，例如 for=203.0.113.7;proto=https。若被设为高优先级且格式有效，会优先用于真实 IP 解析。") }}<input class="field-input" id="ip-test-forwarded" type="text"></label>
+        <label class="content-guard-label">{{ field_title("CF-Connecting-IP", "CF-Connecting-IP 说明", "模拟 Cloudflare 写入的真实客户端 IP 头。只有直连 IP 是可信 Cloudflare 或自有代理节点时才应信任。") }}<input class="field-input" id="ip-test-cf" type="text"></label>
+        <label class="content-guard-label">{{ field_title("可信代理 CIDR", "测试可信代理 CIDR 说明", "解析测试使用的可信代理网段，可临时覆盖模块设置。一行一个 CIDR，用来验证某个代理节点是否会被信任。") }}<textarea class="field-input" id="ip-test-cidrs" rows="3"></textarea></label>
+        <label class="content-guard-label">{{ field_title("可信头优先级", "测试可信头优先级说明", "解析测试使用的头字段读取顺序。若不选择，会回退使用模块设置中的顺序；可临时调整验证不同代理链结果。") }}<select class="field-input" id="ip-test-trusted-header-order" multiple size="3"><option value="forwarded">Forwarded</option><option value="x_forwarded_for">X-Forwarded-For</option><option value="cf_connecting_ip">CF-Connecting-IP</option></select></label>
+        <button class="topbar-btn interactive-btn" type="submit" {{ action_help_attrs("解析测试按钮说明", "提交当前模拟直连 IP、转发头和可信代理配置，查看系统会解析出哪个客户端 IP 以及为什么采信或忽略。") }}><i class="bi bi-play" aria-hidden="true"></i><span>测试</span><i class="bi bi-question-circle ip-action-help-icon" aria-hidden="true"></i></button>
         <pre class="ip-management-result" id="ip-resolution-test-result">等待测试</pre>
     </form>
     <form class="panel-card" id="ip-rule-test-form">
         <div class="section-subhead"><h2>规则测试</h2></div>
-        <label class="content-guard-label"><span>IP</span><input class="field-input" id="ip-rule-test-ip" type="text"></label>
-        <label class="content-guard-label"><span>作用域</span><select class="field-input" id="ip-rule-test-scope"><option value="external_v1">/v1/*</option><option value="internal_api">/api/*</option><option value="user_pages">用户端</option></select></label>
-        <label class="content-guard-label"><span>路径</span><input class="field-input" id="ip-rule-test-path" type="text" value="/v1/chat/completions"></label>
-        <button class="topbar-btn interactive-btn" type="submit"><i class="bi bi-play" aria-hidden="true"></i><span>测试</span></button>
+        <label class="content-guard-label">{{ field_title("IP", "规则测试 IP 说明", "输入需要验证的客户端 IP。可以手动填写，也可以从规则列表点测试自动带入匹配值中的代表 IP。") }}<input class="field-input" id="ip-rule-test-ip" type="text"></label>
+        <label class="content-guard-label">{{ field_title("作用域", "规则测试作用域说明", "指定模拟请求所属范围。系统会按该范围筛选规则，因此同一个 IP 在不同作用域可能得到不同动作。") }}<select class="field-input" id="ip-rule-test-scope"><option value="external_v1">/v1/*</option><option value="internal_api">/api/*</option><option value="user_pages">用户端</option></select></label>
+        <label class="content-guard-label">{{ field_title("路径", "规则测试路径说明", "模拟请求路径，默认使用 /v1/chat/completions。用于确认事件和规则上下文；当前规则主要按 IP 与作用域匹配。") }}<input class="field-input" id="ip-rule-test-path" type="text" value="/v1/chat/completions"></label>
+        <button class="topbar-btn interactive-btn" type="submit" {{ action_help_attrs("规则测试按钮说明", "提交当前 IP、作用域和路径，查看会命中哪条规则以及最终动作。该测试不会真实阻断或写入正式请求日志。") }}><i class="bi bi-play" aria-hidden="true"></i><span>测试</span><i class="bi bi-question-circle ip-action-help-icon" aria-hidden="true"></i></button>
         <pre class="ip-management-result" id="ip-rule-test-result">等待测试</pre>
     </form>
 </section>
@@ -119,18 +143,18 @@
         <div class="modal-head"><div><div class="panel-kicker">IP 规则</div><h2 id="ip-rule-modal-title">新建规则</h2></div><button class="icon-btn interactive-btn" id="ip-rule-modal-close" type="button" aria-label="关闭">×</button></div>
         <input id="ip-rule-id" type="hidden">
         <div class="ip-rule-form-grid">
-            <label class="content-guard-label"><span>规则名</span><input class="field-input" id="ip-rule-name" required></label>
-            <label class="content-guard-label"><span>状态</span><select class="field-input" id="ip-rule-form-enabled"><option value="false">停用</option><option value="true">启用</option></select></label>
-            <label class="content-guard-label"><span>作用域</span><select class="field-input" id="ip-rule-form-scope"><option value="external_v1">/v1/*</option><option value="internal_api">/api/*</option><option value="user_pages">用户端</option><option value="all">全部</option></select></label>
-            <label class="content-guard-label"><span>匹配类型</span><select class="field-input" id="ip-rule-match-type"><option value="cidr">CIDR</option><option value="exact_ip">精确 IP</option><option value="range">IP 范围</option></select></label>
-            <label class="content-guard-label form-span-2"><span>匹配值</span><input class="field-input" id="ip-rule-match-value" required placeholder="203.0.113.0/24"></label>
-            <label class="content-guard-label"><span>动作</span><select class="field-input" id="ip-rule-form-action"><option value="record">记录</option><option value="allow">放行</option><option value="rate_limit">限流</option><option value="block">阻断</option></select></label>
-            <label class="content-guard-label"><span>优先级</span><input class="field-input" id="ip-rule-priority" type="number" min="1" value="100"></label>
-            <label class="content-guard-label"><span>QPS</span><input class="field-input" id="ip-rule-qps" type="number" min="0" value="0"></label>
-            <label class="content-guard-label"><span>RPM</span><input class="field-input" id="ip-rule-rpm" type="number" min="0" value="0"></label>
-            <label class="content-guard-label form-span-2"><span>原因</span><input class="field-input" id="ip-rule-reason"></label>
+            <label class="content-guard-label">{{ field_title("规则名", "规则名说明", "用于识别这条 IP 规则，建议包含对象和目的，例如 办公网放行 或 异常来源阻断。最多 100 字。") }}<input class="field-input" id="ip-rule-name" required></label>
+            <label class="content-guard-label">{{ field_title("状态", "规则状态说明", "控制规则是否参与匹配。新规则建议先停用保存，或启用但配合仅观察验证后再执行阻断/限流。") }}<select class="field-input" id="ip-rule-form-enabled"><option value="false">停用</option><option value="true">启用</option></select></label>
+            <label class="content-guard-label">{{ field_title("作用域", "规则作用域说明", "设置规则应用的请求范围。选择全部会跨外部 API、内部 API 和用户端页面生效，风险更高，应谨慎使用。") }}<select class="field-input" id="ip-rule-form-scope"><option value="external_v1">/v1/*</option><option value="internal_api">/api/*</option><option value="user_pages">用户端</option><option value="all">全部</option></select></label>
+            <label class="content-guard-label">{{ field_title("匹配类型", "匹配类型说明", "选择 IP 匹配方式。CIDR 适合网段，精确 IP 适合单个地址，IP 范围适合连续地址段。") }}<select class="field-input" id="ip-rule-match-type"><option value="cidr">CIDR</option><option value="exact_ip">精确 IP</option><option value="range">IP 范围</option></select></label>
+            <label class="content-guard-label form-span-2">{{ field_title("匹配值", "匹配值说明", "填写与匹配类型对应的值：CIDR 如 203.0.113.0/24，精确 IP 如 203.0.113.7，范围如 203.0.113.1-203.0.113.20。") }}<input class="field-input" id="ip-rule-match-value" required placeholder="203.0.113.0/24"></label>
+            <label class="content-guard-label">{{ field_title("动作", "规则动作说明", "设置命中后的动作。记录只审计，放行可覆盖后续低优先级规则，限流按 QPS/RPM 控制，阻断会拒绝请求且需允许阻断开关开启。") }}<select class="field-input" id="ip-rule-form-action"><option value="record">记录</option><option value="allow">放行</option><option value="rate_limit">限流</option><option value="block">阻断</option></select></label>
+            <label class="content-guard-label">{{ field_title("优先级", "优先级说明", "控制规则匹配顺序，数字越小越先匹配。常用放行例外可设小值，高风险阻断次之，兜底记录设大值。") }}<input class="field-input" id="ip-rule-priority" type="number" min="1" value="100"></label>
+            <label class="content-guard-label">{{ field_title("QPS 说明", "QPS 说明", "每秒请求上限，仅在动作选择限流且 IP 限流开关开启时执行。0 表示不使用 QPS 限制；限流规则需要 QPS 或 RPM 至少一个为正数。") }}<input class="field-input" id="ip-rule-qps" type="number" min="0" value="0"></label>
+            <label class="content-guard-label">{{ field_title("RPM 说明", "RPM 说明", "每分钟请求上限，仅在动作选择限流且 IP 限流开关开启时执行。0 表示不使用 RPM 限制；适合限制持续高频访问。") }}<input class="field-input" id="ip-rule-rpm" type="number" min="0" value="0"></label>
+            <label class="content-guard-label form-span-2">{{ field_title("原因", "原因说明", "记录这条规则的业务或安全依据，会在规则列表和事件排查中辅助识别。建议写明来源、处理目标和到期复核要求。") }}<input class="field-input" id="ip-rule-reason"></label>
         </div>
-        <div class="modal-actions"><button class="topbar-btn interactive-btn" id="ip-rule-submit-btn" type="submit"><i class="bi bi-check2" aria-hidden="true"></i><span>保存</span></button></div>
+        <div class="modal-actions"><button class="topbar-btn interactive-btn" id="ip-rule-submit-btn" type="submit" {{ action_help_attrs("保存规则说明", "保存新建或编辑后的规则。保存后若状态为启用且模块相关开关已开启，会参与后续请求匹配。") }}><i class="bi bi-check2" aria-hidden="true"></i><span>保存</span><i class="bi bi-question-circle ip-action-help-icon" aria-hidden="true"></i></button></div>
     </form>
 </div>
 {% endblock %}

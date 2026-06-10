@@ -3,17 +3,21 @@ from __future__ import annotations
 import json
 import re
 import html
+import ipaddress
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.models.alert_event import AlertEvent
 from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
 from app.services.provider_service import ProviderService
+from app.services.setting_service import SettingService
 from app.utils.json_utils import dumps_json
 
 
@@ -43,6 +47,8 @@ class ContentGuardResult:
             "content_guard_latency_ms": self.latency_ms,
             "content_guard_buffer_wait_ms": self.buffer_wait_ms,
             "content_guard_final_strategy": self.final_strategy,
+            "content_guard_confidence": self.confidence,
+            "content_guard_score_delta": self.score_delta,
         }
 
     def matched_rules_json(self) -> str:
@@ -89,6 +95,8 @@ class ContentGuardService:
     TRUSTED_LEVELS = {"official", "trusted"}
     STRUCTURED_ENDPOINTS = {"/chat/completions", "/responses", "/completions"}
     EXCERPT_MAX_CHARS = 500
+    MAX_SCAN_NODES = 2000
+    MAX_SCAN_DEPTH = 32
     JSON_MODE_TYPES = {"json_object", "json_schema"}
     SUSPICIOUS_RESPONSE_KEYS = {
         "ad",
@@ -106,6 +114,27 @@ class ContentGuardService:
         "wechat",
         "whatsapp",
     }
+    SUSPICIOUS_KEY_SCAN_SKIP_KEYS = {
+        "metadata",
+        "usage",
+        "system_fingerprint",
+        "service_tier",
+        "billing",
+        "logprobs",
+        "content",
+        "input",
+        "messages",
+        "text",
+        "output_text",
+        "json",
+        "arguments",
+        "summary",
+        "reasoning",
+        "annotations",
+        "citations",
+        "refusal",
+        "image_url",
+    }
 
     _URL_RE = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
     _URL_MARKERS = ("http://", "https://")
@@ -113,18 +142,13 @@ class ContentGuardService:
     _ALLOWED_RULE_RISK_LEVELS = {"low", "medium", "high"}
     _ALLOWED_RULE_ACTIONS = {"allow", "record", "block"}
     _ZERO_WIDTH_RE = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]")
-    _DOMAIN_RE = re.compile(r"\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\b", re.IGNORECASE)
-    DEFAULT_URL_ALLOWLIST = {
-        "openai.com",
-        "platform.openai.com",
-        "github.com",
-        "docs.github.com",
-        "microsoft.com",
-        "learn.microsoft.com",
-        "google.com",
-        "cloud.google.com",
-        "anthropic.com",
-    }
+    _DOMAIN_RE = re.compile(
+        r"(?<![\w.-])(?:[a-z0-9\u4e00-\u9fff](?:[a-z0-9\u4e00-\u9fff-]{0,61}[a-z0-9\u4e00-\u9fff])?\.)+"
+        r"(?:[a-z\u4e00-\u9fff]{2,63}|xn--[a-z0-9-]{2,59})(?![\w.-])",
+        re.IGNORECASE,
+    )
+    _IPV4_RE = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])")
+    _IPV6_RE = re.compile(r"(?<![\w:])(?:\[[0-9a-f:.%]+\]|[0-9a-f]{0,4}:[0-9a-f:.%]{2,})(?![\w:])", re.IGNORECASE)
     SHORT_LINK_DOMAINS = {
         "amzn.to",
         "bit.ly",
@@ -271,6 +295,11 @@ class ContentGuardService:
         require_tools: bool = False,
     ) -> bool:
         """判断请求是否应优先走可信提供商，不执行健康探测。"""
+        try:
+            if not bool(getattr(SettingService.get_cached(), "content_guard_enabled", True)):
+                return False
+        except Exception:
+            pass
         if not isinstance(payload, dict):
             return bool(has_image or require_tools)
         return bool(
@@ -294,19 +323,40 @@ class ContentGuardService:
         url_allowlist: list[str] | str | None = None,
         url_check_enabled: bool = True,
         rules: list[ContentGuardRule | dict[str, Any]] | None = None,
+        enhanced_detection_enabled: bool | None = None,
+        enhanced_illegal_enabled: bool | None = None,
+        enhanced_ad_enabled: bool | None = None,
+        enhanced_custom_enabled: bool | None = None,
+        enhanced_obfuscation_enabled: bool | None = None,
+        enhanced_threshold: int | None = None,
+        enhanced_context_window_chars: int | None = None,
     ) -> ContentGuardResult:
+        from app.services.content_guard_rule_service import ContentGuardRuleService
+
         started = datetime.utcnow()
         sample = cls._clip_text(cls.normalize_scan_text(text), max_scan_bytes=max_scan_bytes)
         if not sample:
             return ContentGuardResult(result=cls.RESULT_PASS, risk_level="low", reason="未检测到可扫描文本")
+        enhanced_options = cls._resolve_enhanced_detection_options(
+            enhanced_detection_enabled=enhanced_detection_enabled,
+            enhanced_illegal_enabled=enhanced_illegal_enabled,
+            enhanced_ad_enabled=enhanced_ad_enabled,
+            enhanced_custom_enabled=enhanced_custom_enabled,
+            enhanced_obfuscation_enabled=enhanced_obfuscation_enabled,
+            enhanced_threshold=enhanced_threshold,
+            enhanced_context_window_chars=enhanced_context_window_chars,
+        )
         matched_rules = cls.match_text_rules(
             sample,
             request_payload=request_payload,
             url_allowlist=url_allowlist,
             url_check_enabled=url_check_enabled,
-            rules=rules if rules is not None else cls.parse_rules_json(rules_json),
+            rules=rules if rules is not None else ContentGuardRuleService.parse_rules_json(rules_json),
+            **enhanced_options,
         )
-        active_rules = cls.normalize_rules(rules if rules is not None else cls.parse_rules_json(rules_json))
+        active_rules = ContentGuardRuleService.normalize_rules(
+            rules if rules is not None else ContentGuardRuleService.parse_rules_json(rules_json)
+        )
         invalid_config_rules = [rule for rule in active_rules if rule.category == "rule_configuration_error"]
         if invalid_config_rules:
             matched_rules.extend(rule for rule in invalid_config_rules if rule.id not in {item.id for item in matched_rules})
@@ -331,13 +381,31 @@ class ContentGuardService:
                 ContentGuardResult(result=cls.RESULT_PASS, risk_level="low", reason="未命中内容污染规则"),
                 started=started,
             )
+        allow_rules, risk_rules = ContentGuardRuleService.split_allow_rules(matched_rules)
+        if allow_rules:
+            return cls._with_latency(
+                ContentGuardResult(
+                    result=cls.RESULT_PASS,
+                    risk_level="low",
+                    categories=[rule.category for rule in allow_rules if rule.category],
+                    reason=cls._summarize_matched_rules(allow_rules) or "命中内容防护放行规则",
+                    action="allow",
+                    excerpt=cls._excerpt(sample),
+                    score_delta=0,
+                    confidence=cls._combine_rule_confidence(allow_rules),
+                    matched_rules=[rule.to_dict() for rule in allow_rules],
+                ),
+                started=started,
+            )
+        matched_rules = risk_rules
         categories = []
         for rule in matched_rules:
             if rule.category not in categories:
                 categories.append(rule.category)
         high_risk = any(rule.risk_level == "high" or rule.action == "block" for rule in matched_rules)
-        score_total = sum(abs(int(rule.score_delta or 0)) for rule in matched_rules)
-        score_delta = -min(100, max(8, score_total))
+        score_delta, score_total = ContentGuardRuleService.score_rules(matched_rules)
+        if score_total > 0:
+            score_delta = -min(100, max(8, score_total))
         confidence = cls._combine_rule_confidence(matched_rules)
         tail_boost = cls._tail_risk_boost(sample, matched_rules)
         ad_intent_boost = 0.08 if cls._has_ad_intent(sample) else 0.0
@@ -382,96 +450,30 @@ class ContentGuardService:
         url_allowlist: list[str] | str | None = None,
         url_check_enabled: bool = True,
         rules: list[ContentGuardRule | dict[str, Any]] | None = None,
+        enhanced_detection_enabled: bool = True,
+        enhanced_illegal_enabled: bool = True,
+        enhanced_ad_enabled: bool = True,
+        enhanced_custom_enabled: bool = True,
+        enhanced_obfuscation_enabled: bool = True,
+        enhanced_threshold: int = 70,
+        enhanced_context_window_chars: int = 96,
     ) -> list[ContentGuardRule]:
-        normalized_rules = cls.normalize_rules(rules)
-        normalized_text = cls.normalize_scan_text(text)
-        lower_sample = normalized_text.lower()
-        response_domains = cls.extract_domains(normalized_text)
-        allowed_domains = cls.allowed_domains(request_payload=request_payload, url_allowlist=url_allowlist)
-        unexpected_domains = {domain for domain in response_domains if not cls._domain_allowed(domain, allowed_domains)}
-        matched: list[ContentGuardRule] = []
-        for rule in normalized_rules:
-            if not rule.enabled:
-                continue
-            if rule.match_type == "unexpected_url":
-                if not url_check_enabled or not unexpected_domains:
-                    continue
-                if cls._request_disallows_advertising_or_links(request_payload):
-                    matched.append(
-                        ContentGuardRule(
-                            id="forbidden_unexpected_link",
-                            name="禁止链接场景外链",
-                            category="unexpected_link",
-                            match_type="unexpected_url",
-                            patterns=[],
-                            risk_level="high",
-                            action="block",
-                            score_delta=-25,
-                            confidence=0.9,
-                            reason="用户明确要求不要链接、外链或联系方式，但响应包含外部链接",
-                        )
-                    )
-                elif not cls._request_allows_advertising(request_payload):
-                    matched.append(rule)
-                continue
-            if rule.match_type == "keyword_any":
-                terms = [str(item).strip().lower() for item in rule.patterns if str(item).strip()]
-                if terms and any(term in lower_sample for term in terms):
-                    matched.append(rule)
-                continue
-            if rule.match_type == "regex":
-                for pattern in rule.patterns:
-                    try:
-                        if re.search(str(pattern), normalized_text, re.IGNORECASE):
-                            matched.append(rule)
-                            break
-                    except re.error as exc:
-                        matched.append(
-                            ContentGuardRule(
-                                id=f"invalid_regex_{rule.id}",
-                                name=f"无效正则：{rule.name}",
-                                category="rule_configuration_error",
-                                match_type="regex",
-                                patterns=[str(pattern)],
-                                risk_level="high",
-                                action="record",
-                                score_delta=0,
-                                confidence=1.0,
-                                reason=f"内容防护正则规则 `{rule.name}` 无效：{exc}",
-                            )
-                        )
-                        break
-        if url_check_enabled and cls._has_short_link_domain(response_domains):
-            matched.append(
-                ContentGuardRule(
-                    id="short_link_redirect",
-                    name="短链导流",
-                    category="unexpected_link",
-                    match_type="unexpected_url",
-                    patterns=[],
-                    risk_level="high",
-                    action="block",
-                    score_delta=-25,
-                    confidence=0.86,
-                    reason="响应包含短链域名",
-                )
-            )
-        if url_check_enabled and unexpected_domains and cls._has_ad_intent(normalized_text) and not cls._request_allows_advertising(request_payload):
-            matched.append(
-                ContentGuardRule(
-                    id="unexpected_link_with_ad_intent",
-                    name="外链广告引导",
-                    category="advertising_or_promotion",
-                    match_type="unexpected_url",
-                    patterns=[],
-                    risk_level="high",
-                    action="block",
-                    score_delta=-25,
-                    confidence=0.88,
-                    reason="响应包含未授权外链并伴随广告、注册、优惠或导流意图",
-                )
-            )
-        return matched
+        from app.services.content_guard_rule_service import ContentGuardRuleService
+
+        return ContentGuardRuleService.match_text_rules(
+            text,
+            request_payload=request_payload,
+            url_allowlist=url_allowlist,
+            url_check_enabled=url_check_enabled,
+            rules=rules,
+            enhanced_detection_enabled=enhanced_detection_enabled,
+            enhanced_illegal_enabled=enhanced_illegal_enabled,
+            enhanced_ad_enabled=enhanced_ad_enabled,
+            enhanced_custom_enabled=enhanced_custom_enabled,
+            enhanced_obfuscation_enabled=enhanced_obfuscation_enabled,
+            enhanced_threshold=enhanced_threshold,
+            enhanced_context_window_chars=enhanced_context_window_chars,
+        )
 
     @classmethod
     def inspect_json_response(
@@ -487,9 +489,35 @@ class ContentGuardService:
         url_allowlist: list[str] | str | None = None,
         url_check_enabled: bool = True,
         rules: list[ContentGuardRule | dict[str, Any]] | None = None,
+        enhanced_detection_enabled: bool | None = None,
+        enhanced_illegal_enabled: bool | None = None,
+        enhanced_ad_enabled: bool | None = None,
+        enhanced_custom_enabled: bool | None = None,
+        enhanced_obfuscation_enabled: bool | None = None,
+        enhanced_threshold: int | None = None,
+        enhanced_context_window_chars: int | None = None,
     ) -> ContentGuardResult:
         started = datetime.utcnow()
-        structure_result = cls._inspect_response_structure(payload, endpoint_path=endpoint_path, request_payload=request_payload)
+        enhanced_options = cls._resolve_enhanced_detection_options(
+            enhanced_detection_enabled=enhanced_detection_enabled,
+            enhanced_illegal_enabled=enhanced_illegal_enabled,
+            enhanced_ad_enabled=enhanced_ad_enabled,
+            enhanced_custom_enabled=enhanced_custom_enabled,
+            enhanced_obfuscation_enabled=enhanced_obfuscation_enabled,
+            enhanced_threshold=enhanced_threshold,
+            enhanced_context_window_chars=enhanced_context_window_chars,
+        )
+        structure_result = cls._inspect_response_structure(
+            payload,
+            endpoint_path=endpoint_path,
+            request_payload=request_payload,
+            max_scan_bytes=max_scan_bytes,
+            rules_json=rules_json,
+            url_allowlist=url_allowlist,
+            url_check_enabled=url_check_enabled,
+            rules=rules,
+            **enhanced_options,
+        )
         if structure_result.result == cls.RESULT_BLOCK:
             return cls._with_latency(structure_result, started=started)
         text = cls._extract_response_scan_text(payload, endpoint_path=endpoint_path, max_scan_bytes=max_scan_bytes)
@@ -503,6 +531,7 @@ class ContentGuardService:
             url_allowlist=url_allowlist,
             url_check_enabled=url_check_enabled,
             rules=rules,
+            **enhanced_options,
         )
         if text_result.result != cls.RESULT_PASS:
             return text_result
@@ -520,6 +549,13 @@ class ContentGuardService:
         url_allowlist: list[str] | str | None = None,
         url_check_enabled: bool = True,
         rules: list[ContentGuardRule | dict[str, Any]] | None = None,
+        enhanced_detection_enabled: bool | None = None,
+        enhanced_illegal_enabled: bool | None = None,
+        enhanced_ad_enabled: bool | None = None,
+        enhanced_custom_enabled: bool | None = None,
+        enhanced_obfuscation_enabled: bool | None = None,
+        enhanced_threshold: int | None = None,
+        enhanced_context_window_chars: int | None = None,
     ) -> ContentGuardResult:
         started = datetime.utcnow()
         if not data or data == "[DONE]":
@@ -531,13 +567,13 @@ class ContentGuardService:
         if not stripped.startswith("{"):
             return cls._with_latency(
                 ContentGuardResult(
-                    result=cls.RESULT_BLOCK,
-                    risk_level="high",
+                    result=cls.RESULT_REVIEW,
+                    risk_level="medium",
                     categories=["invalid_sse_event"],
-                    reason="SSE data 不是合法 JSON 事件",
-                    action="block",
+                    reason="SSE data 不是 JSON 事件，已按兼容流文本降级复核",
+                    action="async_review",
                     excerpt=cls._excerpt(stripped),
-                    score_delta=-20,
+                    score_delta=-5,
                 ),
                 started=started,
             )
@@ -546,13 +582,13 @@ class ContentGuardService:
         except Exception:
             return cls._with_latency(
                 ContentGuardResult(
-                    result=cls.RESULT_BLOCK,
-                    risk_level="high",
+                    result=cls.RESULT_REVIEW,
+                    risk_level="medium",
                     categories=["invalid_sse_event"],
-                    reason="SSE data 不是合法 JSON 事件",
-                    action="block",
+                    reason="SSE data 不是合法 JSON 事件，已按兼容流文本降级复核",
+                    action="async_review",
                     excerpt=cls._excerpt(stripped),
-                    score_delta=-20,
+                    score_delta=-5,
                 ),
                 started=started,
             )
@@ -571,6 +607,13 @@ class ContentGuardService:
             url_allowlist=url_allowlist,
             url_check_enabled=url_check_enabled,
             rules=rules,
+            enhanced_detection_enabled=enhanced_detection_enabled,
+            enhanced_illegal_enabled=enhanced_illegal_enabled,
+            enhanced_ad_enabled=enhanced_ad_enabled,
+            enhanced_custom_enabled=enhanced_custom_enabled,
+            enhanced_obfuscation_enabled=enhanced_obfuscation_enabled,
+            enhanced_threshold=enhanced_threshold,
+            enhanced_context_window_chars=enhanced_context_window_chars,
         )
 
     @classmethod
@@ -579,17 +622,63 @@ class ContentGuardService:
 
     @classmethod
     def parse_rules_json(cls, rules_json: str | None) -> list[ContentGuardRule]:
-        if not rules_json:
-            return cls.normalize_rules(None)
+        from app.services.content_guard_rule_service import ContentGuardRuleService
+
+        return ContentGuardRuleService.parse_rules_json(rules_json)
+
+    @classmethod
+    def _resolve_enhanced_detection_options(
+        cls,
+        *,
+        enhanced_detection_enabled: bool | None = None,
+        enhanced_illegal_enabled: bool | None = None,
+        enhanced_ad_enabled: bool | None = None,
+        enhanced_custom_enabled: bool | None = None,
+        enhanced_obfuscation_enabled: bool | None = None,
+        enhanced_threshold: int | None = None,
+        enhanced_context_window_chars: int | None = None,
+    ) -> dict[str, Any]:
+        setting = None
         try:
-            parsed = json.loads(rules_json)
-        except Exception as exc:
-            return [
-                cls._invalid_rules_json_rule(
-                    f"内容防护规则 JSON 配置损坏：{exc}",
-                )
-            ]
-        return cls.normalize_rules(parsed)
+            setting = SettingService.get_cached()
+        except Exception:
+            setting = None
+
+        def bool_value(explicit: bool | None, field_name: str, default: bool) -> bool:
+            if explicit is not None:
+                return bool(explicit)
+            if setting is None:
+                return default
+            return bool(getattr(setting, field_name, default))
+
+        def int_value(explicit: int | None, field_name: str, default: int, minimum: int, maximum: int) -> int:
+            if explicit is not None:
+                raw = explicit
+            elif setting is not None:
+                raw = getattr(setting, field_name, default)
+            else:
+                raw = default
+            try:
+                value = int(raw)
+            except Exception:
+                value = default
+            return min(maximum, max(minimum, value))
+
+        return {
+            "enhanced_detection_enabled": bool_value(enhanced_detection_enabled, "content_guard_enhanced_detection_enabled", True),
+            "enhanced_illegal_enabled": bool_value(enhanced_illegal_enabled, "content_guard_enhanced_illegal_enabled", True),
+            "enhanced_ad_enabled": bool_value(enhanced_ad_enabled, "content_guard_enhanced_ad_enabled", True),
+            "enhanced_custom_enabled": bool_value(enhanced_custom_enabled, "content_guard_enhanced_custom_enabled", True),
+            "enhanced_obfuscation_enabled": bool_value(enhanced_obfuscation_enabled, "content_guard_enhanced_obfuscation_enabled", True),
+            "enhanced_threshold": int_value(enhanced_threshold, "content_guard_enhanced_threshold", 70, 0, 100),
+            "enhanced_context_window_chars": int_value(
+                enhanced_context_window_chars,
+                "content_guard_enhanced_context_window_chars",
+                96,
+                24,
+                512,
+            ),
+        }
 
     @classmethod
     def _invalid_rules_json_rule(cls, reason: str) -> ContentGuardRule:
@@ -608,68 +697,21 @@ class ContentGuardService:
 
     @classmethod
     def serialize_rules_json(cls, rules: list[ContentGuardRule | dict[str, Any]] | None) -> str:
-        return dumps_json([rule.to_dict() if isinstance(rule, ContentGuardRule) else rule for rule in cls.normalize_rules(rules)])
+        from app.services.content_guard_rule_service import ContentGuardRuleService
+
+        return ContentGuardRuleService.serialize_rules_json(rules)
 
     @classmethod
     def normalize_rules(cls, rules: list[ContentGuardRule | dict[str, Any]] | None) -> list[ContentGuardRule]:
-        use_defaults = rules is None
-        source = rules if isinstance(rules, list) else list(cls.DEFAULT_TEXT_RULES)
-        normalized: list[ContentGuardRule] = []
-        seen: set[str] = set()
-        for index, item in enumerate(source):
-            rule = item if isinstance(item, ContentGuardRule) else cls._coerce_rule(item, index=index)
-            if rule is None or rule.id in seen:
-                continue
-            seen.add(rule.id)
-            normalized.append(rule)
-        return normalized or (list(cls.DEFAULT_TEXT_RULES) if use_defaults else [])
+        from app.services.content_guard_rule_service import ContentGuardRuleService
+
+        return ContentGuardRuleService.normalize_rules(rules)
 
     @classmethod
     def _coerce_rule(cls, item: Any, *, index: int) -> ContentGuardRule | None:
-        if not isinstance(item, dict):
-            return None
-        rule_id = cls._normalize_rule_id(str(item.get("id") or f"custom_rule_{index + 1}"))
-        name = str(item.get("name") or rule_id).strip()[:80]
-        category = cls._normalize_rule_id(str(item.get("category") or rule_id))
-        match_type = str(item.get("match_type") or "keyword_any").strip()
-        risk_level = str(item.get("risk_level") or "medium").strip()
-        action = str(item.get("action") or "record").strip()
-        patterns = item.get("patterns")
-        if isinstance(patterns, str):
-            patterns = [line.strip() for line in patterns.splitlines() if line.strip()]
-        if not isinstance(patterns, list):
-            patterns = []
-        clean_patterns = [str(pattern).strip()[:500] for pattern in patterns if str(pattern).strip()]
-        if not rule_id or not name or not category or not clean_patterns:
-            return None
-        if match_type not in cls._ALLOWED_RULE_MATCH_TYPES:
-            match_type = "keyword_any"
-        if risk_level not in cls._ALLOWED_RULE_RISK_LEVELS:
-            risk_level = "medium"
-        if action not in cls._ALLOWED_RULE_ACTIONS:
-            action = "record"
-        try:
-            score_delta = int(item.get("score_delta", -8))
-        except Exception:
-            score_delta = -8
-        try:
-            confidence = float(item.get("confidence", 0.7))
-        except Exception:
-            confidence = 0.7
-        confidence = max(0.0, min(1.0, confidence))
-        return ContentGuardRule(
-            id=rule_id,
-            name=name,
-            category=category,
-            enabled=bool(item.get("enabled", True)),
-            match_type=match_type,
-            patterns=clean_patterns[:50],
-            risk_level=risk_level,
-            action=action,
-            score_delta=max(-100, min(0, score_delta)),
-            confidence=confidence,
-            reason=str(item.get("reason") or "").strip()[:200],
-        )
+        from app.services.content_guard_rule_service import ContentGuardRuleService
+
+        return ContentGuardRuleService.coerce_rule(item, index=index)
 
     @staticmethod
     def _normalize_rule_id(value: str) -> str:
@@ -677,10 +719,22 @@ class ContentGuardService:
 
     @staticmethod
     def _summarize_matched_rules(rules: list[ContentGuardRule]) -> str:
-        names = [rule.name for rule in rules[:3] if rule.name]
-        if not names:
+        summaries: list[str] = []
+        for rule in rules[:3]:
+            name = rule.name or rule.id
+            if not name:
+                continue
+            patterns = [str(item).strip() for item in rule.patterns if str(item).strip()]
+            pattern_hint = ""
+            if patterns:
+                clipped = ", ".join(pattern[:40] for pattern in patterns[:2])
+                pattern_hint = f"，pattern={clipped}"
+            summaries.append(
+                f"{name}(id={rule.id}, type={rule.match_type}, confidence={float(rule.confidence or 0):.2f}{pattern_hint})"
+            )
+        if not summaries:
             return ""
-        return "命中内容防护规则：" + "、".join(names)
+        return "命中内容防护规则：" + "；".join(summaries)
 
     @staticmethod
     def _with_latency(result: ContentGuardResult, *, started: datetime) -> ContentGuardResult:
@@ -692,7 +746,7 @@ class ContentGuardService:
         if not isinstance(text, str) or not text:
             return ""
         normalized = unicodedata.normalize("NFKC", text)
-        normalized = normalized.translate(str.maketrans({"。": ".", "．": ".", "｡": "."}))
+        normalized = normalized.translate(str.maketrans({"．": ".", "｡": "."}))
         normalized = cls._ZERO_WIDTH_RE.sub("", normalized)
         normalized = html.unescape(normalized)
         previous = normalized
@@ -705,21 +759,29 @@ class ContentGuardService:
 
     @classmethod
     def parse_url_allowlist(cls, value: list[str] | str | None) -> set[str]:
-        domains = set(cls.DEFAULT_URL_ALLOWLIST)
+        domains: set[str] = set()
         if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return domains
             try:
-                parsed = json.loads(value)
+                parsed = json.loads(stripped)
                 if isinstance(parsed, list):
                     value = parsed
                 else:
-                    value = [item.strip() for item in value.replace(",", "\n").splitlines()]
+                    value = []
             except Exception:
-                value = [item.strip() for item in value.replace(",", "\n").splitlines()]
+                if stripped.startswith("{"):
+                    value = []
+                else:
+                    value = [item.strip() for item in stripped.replace(",", "\n").splitlines()]
         if isinstance(value, list):
             for item in value:
-                domain = cls._normalize_domain(str(item))
+                raw_item = str(item).strip()
+                wildcard = raw_item.startswith("*.")
+                domain = cls._normalize_domain(raw_item[2:] if wildcard else raw_item)
                 if domain:
-                    domains.add(domain)
+                    domains.add(f"*.{domain}" if wildcard else domain)
         return domains
 
     @classmethod
@@ -744,19 +806,60 @@ class ContentGuardService:
             domain = cls._normalize_domain(match)
             if domain:
                 domains.add(domain)
+        for match in cls._IPV4_RE.findall(normalized):
+            domain = cls._normalize_domain(match)
+            if domain:
+                domains.add(domain)
+        for match in cls._IPV6_RE.findall(normalized):
+            domain = cls._normalize_domain(match)
+            if domain:
+                domains.add(domain)
         return domains
 
     @staticmethod
     def _normalize_domain(value: str) -> str:
-        domain = value.strip().lower().rstrip(".")
+        domain = value.strip().lower()
+        domain = domain.strip("[](){}<>\"'`，,；;。")
+        domain = domain.rstrip(".")
         if not domain:
             return ""
         if "://" in domain:
             domain = urlparse(domain).hostname or ""
-        domain = domain.removeprefix("www.").strip().lower().rstrip(".")
+        if domain.startswith("[") and "]" in domain:
+            domain = domain[1:domain.index("]")]
+        elif ":" in domain and domain.count(":") == 1:
+            host, port = domain.rsplit(":", 1)
+            if port.isdigit():
+                domain = host
+        domain = domain.strip().lower().rstrip(".")
+        if "%" in domain:
+            domain = domain.split("%", 1)[0]
+        if not domain:
+            return ""
+        try:
+            return ipaddress.ip_address(domain).compressed.lower()
+        except ValueError:
+            pass
+        domain = domain.removeprefix("www.")
         if not domain or "." not in domain:
             return ""
-        return domain[:253]
+        try:
+            ascii_domain = domain.encode("idna").decode("ascii").lower()
+        except UnicodeError:
+            return ""
+        if len(ascii_domain) > 253:
+            return ""
+        labels = ascii_domain.split(".")
+        if any(
+            not label
+            or len(label) > 63
+            or label.startswith("-")
+            or label.endswith("-")
+            or not re.fullmatch(r"[a-z0-9-]+", label)
+            for label in labels
+        ):
+            return ""
+        return ascii_domain
 
     @staticmethod
     def _normalize_obfuscated_url_text(value: str) -> str:
@@ -780,8 +883,27 @@ class ContentGuardService:
     def _domain_allowed(domain: str, allowed_domains: set[str]) -> bool:
         normalized = ContentGuardService._normalize_domain(domain)
         if not normalized:
-            return True
-        return any(normalized == allowed or normalized.endswith(f".{allowed}") for allowed in allowed_domains)
+            return False
+        for allowed in allowed_domains:
+            normalized_allowed = str(allowed or "").strip().lower()
+            if normalized_allowed.startswith("*."):
+                root = ContentGuardService._normalize_domain(normalized_allowed[2:])
+                if root and normalized != root and normalized.endswith(f".{root}"):
+                    return True
+                continue
+            root = ContentGuardService._normalize_domain(normalized_allowed)
+            if root and normalized == root:
+                return True
+        return False
+
+    @staticmethod
+    def _keyword_matches(sample: str, term: str) -> bool:
+        if not sample or not term:
+            return False
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_.:-]*", term, flags=re.IGNORECASE):
+            return term in sample
+        pattern = rf"(?<![a-z0-9_.:-]){re.escape(term)}(?![a-z0-9_.:-])"
+        return re.search(pattern, sample, flags=re.IGNORECASE) is not None
 
     @classmethod
     def _has_short_link_domain(cls, domains: set[str]) -> bool:
@@ -815,7 +937,7 @@ class ContentGuardService:
                 term = str(pattern).strip().lower()
                 if not term:
                     continue
-                if rule.match_type == "keyword_any" and term in tail:
+                if rule.match_type == "keyword_any" and cls._keyword_matches(tail, term):
                     return 0.08
                 if rule.match_type == "regex":
                     try:
@@ -827,16 +949,18 @@ class ContentGuardService:
 
     @staticmethod
     def should_block(result: ContentGuardResult, *, setting: Any | None = None) -> bool:
-        if result.result != ContentGuardService.RESULT_BLOCK:
+        if result.result not in {ContentGuardService.RESULT_BLOCK, ContentGuardService.RESULT_ERROR}:
             return False
         if setting is None:
             return True
         strategy = str(getattr(setting, "content_guard_high_risk_strategy", "") or "").strip()
         if strategy == "record_only":
             return False
+        if strategy in {"switch_provider", "safe_error"}:
+            return True
         raw_threshold = float(getattr(setting, "content_guard_high_risk_confidence_threshold", 85) or 85)
         threshold = raw_threshold / 100 if raw_threshold > 1 else raw_threshold
-        if float(result.confidence or 0.0) < threshold and result.action != "block":
+        if float(result.confidence or 0.0) < threshold:
             return False
         return bool(getattr(setting, "content_guard_block_on_high_risk", True))
 
@@ -849,29 +973,100 @@ class ContentGuardService:
         provider_model: ProviderModel | None,
         result: ContentGuardResult,
         severe: bool | None = None,
+        source: str = "runtime",
         auto_commit: bool = True,
     ) -> None:
         if result.result not in {cls.RESULT_REVIEW, cls.RESULT_BLOCK, cls.RESULT_ERROR}:
             return
         now = datetime.utcnow()
-        is_severe = result.result == cls.RESULT_BLOCK if severe is None else severe
+        final_strategy = str(getattr(result, "final_strategy", "") or getattr(result, "action", "") or "")
+        if final_strategy in {"record_only", "record", "async_review"}:
+            severe = False
+        is_severe = result.result in {cls.RESULT_BLOCK, cls.RESULT_ERROR} if severe is None else severe
         if provider is not None:
             provider.content_violation_count = int(provider.content_violation_count or 0) + 1
             provider.last_content_violation_at = now
-            provider.content_integrity_status = "blocked" if is_severe else "degraded"
-            provider.content_integrity_score = max(0, int(provider.content_integrity_score or 80) + int(result.score_delta or -10))
-            if is_severe and getattr(provider, "auto_circuit_break_enabled", True):
-                provider.circuit_state = "open"
-        if provider_model is not None:
-            provider_model.content_probe_last_failed_at = now
-            provider_model.content_probe_failure_count = int(provider_model.content_probe_failure_count or 0) + 1
-            provider_model.content_integrity_status = "blocked" if is_severe else "degraded"
             if is_severe:
-                provider_model.circuit_state = "open"
-                provider_model.circuit_opened_at = now
+                provider.content_integrity_status = "blocked"
+                provider.content_integrity_score = max(0, int(provider.content_integrity_score or 80) + int(result.score_delta or -10))
+                if getattr(provider, "auto_circuit_break_enabled", True) is not False:
+                    provider.circuit_state = "open"
+                    if hasattr(provider, "circuit_opened_at"):
+                        provider.circuit_opened_at = now
+        if provider_model is not None and is_severe:
+            if source == "probe":
+                provider_model.content_probe_last_failed_at = now
+                provider_model.content_probe_failure_count = int(provider_model.content_probe_failure_count or 0) + 1
+            provider_model.content_integrity_status = "blocked"
+            provider_model.circuit_state = "open"
+            provider_model.circuit_opened_at = now
+        if is_severe and provider is not None:
+            cls._upsert_content_guard_alert_event(
+                db,
+                provider=provider,
+                provider_model=provider_model,
+                result=result,
+                occurred_at=now,
+            )
         ProviderService.invalidate_provider_runtime_cache()
         if auto_commit:
             db.commit()
+
+    @classmethod
+    def _upsert_content_guard_alert_event(
+        cls,
+        db: Session,
+        *,
+        provider: Provider,
+        provider_model: ProviderModel | None,
+        result: ContentGuardResult,
+        occurred_at: datetime,
+    ) -> None:
+        alert_key = f"runtime:content_guard_violation:{provider.id}"
+        item = db.scalar(select(AlertEvent).where(AlertEvent.alert_key == alert_key))
+        payload = {
+            "provider_id": provider.id,
+            "provider_name": provider.name,
+            "provider_model_id": getattr(provider_model, "id", None),
+            "model_name": getattr(provider_model, "model_name", None),
+            "content_guard_result": result.result,
+            "risk_level": result.risk_level,
+            "categories": result.categories,
+            "reason": result.reason,
+            "provider_status_after": provider.content_integrity_status,
+            "provider_circuit_state": provider.circuit_state,
+            "provider_circuit_opened_at": provider.circuit_opened_at.isoformat()
+            if getattr(provider, "circuit_opened_at", None)
+            else None,
+            "model_circuit_opened_at": provider_model.circuit_opened_at.isoformat()
+            if provider_model is not None and provider_model.circuit_opened_at
+            else None,
+        }
+        title = f"提供商内容完整性高风险 · {provider.name}"
+        message = f"运行时内容防护命中高风险规则：{result.reason or result.risk_level}"
+        if item is None:
+            db.add(
+                AlertEvent(
+                    alert_key=alert_key,
+                    alert_type="provider",
+                    severity="danger",
+                    title=title,
+                    message=message,
+                    payload_json=dumps_json(payload),
+                    status="active",
+                    first_seen_at=occurred_at,
+                    last_seen_at=occurred_at,
+                )
+            )
+            return
+        item.alert_type = "provider"
+        item.severity = "danger"
+        item.title = title
+        item.message = message
+        item.payload_json = dumps_json(payload)
+        item.status = "active"
+        item.last_seen_at = occurred_at
+        item.resolved_at = None
 
     @classmethod
     def _inspect_response_structure(
@@ -880,6 +1075,18 @@ class ContentGuardService:
         *,
         endpoint_path: str | None,
         request_payload: dict[str, Any] | None = None,
+        max_scan_bytes: int = 16384,
+        rules_json: str | None = None,
+        url_allowlist: list[str] | str | None = None,
+        url_check_enabled: bool = True,
+        rules: list[ContentGuardRule | dict[str, Any]] | None = None,
+        enhanced_detection_enabled: bool = True,
+        enhanced_illegal_enabled: bool = True,
+        enhanced_ad_enabled: bool = True,
+        enhanced_custom_enabled: bool = True,
+        enhanced_obfuscation_enabled: bool = True,
+        enhanced_threshold: int = 70,
+        enhanced_context_window_chars: int = 96,
     ) -> ContentGuardResult:
         if not isinstance(payload, dict):
             return ContentGuardResult(
@@ -891,28 +1098,31 @@ class ContentGuardService:
                 excerpt=cls._excerpt(str(payload)),
                 score_delta=-20,
             )
-        if endpoint_path == "/chat/completions" and "choices" not in payload and "error" not in payload:
-            return ContentGuardResult(
-                result=cls.RESULT_BLOCK,
-                risk_level="high",
-                categories=["chat_completion_schema_violation"],
-                reason="Chat Completions 响应缺少 choices 字段",
-                action="block",
-                excerpt=cls._excerpt(dumps_json({"keys": list(payload.keys())[:20]})),
-                score_delta=-20,
+        if cls._has_meaningful_error_payload(payload):
+            return cls._response_schema_violation(
+                category="upstream_error_payload",
+                reason="上游 HTTP 200 响应包含 error 字段，不能作为正常模型响应放行",
+                payload=payload,
             )
-        if endpoint_path == "/responses" and "output" not in payload and "error" not in payload:
-            return ContentGuardResult(
-                result=cls.RESULT_BLOCK,
-                risk_level="high",
-                categories=["responses_schema_violation"],
-                reason="Responses 响应缺少 output 字段",
-                action="block",
-                excerpt=cls._excerpt(dumps_json({"keys": list(payload.keys())[:20]})),
-                score_delta=-20,
+        if endpoint_path == "/chat/completions" and not cls._has_non_empty_chat_choices(payload):
+            return cls._response_schema_violation(
+                category="chat_completion_schema_violation",
+                reason="Chat Completions 响应缺少非空 choices 字段",
+                payload=payload,
             )
-        suspicious_key = cls._find_suspicious_response_key(payload)
-        if suspicious_key and not cls._request_allows_advertising(request_payload):
+        if endpoint_path == "/responses" and not cls._has_non_empty_responses_output(payload):
+            return cls._response_schema_violation(
+                category="responses_schema_violation",
+                reason="Responses 响应缺少非空 output 或 output_text 字段",
+                payload=payload,
+            )
+        suspicious_scan_root = cls._suspicious_response_scan_root(payload, endpoint_path=endpoint_path)
+        suspicious_key = cls._find_suspicious_response_key(suspicious_scan_root)
+        if (
+            suspicious_key
+            and cls._suspicious_key_has_polluting_value(suspicious_scan_root, suspicious_key)
+            and not cls._request_allows_advertising(request_payload)
+        ):
             return ContentGuardResult(
                 result=cls.RESULT_BLOCK,
                 risk_level="high",
@@ -923,16 +1133,105 @@ class ContentGuardService:
                 score_delta=-20,
             )
         if cls._request_expects_json_response(request_payload):
-            json_mode_result = cls._inspect_structured_json_mode(payload, endpoint_path=endpoint_path)
+            json_mode_result = cls._inspect_structured_json_mode(
+                payload,
+                endpoint_path=endpoint_path,
+                request_payload=request_payload,
+            )
             if json_mode_result.result == cls.RESULT_BLOCK:
                 return json_mode_result
-        tool_result = cls._inspect_tool_call_arguments(payload, endpoint_path=endpoint_path, request_payload=request_payload)
+        tool_result = cls._inspect_tool_call_arguments(
+            payload,
+            endpoint_path=endpoint_path,
+            request_payload=request_payload,
+            max_scan_bytes=max_scan_bytes,
+            rules_json=rules_json,
+            url_allowlist=url_allowlist,
+            url_check_enabled=url_check_enabled,
+            rules=rules,
+            enhanced_detection_enabled=enhanced_detection_enabled,
+            enhanced_illegal_enabled=enhanced_illegal_enabled,
+            enhanced_ad_enabled=enhanced_ad_enabled,
+            enhanced_custom_enabled=enhanced_custom_enabled,
+            enhanced_obfuscation_enabled=enhanced_obfuscation_enabled,
+            enhanced_threshold=enhanced_threshold,
+            enhanced_context_window_chars=enhanced_context_window_chars,
+        )
         if tool_result.result == cls.RESULT_BLOCK:
             return tool_result
         return ContentGuardResult(result=cls.RESULT_PASS, risk_level="low", reason="响应结构通过")
 
     @classmethod
-    def _inspect_structured_json_mode(cls, payload: dict[str, Any], *, endpoint_path: str | None) -> ContentGuardResult:
+    def _response_schema_violation(cls, *, category: str, reason: str, payload: dict[str, Any]) -> ContentGuardResult:
+        return ContentGuardResult(
+            result=cls.RESULT_BLOCK,
+            risk_level="high",
+            categories=[category],
+            reason=reason,
+            action="block",
+            excerpt=cls._excerpt(dumps_json({"keys": list(payload.keys())[:20]})),
+            score_delta=-20,
+        )
+
+    @staticmethod
+    def _has_meaningful_error_payload(payload: dict[str, Any]) -> bool:
+        error = payload.get("error")
+        if error is None or error is False:
+            return False
+        if isinstance(error, str):
+            return bool(error.strip())
+        if isinstance(error, (list, tuple, set)):
+            return bool(error)
+        if isinstance(error, dict):
+            return bool(error)
+        return True
+
+    @staticmethod
+    def _has_non_empty_chat_choices(payload: dict[str, Any]) -> bool:
+        choices = payload.get("choices")
+        return isinstance(choices, list) and len(choices) > 0
+
+    @staticmethod
+    def _has_non_empty_responses_output(payload: dict[str, Any]) -> bool:
+        output = payload.get("output")
+        if isinstance(output, list) and len(output) > 0:
+            return True
+        output_text = payload.get("output_text")
+        return isinstance(output_text, str) and bool(output_text.strip())
+
+    @classmethod
+    def _suspicious_response_scan_root(cls, payload: dict[str, Any], *, endpoint_path: str | None) -> Any:
+        if endpoint_path not in cls.STRUCTURED_ENDPOINTS:
+            return {}
+        roots: list[Any] = []
+        top_level_suspicious = {
+            key: nested
+            for key, nested in payload.items()
+            if re.sub(r"[^a-z0-9_]+", "", str(key).lower()) in cls.SUSPICIOUS_RESPONSE_KEYS
+        }
+        if top_level_suspicious:
+            roots.append(top_level_suspicious)
+        if endpoint_path in {"/chat/completions", "/completions"}:
+            for choice in payload.get("choices") or []:
+                if isinstance(choice, dict):
+                    roots.append(choice)
+        elif endpoint_path == "/responses":
+            for item in payload.get("output") or []:
+                if isinstance(item, dict):
+                    roots.append(item)
+                    for content in item.get("content") or []:
+                        if isinstance(content, dict):
+                            roots.append(content)
+        return {"response_items": roots}
+
+    @classmethod
+    def _inspect_structured_json_mode(
+        cls,
+        payload: dict[str, Any],
+        *,
+        endpoint_path: str | None,
+        request_payload: dict[str, Any] | None,
+    ) -> ContentGuardResult:
         texts: list[str] = []
         if endpoint_path == "/chat/completions":
             for choice in payload.get("choices") or []:
@@ -955,7 +1254,7 @@ class ContentGuardService:
         if not combined:
             return ContentGuardResult(result=cls.RESULT_PASS, risk_level="low", reason="JSON 模式未发现文本内容")
         try:
-            json.loads(combined)
+            parsed = json.loads(combined)
         except Exception:
             return ContentGuardResult(
                 result=cls.RESULT_BLOCK,
@@ -966,7 +1265,130 @@ class ContentGuardService:
                 excerpt=cls._excerpt(combined),
                 score_delta=-20,
             )
+        schema = cls._structured_json_schema_from_request(request_payload)
+        if isinstance(schema, dict):
+            schema_error = cls._validate_json_schema_subset(parsed, schema)
+            if schema_error:
+                return ContentGuardResult(
+                    result=cls.RESULT_BLOCK,
+                    risk_level="high",
+                    categories=["structured_json_schema_violation"],
+                    reason=f"结构化 JSON 输出不符合请求 schema：{schema_error}",
+                    action="block",
+                    excerpt=cls._excerpt(dumps_json(parsed)),
+                    score_delta=-20,
+                    confidence=0.9,
+                )
         return ContentGuardResult(result=cls.RESULT_PASS, risk_level="low", reason="结构化 JSON 输出通过")
+
+    @classmethod
+    def _structured_json_schema_from_request(cls, request_payload: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(request_payload, dict):
+            return None
+        response_format = request_payload.get("response_format")
+        if isinstance(response_format, dict):
+            schema_container = response_format.get("json_schema")
+            if isinstance(schema_container, dict) and isinstance(schema_container.get("schema"), dict):
+                return schema_container["schema"]
+            if isinstance(response_format.get("schema"), dict):
+                return response_format["schema"]
+        text = request_payload.get("text")
+        if isinstance(text, dict):
+            text_format = text.get("format")
+            if isinstance(text_format, dict):
+                if isinstance(text_format.get("schema"), dict):
+                    return text_format["schema"]
+                schema_container = text_format.get("json_schema")
+                if isinstance(schema_container, dict) and isinstance(schema_container.get("schema"), dict):
+                    return schema_container["schema"]
+        return None
+
+    @classmethod
+    def _validate_json_schema_subset(cls, value: Any, schema: dict[str, Any], *, path: str = "$", depth: int = 0) -> str | None:
+        if depth > 16:
+            return None
+        if not isinstance(schema, dict):
+            return None
+        for key in ("anyOf", "oneOf"):
+            variants = schema.get(key)
+            if isinstance(variants, list) and variants:
+                errors = [
+                    cls._validate_json_schema_subset(value, item, path=path, depth=depth + 1)
+                    for item in variants
+                    if isinstance(item, dict)
+                ]
+                if any(error is None for error in errors):
+                    return None
+                return errors[0] if errors else None
+        all_of = schema.get("allOf")
+        if isinstance(all_of, list):
+            for item in all_of:
+                if isinstance(item, dict):
+                    error = cls._validate_json_schema_subset(value, item, path=path, depth=depth + 1)
+                    if error:
+                        return error
+        if "const" in schema and value != schema.get("const"):
+            return f"{path} 不等于 const 指定值"
+        enum_values = schema.get("enum")
+        if isinstance(enum_values, list) and value not in enum_values:
+            return f"{path} 不在 enum 允许值中"
+        expected_type = schema.get("type")
+        if isinstance(expected_type, list):
+            type_errors = [
+                cls._validate_json_schema_subset(value, {**schema, "type": item}, path=path, depth=depth + 1)
+                for item in expected_type
+            ]
+            if any(error is None for error in type_errors):
+                return None
+            return type_errors[0] if type_errors else None
+        if isinstance(expected_type, str):
+            type_error = cls._json_schema_type_error(value, expected_type, path)
+            if type_error:
+                return type_error
+        if expected_type == "object" or isinstance(schema.get("properties"), dict):
+            if not isinstance(value, dict):
+                return f"{path} 必须是对象"
+            properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+            required = schema.get("required") if isinstance(schema.get("required"), list) else []
+            for key in required:
+                if isinstance(key, str) and key not in value:
+                    return f"{path}.{key} 为必填字段"
+            additional = schema.get("additionalProperties")
+            if additional is False:
+                extra_keys = sorted(set(value.keys()) - {str(key) for key in properties.keys()})
+                if extra_keys:
+                    return f"{path} 存在未声明字段 {extra_keys[0]}"
+            for key, nested_schema in properties.items():
+                if isinstance(key, str) and key in value and isinstance(nested_schema, dict):
+                    error = cls._validate_json_schema_subset(value[key], nested_schema, path=f"{path}.{key}", depth=depth + 1)
+                    if error:
+                        return error
+        if expected_type == "array" or isinstance(schema.get("items"), dict):
+            if not isinstance(value, list):
+                return f"{path} 必须是数组"
+            item_schema = schema.get("items")
+            if isinstance(item_schema, dict):
+                for index, item in enumerate(value[:100]):
+                    error = cls._validate_json_schema_subset(item, item_schema, path=f"{path}[{index}]", depth=depth + 1)
+                    if error:
+                        return error
+        return None
+
+    @staticmethod
+    def _json_schema_type_error(value: Any, expected_type: str, path: str) -> str | None:
+        checks = {
+            "object": lambda item: isinstance(item, dict),
+            "array": lambda item: isinstance(item, list),
+            "string": lambda item: isinstance(item, str),
+            "number": lambda item: isinstance(item, (int, float)) and not isinstance(item, bool),
+            "integer": lambda item: isinstance(item, int) and not isinstance(item, bool),
+            "boolean": lambda item: isinstance(item, bool),
+            "null": lambda item: item is None,
+        }
+        checker = checks.get(expected_type)
+        if checker is None or checker(value):
+            return None
+        return f"{path} 类型必须是 {expected_type}"
 
     @classmethod
     def _inspect_tool_call_arguments(
@@ -975,6 +1397,18 @@ class ContentGuardService:
         *,
         endpoint_path: str | None,
         request_payload: dict[str, Any] | None = None,
+        max_scan_bytes: int = 16384,
+        rules_json: str | None = None,
+        url_allowlist: list[str] | str | None = None,
+        url_check_enabled: bool = True,
+        rules: list[ContentGuardRule | dict[str, Any]] | None = None,
+        enhanced_detection_enabled: bool = True,
+        enhanced_illegal_enabled: bool = True,
+        enhanced_ad_enabled: bool = True,
+        enhanced_custom_enabled: bool = True,
+        enhanced_obfuscation_enabled: bool = True,
+        enhanced_threshold: int = 70,
+        enhanced_context_window_chars: int = 96,
     ) -> ContentGuardResult:
         arguments: list[Any] = []
         if endpoint_path == "/chat/completions":
@@ -995,8 +1429,8 @@ class ContentGuardService:
                     arguments.append(function_call.get("arguments"))
         elif endpoint_path == "/responses":
             for item in payload.get("output") or []:
-                if isinstance(item, dict) and item.get("type") == "function_call" and "arguments" in item:
-                    arguments.append(item.get("arguments"))
+                if isinstance(item, dict):
+                    arguments.extend(cls._collect_tool_call_arguments(item))
         for value in arguments:
             if isinstance(value, str):
                 try:
@@ -1013,19 +1447,34 @@ class ContentGuardService:
                     )
             else:
                 parsed = value
-            if not isinstance(parsed, dict):
+            if not isinstance(parsed, (dict, list)):
                 return ContentGuardResult(
                     result=cls.RESULT_BLOCK,
                     risk_level="high",
                     categories=["tool_argument_pollution"],
-                    reason="工具调用参数不是 JSON 对象",
+                    reason="工具调用参数不是 JSON 对象或数组",
                     action="block",
                     excerpt=cls._excerpt(dumps_json(parsed)),
                     score_delta=-20,
                 )
-            text = cls._extract_scan_text(parsed, max_scan_bytes=8192)
+            text = cls._extract_scan_text(parsed, max_scan_bytes=max_scan_bytes)
             if text:
-                text_result = cls.inspect_response_text(text, request_payload=request_payload, max_scan_bytes=8192)
+                text_result = cls.inspect_response_text(
+                    text,
+                    request_payload=request_payload,
+                    max_scan_bytes=max_scan_bytes,
+                    rules_json=rules_json,
+                    url_allowlist=url_allowlist,
+                    url_check_enabled=url_check_enabled,
+                    rules=rules,
+                    enhanced_detection_enabled=enhanced_detection_enabled,
+                    enhanced_illegal_enabled=enhanced_illegal_enabled,
+                    enhanced_ad_enabled=enhanced_ad_enabled,
+                    enhanced_custom_enabled=enhanced_custom_enabled,
+                    enhanced_obfuscation_enabled=enhanced_obfuscation_enabled,
+                    enhanced_threshold=enhanced_threshold,
+                    enhanced_context_window_chars=enhanced_context_window_chars,
+                )
                 if text_result.result != cls.RESULT_PASS:
                     return ContentGuardResult(
                         result=cls.RESULT_BLOCK,
@@ -1038,6 +1487,34 @@ class ContentGuardService:
                         confidence=max(0.85, float(text_result.confidence or 0.0)),
                     )
         return ContentGuardResult(result=cls.RESULT_PASS, risk_level="low", reason="工具调用参数通过")
+
+    @classmethod
+    def _collect_tool_call_arguments(cls, value: Any, *, depth: int = 0) -> list[Any]:
+        if depth > 8:
+            return []
+        arguments: list[Any] = []
+        if isinstance(value, dict):
+            item_type = str(value.get("type") or value.get("item_type") or "")
+            looks_like_tool_call = item_type in {"function_call", "tool_call", "response.function_call", "response.tool_call"}
+            if looks_like_tool_call and "arguments" in value:
+                arguments.append(value.get("arguments"))
+            function = value.get("function")
+            if isinstance(function, dict) and "arguments" in function:
+                arguments.append(function.get("arguments"))
+            call = value.get("call")
+            if isinstance(call, dict) and "arguments" in call:
+                arguments.append(call.get("arguments"))
+            tool_call = value.get("tool_call")
+            if isinstance(tool_call, dict):
+                arguments.extend(cls._collect_tool_call_arguments(tool_call, depth=depth + 1))
+            for nested_key in ("content", "output", "items", "delta"):
+                nested = value.get(nested_key)
+                if isinstance(nested, (dict, list)):
+                    arguments.extend(cls._collect_tool_call_arguments(nested, depth=depth + 1))
+        elif isinstance(value, list):
+            for item in value:
+                arguments.extend(cls._collect_tool_call_arguments(item, depth=depth + 1))
+        return arguments
 
     @classmethod
     def _request_expects_json_response(cls, request_payload: dict[str, Any] | None) -> bool:
@@ -1060,6 +1537,8 @@ class ContentGuardService:
                 normalized = re.sub(r"[^a-z0-9_]+", "", str(key).lower())
                 if normalized in cls.SUSPICIOUS_RESPONSE_KEYS:
                     return str(key)
+                if normalized in cls.SUSPICIOUS_KEY_SCAN_SKIP_KEYS:
+                    continue
                 found = cls._find_suspicious_response_key(nested)
                 if found:
                     return found
@@ -1071,11 +1550,48 @@ class ContentGuardService:
         return None
 
     @classmethod
+    def _suspicious_key_has_polluting_value(cls, value: Any, key_name: str) -> bool:
+        normalized_target = re.sub(r"[^a-z0-9_]+", "", str(key_name).lower())
+
+        def find_value(item: Any) -> Any:
+            if isinstance(item, dict):
+                for key, nested in item.items():
+                    normalized = re.sub(r"[^a-z0-9_]+", "", str(key).lower())
+                    if normalized == normalized_target:
+                        return nested
+                    if normalized in cls.SUSPICIOUS_KEY_SCAN_SKIP_KEYS:
+                        continue
+                    found = find_value(nested)
+                    if found is not None:
+                        return found
+            elif isinstance(item, list):
+                for nested in item:
+                    found = find_value(nested)
+                    if found is not None:
+                        return found
+            return None
+
+        suspicious_value = find_value(value)
+        if suspicious_value is None:
+            return False
+        text = cls._extract_scan_text(suspicious_value, max_scan_bytes=4096)
+        if not text:
+            return False
+        domains = cls.extract_domains(text)
+        if domains or cls._has_ad_intent(text):
+            return True
+        return bool(
+            re.search(r"(扫码|加群|联系|私聊|客服|优惠|返利|充值|注册|推广|赞助|广告|二维码)", text, flags=re.IGNORECASE)
+        )
+
+    @classmethod
     def _payload_contains_file_reference(cls, value: Any) -> bool:
         if isinstance(value, dict):
             for key, nested in value.items():
                 normalized = str(key).lower()
-                if normalized in {"file", "files", "file_id", "file_ids", "filename", "attachments"}:
+                if normalized in {"file", "files", "file_id", "file_ids", "filename", "attachments", "file_data", "file_url"}:
+                    return True
+                if normalized in {"url", "uri"} and isinstance(nested, str) and cls._looks_like_file_reference(nested):
                     return True
                 if normalized == "type" and isinstance(nested, str) and nested in {"input_file", "file_search"}:
                     return True
@@ -1084,6 +1600,17 @@ class ContentGuardService:
         elif isinstance(value, list):
             return any(cls._payload_contains_file_reference(item) for item in value)
         return False
+
+    @staticmethod
+    def _looks_like_file_reference(value: str) -> bool:
+        text = value.strip().lower()
+        if not text:
+            return False
+        if text.startswith(("data:", "file:", "cid:")):
+            return True
+        parsed = urlparse(text)
+        path = parsed.path if parsed.scheme else text
+        return bool(re.search(r"\.(pdf|docx?|xlsx?|pptx?|csv|json|jsonl|txt|md|zip|tar|gz|7z|png|jpe?g|webp|gif|svg|mp3|mp4|wav|mov|avi)$", path))
 
     @classmethod
     def _payload_has_long_context(cls, payload: dict[str, Any]) -> bool:
@@ -1096,33 +1623,56 @@ class ContentGuardService:
         input_items = payload.get("input")
         if isinstance(input_items, list) and len(input_items) >= 20:
             return True
+        if cls._payload_contains_file_reference(payload):
+            return True
+        nested_content_count = cls._count_nested_content_items(payload)
+        if nested_content_count >= 80:
+            return True
         return False
+
+    @classmethod
+    def _count_nested_content_items(cls, value: Any, *, depth: int = 0) -> int:
+        if depth > cls.MAX_SCAN_DEPTH:
+            return 0
+        if isinstance(value, dict):
+            count = 1 if "content" in value or "input" in value or "messages" in value else 0
+            return count + sum(cls._count_nested_content_items(item, depth=depth + 1) for item in value.values())
+        if isinstance(value, list):
+            return len(value) + sum(cls._count_nested_content_items(item, depth=depth + 1) for item in value)
+        return 0
 
     @classmethod
     def _extract_scan_text(cls, value: Any, *, max_scan_bytes: int) -> str:
         parts: list[str] = []
         current_bytes = 0
+        visited_nodes = 0
 
-        def walk(item: Any) -> None:
-            nonlocal current_bytes
-            if current_bytes >= max_scan_bytes:
+        def walk(item: Any, *, depth: int = 0) -> None:
+            nonlocal current_bytes, visited_nodes
+            if current_bytes >= max_scan_bytes or visited_nodes >= cls.MAX_SCAN_NODES or depth > cls.MAX_SCAN_DEPTH:
                 return
+            visited_nodes += 1
             if isinstance(item, str):
-                encoded_len = len(item.encode("utf-8", errors="ignore"))
-                parts.append(item)
-                current_bytes += encoded_len
+                remaining = max_scan_bytes - current_bytes
+                if remaining <= 0:
+                    return
+                encoded = item.encode("utf-8", errors="ignore")
+                clipped = encoded[:remaining].decode("utf-8", errors="ignore")
+                if clipped:
+                    parts.append(clipped)
+                    current_bytes += len(clipped.encode("utf-8", errors="ignore"))
                 return
             if isinstance(item, dict):
                 for key, nested in item.items():
-                    if key in {"api_key", "authorization", "base64", "b64_json"}:
+                    if str(key).lower() in {"api_key", "authorization", "base64", "b64_json"}:
                         continue
-                    walk(nested)
-                    if current_bytes >= max_scan_bytes:
+                    walk(nested, depth=depth + 1)
+                    if current_bytes >= max_scan_bytes or visited_nodes >= cls.MAX_SCAN_NODES:
                         break
             elif isinstance(item, list):
                 for nested in item:
-                    walk(nested)
-                    if current_bytes >= max_scan_bytes:
+                    walk(nested, depth=depth + 1)
+                    if current_bytes >= max_scan_bytes or visited_nodes >= cls.MAX_SCAN_NODES:
                         break
 
         walk(value)
@@ -1137,6 +1687,8 @@ class ContentGuardService:
         def add(text: Any) -> None:
             if isinstance(text, str) and text:
                 parts.append(text)
+            elif isinstance(text, (dict, list)):
+                add_scan(text)
 
         def add_scan(value: Any) -> None:
             if value is None:
@@ -1176,14 +1728,32 @@ class ContentGuardService:
                     continue
                 add(item.get("arguments"))
                 add(item.get("delta"))
+                add_scan(item.get("summary"))
+                add_scan(item.get("reasoning"))
+                add_scan(item.get("annotations"))
+                add_scan(item.get("citations"))
+                add_scan(item.get("refusal"))
+                add_scan(item.get("metadata"))
                 for content in item.get("content") or []:
-                    if not isinstance(content, dict):
-                        continue
-                    add(content.get("text"))
-                    add(content.get("output_text"))
-                    add(content.get("delta"))
-                    add_scan(content.get("image_url"))
+                    if isinstance(content, dict):
+                        add(content.get("text"))
+                        add(content.get("output_text"))
+                        add(content.get("delta"))
+                        add_scan(content.get("summary"))
+                        add_scan(content.get("reasoning"))
+                        add_scan(content.get("annotations"))
+                        add_scan(content.get("citations"))
+                        add_scan(content.get("refusal"))
+                        add_scan(content.get("metadata"))
+                        add_scan(content.get("image_url"))
+                    elif isinstance(content, (str, list)):
+                        add_scan(content)
             add(value.get("output_text"))
+            add_scan(value.get("annotations"))
+            add_scan(value.get("citations"))
+            add_scan(value.get("refusal"))
+            add_scan(value.get("reasoning"))
+            add_scan(value.get("metadata"))
         if not parts:
             return cls._extract_scan_text(value, max_scan_bytes=max_scan_bytes)
         return cls._clip_text("\n".join(parts), max_scan_bytes=max_scan_bytes)
@@ -1213,8 +1783,10 @@ class ContentGuardService:
         if ContentGuardService._request_disallows_advertising_or_links(request_payload):
             return False
         explicit_allow_patterns = (
-            r"(生成|撰写|编写|输出|包含|加入|附带|提供|设计|创建).{0,16}(广告|推广|营销|落地页|优惠|链接|联系方式|外链)",
-            r"(广告|推广|营销|落地页|优惠|链接|联系方式|外链).{0,16}(文案|内容|链接|地址|联系方式|素材)",
+            r"(使用|引用|包含|加入|附带|提供|保留).{0,16}(https?://|[a-z0-9][a-z0-9.-]+\.[a-z]{2,63})",
+            r"(https?://|[a-z0-9][a-z0-9.-]+\.[a-z]{2,63}).{0,16}(使用|引用|包含|加入|附带|提供|保留)",
+            r"(广告|推广|营销|落地页|优惠|赞助|活动页|campaign).{0,32}(链接|外链|广告链接|优惠链接|开户链接)",
+            r"(链接|外链|广告链接|优惠链接|开户链接).{0,32}(广告|推广|营销|落地页|优惠|赞助|活动页|campaign)",
         )
         return any(re.search(pattern, text) for pattern in explicit_allow_patterns)
 

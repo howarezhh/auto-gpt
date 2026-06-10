@@ -7,13 +7,21 @@ from collections.abc import Callable
 from functools import wraps
 from uuid import uuid4
 
+from app.config import get_settings
 from app.database import SessionLocal
 from app.logging.sanitizers import dumps_sanitized
+from app.models.provider import Provider
+from app.models.provider_model import ProviderModel
 from app.models.logging_events import BackgroundJobEvent
 from app.scheduler import scheduler
 from app.services.data_retention_service import DataRetentionService
 from app.services.health_service import HealthService
+from app.services.ip_management_event_service import IpManagementEventService
+from app.services.ip_management_service import IpManagementService
 from app.logging.adapters.background_job_adapter import BackgroundJobLogRecorder
+from app.services.log_service import LogService
+from app.services.provider_health_state_service import ProviderHealthStateService
+from app.services.provider_service import ProviderService
 from app.services.redis_service import RedisService
 from app.services.responses_chat_adapter_service import ResponsesChatAdapterService
 from app.services.setting_service import SettingService
@@ -23,6 +31,9 @@ from app.services.token_usage_service import TokenUsageService
 logger = logging.getLogger(__name__)
 PROVIDER_L0_HEALTH_CHECK_INTERVAL_SEC = 120
 MODEL_L2_CAPABILITY_CHECK_MIN_INTERVAL_SEC = 60 * 30
+BACKGROUND_JOB_RESULT_SUMMARY_MAX_BYTES = 8192
+RECENT_RUNTIME_HEALTH_REFRESH_INTERVAL_SEC = 5
+RECENT_RUNTIME_HEALTH_WINDOW_SEC = 5
 
 _RELEASE_LOCK_LUA = """
 if redis.call('GET', KEYS[1]) == ARGV[1] then
@@ -91,6 +102,7 @@ def _safe_record_job_event(
     job_name: str,
     status: str,
     started_at: datetime,
+    trigger_type: str = "scheduler",
     finished_at: datetime | None = None,
     lock_key: str | None = None,
     lock_status: str | None = None,
@@ -106,6 +118,7 @@ def _safe_record_job_event(
             db,
             job_run_id=job_run_id,
             job_name=job_name,
+            trigger_type=trigger_type,
             lock_key=lock_key,
             lock_status=lock_status,
             status=status,
@@ -131,6 +144,7 @@ def _safe_finish_job_event(
     *,
     job_run_id: str,
     job_name: str,
+    trigger_type: str = "scheduler",
     lock_key: str | None,
     lock_status: str | None,
     status: str,
@@ -146,6 +160,7 @@ def _safe_finish_job_event(
         _safe_record_job_event(
             job_run_id=job_run_id,
             job_name=job_name,
+            trigger_type=trigger_type,
             lock_key=lock_key,
             lock_status=lock_status,
             status=status,
@@ -166,6 +181,7 @@ def _safe_finish_job_event(
             _safe_record_job_event(
                 job_run_id=job_run_id,
                 job_name=job_name,
+                trigger_type=trigger_type,
                 lock_key=lock_key,
                 lock_status=lock_status,
                 status=status,
@@ -185,7 +201,12 @@ def _safe_finish_job_event(
         item.processed_count = processed_count
         item.success_count = success_count
         item.failed_count = failed_count
-        item.result_summary_json = dumps_sanitized(result_summary)
+        item.result_summary_json = dumps_sanitized(
+            result_summary,
+            max_string_length=500,
+            max_bytes=BACKGROUND_JOB_RESULT_SUMMARY_MAX_BYTES,
+            max_list_items=50,
+        )
         item.error = error
         db.commit()
     except Exception as exc:
@@ -211,6 +232,7 @@ def distributed_job_lock(job_name: str, *, ttl_seconds: int | Callable[[], int])
     def decorator(func: Callable) -> Callable:
         @wraps(func)
         async def async_wrapper(*args, **kwargs):
+            trigger_type = str(kwargs.pop("trigger_type", "scheduler") or "scheduler")
             token = uuid4().hex
             lock_key = f"scheduler:lock:{job_name}"
             state_key = f"scheduler:job:{job_name}:state"
@@ -229,6 +251,7 @@ def distributed_job_lock(job_name: str, *, ttl_seconds: int | Callable[[], int])
                 _safe_record_job_event(
                     job_run_id=job_run_id,
                     job_name=job_name,
+                    trigger_type=trigger_type,
                     lock_key=lock_key,
                     lock_status="unavailable_skipped",
                     status="skipped_lock_unavailable",
@@ -243,6 +266,9 @@ def distributed_job_lock(job_name: str, *, ttl_seconds: int | Callable[[], int])
                         state_key,
                         mapping={
                             "status": "skipped_locked",
+                            "job_run_id": job_run_id,
+                            "trigger_type": trigger_type,
+                            "lock_status": "skipped_locked",
                             "updated_at": datetime.utcnow().isoformat(),
                         },
                     )
@@ -252,6 +278,7 @@ def distributed_job_lock(job_name: str, *, ttl_seconds: int | Callable[[], int])
                 _safe_record_job_event(
                     job_run_id=job_run_id,
                     job_name=job_name,
+                    trigger_type=trigger_type,
                     lock_key=lock_key,
                     lock_status="skipped_locked",
                     status="skipped_locked",
@@ -267,6 +294,9 @@ def distributed_job_lock(job_name: str, *, ttl_seconds: int | Callable[[], int])
                         mapping={
                             "status": "running",
                             "token": token,
+                            "job_run_id": job_run_id,
+                            "trigger_type": trigger_type,
+                            "lock_status": lock_status,
                             "started_at": datetime.utcnow().isoformat(),
                             "updated_at": datetime.utcnow().isoformat(),
                         },
@@ -275,6 +305,7 @@ def distributed_job_lock(job_name: str, *, ttl_seconds: int | Callable[[], int])
                 job_event_id = _safe_record_job_event(
                     job_run_id=job_run_id,
                     job_name=job_name,
+                    trigger_type=trigger_type,
                     lock_key=lock_key,
                     lock_status=lock_status,
                     status="running",
@@ -289,6 +320,9 @@ def distributed_job_lock(job_name: str, *, ttl_seconds: int | Callable[[], int])
                         state_key,
                         mapping={
                             "status": "success",
+                            "job_run_id": job_run_id,
+                            "trigger_type": trigger_type,
+                            "lock_status": lock_status,
                             "finished_at": finished_at.isoformat(),
                             "updated_at": finished_at.isoformat(),
                         },
@@ -299,6 +333,7 @@ def distributed_job_lock(job_name: str, *, ttl_seconds: int | Callable[[], int])
                     job_event_id,
                     job_run_id=job_run_id,
                     job_name=job_name,
+                    trigger_type=trigger_type,
                     lock_key=lock_key,
                     lock_status=lock_status,
                     status="success",
@@ -318,6 +353,9 @@ def distributed_job_lock(job_name: str, *, ttl_seconds: int | Callable[[], int])
                             state_key,
                             mapping={
                                 "status": "cancelled",
+                                "job_run_id": job_run_id,
+                                "trigger_type": trigger_type,
+                                "lock_status": lock_status,
                                 "finished_at": finished_at.isoformat(),
                                 "updated_at": finished_at.isoformat(),
                             },
@@ -329,6 +367,7 @@ def distributed_job_lock(job_name: str, *, ttl_seconds: int | Callable[[], int])
                     job_event_id,
                     job_run_id=job_run_id,
                     job_name=job_name,
+                    trigger_type=trigger_type,
                     lock_key=lock_key,
                     lock_status=lock_status,
                     status="cancelled",
@@ -344,6 +383,9 @@ def distributed_job_lock(job_name: str, *, ttl_seconds: int | Callable[[], int])
                             state_key,
                             mapping={
                                 "status": "failed",
+                                "job_run_id": job_run_id,
+                                "trigger_type": trigger_type,
+                                "lock_status": lock_status,
                                 "error": str(exc)[:1000],
                                 "finished_at": finished_at.isoformat(),
                                 "updated_at": finished_at.isoformat(),
@@ -356,6 +398,7 @@ def distributed_job_lock(job_name: str, *, ttl_seconds: int | Callable[[], int])
                     job_event_id,
                     job_run_id=job_run_id,
                     job_name=job_name,
+                    trigger_type=trigger_type,
                     lock_key=lock_key,
                     lock_status=lock_status,
                     status="failed",
@@ -447,6 +490,299 @@ async def scheduled_model_l3_content_integrity_health_check() -> list[dict]:
         db.close()
 
 
+def _runtime_metric_priority(metrics: dict[str, Any]) -> tuple[int, int, int]:
+    decision = str(metrics.get("decision") or "")
+    return (
+        1 if decision == "probe_required" else 0,
+        int(metrics.get("upstream_failure_requests") or 0),
+        int(metrics.get("total_requests") or 0),
+    )
+
+
+def _record_runtime_health_state_event(
+    db,
+    *,
+    provider: Provider,
+    provider_model: ProviderModel,
+    metrics: dict[str, Any],
+    success: bool,
+    message: str,
+    status_code: int | None = None,
+) -> None:
+    LogService.create_log(
+        db,
+        log_type="health_check_model",
+        provider_id=provider.id,
+        provider_name=provider.name,
+        model_name=provider_model.model_name,
+        resolved_provider_model_id=provider_model.id,
+        request_path="/runtime-health-state",
+        success=success,
+        status_code=status_code,
+        latency_ms=int(float(metrics.get("avg_latency_ms") or 0)),
+        ttfb_ms=int(float(metrics.get("avg_ttfb_ms") or 0)) if metrics.get("avg_ttfb_ms") is not None else None,
+        message=message,
+        capability_result={
+            "runtime_metrics": {
+                "provider_id": provider.id,
+                "provider_model_id": provider_model.id,
+                "model_name": provider_model.model_name,
+                "requested_model": metrics.get("requested_model"),
+                "window_seconds": metrics.get("window_seconds"),
+                "total_requests": metrics.get("total_requests"),
+                "success_requests": metrics.get("success_requests"),
+                "failed_requests": metrics.get("failed_requests"),
+                "upstream_failure_requests": metrics.get("upstream_failure_requests"),
+                "ignored_failure_requests": metrics.get("ignored_failure_requests"),
+                "success_rate": metrics.get("success_rate"),
+                "upstream_failure_rate": metrics.get("upstream_failure_rate"),
+                "decision": metrics.get("decision"),
+                "confidence": metrics.get("confidence"),
+                "latest_error_code": metrics.get("latest_error_code"),
+                "latest_error_category": metrics.get("latest_error_category"),
+                "latest_trace_id": metrics.get("latest_trace_id"),
+            }
+        },
+        schedule_token_fill=False,
+        auto_commit=False,
+    )
+
+
+def _apply_runtime_healthy_signal(
+    db,
+    *,
+    provider: Provider,
+    provider_model: ProviderModel,
+    metrics: dict[str, Any],
+) -> bool:
+    previous_status = str(provider_model.health_status or "unknown")
+    previous_circuit = str(provider_model.circuit_state or "closed")
+    status_changed = previous_status != "healthy" or previous_circuit != "closed" or bool(provider_model.last_error)
+    ProviderHealthStateService.record_runtime_metrics(
+        provider,
+        provider_model,
+        metrics,
+        health_status="healthy",
+        circuit_state="closed",
+        status_update_reason="runtime_healthy_signal",
+    )
+    if not status_changed:
+        return False
+    now = datetime.utcnow()
+    provider_model.health_status = "healthy"
+    provider_model.circuit_state = "closed"
+    provider_model.circuit_opened_at = None
+    provider_model.failure_count = 0
+    provider_model.last_error = None
+    provider_model.last_check_at = now
+    if metrics.get("avg_latency_ms") is not None:
+        provider_model.last_latency_ms = int(float(metrics.get("avg_latency_ms") or 0))
+    provider.last_check_at = now
+    if provider_model.last_latency_ms is not None:
+        provider.last_latency_ms = provider_model.last_latency_ms
+    ProviderService.refresh_provider_state(provider)
+    _record_runtime_health_state_event(
+        db,
+        provider=provider,
+        provider_model=provider_model,
+        metrics=metrics,
+        success=True,
+        message=(
+            "短窗口正式请求成功信号已恢复模型健康状态；"
+            f"模型唯一ID={provider_model.id}，模型名={provider_model.model_name}"
+        ),
+        status_code=200,
+    )
+    return True
+
+
+def _apply_runtime_probe_unavailable_unhealthy_signal(
+    db,
+    *,
+    provider: Provider,
+    provider_model: ProviderModel,
+    metrics: dict[str, Any],
+    reason: str,
+) -> bool:
+    previous_status = str(provider_model.health_status or "unknown")
+    previous_circuit = str(provider_model.circuit_state or "closed")
+    now = datetime.utcnow()
+    message = (
+        "短窗口正式请求异常信号需要健康探针确认，但探针未能触发或执行失败；"
+        "为避免继续路由到疑似异常上游，已默认更新为异常状态。"
+        f"模型唯一ID={provider_model.id}，模型名={provider_model.model_name}；原因={reason[:300]}"
+    )
+    ProviderHealthStateService.record_runtime_metrics(
+        provider,
+        provider_model,
+        metrics,
+        health_status="unhealthy",
+        circuit_state="open",
+        status_update_reason="runtime_probe_unavailable_default_unhealthy",
+    )
+    provider_model.health_status = "unhealthy"
+    provider_model.circuit_state = "open"
+    provider_model.circuit_opened_at = now
+    provider_model.failure_count = max(1, int(provider_model.failure_count or 0) + 1)
+    provider_model.last_error = reason[:500]
+    provider_model.last_check_at = now
+    provider.last_check_at = now
+    ProviderService.refresh_provider_state(provider)
+    _record_runtime_health_state_event(
+        db,
+        provider=provider,
+        provider_model=provider_model,
+        metrics=metrics,
+        success=False,
+        status_code=503,
+        message=message,
+    )
+    return previous_status != "unhealthy" or previous_circuit != "open"
+
+
+@distributed_job_lock("recent_runtime_health_state_refresh", ttl_seconds=60)
+async def scheduled_recent_runtime_health_state_refresh() -> dict[str, int]:
+    db = SessionLocal()
+    try:
+        setting = SettingService.get_or_create(db)
+        if not setting.auto_health_check:
+            return {
+                "processed_count": 0,
+                "success_count": 0,
+                "failed_count": 0,
+                "skipped_auto_health_disabled": 1,
+            }
+        metrics_by_key = LogService.provider_model_recent_runtime_metrics_batch(
+            db,
+            window_seconds=RECENT_RUNTIME_HEALTH_WINDOW_SEC,
+            max_rows=0,
+        )
+        metrics_items = sorted(metrics_by_key.values(), key=_runtime_metric_priority, reverse=True)
+        processed_count = 0
+        success_count = 0
+        failed_count = 0
+        status_update_count = 0
+        probe_count = 0
+        skipped_disabled_count = 0
+        for metrics in metrics_items:
+            provider_id = int(metrics.get("provider_id") or 0)
+            provider_model_id = int(metrics.get("provider_model_id") or 0)
+            if provider_id <= 0 or provider_model_id <= 0:
+                continue
+            provider = db.get(Provider, provider_id)
+            provider_model = db.get(ProviderModel, provider_model_id)
+            if provider is None or provider_model is None or int(provider_model.provider_id) != provider_id:
+                continue
+            if not provider.enabled or not provider_model.enabled:
+                skipped_disabled_count += 1
+                continue
+            processed_count += 1
+            ProviderHealthStateService.record_runtime_metrics(provider, provider_model, metrics)
+            decision = str(metrics.get("decision") or "")
+            if decision == "healthy_signal":
+                if _apply_runtime_healthy_signal(
+                    db,
+                    provider=provider,
+                    provider_model=provider_model,
+                    metrics=metrics,
+                ):
+                    status_update_count += 1
+                success_count += 1
+                continue
+            if decision != "probe_required":
+                success_count += 1
+                continue
+            probe_count += 1
+            try:
+                result = await HealthService.check_provider_model(
+                    db,
+                    provider,
+                    provider_model,
+                    stream_probe=False,
+                    vision_probe=False,
+                    phase_keys=HealthService.INTERACTIVE_TEXT_PROBE_PHASE_KEYS,
+                    text_probe_max_tokens=HealthService.INTERACTIVE_TEXT_PROBE_MAX_TOKENS,
+                    parallel_phases=False,
+                    single_endpoint_mode=True,
+                )
+                ProviderHealthStateService.record_runtime_metrics(
+                    provider,
+                    provider_model,
+                    metrics,
+                    health_status=str(provider_model.health_status or result.get("health_status") or "unknown"),
+                    circuit_state=str(provider_model.circuit_state or "closed"),
+                    status_update_reason="runtime_probe_confirmed",
+                )
+                _record_runtime_health_state_event(
+                    db,
+                    provider=provider,
+                    provider_model=provider_model,
+                    metrics=metrics,
+                    success=bool(result.get("success")),
+                    status_code=result.get("status_code"),
+                    message=(
+                        "短窗口正式请求异常信号已触发健康探针并完成状态确认；"
+                        f"模型唯一ID={provider_model.id}，模型名={provider_model.model_name}；"
+                        f"探针结果={result.get('health_status') or provider_model.health_status}"
+                    ),
+                )
+                if result.get("success"):
+                    success_count += 1
+                else:
+                    failed_count += 1
+                    status_update_count += 1
+                    if result.get("probe_rate_limited"):
+                        if _apply_runtime_probe_unavailable_unhealthy_signal(
+                            db,
+                            provider=provider,
+                            provider_model=provider_model,
+                            metrics=metrics,
+                            reason=str(result.get("message") or "自动健康探针被频率限制"),
+                        ):
+                            status_update_count += 1
+            except Exception as exc:
+                failed_count += 1
+                logger.warning(
+                    "Runtime health probe failed for provider %s provider_model %s: %s",
+                    provider_id,
+                    provider_model_id,
+                    exc,
+                )
+                _record_runtime_health_state_event(
+                    db,
+                    provider=provider,
+                    provider_model=provider_model,
+                    metrics=metrics,
+                    success=False,
+                    message=(
+                        "短窗口正式请求异常信号触发健康探针，但探针执行失败；"
+                        f"模型唯一ID={provider_model.id}，模型名={provider_model.model_name}；错误={str(exc)[:300]}"
+                    ),
+                )
+                if _apply_runtime_probe_unavailable_unhealthy_signal(
+                    db,
+                    provider=provider,
+                    provider_model=provider_model,
+                    metrics=metrics,
+                    reason=str(exc),
+                ):
+                    status_update_count += 1
+        db.commit()
+        return {
+            "processed_count": processed_count,
+            "success_count": success_count,
+            "failed_count": failed_count,
+            "status_update_count": status_update_count,
+            "probe_count": probe_count,
+            "skipped_disabled_count": skipped_disabled_count,
+        }
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 @distributed_job_lock("token_usage_backfill", ttl_seconds=120)
 def scheduled_token_usage_backfill() -> dict[str, int]:
     db = SessionLocal()
@@ -502,10 +838,27 @@ def scheduled_responses_chat_adapter_session_cleanup() -> dict[str, int]:
         db.close()
 
 
+@distributed_job_lock("ip_management_event_cleanup", ttl_seconds=60 * 60 * 8)
+def scheduled_ip_management_event_cleanup() -> dict[str, int]:
+    db = SessionLocal()
+    try:
+        setting = IpManagementService.get_or_create_setting(db)
+        processed_count = IpManagementEventService.cleanup_old_events(db, retention_days=setting.event_retention_days)
+        return {
+            "processed_count": processed_count,
+            "success_count": processed_count,
+            "failed_count": 0,
+            "deleted_count": processed_count,
+        }
+    finally:
+        db.close()
+
+
 def configure_scheduler() -> None:
     db = SessionLocal()
     try:
         setting = SettingService.get_or_create(db)
+        health_check_enabled = bool(setting.auto_health_check)
         interval = max(300, setting.health_check_interval_sec)
         adapter_cleanup_interval = max(300, setting.responses_chat_adapter_db_cleanup_interval_seconds)
         content_guard_probe_interval = max(
@@ -522,27 +875,58 @@ def configure_scheduler() -> None:
         scheduler.remove_job("provider_health_check")
     except Exception:
         pass
-    scheduler.add_job(
-        scheduled_provider_l0_health_check,
-        "interval",
-        seconds=PROVIDER_L0_HEALTH_CHECK_INTERVAL_SEC,
-        id="provider_l0_health_check",
-        replace_existing=True,
-    )
-    scheduler.add_job(
-        scheduled_model_l1_text_health_check,
-        "interval",
-        seconds=interval,
-        id="model_l1_text_health_check",
-        replace_existing=True,
-    )
-    scheduler.add_job(
-        scheduled_model_l2_capability_health_check,
-        "interval",
-        seconds=max(MODEL_L2_CAPABILITY_CHECK_MIN_INTERVAL_SEC, interval * 3),
-        id="model_l2_capability_health_check",
-        replace_existing=True,
-    )
+    if health_check_enabled:
+        scheduler.add_job(
+            scheduled_recent_runtime_health_state_refresh,
+            "interval",
+            seconds=RECENT_RUNTIME_HEALTH_REFRESH_INTERVAL_SEC,
+            id="recent_runtime_health_state_refresh",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=5,
+        )
+        scheduler.add_job(
+            scheduled_provider_l0_health_check,
+            "interval",
+            seconds=PROVIDER_L0_HEALTH_CHECK_INTERVAL_SEC,
+            id="provider_l0_health_check",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
+        )
+        scheduler.add_job(
+            scheduled_model_l1_text_health_check,
+            "interval",
+            seconds=interval,
+            id="model_l1_text_health_check",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=60,
+        )
+        scheduler.add_job(
+            scheduled_model_l2_capability_health_check,
+            "interval",
+            seconds=max(MODEL_L2_CAPABILITY_CHECK_MIN_INTERVAL_SEC, interval * 3),
+            id="model_l2_capability_health_check",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=120,
+        )
+    else:
+        for job_id in (
+            "recent_runtime_health_state_refresh",
+            "provider_l0_health_check",
+            "model_l1_text_health_check",
+            "model_l2_capability_health_check",
+        ):
+            try:
+                scheduler.remove_job(job_id)
+            except Exception:
+                pass
     if content_guard_precheck_enabled:
         scheduler.add_job(
             scheduled_model_l3_content_integrity_health_check,
@@ -550,6 +934,9 @@ def configure_scheduler() -> None:
             seconds=content_guard_probe_interval,
             id="model_l3_content_integrity_health_check",
             replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=120,
         )
     else:
         try:
@@ -559,9 +946,12 @@ def configure_scheduler() -> None:
     scheduler.add_job(
         scheduled_token_usage_backfill,
         "interval",
-        seconds=15,
+        seconds=max(15, int(get_settings().token_usage_backfill_interval_seconds or 15)),
         id="token_usage_backfill",
         replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=15,
     )
     scheduler.add_job(
         scheduled_data_retention_cleanup,
@@ -569,6 +959,9 @@ def configure_scheduler() -> None:
         hours=6,
         id="data_retention_cleanup",
         replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=300,
     )
     scheduler.add_job(
         scheduled_responses_chat_adapter_session_cleanup,
@@ -576,4 +969,17 @@ def configure_scheduler() -> None:
         seconds=adapter_cleanup_interval,
         id="responses_chat_adapter_session_cleanup",
         replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=120,
+    )
+    scheduler.add_job(
+        scheduled_ip_management_event_cleanup,
+        "interval",
+        hours=6,
+        id="ip_management_event_cleanup",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=300,
     )

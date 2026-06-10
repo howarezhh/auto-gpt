@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from uuid import uuid4
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -15,6 +16,16 @@ logger = logging.getLogger(__name__)
 
 class IpManagementMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
+        if not getattr(request.state, "trace_id", None):
+            request.state.trace_id = request.headers.get("x-trace-id") or request.headers.get("x-request-id") or uuid4().hex
+        scope = IpManagementService.resolve_scope(request.url.path)
+        if scope is None:
+            return await call_next(request)
+        cached_setting = IpManagementService.get_fresh_cached_setting()
+        if cached_setting is not None and (
+            not cached_setting.enabled or not IpManagementService.scope_enabled(cached_setting, scope)
+        ):
+            return await call_next(request)
         db = SessionLocal()
         try:
             decision = await IpManagementService.evaluate_request(db, request)
@@ -23,6 +34,8 @@ class IpManagementMiddleware(BaseHTTPMiddleware):
             if decision is not None and decision.should_block:
                 trace_id = getattr(request.state, "trace_id", None)
                 if decision.scope == "external_v1":
+                    retryable = decision.status_code in {429, 503}
+                    category = "rate_limit" if decision.status_code == 429 else ("internal" if decision.status_code == 503 else "authorization")
                     return JSONResponse(
                         status_code=decision.status_code or 403,
                         content=OpenAIErrorService.build_error_payload(
@@ -30,9 +43,9 @@ class IpManagementMiddleware(BaseHTTPMiddleware):
                             code=decision.error_code or "source_ip_blocked",
                             trace_id=trace_id,
                             status_code=decision.status_code or 403,
-                            retryable=decision.status_code == 429,
-                            recoverable=decision.status_code == 429,
-                            category="rate_limit" if decision.status_code == 429 else "authorization",
+                            retryable=retryable,
+                            recoverable=retryable,
+                            category=category,
                         ),
                         headers={"X-Trace-Id": trace_id or "", "X-Request-Id": trace_id or ""},
                     )

@@ -155,7 +155,10 @@ class ClientIpResolver:
             )
         status = "trusted_proxy"
         try:
-            if all(ipaddress.ip_address(item) in network for item in values for network in trusted_networks):
+            if trusted_networks and all(
+                any(ipaddress.ip_address(item) in network for network in trusted_networks)
+                for item in values
+            ):
                 status = "all_forwarded_entries_trusted"
         except ValueError:
             pass
@@ -192,6 +195,21 @@ class ClientIpResolver:
         return candidate
 
     @staticmethod
+    def strip_forwarded_for_value(value: str) -> str | None:
+        candidate = value.strip().strip('"')
+        if not candidate or candidate.lower() == "unknown" or candidate.startswith("_"):
+            return None
+        if candidate.startswith("["):
+            if "]" not in candidate:
+                return None
+            return candidate[1:candidate.index("]")]
+        if re.match(r"^\d+\.\d+\.\d+\.\d+:\d+$", candidate):
+            return candidate.rsplit(":", 1)[0]
+        if candidate.count(":") > 1:
+            return None
+        return candidate
+
+    @staticmethod
     def parse_networks(values: list[str]) -> tuple[list[ipaddress._BaseNetwork], list[str]]:
         networks: list[ipaddress._BaseNetwork] = []
         warnings: list[str] = []
@@ -220,7 +238,9 @@ class ClientIpResolver:
             for part in segment.split(";"):
                 key, sep, raw_value = part.strip().partition("=")
                 if sep and key.strip().lower() == "for":
-                    normalized = ClientIpResolver.normalize_ip(raw_value.strip())
+                    normalized = ClientIpResolver.normalize_ip(
+                        ClientIpResolver.strip_forwarded_for_value(raw_value.strip())
+                    )
                     if normalized:
                         result.append(normalized)
         return result

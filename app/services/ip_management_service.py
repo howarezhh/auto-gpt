@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from time import monotonic
+from types import SimpleNamespace
 from typing import Any
 
 from fastapi import Request
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from app.models.ip_management import IpAccessRule, IpManagementEvent, IpManagementSetting
@@ -37,11 +39,23 @@ class IpManagementDecision:
 
 
 class IpManagementService:
-    _cached_setting: IpManagementSetting | None = None
+    _cached_setting: SimpleNamespace | None = None
+    _cached_setting_expires_at: float = 0
+    _SETTING_CACHE_TTL_SECONDS = 5
+    _cached_enabled_rules: list[SimpleNamespace] | None = None
+    _cached_enabled_rules_expires_at: float = 0
+    _RULE_CACHE_TTL_SECONDS = 5
 
     @staticmethod
     def invalidate_cache() -> None:
         IpManagementService._cached_setting = None
+        IpManagementService._cached_setting_expires_at = 0
+        IpManagementService.invalidate_rule_cache()
+
+    @staticmethod
+    def invalidate_rule_cache() -> None:
+        IpManagementService._cached_enabled_rules = None
+        IpManagementService._cached_enabled_rules_expires_at = 0
 
     @staticmethod
     def get_or_create_setting(db: Session) -> IpManagementSetting:
@@ -54,9 +68,40 @@ class IpManagementService:
         return setting
 
     @staticmethod
-    def get_cached_setting(db: Session) -> IpManagementSetting:
+    def get_cached_setting(db: Session) -> SimpleNamespace:
+        now = monotonic()
+        if IpManagementService._cached_setting is None or IpManagementService._cached_setting_expires_at <= now:
+            setting = IpManagementService.get_or_create_setting(db)
+            IpManagementService._cached_setting = SimpleNamespace(
+                id=setting.id,
+                enabled=setting.enabled,
+                observe_only_enabled=setting.observe_only_enabled,
+                trusted_proxy_resolution_enabled=setting.trusted_proxy_resolution_enabled,
+                trusted_proxy_cidrs_json=setting.trusted_proxy_cidrs_json,
+                trusted_header_order_json=setting.trusted_header_order_json,
+                apply_external_v1_enabled=setting.apply_external_v1_enabled,
+                apply_internal_api_enabled=setting.apply_internal_api_enabled,
+                apply_user_pages_enabled=setting.apply_user_pages_enabled,
+                rule_engine_enabled=setting.rule_engine_enabled,
+                block_action_enabled=setting.block_action_enabled,
+                rate_limit_enabled=setting.rate_limit_enabled,
+                event_logging_enabled=setting.event_logging_enabled,
+                event_sample_rate=setting.event_sample_rate,
+                event_retention_days=setting.event_retention_days,
+                store_raw_headers_enabled=setting.store_raw_headers_enabled,
+                ip_masking_enabled=setting.ip_masking_enabled,
+                fail_open_enabled=setting.fail_open_enabled,
+                updated_at=setting.updated_at,
+            )
+            IpManagementService._cached_setting_expires_at = now + IpManagementService._SETTING_CACHE_TTL_SECONDS
+        return IpManagementService._cached_setting
+
+    @staticmethod
+    def get_fresh_cached_setting() -> SimpleNamespace | None:
         if IpManagementService._cached_setting is None:
-            IpManagementService._cached_setting = IpManagementService.get_or_create_setting(db)
+            return None
+        if IpManagementService._cached_setting_expires_at <= monotonic():
+            return None
         return IpManagementService._cached_setting
 
     @staticmethod
@@ -85,7 +130,6 @@ class IpManagementService:
     @staticmethod
     def update_setting(db: Session, payload: IpManagementSettingsUpdate) -> IpManagementSetting:
         for cidr in payload.trusted_proxy_cidrs:
-            ClientIpResolver.parse_networks([cidr])
             networks, warnings = ClientIpResolver.parse_networks([cidr])
             if not networks or warnings:
                 raise ValueError(f"可信代理 CIDR 无效: {cidr}")
@@ -165,6 +209,13 @@ class IpManagementService:
                     error_code = exc.code
                     message = exc.message
                     reason = f"rate_limit_exceeded:{exc.key}"
+                except Exception as exc:
+                    reason = f"rate_limit_backend_failed:{type(exc).__name__}"
+                    if not setting.fail_open_enabled:
+                        enforced = True
+                        status_code = 503
+                        error_code = "source_ip_resolution_failed"
+                        message = "IP 限流共享状态不可用，当前请求无法安全放行。"
         result = IpManagementDecision(
             resolution=resolution,
             scope=scope,
@@ -196,7 +247,37 @@ class IpManagementService:
 
     @staticmethod
     def enabled_rules(db: Session) -> list[IpAccessRule]:
-        return list(db.scalars(select(IpAccessRule).where(IpAccessRule.enabled.is_(True)).order_by(IpAccessRule.priority.asc(), IpAccessRule.id.asc())))
+        now = monotonic()
+        if IpManagementService._cached_enabled_rules is not None and IpManagementService._cached_enabled_rules_expires_at > now:
+            return list(IpManagementService._cached_enabled_rules)
+        rules = [
+            SimpleNamespace(
+                id=item.id,
+                name=item.name,
+                enabled=item.enabled,
+                priority=item.priority,
+                scope=item.scope,
+                match_type=item.match_type,
+                match_value=item.match_value,
+                normalized_value=item.normalized_value,
+                action=item.action,
+                rate_qps_limit=item.rate_qps_limit,
+                rate_rpm_limit=item.rate_rpm_limit,
+                expires_at=item.expires_at,
+                reason=item.reason,
+                created_by_username=item.created_by_username,
+                created_at=item.created_at,
+                updated_at=item.updated_at,
+            )
+            for item in db.scalars(
+                select(IpAccessRule)
+                .where(IpAccessRule.enabled.is_(True))
+                .order_by(IpAccessRule.priority.asc(), IpAccessRule.id.asc())
+            )
+        ]
+        IpManagementService._cached_enabled_rules = rules
+        IpManagementService._cached_enabled_rules_expires_at = now + IpManagementService._RULE_CACHE_TTL_SECONDS
+        return list(rules)
 
     @staticmethod
     def create_rule(db: Session, payload: IpAccessRuleCreate, *, username: str | None, user_id: int | None) -> IpAccessRule:
@@ -221,6 +302,7 @@ class IpManagementService:
         db.add(rule)
         db.commit()
         db.refresh(rule)
+        IpManagementService.invalidate_rule_cache()
         return rule
 
     @staticmethod
@@ -235,6 +317,7 @@ class IpManagementService:
         rule.normalized_value = normalized
         db.commit()
         db.refresh(rule)
+        IpManagementService.invalidate_rule_cache()
         return rule
 
     @staticmethod
@@ -307,22 +390,68 @@ class IpManagementService:
     def build_overview(db: Session) -> dict[str, Any]:
         setting = IpManagementService.get_or_create_setting(db)
         since = datetime.utcnow() - timedelta(hours=1)
-        total_events = int(db.scalar(select(func.count()).select_from(IpManagementEvent)) or 0)
-        recent_blocked = int(db.scalar(select(func.count()).select_from(IpManagementEvent).where(IpManagementEvent.created_at >= since, IpManagementEvent.decision == "block")) or 0)
-        recent_limited = int(db.scalar(select(func.count()).select_from(IpManagementEvent).where(IpManagementEvent.created_at >= since, IpManagementEvent.decision == "rate_limit")) or 0)
-        trusted_hits = int(db.scalar(select(func.count()).select_from(IpManagementEvent).where(IpManagementEvent.created_at >= since, IpManagementEvent.trusted_proxy_matched.is_(True))) or 0)
-        invalid_ignored = int(db.scalar(select(func.count()).select_from(IpManagementEvent).where(IpManagementEvent.created_at >= since, IpManagementEvent.resolution_status == "invalid_header_ignored")) or 0)
-        rule_count = int(db.scalar(select(func.count()).select_from(IpAccessRule)) or 0)
-        enabled_rule_count = int(db.scalar(select(func.count()).select_from(IpAccessRule).where(IpAccessRule.enabled.is_(True))) or 0)
+        event_row = db.execute(
+            select(
+                func.count(IpManagementEvent.id).label("total_events"),
+                func.sum(
+                    case(
+                        (
+                            (IpManagementEvent.created_at >= since)
+                            & (IpManagementEvent.decision == "block")
+                            & (IpManagementEvent.enforced.is_(True)),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ).label("recent_blocked"),
+                func.sum(
+                    case(
+                        (
+                            (IpManagementEvent.created_at >= since)
+                            & (IpManagementEvent.decision == "rate_limit")
+                            & (IpManagementEvent.enforced.is_(True)),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ).label("recent_limited"),
+                func.sum(
+                    case(
+                        (
+                            (IpManagementEvent.created_at >= since)
+                            & (IpManagementEvent.trusted_proxy_matched.is_(True)),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ).label("trusted_hits"),
+                func.sum(
+                    case(
+                        (
+                            (IpManagementEvent.created_at >= since)
+                            & (IpManagementEvent.resolution_status == "invalid_header_ignored"),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ).label("invalid_ignored"),
+            )
+        ).one()
+        rule_row = db.execute(
+            select(
+                func.count(IpAccessRule.id).label("rule_count"),
+                func.sum(case((IpAccessRule.enabled.is_(True), 1), else_=0)).label("enabled_rule_count"),
+            )
+        ).one()
         return {
             "settings": IpManagementService.serialize_setting(setting),
             "summary": {
-                "event_count": total_events,
-                "rule_count": rule_count,
-                "enabled_rule_count": enabled_rule_count,
-                "recent_block_count": recent_blocked,
-                "recent_rate_limit_count": recent_limited,
-                "recent_trusted_proxy_hit_count": trusted_hits,
-                "recent_invalid_header_ignored_count": invalid_ignored,
+                "event_count": int(event_row.total_events or 0),
+                "rule_count": int(rule_row.rule_count or 0),
+                "enabled_rule_count": int(rule_row.enabled_rule_count or 0),
+                "recent_block_count": int(event_row.recent_blocked or 0),
+                "recent_rate_limit_count": int(event_row.recent_limited or 0),
+                "recent_trusted_proxy_hit_count": int(event_row.trusted_hits or 0),
+                "recent_invalid_header_ignored_count": int(event_row.invalid_ignored or 0),
             },
         }
