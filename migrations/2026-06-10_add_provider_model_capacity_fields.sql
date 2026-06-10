@@ -1,0 +1,5 @@
+ALTER TABLE provider_models
+    ADD COLUMN IF NOT EXISTS max_active_requests INTEGER,
+    ADD COLUMN IF NOT EXISTS max_active_streams INTEGER,
+    ADD COLUMN IF NOT EXISTS max_qps INTEGER,
+    ADD COLUMN IF NOT EXISTS max_rpm INTEGER;

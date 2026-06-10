@@ -1,6 +1,6 @@
 # 数据库设计
 
-项目默认使用 SQLite，数据库文件路径为 `data/app.db`。
+项目所有运行环境默认且仅支持 PostgreSQL，连接地址通过 `DATABASE_URL` 配置。
 
 ## `providers`
 

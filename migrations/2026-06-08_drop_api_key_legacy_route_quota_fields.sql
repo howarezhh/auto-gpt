@@ -11,6 +11,7 @@ ALTER TABLE api_client_keys DROP COLUMN IF EXISTS default_provider_id;
 ALTER TABLE api_client_keys DROP COLUMN IF EXISTS manual_allow_fallback;
 ALTER TABLE api_client_keys DROP COLUMN IF EXISTS route_exhausted_retry_infinite_enabled;
 ALTER TABLE api_client_keys DROP COLUMN IF EXISTS max_candidate_count;
+ALTER TABLE api_client_keys DROP COLUMN IF EXISTS cost_bias;
 
 ALTER TABLE api_key_policy_templates DROP COLUMN IF EXISTS route_mode;
 ALTER TABLE api_key_policy_templates DROP COLUMN IF EXISTS default_provider_id;

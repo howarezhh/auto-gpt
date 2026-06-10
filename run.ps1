@@ -261,15 +261,23 @@ function Set-LocalDevRuntimeFallbacks {
 
     $databaseUrl = Get-EffectiveEnvValue -Name "DATABASE_URL" -DotEnvValues $dotEnvValues
     $databaseEndpoint = Get-UrlEndpoint -Url $databaseUrl
+    if ([string]::IsNullOrWhiteSpace($databaseUrl)) {
+        throw "DATABASE_URL 必须使用 PostgreSQL 连接地址。"
+    }
+    $normalizedDatabaseUrl = $databaseUrl.Trim().ToLowerInvariant()
+    if (-not (
+        $normalizedDatabaseUrl.StartsWith("postgresql://") -or
+        $normalizedDatabaseUrl.StartsWith("postgresql+") -or
+        $normalizedDatabaseUrl.StartsWith("postgres://")
+    )) {
+        throw "DATABASE_URL 必须使用 PostgreSQL 连接地址。"
+    }
     if (
-        -not [string]::IsNullOrWhiteSpace($databaseUrl) -and
-        $databaseUrl.Trim().ToLowerInvariant().StartsWith("postgresql") -and
         $null -ne $databaseEndpoint -and
         $databaseEndpoint.Host -in @("127.0.0.1", "localhost") -and
         -not (Test-TcpEndpoint -HostName $databaseEndpoint.Host -Port $databaseEndpoint.Port)
     ) {
-        $env:DATABASE_URL = "sqlite:///./data/app.db"
-        Write-Warning "检测到本地 PostgreSQL 不可用，当前进程临时回退为 SQLite：$env:DATABASE_URL"
+        throw "本地 PostgreSQL 不可用，请先启动 PostgreSQL 后再运行项目。"
     }
 
     $redisUrl = Get-EffectiveEnvValue -Name "REDIS_URL" -DotEnvValues $dotEnvValues
