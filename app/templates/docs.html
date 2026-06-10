@@ -4,7 +4,7 @@
     <div class="cockpit-hero-copy docs-hero-copy">
         <div class="eyebrow">开发者接入</div>
         <h2>开发者接入页</h2>
-        <p>把接入动作压缩成一条标准流程：先拿到 Base URL 和 API Key，再复制正式入口与最短请求，最后再按客户端类型填配置。</p>
+        <p>先复制 Base URL 和 API Key，跑通最短自检，再按客户端类型补充模型名与能力参数。</p>
         <div class="hero-actions">
             <a class="btn btn-accent interactive-btn" href="#docs-step-flow">先看步骤流</a>
             <a class="btn btn-ghost interactive-btn" href="#docs-copy-flow">直接复制接入信息</a>
@@ -12,26 +12,29 @@
         <div class="docs-hero-strip" aria-label="接入摘要">
             <article>
                 <span>正式入口</span>
-                <strong>{{ external_v1_base_url }}</strong>
+                <strong><code>{{ external_v1_base_url }}</code></strong>
             </article>
             <article>
                 <span>推荐起手</span>
-                <strong>先测 `/v1/models`</strong>
+                <strong>先测 <code>/v1/models</code></strong>
             </article>
             <article>
                 <span>图片策略</span>
-                <strong>优先走 `/v1/responses`</strong>
+                <strong>优先走 <code>/v1/responses</code></strong>
             </article>
         </div>
     </div>
     <div class="cockpit-hero-aside docs-hero-aside">
         <div class="cockpit-aside-label">统一接入地址</div>
-        <div class="cockpit-aside-value">{{ external_v1_base_url }}</div>
-        <div class="cockpit-aside-copy">文档中的正式接入地址统一由配置或当前访问地址生成，避免写死域名、IP 或协议。</div>
-        <div class="cockpit-health-bar"><span class="cockpit-health-fill-full"></span></div>
+        <div class="docs-endpoint-panel">
+            <span>OpenAI Base URL</span>
+            <code>{{ external_v1_base_url }}</code>
+            <button class="btn btn-accent btn-sm interactive-btn" type="button" data-copy-text="{{ external_v1_base_url }}">复制入口</button>
+        </div>
+        <div class="cockpit-aside-copy">该地址由配置或当前访问地址生成，避免写死域名、IP 或协议。</div>
         <div class="docs-hero-meta">
             <span>OpenAI 兼容子集</span>
-            <span>只走 `/v1/*`</span>
+            <span>只走 <code>/v1/*</code></span>
             <span>支持一键复制</span>
         </div>
     </div>

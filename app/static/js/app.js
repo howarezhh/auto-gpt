@@ -7,15 +7,6 @@
     };
     const PUBLIC_ROUTE_PREFIXES = ["/login", "/register", "/setup-admin"];
     const ADMIN_ROUTE_PREFIXES = ["/providers", "/provider-models", "/models", "/settings", "/content-guard", "/ip-management", "/playground", "/benchmark", "/operations", "/docs", "/api-keys", "/logs", "/alerts", "/conversations", "/users", "/audit-logs"];
-    const FIXED_ROUTE_MODE = "failover";
-
-    const ROUTE_MODE_LABELS = {
-        manual: "健康优先",
-        failover: "健康优先",
-        weighted: "健康优先",
-        sticky: "健康优先",
-    };
-
     const LOG_TYPE_LABELS = {
         health_check: "健康检查",
         chat: "对话请求",
@@ -71,7 +62,7 @@
         account_daily_cost_quota_exhausted: "账户余额不足",
         account_monthly_cost_quota_exhausted: "账户余额不足",
         insufficient_balance: "余额不足",
-        no_authorized_provider: "未授权渠道",
+        no_authorized_provider: "未授权提供商",
     };
 
     const API_KEY_STATUS_LABELS = {
@@ -81,7 +72,7 @@
         quota_exhausted: "余额耗尽",
         cost_quota_exhausted: "余额耗尽",
         balance_exhausted: "余额耗尽",
-        unbound: "未绑定渠道",
+        unbound: "未绑定提供商",
     };
     const PROVIDER_TRUST_LEVEL_LABELS = {
         official: "官方",
@@ -111,6 +102,7 @@
         pass: "通过",
         review: "需复核",
         block: "已拦截",
+        error: "检测异常",
     };
     const CONTENT_GUARD_RISK_LABELS = {
         low: "低",
@@ -122,7 +114,6 @@
         content_pollution_rules: "外链广告识别",
         content_json: "JSON",
         content_sse: "流式污染检测",
-        content_tools: "工具",
     };
     const ENDPOINT_PROBE_LABELS = {
         "chat/completions": "Chat 调用检查",
@@ -155,26 +146,67 @@
     ]);
     const STYLE_PRESET_MAP = new Map(STYLE_PRESETS.map((preset) => [preset.id, preset]));
     const REFERENCE_CACHE_DEFAULT_TTL_MS = 15000;
+    const API_TIMEOUT_MS = 45000;
     const referenceCacheStore = new Map();
+    let currentPageAbortController = new AbortController();
+    let shellNavigationAbortController = null;
 
     const api = {
-        get: async (url) => parseResponse(await fetch(url, { cache: "no-store", headers: { "Cache-Control": "no-cache" } })),
+        get: async (url, options = {}) => parseResponse(await fetchWithTimeout(url, { cache: "no-store", headers: { "Cache-Control": "no-cache" }, ...options })),
         post: async (url, data) => {
-            const result = await parseResponse(await fetch(url, withJson("POST", data)));
+            const result = await parseResponse(await fetchWithTimeout(url, withJson("POST", data)));
             invalidateReferenceCacheByMutation("POST", url);
             return result;
         },
         put: async (url, data) => {
-            const result = await parseResponse(await fetch(url, withJson("PUT", data)));
+            const result = await parseResponse(await fetchWithTimeout(url, withJson("PUT", data)));
             invalidateReferenceCacheByMutation("PUT", url);
             return result;
         },
         delete: async (url) => {
-            const result = await parseResponse(await fetch(url, { method: "DELETE" }));
+            const result = await parseResponse(await fetchWithTimeout(url, { method: "DELETE" }));
             invalidateReferenceCacheByMutation("DELETE", url);
             return result;
         },
     };
+
+    function composeAbortSignal(signal, timeoutMs = API_TIMEOUT_MS) {
+        const controller = new AbortController();
+        const signals = [currentPageAbortController.signal];
+        if (signal) signals.push(signal);
+        const abort = () => controller.abort();
+        signals.forEach((item) => {
+            if (item.aborted) {
+                controller.abort();
+                return;
+            }
+            item.addEventListener("abort", abort, { once: true });
+        });
+        const timer = window.setTimeout(() => controller.abort(), Math.max(1, timeoutMs));
+        controller.signal.addEventListener("abort", () => {
+            window.clearTimeout(timer);
+            signals.forEach((item) => item.removeEventListener("abort", abort));
+        }, { once: true });
+        return controller.signal;
+    }
+
+    function normalizeFetchError(error) {
+        if (error?.name === "AbortError") {
+            return new Error("请求超时或页面已切换，请稍后重试");
+        }
+        return error;
+    }
+
+    async function fetchWithTimeout(url, options = {}) {
+        try {
+            return await fetch(url, {
+                ...options,
+                signal: composeAbortSignal(options.signal, options.timeoutMs ?? API_TIMEOUT_MS),
+            });
+        } catch (error) {
+            throw normalizeFetchError(error);
+        }
+    }
 
     function getReferenceCacheEntry(url) {
         const entry = referenceCacheStore.get(url);
@@ -1497,19 +1529,9 @@
         return formatModelCapabilitySummary(summary);
     }
 
-    function getDefaultProviderLabel(providers = [], providerId) {
-        if (!providerId) return "未设置默认提供商";
-        const provider = providers.find((item) => item.id === Number(providerId));
-        return provider ? provider.name : `ID ${providerId}`;
-    }
-
     function formatMappedLabel(mapping, value, fallback = "-") {
         if (value == null || value === "") return fallback;
         return mapping[String(value)] || String(value);
-    }
-
-    function formatRouteModeLabel(value) {
-        return value ? formatMappedLabel(ROUTE_MODE_LABELS, value, "健康优先") : "健康优先";
     }
 
     function formatLogTypeLabel(value) {
@@ -1556,6 +1578,34 @@
         return formatMappedLabel(CONTENT_GUARD_RISK_LABELS, value, "-");
     }
 
+    function formatContentGuardActionLabel(value) {
+        const labels = {
+            allow: "放行",
+            record: "记录",
+            record_only: "仅记录",
+            review: "复核",
+            async_review: "异步复核",
+            block: "拦截",
+            switch_provider: "切换提供商",
+            switch_provider_succeeded: "切换成功",
+            switch_provider_exhausted: "切换耗尽",
+            safe_error: "安全错误",
+        };
+        return formatMappedLabel(labels, value, "-");
+    }
+
+    function formatContentGuardStageLabel(value) {
+        const labels = {
+            non_stream_response: "非流式响应",
+            stream_buffer: "流式首段缓冲",
+            stream_prefetch: "流式首段缓冲",
+            stream_chunk: "流式分块",
+            runtime_async_review: "异步复核",
+            stream_disabled: "流式检测关闭",
+        };
+        return formatMappedLabel(labels, value, "-");
+    }
+
     function formatContentGuardCategories(value) {
         const parsed = typeof value === "string" ? safeJsonParse(value) : value;
         const categories = Array.isArray(parsed)
@@ -1576,12 +1626,71 @@
         };
     }
 
+    function contentTrustBatchStatusFromGuardResult(guardResult) {
+        const normalized = String(guardResult || "").toLowerCase();
+        if (normalized === "pass" || normalized === "passed") return "passed";
+        if (normalized === "review") return "review";
+        return "failed";
+    }
+
     function contentGuardResultStatusClass(value) {
         if (value === "passed" || value === "pass") return "status-healthy";
         if (value === "blocked" || value === "block") return "status-unhealthy";
-        if (value === "review") return "status-degraded";
+        if (value === "review" || value === "error") return "status-degraded";
         return "status-unknown";
     }
+
+    const contentGuardRawResponseStore = new Map();
+    let contentGuardRawResponseSeq = 0;
+
+    function formatRawProviderResponse(raw) {
+        if (raw == null) return "";
+        if (typeof raw === "string") return raw;
+        try {
+            return JSON.stringify(raw, null, 2);
+        } catch (error) {
+            return String(raw);
+        }
+    }
+
+    function renderContentGuardRawResponseButton(item, label = "原始响应") {
+        const raw = item?.raw_provider_response;
+        if (!raw) return "-";
+        const key = `content-guard-raw-${Date.now()}-${contentGuardRawResponseSeq += 1}`;
+        contentGuardRawResponseStore.set(key, {
+            label,
+            raw,
+        });
+        return `<button class="table-action-btn interactive-btn" type="button" data-content-guard-raw-response="${escapeHtml(key)}">查看</button>`;
+    }
+
+    function openContentGuardRawResponse(key, trigger = document.activeElement) {
+        const entry = contentGuardRawResponseStore.get(key);
+        if (!entry) {
+            showToast("原始响应已失效，请重新执行探针", "error");
+            return;
+        }
+        const rawText = formatRawProviderResponse(entry.raw);
+        openHealthCheckResultModal(
+            `原始响应 · ${entry.label || "内容防护探针"}`,
+            `
+                <div class="health-result-summary">
+                    <span class="status-badge status-unknown">原始响应</span>
+                    <strong>${escapeHtml(entry.label || "内容防护探针")}</strong>
+                    <span>来自上游提供商的探针响应内容</span>
+                </div>
+                <div class="doc-code-block compact"><pre><code>${escapeHtml(rawText || "无原始响应内容")}</code></pre></div>
+            `,
+            trigger,
+        );
+    }
+
+    document.addEventListener("click", (event) => {
+        const button = event.target.closest("[data-content-guard-raw-response]");
+        if (!button) return;
+        event.preventDefault();
+        openContentGuardRawResponse(button.dataset.contentGuardRawResponse, button);
+    });
 
     function renderContentGuardProbeModalBody(result, title = "可信检测") {
         const summary = result?.summary || {};
@@ -1604,6 +1713,7 @@
                             <th>风险</th>
                             <th>耗时</th>
                             <th>原因</th>
+                            <th>原始响应</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -1618,11 +1728,85 @@
                                     <td>${escapeHtml(formatContentGuardRiskLabel(guard.content_guard_risk_level))}</td>
                                     <td>${escapeHtml(String(item.latency_ms ?? 0))} ms</td>
                                     <td>${escapeHtml(itemReason)}</td>
+                                    <td>${renderContentGuardRawResponseButton(item, item.probe_label || item.endpoint_label || item.probe_key || "内容防护探针")}</td>
                                 </tr>
                             `;
-                        }).join("") : '<tr><td colspan="5"><div class="empty-state">未返回可信检测结果</div></td></tr>'}
+                        }).join("") : '<tr><td colspan="6"><div class="empty-state">未返回可信检测结果</div></td></tr>'}
                     </tbody>
                 </table>
+            </div>
+        `;
+    }
+
+    function renderSingleModelTestProgressBody({ titleName, status = "running", message = "" } = {}) {
+        const statusText = status === "failed" ? "失败" : "执行中";
+        const badgeStatus = status === "failed" ? "unhealthy" : "running";
+        const summaryRows = [
+            ["测试对象", titleName || "模型挂载"],
+            ["测试范围", "单模型测试"],
+            ["执行状态", statusText],
+            ["当前阶段", message || (status === "failed" ? "测试请求失败" : "正在发起健康测试")],
+        ];
+        const summaryHtml = summaryRows.map(([label, value]) => `
+            <div class="provider-test-summary-item">
+                <span>${escapeHtml(String(label))}</span>
+                <strong>${escapeHtml(String(value))}</strong>
+            </div>
+        `).join("");
+        return `
+            <div class="provider-test-result-shell">
+                <section class="provider-test-result-card">
+                    <div class="panel-kicker">执行进度</div>
+                    <div class="provider-test-summary-grid">${summaryHtml}</div>
+                </section>
+                <section class="provider-test-result-card">
+                    <div class="panel-kicker">过程反馈</div>
+                    <article class="provider-test-model-item">
+                        <div class="provider-test-model-top">
+                            <strong>${escapeHtml(titleName || "模型挂载")}</strong>
+                            <div>${statusBadge(badgeStatus)}</div>
+                        </div>
+                        <div class="provider-test-model-message">${escapeHtml(message || (status === "failed" ? "测试未完成，请查看错误信息后重试。" : "请求已提交，正在等待上游返回结果。"))}</div>
+                    </article>
+                </section>
+            </div>
+        `;
+    }
+
+    function renderContentTrustProgressBody({ titleName, status = "running", message = "" } = {}) {
+        const statusText = status === "failed" ? "失败" : "执行中";
+        const summaryRows = [
+            ["检测对象", titleName || "模型挂载"],
+            ["检测范围", "可信检测"],
+            ["执行状态", statusText],
+            ["当前阶段", message || (status === "failed" ? "可信检测请求失败" : "正在执行固定答案、外链广告识别和流式污染检测")],
+        ];
+        const summaryHtml = summaryRows.map(([label, value]) => `
+            <div class="provider-test-summary-item">
+                <span>${escapeHtml(String(label))}</span>
+                <strong>${escapeHtml(String(value))}</strong>
+            </div>
+        `).join("");
+        return `
+            <div class="provider-test-result-shell">
+                <section class="provider-test-result-card">
+                    <div class="panel-kicker">执行进度</div>
+                    <div class="provider-test-summary-grid">${summaryHtml}</div>
+                </section>
+                <section class="provider-test-result-card">
+                    <div class="panel-kicker">探针队列</div>
+                    <div class="provider-test-model-list">
+                        ${CONTENT_TRUST_PROBE_KEYS.map((key) => `
+                            <article class="provider-test-model-item">
+                                <div class="provider-test-model-top">
+                                    <strong>${escapeHtml(formatMappedLabel(CONTENT_PROBE_PHASE_LABELS, `content_${key}`, key))}</strong>
+                                    <div>${statusBadge(status === "failed" ? "unhealthy" : "running")}</div>
+                                </div>
+                                <div class="provider-test-model-message">${escapeHtml(status === "failed" ? (message || "检测未完成") : "等待检测结果返回。")}</div>
+                            </article>
+                        `).join("")}
+                    </div>
+                </section>
             </div>
         `;
     }
@@ -1944,7 +2128,7 @@
             `风险 ${formatContentGuardRiskLabel(log.content_guard_risk_level)}`,
         ];
         if (log.content_guard_action) {
-            parts.push(`动作 ${log.content_guard_action}`);
+            parts.push(`动作 ${formatContentGuardActionLabel(log.content_guard_action)}`);
         }
         return parts.filter(Boolean).join(" · ");
     }
@@ -2419,6 +2603,7 @@
             skipped: "跳过",
             skipped_locked: "锁定跳过",
             skipped_lock_unavailable: "锁不可用跳过",
+            stale_running: "运行超时",
             cancelled: "已取消",
             timeout: "超时",
             partial: "部分完成",
@@ -2490,6 +2675,17 @@
     }
 
     function formatBackgroundJobProcess(item) {
+        const resultSummary = normalizeTypedJsonObject(item.result_summary_json);
+        const enqueuedRaw = resultSummary.enqueued_count ?? resultSummary.enqueued ?? null;
+        const enqueued = enqueuedRaw === null || enqueuedRaw === undefined ? null : Number(enqueuedRaw);
+        if (Number.isFinite(enqueued)) {
+            const processedRaw = item.processed_count ?? resultSummary.processed_count ?? null;
+            const processed = processedRaw === null || processedRaw === undefined ? null : Number(processedRaw);
+            if (Number.isFinite(processed) && processed !== enqueued) {
+                return `入队 ${formatNumber(enqueued)}，处理 ${formatNumber(processed)}`;
+            }
+            return `入队 ${formatNumber(enqueued)}`;
+        }
         if (item.processed_count === null || item.processed_count === undefined) {
             return "未统计";
         }
@@ -2510,12 +2706,13 @@
         const resultSummary = normalizeTypedJsonObject(item.result_summary_json);
         return [
             {
-                title: "分布式锁",
+                title: "调度锁",
                 items: [
                     ["任务", item.job_name],
                     ["运行 ID", item.job_run_id],
                     ["锁键", item.lock_key],
                     ["锁状态", formatTypedLogStatusLabel(item.lock_status)],
+                    ["日志范围", "仅记录分布式锁调度任务"],
                 ],
             },
             {
@@ -2523,6 +2720,7 @@
                 items: [
                     ["触发方式", formatTypedLogStatusLabel(item.trigger_type)],
                     ["状态", formatTypedLogStatusLabel(item.status)],
+                    ["运行异常", item.stale ? "运行超过阈值，可能已失去心跳或进程已退出" : "-"],
                     ["开始", formatDate(item.started_at)],
                     ["结束", formatDate(item.finished_at)],
                     ["耗时", item.duration_ms == null ? "-" : `${formatNumber(item.duration_ms)} ms`],
@@ -2531,6 +2729,7 @@
             {
                 title: "处理数量",
                 items: [
+                    ["入队数", resultSummary.enqueued_count],
                     ["处理总数", item.processed_count],
                     ["成功数", item.success_count],
                     ["失败数", item.failed_count],
@@ -2551,6 +2750,12 @@
                 endpoint: "/api/logging/exceptions",
                 keywordLabel: "关键词",
                 keywordPlaceholder: "trace、异常类型、错误码或摘要",
+                summaryCards: (summary) => [
+                    ["异常总数", formatNumber(summary.total || 0)],
+                    ["当前页高危", formatNumber(summary.danger_count || 0), (summary.danger_count || 0) ? "danger" : ""],
+                    ["当前页警告", formatNumber(summary.warning_count || 0)],
+                    ["当前页 Trace", formatNumber(summary.unique_trace_count || 0)],
+                ],
                 filters: [
                     {
                         key: "severity",
@@ -2583,6 +2788,12 @@
                 endpoint: "/api/logging/health-runs",
                 keywordLabel: "关键词",
                 keywordPlaceholder: "运行批次、范围类型或对象标识",
+                summaryCards: (summary) => [
+                    ["检查批次", formatNumber(summary.total || 0)],
+                    ["当前页成功探针", formatNumber(summary.success_probes || 0)],
+                    ["当前页失败探针", formatNumber(summary.failed_probes || 0), (summary.failed_probes || 0) ? "danger" : ""],
+                    ["当前页运行中", formatNumber(summary.running_count || 0)],
+                ],
                 filters: [
                     {
                         key: "trigger_type",
@@ -2628,6 +2839,12 @@
                 endpoint: "/api/logging/billing-events",
                 keywordLabel: "关键词",
                 keywordPlaceholder: "队列来源、价格来源、错误摘要",
+                summaryCards: (summary) => [
+                    ["计费事件", formatNumber(summary.total || 0)],
+                    ["Token 回填", formatNumber(summary.token_finalize_count || 0)],
+                    ["失败 / 待处理", `${formatNumber(summary.failed_count || 0)} / ${formatNumber(summary.pending_count || 0)}`, (summary.failed_count || summary.pending_count) ? "danger" : ""],
+                    ["余额变化", formatMoney(summary.balance_delta || 0)],
+                ],
                 filters: [
                     {
                         key: "event_family",
@@ -2641,12 +2858,22 @@
                     },
                     {
                         key: "result",
-                        label: "结果状态",
+                        label: "Token 回填结果",
                         type: "select",
                         options: [
                             { value: "", label: "全部" },
                             { value: "filled", label: "已补全" },
                             { value: "pending_tokens", label: "等待 Token" },
+                            { value: "retry", label: "重试" },
+                            { value: "failed", label: "失败" },
+                        ],
+                    },
+                    {
+                        key: "billing_status",
+                        label: "计费状态",
+                        type: "select",
+                        options: [
+                            { value: "", label: "全部" },
                             { value: "billed", label: "已计费" },
                             { value: "no_charge", label: "不扣费" },
                             { value: "retry", label: "重试" },
@@ -2670,7 +2897,13 @@
                 title: "内容防护日志",
                 endpoint: "/api/logging/content-guard-events",
                 keywordLabel: "关键词",
-                keywordPlaceholder: "trace、阶段、原因、动作或证据摘录",
+                keywordPlaceholder: "trace、提供商、模型、路径、阶段、原因或证据摘录",
+                summaryCards: (summary) => [
+                    ["检测事件", formatNumber(summary.total || 0)],
+                    ["当前页拦截", formatNumber(summary.block_count || 0), (summary.block_count || 0) ? "danger" : ""],
+                    ["当前页复核", formatNumber(summary.review_count || 0)],
+                    ["当前页高风险", formatNumber(summary.high_risk_count || 0)],
+                ],
                 filters: [
                     {
                         key: "guard_stage",
@@ -2707,7 +2940,21 @@
                             { value: "high", label: "高" },
                         ],
                     },
+                    { key: "matched_rule", label: "规则 / 原因", type: "text", placeholder: "规则名、规则 JSON、原因或证据摘录" },
                     { key: "action", label: "处置动作", type: "text", placeholder: "例如 block、record、switch_provider" },
+                    { key: "provider_id", label: "提供商 ID", type: "number", placeholder: "例如 12" },
+                    { key: "model_name", label: "模型", type: "text", placeholder: "实际模型或请求模型" },
+                    { key: "request_path", label: "请求路径", type: "text", placeholder: "/v1/chat/completions" },
+                    {
+                        key: "is_stream",
+                        label: "流式",
+                        type: "select",
+                        options: [
+                            { value: "", label: "全部" },
+                            { value: "true", label: "是" },
+                            { value: "false", label: "否" },
+                        ],
+                    },
                     { key: "trace_id", label: "链路 ID", type: "text", placeholder: "输入 trace_id" },
                     { key: "request_log_id", label: "请求日志 ID", type: "number", placeholder: "例如 1024" },
                     { key: "start_at", label: "开始时间", type: "datetime-local" },
@@ -2716,6 +2963,7 @@
                 columns: [
                     ["时间", (item) => formatDate(item.created_at)],
                     ["阶段", (item) => renderTypedPrimary(formatTypedLogStatusLabel(item.guard_stage), item.trace_id || `请求 ${item.request_log_id || "-"}`)],
+                    ["上下文", (item) => renderTypedPrimary(item.provider_name || `提供商 ${item.provider_id || "-"}`, item.model_name || item.requested_model || item.request_path || "-")],
                     ["结果", (item) => escapeHtml(formatContentGuardResultLabel(item.guard_result || "-"))],
                     ["风险", (item) => escapeHtml(formatContentGuardRiskLabel(item.risk_level))],
                     ["动作", (item) => escapeHtml(formatTypedLogStatusLabel(item.action || "-"))],
@@ -2723,10 +2971,16 @@
                 ],
             },
             "background-jobs": {
-                title: "后台任务日志",
+                title: "调度任务日志",
                 endpoint: "/api/logging/background-jobs",
                 keywordLabel: "关键词",
-                keywordPlaceholder: "任务名、运行批次、锁键或错误摘要",
+                keywordPlaceholder: "任务名、运行批次、锁键、结果摘要或错误",
+                summaryCards: (summary) => [
+                    ["任务日志", formatNumber(summary.total || 0)],
+                    ["当前页运行中", formatNumber(summary.running_count || 0)],
+                    ["当前页失败", formatNumber(summary.failed_count || 0), (summary.failed_count || 0) ? "danger" : ""],
+                    ["当前页跳过", formatNumber(summary.skipped_count || 0)],
+                ],
                 filters: [
                     {
                         key: "status",
@@ -2741,6 +2995,7 @@
                             { value: "skipped_locked", label: "锁定跳过" },
                             { value: "skipped_lock_unavailable", label: "锁不可用跳过" },
                             { value: "cancelled", label: "已取消" },
+                            { value: "stale_running", label: "运行超时" },
                         ],
                     },
                     { key: "job_name", label: "任务名称", type: "text", placeholder: "输入任务名关键字，例如 token" },
@@ -2777,14 +3032,20 @@
                     ["任务", (item) => renderTypedPrimary(item.job_name, item.job_run_id)],
                     ["锁", (item) => escapeHtml(formatTypedLogStatusLabel(item.lock_status || "-"))],
                     ["状态", (item) => escapeHtml(formatTypedLogStatusLabel(item.status))],
-                    ["处理", (item) => escapeHtml(formatBackgroundJobProcess(item))],
+                    ["处理", (item) => escapeHtml(item.stale ? (item.error || "运行超时") : formatBackgroundJobProcess(item))],
                 ],
             },
             "asset-events": {
                 title: "素材日志",
                 endpoint: "/api/logging/asset-events",
                 keywordLabel: "关键词",
-                keywordPlaceholder: "文件名、哈希前缀、Trace 或错误摘要",
+                keywordPlaceholder: "文件名、完整哈希、Trace 或错误摘要",
+                summaryCards: (summary) => [
+                    ["素材事件", formatNumber(summary.total || 0)],
+                    ["当前页失败", formatNumber(summary.failed_count || 0), (summary.failed_count || 0) ? "danger" : ""],
+                    ["当前页大小", formatBytes(summary.total_bytes || 0)],
+                    ["当前页哈希数", formatNumber(summary.unique_hash_count || 0)],
+                ],
                 filters: [
                     {
                         key: "actor_type",
@@ -2831,6 +3092,128 @@
                     ["来源", (item) => escapeHtml(formatTypedLogStatusLabel(item.actor_type))],
                     ["大小", (item) => formatBytes(item.file_size_bytes || 0)],
                     ["结果", (item) => escapeHtml(formatTypedLogStatusLabel(item.result))],
+                ],
+            },
+            "admin-audits": {
+                title: "后台审计日志",
+                endpoint: "/api/logging/admin-audits",
+                keywordLabel: "关键词",
+                keywordPlaceholder: "管理员、动作、对象、摘要或 Trace",
+                summaryCards: (summary) => [
+                    ["审计日志", formatNumber(summary.total || 0)],
+                    ["当前页高风险", formatNumber(summary.high_risk_count || 0), (summary.high_risk_count || 0) ? "danger" : ""],
+                    ["当前页中风险", formatNumber(summary.medium_risk_count || 0)],
+                    ["当前页管理员数", formatNumber(summary.unique_actor_count || 0)],
+                ],
+                filters: [
+                    { key: "action", label: "操作动作", type: "text", placeholder: "例如 update_provider" },
+                    { key: "entity_type", label: "对象类型", type: "text", placeholder: "例如 provider、logs" },
+                    {
+                        key: "risk_level",
+                        label: "风险等级",
+                        type: "select",
+                        options: [
+                            { value: "", label: "全部" },
+                            { value: "low", label: "低" },
+                            { value: "medium", label: "中" },
+                            { value: "high", label: "高" },
+                        ],
+                    },
+                    { key: "start_at", label: "开始时间", type: "datetime-local" },
+                    { key: "end_at", label: "结束时间", type: "datetime-local" },
+                ],
+                columns: [
+                    ["时间", (item) => formatDate(item.created_at)],
+                    ["管理员", (item) => renderTypedPrimary(item.actor_username || `管理员 ${item.actor_user_id || "-"}`, item.source_ip || item.request_trace_id || "-")],
+                    ["动作", (item) => escapeHtml(formatTypedLogStatusLabel(item.action))],
+                    ["对象", (item) => renderTypedPrimary(formatTypedLogStatusLabel(item.entity_type), item.entity_name || item.entity_id || "-")],
+                    ["风险", (item) => escapeHtml(formatTypedLogStatusLabel(item.risk_level))],
+                    ["摘要", (item) => escapeHtml(item.summary || "-")],
+                ],
+            },
+            "user-operations": {
+                title: "用户操作日志",
+                endpoint: "/api/logging/user-operations",
+                keywordLabel: "关键词",
+                keywordPlaceholder: "用户名、动作、对象、摘要或 Trace",
+                summaryCards: (summary) => [
+                    ["操作日志", formatNumber(summary.total || 0)],
+                    ["当前页失败", formatNumber(summary.failed_count || 0), (summary.failed_count || 0) ? "danger" : ""],
+                    ["当前页", formatNumber(summary.page_count || 0)],
+                    ["当前页用户数", formatNumber(summary.unique_user_count || 0)],
+                ],
+                filters: [
+                    { key: "user_account_id", label: "用户 ID", type: "number", placeholder: "例如 1001" },
+                    { key: "action", label: "操作动作", type: "text", placeholder: "例如 create_api_key" },
+                    {
+                        key: "result",
+                        label: "结果",
+                        type: "select",
+                        options: [
+                            { value: "", label: "全部" },
+                            { value: "success", label: "成功" },
+                            { value: "failed", label: "失败" },
+                            { value: "skipped", label: "跳过" },
+                        ],
+                    },
+                    { key: "start_at", label: "开始时间", type: "datetime-local" },
+                    { key: "end_at", label: "结束时间", type: "datetime-local" },
+                ],
+                columns: [
+                    ["时间", (item) => formatDate(item.created_at)],
+                    ["用户", (item) => renderTypedPrimary(item.username || `用户 ${item.user_account_id || "-"}`, item.source_ip || item.trace_id || "-")],
+                    ["动作", (item) => escapeHtml(formatTypedLogStatusLabel(item.action))],
+                    ["对象", (item) => renderTypedPrimary(formatTypedLogStatusLabel(item.entity_type), item.entity_name || item.entity_id || "-")],
+                    ["结果", (item) => escapeHtml(formatTypedLogStatusLabel(item.result))],
+                    ["摘要", (item) => escapeHtml(item.summary || "-")],
+                ],
+            },
+            "alert-events": {
+                title: "告警事件",
+                endpoint: "/api/logging/alert-events",
+                keywordLabel: "关键词",
+                keywordPlaceholder: "告警键、类型、标题、消息或载荷",
+                summaryCards: (summary) => [
+                    ["告警事件", formatNumber(summary.total || 0)],
+                    ["当前页活跃", formatNumber(summary.active_count || 0), (summary.active_count || 0) ? "danger" : ""],
+                    ["当前页已解决", formatNumber(summary.resolved_count || 0)],
+                    ["当前页高危", formatNumber(summary.danger_count || 0), (summary.danger_count || 0) ? "danger" : ""],
+                ],
+                filters: [
+                    { key: "alert_type", label: "告警类型", type: "text", placeholder: "例如 provider、billing、queue" },
+                    {
+                        key: "severity",
+                        label: "严重级别",
+                        type: "select",
+                        options: [
+                            { value: "", label: "全部" },
+                            { value: "critical", label: "严重" },
+                            { value: "danger", label: "危险" },
+                            { value: "warning", label: "警告" },
+                            { value: "info", label: "信息" },
+                        ],
+                    },
+                    {
+                        key: "status",
+                        label: "处理状态",
+                        type: "select",
+                        options: [
+                            { value: "", label: "全部" },
+                            { value: "active", label: "活跃" },
+                            { value: "resolved", label: "已解决" },
+                            { value: "acknowledged", label: "已确认" },
+                        ],
+                    },
+                    { key: "start_at", label: "开始时间", type: "datetime-local" },
+                    { key: "end_at", label: "结束时间", type: "datetime-local" },
+                ],
+                columns: [
+                    ["最近出现", (item) => formatDate(item.last_seen_at || item.created_at)],
+                    ["告警", (item) => renderTypedPrimary(item.title || item.alert_key, item.message || "-")],
+                    ["类型", (item) => escapeHtml(formatTypedLogStatusLabel(item.alert_type))],
+                    ["级别", (item) => escapeHtml(formatTypedLogStatusLabel(item.severity))],
+                    ["状态", (item) => escapeHtml(formatTypedLogStatusLabel(item.status))],
+                    ["首次出现", (item) => formatDate(item.first_seen_at)],
                 ],
             },
         };
@@ -4292,6 +4675,7 @@
         if (!document.getElementById("dashboard-live-monitor")) return;
         let loading = false;
         const load = async (manual = false) => {
+            if (!manual && document.visibilityState === "hidden") return;
             if (loading) return;
             loading = true;
             try {
@@ -4503,10 +4887,8 @@
             </article>
         `).join("") || '<div class="empty-state">暂无提供商数据</div>';
 
-        const defaultProvider = providers.find((item) => item.id === settings.default_provider_id);
         document.getElementById("dashboard-route-meta").innerHTML = `
-            <div><span>模式</span><strong>${escapeHtml(formatRouteModeLabel(settings.route_mode))}</strong></div>
-            <div><span>默认提供商</span><strong>${defaultProvider ? escapeHtml(defaultProvider.name) : "-"}</strong></div>
+            <div><span>策略</span><strong>健康优先</strong></div>
             <div><span>自动巡检</span><strong>${formatSwitchText(settings.auto_health_check)}</strong></div>
             <div><span>检查间隔</span><strong>${settings.health_check_interval_sec} 秒</strong></div>
             <div><span>模型健康</span><strong>${formatHealthOverview(stats.healthy_model_count, stats.degraded_model_count, stats.unhealthy_model_count)}</strong></div>
@@ -4521,7 +4903,7 @@
             <div class="cockpit-aside-copy">过去 24 小时代理请求量</div>
             <div class="cockpit-health-bar"><span style="width:${healthRatio}%"></span></div>
             <div class="cockpit-aside-meta">
-                <span>路由 ${escapeHtml(formatRouteModeLabel(settings.route_mode))}</span>
+                <span>路由 健康优先</span>
                 <span>${stats.healthy_count}/${stats.provider_count} 全部可用</span>
             </div>
         `;
@@ -4603,6 +4985,8 @@
         const providerModelPrevPageBtn = document.getElementById("provider-model-prev-page-btn");
         const providerModelNextPageBtn = document.getElementById("provider-model-next-page-btn");
         const checkAllBtn = document.getElementById("providers-check-all-btn");
+        const providersTrustSelectedBtn = document.getElementById("providers-trust-selected-btn");
+        const providersSelectAll = document.getElementById("providers-select-all");
         const batchImportOpenBtn = document.getElementById("provider-batch-import-open-btn");
         const batchImportModal = document.getElementById("provider-batch-import-modal");
         const batchImportForm = document.getElementById("provider-batch-import-form");
@@ -4638,7 +5022,6 @@
         const providerMaxActiveStreamsInput = document.getElementById("provider-max-active-streams");
         const providerMaxQpsInput = document.getElementById("provider-max-qps");
         const providerMaxRpmInput = document.getElementById("provider-max-rpm");
-        const providerMaxErrorRateInput = document.getElementById("provider-max-error-rate");
         const providerFirstTokenTimeoutSecInput = document.getElementById("provider-first-token-timeout-sec");
         const providerTrustLevelInput = document.getElementById("provider-trust-level");
         const providerContentIntegrityStatusInput = document.getElementById("provider-content-integrity-status");
@@ -4673,6 +5056,10 @@
             supports_responses: true,
             enabled: true,
             price_multiplier: 1,
+            max_active_requests: null,
+            max_active_streams: null,
+            max_qps: null,
+            max_rpm: null,
         };
         const DEFAULT_PROVIDER_PRESETS = ["gpt-5.4", "gpt-5", "gpt-5-mini", "gpt-4.1", "gpt-4o", "gpt-4o-mini", "o3", "o4-mini"];
         const PROVIDER_PRESETS_STORAGE_KEY = "aotu_provider_model_presets";
@@ -4693,6 +5080,7 @@
         let providerBatchImportTemplate = "";
         let providerBatchImportPreview = null;
         let providerGlobalMaxRetries = 2;
+        const selectedProviderIds = new Set();
 
         if (!tableBody || !modal || !providerForm || !providerModelConfigList) return;
 
@@ -4758,7 +5146,17 @@
                 price_multiplier: Number.isFinite(Number(config.price_multiplier)) && Number(config.price_multiplier) > 0
                     ? Number(config.price_multiplier)
                     : DEFAULT_PROVIDER_MODEL_CONFIG.price_multiplier,
+                max_active_requests: normalizeNullableInteger(config.max_active_requests),
+                max_active_streams: normalizeNullableInteger(config.max_active_streams),
+                max_qps: normalizeNullableInteger(config.max_qps),
+                max_rpm: normalizeNullableInteger(config.max_rpm),
             };
+        }
+
+        function normalizeNullableInteger(value) {
+            if (value === null || value === undefined || value === "") return null;
+            const parsed = Number(value);
+            return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : null;
         }
 
         function createProviderModelConfigRow(config = {}) {
@@ -4793,6 +5191,27 @@
                     <input class="field-input" type="number" min="0.0001" step="0.0001" data-model-config-field="price_multiplier" value="${item.price_multiplier}" placeholder="倍率">
                 </label>
                 <button class="table-action-btn" data-action="remove-model-config" type="button">删除</button>
+                <details class="provider-model-config-advanced">
+                    <summary>容量</summary>
+                    <div class="provider-model-capacity-grid">
+                        <label>
+                            <span>请求</span>
+                            <input class="field-input" type="number" min="0" step="1" data-model-config-field="max_active_requests" value="${item.max_active_requests ?? ""}" placeholder="继承">
+                        </label>
+                        <label>
+                            <span>流式</span>
+                            <input class="field-input" type="number" min="0" step="1" data-model-config-field="max_active_streams" value="${item.max_active_streams ?? ""}" placeholder="继承">
+                        </label>
+                        <label>
+                            <span>QPS</span>
+                            <input class="field-input" type="number" min="0" step="1" data-model-config-field="max_qps" value="${item.max_qps ?? ""}" placeholder="继承">
+                        </label>
+                        <label>
+                            <span>RPM</span>
+                            <input class="field-input" type="number" min="0" step="1" data-model-config-field="max_rpm" value="${item.max_rpm ?? ""}" placeholder="继承">
+                        </label>
+                    </div>
+                </details>
             `;
             return row;
         }
@@ -4875,6 +5294,10 @@
                     supports_responses: protocolSupports.supports_responses,
                     enabled: row.querySelector('[data-model-config-field="enabled"]')?.checked ?? DEFAULT_PROVIDER_MODEL_CONFIG.enabled,
                     price_multiplier: priceMultiplier,
+                    max_active_requests: normalizeNullableInteger(row.querySelector('[data-model-config-field="max_active_requests"]')?.value),
+                    max_active_streams: normalizeNullableInteger(row.querySelector('[data-model-config-field="max_active_streams"]')?.value),
+                    max_qps: normalizeNullableInteger(row.querySelector('[data-model-config-field="max_qps"]')?.value),
+                    max_rpm: normalizeNullableInteger(row.querySelector('[data-model-config-field="max_rpm"]')?.value),
                 });
             }
             return configs;
@@ -5227,7 +5650,6 @@
                 max_active_streams: providerMaxActiveStreamsInput.value === "" ? null : Number(providerMaxActiveStreamsInput.value),
                 max_qps: providerMaxQpsInput.value === "" ? null : Number(providerMaxQpsInput.value),
                 max_rpm: providerMaxRpmInput.value === "" ? null : Number(providerMaxRpmInput.value),
-                max_error_rate: providerMaxErrorRateInput.value === "" ? null : Number(providerMaxErrorRateInput.value),
                 first_token_timeout_sec: providerFirstTokenTimeoutSecInput.value === "" ? null : Number(providerFirstTokenTimeoutSecInput.value),
                 trust_level: providerTrustLevelInput.value || "standard",
                 content_integrity_status: providerContentIntegrityStatusInput.value || "unknown",
@@ -5558,7 +5980,6 @@
                     <button class="provider-action-menu-trigger" data-action-menu-trigger type="button" aria-expanded="false">更多</button>
                     <div class="provider-action-menu-panel">
                         <button class="table-action-btn" data-action="rotate-credential" data-id="${provider.id}" type="button">轮换凭据</button>
-                        <button class="table-action-btn" data-action="default" data-id="${provider.id}" type="button">设为默认</button>
                         <button class="table-action-btn" data-action="toggle" data-id="${provider.id}" type="button">${provider.enabled ? "禁用" : "启用"}</button>
                         <button class="table-action-btn danger" data-action="delete" data-id="${provider.id}" type="button">删除</button>
                     </div>
@@ -5575,13 +5996,12 @@
             const activeStreams = provider.active_streams ?? 0;
             const currentQps = provider.current_qps ?? 0;
             const currentRpm = provider.current_rpm ?? 0;
-            const errorLimit = provider.max_error_rate == null ? "不限" : `${provider.max_error_rate}%`;
             return `
                 <strong>请求 ${formatNumber(activeRequests)} / ${formatCapacityLimit(provider.max_active_requests)}</strong>
                 <div class="table-muted">流式 ${formatNumber(activeStreams)} / ${formatCapacityLimit(provider.max_active_streams)}</div>
                 <div class="table-muted">QPS ${formatNumber(currentQps)} / ${formatCapacityLimit(provider.max_qps)}</div>
                 <div class="table-muted">RPM ${formatNumber(currentRpm)} / ${formatCapacityLimit(provider.max_rpm)}</div>
-                <div class="table-muted">失败率上限 ${escapeHtml(errorLimit)} · 首 Token ${provider.first_token_timeout_sec ?? "-"}s</div>
+                <div class="table-muted">首 Token ${provider.first_token_timeout_sec ?? "-"}s</div>
             `;
         }
 
@@ -6064,9 +6484,9 @@
             }
         }
 
-        function renderProviders(keyword = "") {
+        function getFilteredProviders(keyword = searchInput?.value || "") {
             const query = keyword.trim().toLowerCase();
-            const filtered = providers.filter((provider) => {
+            return providers.filter((provider) => {
                 if (!matchesProviderStatusFilter(provider)) return false;
                 if (!query) return true;
                 const modelNames = Array.isArray(provider.models)
@@ -6084,11 +6504,238 @@
                 ].join(" ").toLowerCase();
                 return text.includes(query);
             });
+        }
+
+        function syncProviderSelectionUi(visibleProviders = getFilteredProviders()) {
+            const existingIds = new Set(providers.map((provider) => Number(provider.id)));
+            Array.from(selectedProviderIds).forEach((id) => {
+                if (!existingIds.has(Number(id))) selectedProviderIds.delete(id);
+            });
+            const visibleIds = visibleProviders.map((provider) => Number(provider.id)).filter(Number.isFinite);
+            const selectedVisibleCount = visibleIds.filter((id) => selectedProviderIds.has(id)).length;
+            tableBody.querySelectorAll("[data-provider-row-select]").forEach((input) => {
+                const providerId = Number(input.dataset.providerId);
+                input.checked = selectedProviderIds.has(providerId);
+            });
+            if (providersSelectAll) {
+                providersSelectAll.checked = visibleIds.length > 0 && selectedVisibleCount === visibleIds.length;
+                providersSelectAll.indeterminate = selectedVisibleCount > 0 && selectedVisibleCount < visibleIds.length;
+                providersSelectAll.disabled = visibleIds.length === 0;
+            }
+            if (providersTrustSelectedBtn) {
+                providersTrustSelectedBtn.disabled = selectedProviderIds.size === 0;
+                providersTrustSelectedBtn.textContent = selectedProviderIds.size
+                    ? `可信检测选中 ${formatNumber(selectedProviderIds.size)}`
+                    : "可信检测选中";
+            }
+        }
+
+        function providerModelConfigToTrustTarget(provider, modelConfig) {
+            const providerId = Number(provider?.id);
+            const modelId = Number(modelConfig?.id);
+            if (!Number.isFinite(providerId) || !Number.isFinite(modelId)) return null;
+            const providerName = provider?.name || `提供商 ${providerId}`;
+            const modelName = modelConfig?.model_name || `模型 ${modelId}`;
+            return {
+                key: `${providerId}:${modelId}`,
+                providerId,
+                modelId,
+                providerName,
+                modelName,
+                displayName: `${providerName} / ${modelName}`,
+                providerEnabled: provider?.enabled !== false,
+                modelEnabled: modelConfig?.enabled !== false,
+            };
+        }
+
+        function getSelectedProviderTrustTargets() {
+            const selectedProviders = providers.filter((provider) => selectedProviderIds.has(Number(provider.id)));
+            const targets = [];
+            selectedProviders.forEach((provider) => {
+                const modelConfigs = Array.isArray(provider.model_configs) ? provider.model_configs : [];
+                const mountedTargets = modelConfigs
+                    .map((modelConfig) => providerModelConfigToTrustTarget(provider, modelConfig))
+                    .filter(Boolean);
+                if (mountedTargets.length) {
+                    targets.push(...mountedTargets);
+                    return;
+                }
+                targets.push({
+                    key: `${Number(provider.id)}:empty`,
+                    providerId: Number(provider.id),
+                    modelId: null,
+                    providerName: provider.name || `提供商 ${provider.id}`,
+                    modelName: "无挂载模型",
+                    displayName: `${provider.name || `提供商 ${provider.id}`} / 无挂载模型`,
+                    status: "skipped",
+                    resultLabel: "已跳过",
+                    latencyMs: null,
+                    message: "该提供商当前没有可执行可信检测的挂载模型。",
+                });
+            });
+            return targets;
+        }
+
+        function createProviderTrustBatchState(targets) {
+            return {
+                items: targets.map((target) => ({
+                    ...target,
+                    status: target.status || "pending",
+                    resultLabel: target.resultLabel || "等待中",
+                    latencyMs: target.latencyMs ?? null,
+                    message: target.message || "",
+                })),
+                startedAt: Date.now(),
+            };
+        }
+
+        function summarizeProviderTrustBatchState(batchState) {
+            const items = Array.isArray(batchState?.items) ? batchState.items : [];
+            const completedStatuses = new Set(["passed", "review", "failed", "skipped"]);
+            return {
+                total: items.length,
+                completed: items.filter((item) => completedStatuses.has(item.status)).length,
+                running: items.filter((item) => item.status === "running").length,
+                passed: items.filter((item) => item.status === "passed").length,
+                review: items.filter((item) => item.status === "review").length,
+                failed: items.filter((item) => item.status === "failed").length,
+                skipped: items.filter((item) => item.status === "skipped").length,
+                providerCount: new Set(items.map((item) => item.providerId).filter(Number.isFinite)).size,
+            };
+        }
+
+        function renderProviderTrustBatchStatusBadge(status) {
+            if (status === "passed") return '<span class="status-badge status-healthy">可信</span>';
+            if (status === "review") return '<span class="status-badge status-degraded">需复核</span>';
+            if (status === "failed") return '<span class="status-badge status-unhealthy">异常</span>';
+            if (status === "running") return '<span class="status-badge status-running">检测中</span>';
+            if (status === "skipped") return '<span class="status-badge status-unknown">已跳过</span>';
+            return '<span class="status-badge status-unknown">等待中</span>';
+        }
+
+        function renderProviderTrustBatchProgress(batchState) {
+            const summary = summarizeProviderTrustBatchState(batchState);
+            const summaryHtml = [
+                ["提供商", formatNumber(summary.providerCount)],
+                ["挂载模型", formatNumber(summary.total)],
+                ["完成", `${formatNumber(summary.completed)}/${formatNumber(summary.total)}`],
+                ["可信", formatNumber(summary.passed)],
+                ["需复核", formatNumber(summary.review)],
+                ["异常", formatNumber(summary.failed)],
+                ["跳过", formatNumber(summary.skipped)],
+            ].map(([label, value]) => `
+                <div class="provider-test-summary-item">
+                    <span>${escapeHtml(String(label))}</span>
+                    <strong>${escapeHtml(String(value))}</strong>
+                </div>
+            `).join("");
+            const itemHtml = batchState.items.map((item) => {
+                const latencyText = item.latencyMs == null ? "-" : `${formatNumber(item.latencyMs)} ms`;
+                const disabledText = item.modelId && (!item.providerEnabled || !item.modelEnabled)
+                    ? `<div class="table-muted">${!item.providerEnabled ? "提供商已停用" : "模型已停用"}，仍按挂载模型执行手动可信检测。</div>`
+                    : "";
+                return `
+                    <article class="provider-test-model-item provider-model-batch-item" data-status="${escapeHtml(item.status)}">
+                        <div class="provider-test-model-top">
+                            <strong>${escapeHtml(item.displayName)}</strong>
+                            <div>${renderProviderTrustBatchStatusBadge(item.status)}</div>
+                        </div>
+                        <div class="table-muted">${escapeHtml(item.resultLabel)} · 耗时 ${escapeHtml(String(latencyText))}</div>
+                        ${disabledText}
+                        ${item.message ? `<div class="provider-test-model-message">${escapeHtml(item.message)}</div>` : ""}
+                    </article>
+                `;
+            }).join("");
+            return `
+                <div class="provider-test-result-shell">
+                    <section class="provider-test-result-card">
+                        <div class="panel-kicker">批量可信检测</div>
+                        <div class="provider-test-summary-grid">${summaryHtml}</div>
+                    </section>
+                    <section class="provider-test-result-card">
+                        <div class="panel-kicker">${summary.completed >= summary.total ? "检测结果" : `检测进度 · ${formatNumber(summary.running)} 进行中`}</div>
+                        <div class="provider-test-model-list provider-model-batch-list">${itemHtml}</div>
+                    </section>
+                </div>
+            `;
+        }
+
+        async function runSelectedProvidersTrustBatch(trigger) {
+            const targets = getSelectedProviderTrustTargets();
+            if (!selectedProviderIds.size) {
+                showToast("请先选择提供商", "error");
+                return;
+            }
+            if (!targets.length) {
+                showToast("选中的提供商没有可检测的挂载模型", "error");
+                return;
+            }
+            const batchState = createProviderTrustBatchState(targets);
+            const title = "提供商批量可信检测";
+            const refresh = () => refreshHealthCheckResultModal(title, renderProviderTrustBatchProgress(batchState));
+            setButtonLoading(trigger, true);
+            openHealthCheckResultModal(title, renderProviderTrustBatchProgress(batchState), trigger);
+            const executableItems = batchState.items.filter((item) => item.modelId != null);
+            const groups = new Map();
+            executableItems.forEach((item) => {
+                if (!groups.has(item.providerId)) groups.set(item.providerId, []);
+                groups.get(item.providerId).push(item);
+            });
+            try {
+                await Promise.all(Array.from(groups.values()).map(async (items) => {
+                    for (const item of items) {
+                        item.status = "running";
+                        item.resultLabel = "执行中";
+                        item.message = `正在执行 ${CONTENT_TRUST_PROBE_KEYS.length} 个可信探针`;
+                        refresh();
+                        try {
+                            const startedAt = Date.now();
+                            const result = await api.post(
+                                "/api/content-guard/trust-probe",
+                                buildContentTrustProbePayload(item.providerId, item.modelId),
+                            );
+                            const guardResult = result?.summary?.content_guard_result || result?.summary?.status;
+                            item.status = contentTrustBatchStatusFromGuardResult(guardResult);
+                            item.resultLabel = formatContentGuardResultLabel(guardResult);
+                            item.latencyMs = result?.summary?.latency_ms ?? result?.latency_ms ?? (Date.now() - startedAt);
+                            item.message = result?.summary?.content_guard_reason || result?.message || "";
+                        } catch (error) {
+                            item.status = "failed";
+                            item.resultLabel = "执行失败";
+                            item.latencyMs = null;
+                            item.message = error.message || "可信检测请求失败";
+                        }
+                        refresh();
+                    }
+                }));
+                const summary = summarizeProviderTrustBatchState(batchState);
+                setButtonTransientFeedback(trigger, summary.failed === 0 ? (summary.review ? "review" : "success") : "error", {
+                    successText: "已完成",
+                    reviewText: "需复核",
+                    errorText: "有异常",
+                });
+                showToast(
+                    `可信检测完成：可信 ${formatNumber(summary.passed)}，需复核 ${formatNumber(summary.review)}，异常 ${formatNumber(summary.failed)}`,
+                    summary.failed === 0 ? (summary.review ? "warning" : "success") : "error",
+                );
+                await wait(500);
+                await loadProviders();
+                refreshHealthCheckResultModal(title, renderProviderTrustBatchProgress(batchState));
+            } finally {
+                setButtonLoading(trigger, false);
+            }
+        }
+
+        function renderProviders(keyword = "") {
+            const filtered = getFilteredProviders(keyword);
             const rows = filtered.map((provider) => {
                 const isExpanded = openProviderDetailIds.has(Number(provider.id));
                 try {
                     return `
                     <tr class="provider-main-row ${isExpanded ? "is-expanded" : ""}">
+                        <td class="provider-model-select-col">
+                            <input data-provider-row-select="${provider.id}" data-provider-id="${provider.id}" type="checkbox" aria-label="选择 ${escapeHtml(provider.name || `提供商 ${provider.id}`)}" ${selectedProviderIds.has(Number(provider.id)) ? "checked" : ""}>
+                        </td>
                         <td>${renderProviderIdentity(provider)}</td>
                         <td>${renderProviderStatusSummary(provider)}</td>
                         <td>${renderProviderModelHealth(provider.model_configs, provider.id)}</td>
@@ -6106,7 +6753,7 @@
                     </tr>
                     ${isExpanded ? `
                     <tr class="provider-detail-row">
-                        <td colspan="7">${renderProviderDetailPanel(provider)}</td>
+                        <td colspan="8">${renderProviderDetailPanel(provider)}</td>
                     </tr>
                     ` : ""}
                 `;
@@ -6114,6 +6761,9 @@
                     console.error("提供商对象目录行渲染失败", provider, error);
                     return `
                     <tr class="provider-main-row">
+                        <td class="provider-model-select-col">
+                            <input data-provider-row-select="${provider?.id || ""}" data-provider-id="${provider?.id || ""}" type="checkbox" aria-label="选择 ${escapeHtml(provider?.name || `提供商 ${provider?.id || "-"}`)}" ${selectedProviderIds.has(Number(provider?.id)) ? "checked" : ""}>
+                        </td>
                         <td><strong>${escapeHtml(provider?.name || `提供商 ${provider?.id || "-"}`)}</strong></td>
                         <td colspan="5"><div class="table-muted">该提供商部分字段渲染失败，请编辑后保存或刷新页面。</div></td>
                         <td>
@@ -6125,8 +6775,9 @@
                 `;
                 }
             });
-            tableBody.innerHTML = rows.join("") || '<tr><td colspan="7"><div class="empty-state">没有匹配的提供商</div></td></tr>';
+            tableBody.innerHTML = rows.join("") || '<tr><td colspan="8"><div class="empty-state">没有匹配的提供商</div></td></tr>';
             enhanceInteractiveButtons(tableBody);
+            syncProviderSelectionUi(filtered);
         }
 
         function getProviderModelContext(providerId, modelId) {
@@ -6231,12 +6882,16 @@
         async function testProviderModel(providerId, modelId, trigger, options = {}) {
             const { owner, modelConfig } = getProviderModelContext(providerId, modelId);
             if (!owner || !modelConfig) return;
-            const features = options.features || await openTestFeaturePicker({
-                title: `选择模型测试功能 · ${modelConfig.model_name}`,
-                singleModel: true,
-            });
+            const features = options.features || ["text_stream"];
             if (!features) return;
+            const titleName = `${owner.name} / ${modelConfig.model_name}`;
+            const modalTitle = `模型测试 · ${modelConfig.model_name}`;
             setButtonLoading(trigger, true);
+            openHealthCheckResultModal(
+                modalTitle,
+                renderSingleModelTestProgressBody({ titleName }),
+                trigger,
+            );
             try {
                 const result = await api.post(`/api/providers/${providerId}/models/${modelId}/test`, { features });
                 const resultUsable = isHealthCheckUsable(result);
@@ -6260,14 +6915,22 @@
                     closeModelsDetailModal({ force: true, reason: "test-model" });
                 }
                 openHealthCheckResultModal(
-                    `模型测试结果 · ${modelConfig.model_name}`,
-                    renderProviderTestModalBody(result, { scope: "model", name: `${owner.name} / ${modelConfig.model_name}` }),
+                    modalTitle,
+                    renderProviderTestModalBody(result, { scope: "model", name: titleName }),
                     trigger,
                 );
                 await loadProviders();
             } catch (error) {
                 setButtonLoading(trigger, false);
                 setButtonTransientFeedback(trigger, "error", { errorText: "失败" });
+                refreshHealthCheckResultModal(
+                    modalTitle,
+                    renderSingleModelTestProgressBody({
+                        titleName,
+                        status: "failed",
+                        message: error.message || "测试失败",
+                    }),
+                );
                 showToast(error.message, "error");
             } finally {
                 setButtonLoading(trigger, false);
@@ -6277,7 +6940,14 @@
         async function testProviderModelTrust(providerId, modelId, trigger, options = {}) {
             const { owner, modelConfig } = getProviderModelContext(providerId, modelId);
             if (!owner || !modelConfig) return;
+            const titleName = `${owner.name} / ${modelConfig.model_name}`;
+            const modalTitle = `可信检测 · ${modelConfig.model_name}`;
             setButtonLoading(trigger, true);
+            openHealthCheckResultModal(
+                modalTitle,
+                renderContentTrustProgressBody({ titleName }),
+                trigger,
+            );
             try {
                 const result = await api.post("/api/content-guard/trust-probe", buildContentTrustProbePayload(providerId, modelId));
                 const guardResult = result?.summary?.content_guard_result || result?.summary?.status;
@@ -6291,13 +6961,21 @@
                 });
                 showToast(`可信检测完成：${formatContentGuardResultLabel(guardResult)}`, guardResult === "pass" ? "success" : "error");
                 openHealthCheckResultModal(
-                    `可信检测结果 · ${modelConfig.model_name}`,
-                    renderContentGuardProbeModalBody(result, `${owner.name} / ${modelConfig.model_name}`),
+                    modalTitle,
+                    renderContentGuardProbeModalBody(result, titleName),
                     trigger,
                 );
                 await loadProviders();
             } catch (error) {
                 setButtonTransientFeedback(trigger, "error", { errorText: "失败" });
+                refreshHealthCheckResultModal(
+                    modalTitle,
+                    renderContentTrustProgressBody({
+                        titleName,
+                        status: "failed",
+                        message: error.message || "可信检测失败",
+                    }),
+                );
                 showToast(error.message, "error");
             } finally {
                 setButtonLoading(trigger, false);
@@ -6374,13 +7052,6 @@
                     await loadProviders();
                     return;
                 }
-                if (action === "default") {
-                    setButtonLoading(button, true);
-                    const settings = await api.get("/api/settings");
-                    await api.put("/api/settings", { ...settings, default_provider_id: id });
-                    showToast(`默认提供商已切换为 ${provider.name}`);
-                    await loadProviders();
-                }
             } catch (error) {
                 if (action === "test") {
                     setButtonTransientFeedback(button, "error", { errorText: "失败" });
@@ -6389,6 +7060,37 @@
             } finally {
                 setButtonLoading(button, false);
             }
+        });
+
+        tableBody.addEventListener("change", (event) => {
+            const input = event.target.closest("[data-provider-row-select]");
+            if (!input) return;
+            const providerId = Number(input.dataset.providerId);
+            if (!Number.isFinite(providerId)) return;
+            if (input.checked) {
+                selectedProviderIds.add(providerId);
+            } else {
+                selectedProviderIds.delete(providerId);
+            }
+            syncProviderSelectionUi();
+        });
+
+        providersSelectAll?.addEventListener("change", () => {
+            const visibleProviders = getFilteredProviders();
+            visibleProviders.forEach((provider) => {
+                const providerId = Number(provider.id);
+                if (!Number.isFinite(providerId)) return;
+                if (providersSelectAll.checked) {
+                    selectedProviderIds.add(providerId);
+                } else {
+                    selectedProviderIds.delete(providerId);
+                }
+            });
+            syncProviderSelectionUi(visibleProviders);
+        });
+
+        providersTrustSelectedBtn?.addEventListener("click", async () => {
+            await runSelectedProvidersTrustBatch(providersTrustSelectedBtn);
         });
 
         modelTableBody?.addEventListener("click", async (event) => {
@@ -6495,7 +7197,6 @@
             providerMaxActiveStreamsInput.value = provider?.max_active_streams ?? 10;
             providerMaxQpsInput.value = provider?.max_qps ?? 20;
             providerMaxRpmInput.value = provider?.max_rpm ?? 20;
-            providerMaxErrorRateInput.value = provider?.max_error_rate ?? 80;
             providerFirstTokenTimeoutSecInput.value = provider?.first_token_timeout_sec ?? 60;
             providerTrustLevelInput.value = provider?.trust_level ?? "standard";
             providerContentIntegrityStatusInput.value = provider?.content_integrity_status ?? "unknown";
@@ -6693,7 +7394,7 @@
                 providerPageRefreshRunning = false;
             }
         }, 30000);
-        window.addEventListener("beforeunload", () => window.clearInterval(providerPageTimer), { once: true });
+        registerPageCleanup(() => window.clearInterval(providerPageTimer));
 
         try {
             const settings = await api.get("/api/settings");
@@ -6738,6 +7439,10 @@
         const providerModelEditOutputPriceInput = document.getElementById("provider-model-edit-output-price");
         const providerModelEditCachePriceInput = document.getElementById("provider-model-edit-cache-price");
         const providerModelEditCacheWritePriceInput = document.getElementById("provider-model-edit-cache-write-price");
+        const providerModelEditMaxActiveRequestsInput = document.getElementById("provider-model-edit-max-active-requests");
+        const providerModelEditMaxActiveStreamsInput = document.getElementById("provider-model-edit-max-active-streams");
+        const providerModelEditMaxQpsInput = document.getElementById("provider-model-edit-max-qps");
+        const providerModelEditMaxRpmInput = document.getElementById("provider-model-edit-max-rpm");
         const providerModelEditSubmitBtn = document.getElementById("provider-model-edit-submit");
         if (!modelTableBody) return;
 
@@ -6934,6 +7639,21 @@
             return toPricePer1K(value);
         }
 
+        function setOptionalIntegerInput(input, value) {
+            if (!input) return;
+            input.value = value === null || value === undefined ? "" : String(value);
+        }
+
+        function readOptionalIntegerInput(input, label) {
+            const rawValue = String(input?.value || "").trim();
+            if (!rawValue) return null;
+            const value = Number(rawValue);
+            if (!Number.isFinite(value) || value < 0 || !Number.isInteger(value)) {
+                throw new Error(`${label}必须填写大于或等于 0 的整数`);
+            }
+            return value;
+        }
+
         function openProviderModelEditor(providerId, modelId, trigger = document.activeElement) {
             const { owner, modelConfig } = getProviderModelContext(providerId, modelId);
             if (!owner || !modelConfig) return;
@@ -6948,6 +7668,10 @@
             setOptionalPriceInput(providerModelEditOutputPriceInput, modelConfig.output_price_per_1k);
             setOptionalPriceInput(providerModelEditCachePriceInput, modelConfig.cache_price_per_1k);
             setOptionalPriceInput(providerModelEditCacheWritePriceInput, modelConfig.cache_write_price_per_1k);
+            setOptionalIntegerInput(providerModelEditMaxActiveRequestsInput, modelConfig.max_active_requests);
+            setOptionalIntegerInput(providerModelEditMaxActiveStreamsInput, modelConfig.max_active_streams);
+            setOptionalIntegerInput(providerModelEditMaxQpsInput, modelConfig.max_qps);
+            setOptionalIntegerInput(providerModelEditMaxRpmInput, modelConfig.max_rpm);
             editModalController.open(trigger);
         }
 
@@ -7024,12 +7748,15 @@
         async function testProviderModel(providerId, modelId, trigger) {
             const { owner, modelConfig } = getProviderModelContext(providerId, modelId);
             if (!owner || !modelConfig) return;
-            const features = await openTestFeaturePicker({
-                title: `选择模型测试功能 · ${modelConfig.model_name}`,
-                singleModel: true,
-            });
-            if (!features) return;
+            const features = ["text_stream"];
+            const titleName = `${owner.name} / ${modelConfig.model_name}`;
+            const modalTitle = `模型测试 · ${modelConfig.model_name}`;
             setButtonLoading(trigger, true);
+            openHealthCheckResultModal(
+                modalTitle,
+                renderSingleModelTestProgressBody({ titleName }),
+                trigger,
+            );
             try {
                 const result = await api.post(`/api/providers/${providerId}/models/${modelId}/test`, { features });
                 const resultUsable = isHealthCheckUsable(result);
@@ -7043,14 +7770,22 @@
                     resultUsable ? "success" : "error",
                 );
                 openHealthCheckResultModal(
-                    `模型测试结果 · ${modelConfig.model_name}`,
-                    renderProviderTestModalBody(result, { scope: "model", name: `${owner.name} / ${modelConfig.model_name}` }),
+                    modalTitle,
+                    renderProviderTestModalBody(result, { scope: "model", name: titleName }),
                     trigger,
                 );
                 await wait(500);
                 await loadProviderModels({ silent: true });
             } catch (error) {
                 setButtonTransientFeedback(trigger, "error", { errorText: "失败" });
+                refreshHealthCheckResultModal(
+                    modalTitle,
+                    renderSingleModelTestProgressBody({
+                        titleName,
+                        status: "failed",
+                        message: error.message || "测试失败",
+                    }),
+                );
                 showToast(error.message, "error");
             } finally {
                 setButtonLoading(trigger, false);
@@ -7060,7 +7795,14 @@
         async function testProviderModelTrust(providerId, modelId, trigger) {
             const { owner, modelConfig } = getProviderModelContext(providerId, modelId);
             if (!owner || !modelConfig) return;
+            const titleName = `${owner.name} / ${modelConfig.model_name}`;
+            const modalTitle = `可信检测 · ${modelConfig.model_name}`;
             setButtonLoading(trigger, true);
+            openHealthCheckResultModal(
+                modalTitle,
+                renderContentTrustProgressBody({ titleName }),
+                trigger,
+            );
             try {
                 const result = await api.post("/api/content-guard/trust-probe", buildContentTrustProbePayload(providerId, modelId));
                 const guardResult = result?.summary?.content_guard_result || result?.summary?.status;
@@ -7071,14 +7813,22 @@
                 });
                 showToast(`可信检测完成：${formatContentGuardResultLabel(guardResult)}`, guardResult === "pass" ? "success" : "error");
                 openHealthCheckResultModal(
-                    `可信检测结果 · ${modelConfig.model_name}`,
-                    renderContentGuardProbeModalBody(result, `${owner.name} / ${modelConfig.model_name}`),
+                    modalTitle,
+                    renderContentGuardProbeModalBody(result, titleName),
                     trigger,
                 );
                 await wait(500);
                 await loadProviderModels({ silent: true });
             } catch (error) {
                 setButtonTransientFeedback(trigger, "error", { errorText: "失败" });
+                refreshHealthCheckResultModal(
+                    modalTitle,
+                    renderContentTrustProgressBody({
+                        titleName,
+                        status: "failed",
+                        message: error.message || "可信检测失败",
+                    }),
+                );
                 showToast(error.message, "error");
             } finally {
                 setButtonLoading(trigger, false);
@@ -7102,15 +7852,17 @@
             const items = Array.isArray(batchState?.items) ? batchState.items : [];
             return {
                 total: items.length,
-                completed: items.filter((item) => item.status === "passed" || item.status === "failed").length,
+                completed: items.filter((item) => ["passed", "review", "failed"].includes(item.status)).length,
                 running: items.filter((item) => item.status === "running").length,
                 passed: items.filter((item) => item.status === "passed").length,
+                review: items.filter((item) => item.status === "review").length,
                 failed: items.filter((item) => item.status === "failed").length,
             };
         }
 
         function renderProviderModelBatchStatusBadge(status, kind) {
             if (status === "passed") return `<span class="status-badge status-healthy">${kind === "trust" ? "可信" : "可用"}</span>`;
+            if (status === "review") return '<span class="status-badge status-degraded">需复核</span>';
             if (status === "failed") return '<span class="status-badge status-unhealthy">异常</span>';
             if (status === "running") return '<span class="status-badge status-running">进行中</span>';
             return '<span class="status-badge status-unknown">等待中</span>';
@@ -7124,6 +7876,7 @@
                 ["总数", formatNumber(summary.total)],
                 ["完成", `${formatNumber(summary.completed)}/${formatNumber(summary.total)}`],
                 [isTrust ? "可信" : "可用", formatNumber(summary.passed)],
+                ...(isTrust ? [["需复核", formatNumber(summary.review)]] : []),
                 ["异常", formatNumber(summary.failed)],
             ].map(([label, value]) => `
                 <div class="provider-test-summary-item">
@@ -7165,37 +7918,53 @@
             }
             const batchState = createProviderModelBatchState(kind, targets);
             const title = kind === "trust" ? "批量可信检测结果" : "批量测试结果";
+            const refresh = () => refreshHealthCheckResultModal(title, renderProviderModelBatchProgress(batchState));
+            const runBatchItem = async (item) => {
+                item.status = "running";
+                item.resultLabel = "执行中";
+                item.message = kind === "trust"
+                    ? `正在执行 ${CONTENT_TRUST_PROBE_KEYS.length} 个可信探针`
+                    : "正在执行健康测试";
+                refresh();
+                const startedAt = Date.now();
+                try {
+                    if (kind === "trust") {
+                        const result = await api.post("/api/content-guard/trust-probe", buildContentTrustProbePayload(item.providerId, item.modelId));
+                        const guardResult = result?.summary?.content_guard_result || result?.summary?.status;
+                        item.status = contentTrustBatchStatusFromGuardResult(guardResult);
+                        item.resultLabel = formatContentGuardResultLabel(guardResult);
+                        item.latencyMs = result?.summary?.latency_ms ?? result?.latency_ms ?? (Date.now() - startedAt);
+                        item.message = result?.summary?.content_guard_reason || result?.message || "";
+                    } else {
+                        const result = await api.post(`/api/providers/${item.providerId}/models/${item.modelId}/test`, { features });
+                        const usable = isHealthCheckUsable(result);
+                        item.status = usable ? "passed" : "failed";
+                        item.resultLabel = formatHealthCheckOutcomeLabel(result);
+                        item.latencyMs = result?.latency_ms ?? (Date.now() - startedAt);
+                        item.message = result?.message || "";
+                    }
+                } catch (error) {
+                    item.status = "failed";
+                    item.resultLabel = "执行失败";
+                    item.latencyMs = Date.now() - startedAt;
+                    item.message = error.message || "请求失败";
+                }
+                refresh();
+            };
+            const providerGroups = new Map();
+            batchState.items.forEach((item) => {
+                const groupKey = Number.isFinite(Number(item.providerId)) ? Number(item.providerId) : item.key;
+                if (!providerGroups.has(groupKey)) providerGroups.set(groupKey, []);
+                providerGroups.get(groupKey).push(item);
+            });
             setButtonLoading(trigger, true);
             openHealthCheckResultModal(title, renderProviderModelBatchProgress(batchState), trigger);
             try {
-                for (const item of batchState.items) {
-                    item.status = "running";
-                    item.resultLabel = "执行中";
-                    refreshHealthCheckResultModal(title, renderProviderModelBatchProgress(batchState));
-                    try {
-                        if (kind === "trust") {
-                            const result = await api.post("/api/content-guard/trust-probe", buildContentTrustProbePayload(item.providerId, item.modelId));
-                            const guardResult = result?.summary?.content_guard_result || result?.summary?.status;
-                            item.status = guardResult === "pass" ? "passed" : "failed";
-                            item.resultLabel = formatContentGuardResultLabel(guardResult);
-                            item.latencyMs = result?.summary?.latency_ms ?? result?.latency_ms ?? null;
-                            item.message = result?.summary?.content_guard_reason || result?.message || "";
-                        } else {
-                            const result = await api.post(`/api/providers/${item.providerId}/models/${item.modelId}/test`, { features });
-                            const usable = isHealthCheckUsable(result);
-                            item.status = usable ? "passed" : "failed";
-                            item.resultLabel = formatHealthCheckOutcomeLabel(result);
-                            item.latencyMs = result?.latency_ms ?? null;
-                            item.message = result?.message || "";
-                        }
-                    } catch (error) {
-                        item.status = "failed";
-                        item.resultLabel = "执行失败";
-                        item.latencyMs = null;
-                        item.message = error.message || "请求失败";
+                await Promise.all(Array.from(providerGroups.values()).map(async (items) => {
+                    for (const item of items) {
+                        await runBatchItem(item);
                     }
-                    refreshHealthCheckResultModal(title, renderProviderModelBatchProgress(batchState));
-                }
+                }));
                 const summary = summarizeProviderModelBatchState(batchState);
                 setButtonTransientFeedback(trigger, summary.failed === 0 ? "success" : "error", {
                     successText: "已完成",
@@ -7301,6 +8070,10 @@
                     output_price_per_1k: readOptionalPriceInput(providerModelEditOutputPriceInput, "输出单价"),
                     cache_price_per_1k: readOptionalPriceInput(providerModelEditCachePriceInput, "缓存单价"),
                     cache_write_price_per_1k: readOptionalPriceInput(providerModelEditCacheWritePriceInput, "缓存写入单价"),
+                    max_active_requests: readOptionalIntegerInput(providerModelEditMaxActiveRequestsInput, "最大活跃请求"),
+                    max_active_streams: readOptionalIntegerInput(providerModelEditMaxActiveStreamsInput, "最大流式请求"),
+                    max_qps: readOptionalIntegerInput(providerModelEditMaxQpsInput, "最大 QPS"),
+                    max_rpm: readOptionalIntegerInput(providerModelEditMaxRpmInput, "最大 RPM"),
                 };
             } catch (error) {
                 showToast(error.message, "error");
@@ -7650,7 +8423,7 @@
 
         function renderModelChannelTestList(channels = []) {
             if (!channels.length) {
-                return '<div class="empty-state">未绑定渠道</div>';
+                return '<div class="empty-state">未绑定提供商</div>';
             }
             return channels.map((item) => {
                 const status = item.available ? "healthy" : "unhealthy";
@@ -8893,6 +9666,10 @@
         await loadData({ silent: true, reloadProviders: true });
     }
 
+    function createContentGuardRulesController(methods) {
+        return Object.freeze(methods);
+    }
+
     async function initContentGuardPage() {
         const refreshBtn = document.getElementById("content-guard-refresh-btn");
         const settingsForm = document.getElementById("content-guard-settings-form");
@@ -8904,21 +9681,94 @@
         const internalFields = document.getElementById("content-guard-internal-fields");
         const externalFields = document.getElementById("content-guard-external-fields");
         const probeOptionsNode = document.getElementById("content-guard-probe-options");
-        const externalApiKeyInput = document.getElementById("content-guard-external-api-key");
-        const externalApiKeyToggleBtn = document.getElementById("content-guard-external-api-key-toggle");
-        const externalApiKeyClearBtn = document.getElementById("content-guard-external-api-key-clear");
+        const manualNotice = document.getElementById("content-guard-manual-notice");
+        const pageError = document.getElementById("content-guard-page-error");
+        const pageErrorMessage = document.getElementById("content-guard-page-error-message");
+        const pageRetryBtn = document.getElementById("content-guard-page-retry-btn");
         const rulesBody = document.getElementById("content-guard-rules-body");
         const addRuleBtn = document.getElementById("content-guard-add-rule-btn");
         const resetRulesBtn = document.getElementById("content-guard-reset-rules-btn");
         const saveRulesBtn = document.getElementById("content-guard-save-rules-btn");
+        const ruleSearchInput = document.getElementById("content-guard-rule-search");
+        const ruleCategoryFilter = document.getElementById("content-guard-rule-category-filter");
+        const ruleCategoryOptions = document.getElementById("content-guard-rule-category-options");
+        const ruleEnabledFilter = document.getElementById("content-guard-rule-enabled-filter");
+        const rulePageSizeSelect = document.getElementById("content-guard-rule-page-size");
+        const rulePageMeta = document.getElementById("content-guard-rule-page-meta");
+        const rulePrevPageBtn = document.getElementById("content-guard-rule-prev-page-btn");
+        const ruleNextPageBtn = document.getElementById("content-guard-rule-next-page-btn");
+        const rulesConfigAlert = document.getElementById("content-guard-rules-config-alert");
+        const rulesConfigAlertMessage = document.getElementById("content-guard-rules-config-alert-message");
+        const rulesConfigResetBtn = document.getElementById("content-guard-rules-config-reset-btn");
         const inspectForm = document.getElementById("content-guard-inspect-form");
         const inspectSubmitBtn = document.getElementById("content-guard-inspect-submit-btn");
         const inspectText = document.getElementById("content-guard-inspect-text");
+        const inspectEndpointPath = document.getElementById("content-guard-inspect-endpoint-path");
+        const inspectMaxScanBytes = document.getElementById("content-guard-inspect-max-scan-bytes");
+        const inspectRequestPayload = document.getElementById("content-guard-inspect-request-payload");
+        const inspectUrlAllowlist = document.getElementById("content-guard-inspect-url-allowlist");
         const inspectResult = document.getElementById("content-guard-inspect-result");
         const tabButtons = Array.from(document.querySelectorAll("[data-content-guard-tab]"));
         const tabPanels = Array.from(document.querySelectorAll("[data-content-guard-panel]"));
         const governanceBody = document.getElementById("content-guard-governance-body");
-        const state = { overview: null, rules: [], activeTab: "settings" };
+        const governanceSearchInput = document.getElementById("content-guard-governance-search");
+        const governanceStatusFilter = document.getElementById("content-guard-governance-status-filter");
+        const governanceSelectionMeta = document.getElementById("content-guard-governance-selection");
+        const governanceSelectAll = document.getElementById("content-guard-governance-select-all");
+        const governanceBatchRestoreBtn = document.getElementById("content-guard-governance-batch-restore-btn");
+        const governanceBatchIsolateBtn = document.getElementById("content-guard-governance-batch-isolate-btn");
+        const runtimeEventsBody = document.getElementById("content-guard-runtime-events-body");
+        const runtimeEventsRefreshBtn = document.getElementById("content-guard-runtime-events-refresh-btn");
+        const runtimeEventsExportBtn = document.getElementById("content-guard-runtime-events-export-btn");
+        const runtimeEventsKeywordInput = document.getElementById("content-guard-runtime-keyword");
+        const runtimeEventsRiskLevelSelect = document.getElementById("content-guard-runtime-risk-level");
+        const runtimeEventsActionSelect = document.getElementById("content-guard-runtime-action");
+        const runtimeEventsModelNameInput = document.getElementById("content-guard-runtime-model-name");
+        const runtimeEventsPageMeta = document.getElementById("content-guard-runtime-page-meta");
+        const runtimeEventsPrevBtn = document.getElementById("content-guard-runtime-prev-page-btn");
+        const runtimeEventsNextBtn = document.getElementById("content-guard-runtime-next-page-btn");
+        const requiredContentGuardNodes = [
+            refreshBtn,
+            settingsForm,
+            settingsSubmitBtn,
+            probeForm,
+            probeSubmitBtn,
+            providerSelect,
+            providerModelSelect,
+            probeOptionsNode,
+            rulesBody,
+            inspectForm,
+            inspectSubmitBtn,
+            inspectText,
+            inspectResult,
+            runtimeEventsBody,
+        ];
+        if (requiredContentGuardNodes.some((node) => !node)) {
+            const message = "内容防护页面结构不完整，请刷新页面或联系管理员。";
+            pageError?.classList.remove("hidden");
+            if (pageErrorMessage) pageErrorMessage.textContent = message;
+            showToast(message, "error");
+            return;
+        }
+        const state = {
+            overview: null,
+            rules: [],
+            activeTab: "settings",
+            rulePage: 1,
+            rulePageSize: Number(rulePageSizeSelect?.value || 10),
+            ruleTotal: 0,
+            ruleTotalPages: 1,
+            ruleServerPageActive: false,
+            ruleServerIndexes: [],
+            ruleServerCategories: [],
+            selectedGovernanceProviderIds: new Set(),
+            governanceProviderPage: 1,
+            governanceProviderPageSize: 50,
+            governanceProviderKeyword: "",
+            runtimeEventsPage: 1,
+            runtimeEventsPageSize: 20,
+            runtimeEventsTotal: 0,
+        };
         const ruleMatchTypeLabels = {
             keyword_any: "关键词",
             regex: "正则",
@@ -8941,6 +9791,12 @@
             contact_or_offplatform_redirect: "站外联系",
             unexpected_link: "异常外链",
             custom_content_guard: "自定义规则",
+        };
+        const contentGuardProbeLabels = {
+            fixed_answer: "固定答案",
+            pollution_rules: "外链广告识别",
+            json: "严格 JSON",
+            sse: "流式污染检测",
         };
 
         const setText = (id, value) => {
@@ -8983,14 +9839,28 @@
         const formatContentGuardActionLabel = (value) => ({
             allow: "放行",
             record: "记录",
+            record_only: "仅记录",
             review: "复核",
+            async_review: "异步复核",
             block: "拦截",
+            switch_provider: "切换提供商",
+            safe_error: "安全错误",
         }[String(value || "")] || String(value || "-"));
 
         const formatContentGuardCategories = (value) => {
             const categories = Array.isArray(value) ? value : safeJsonParse(String(value || ""));
             const items = Array.isArray(categories) ? categories : [];
             return items.map((item) => ruleCategoryLabels[String(item)] || String(item)).filter(Boolean).join("、") || "-";
+        };
+
+        const parseOptionalJsonObject = (value, fieldLabel) => {
+            const raw = String(value || "").trim();
+            if (!raw) return undefined;
+            const parsed = JSON.parse(raw);
+            if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
+                throw new Error(`${fieldLabel} 必须是 JSON 对象`);
+            }
+            return parsed;
         };
 
         const normalizeRuleId = (value) => String(value || "")
@@ -9011,11 +9881,24 @@
             return candidate;
         };
 
-        const readNumberField = (input, fallback, { min = -Infinity, max = Infinity } = {}) => {
+        const readNumberField = (input, fallback, { min = -Infinity, max = Infinity, label = "数值" } = {}) => {
             const raw = String(input?.value ?? "").trim();
             const numeric = raw === "" ? Number(fallback) : Number(raw);
-            if (!Number.isFinite(numeric)) return Number(fallback);
-            return Math.min(max, Math.max(min, numeric));
+            if (!Number.isFinite(numeric)) {
+                throw new Error(`${label}必须是有效数字`);
+            }
+            if (numeric < min || numeric > max) {
+                if (Number.isFinite(min) && Number.isFinite(max)) {
+                    throw new Error(`${label}必须在 ${min} 到 ${max} 之间`);
+                }
+                if (Number.isFinite(min)) {
+                    throw new Error(`${label}必须大于等于 ${min}`);
+                }
+                if (Number.isFinite(max)) {
+                    throw new Error(`${label}必须小于等于 ${max}`);
+                }
+            }
+            return numeric;
         };
 
         const renderRuleSelectOptions = (labels, selected, fallbackLabel = "自定义") => {
@@ -9026,7 +9909,19 @@
             return `${baseOptions}<option value="${escapeHtml(selected)}" selected>${escapeHtml(fallbackLabel)}</option>`;
         };
 
-        const normalizeRuleForView = (rule, index) => ({
+        const renderRuleCategoryDatalist = () => {
+            if (!ruleCategoryOptions) return;
+            const categories = Array.from(new Set([
+                ...Object.keys(ruleCategoryLabels),
+                ...(state.ruleServerCategories || []),
+                ...(state.rules || []).map((rule) => normalizeRuleForView(rule).category).filter(Boolean),
+            ])).sort();
+            ruleCategoryOptions.innerHTML = categories
+                .map((category) => `<option value="${escapeHtml(category)}">${escapeHtml(ruleCategoryLabels[category] || category)}</option>`)
+                .join("");
+        };
+
+        const normalizeRuleForView = (rule, index = 0) => ({
             id: rule?.id || `custom_rule_${Date.now()}_${index + 1}`,
             name: rule?.name || "新规则",
             category: rule?.category || "custom_content_guard",
@@ -9040,83 +9935,219 @@
             reason: rule?.reason || "",
         });
 
-        const renderRules = () => {
-            if (!rulesBody) return;
-            const rules = Array.isArray(state.rules) ? state.rules.map(normalizeRuleForView) : [];
-            if (!rules.length) {
-                rulesBody.innerHTML = '<tr><td colspan="9" class="table-muted">暂无规则</td></tr>';
-                return;
-            }
-            rulesBody.innerHTML = rules.map((rule, index) => `
-                <tr data-rule-index="${index}">
-                    <td>
-                        <label class="settings-switch-control content-guard-rule-switch">
-                            <input type="checkbox" data-rule-field="enabled" ${rule.enabled ? "checked" : ""} aria-label="启用 ${escapeHtml(rule.name)}">
-                            <span class="settings-switch-slider"></span>
-                        </label>
-                    </td>
-                    <td>
-                        <input class="field-input content-guard-rule-input" data-rule-field="name" value="${escapeHtml(rule.name)}" aria-label="规则名称">
-                        <input class="field-input content-guard-rule-id" data-rule-field="id" value="${escapeHtml(rule.id)}" aria-label="规则标识">
-                    </td>
-                    <td>
-                        <select class="field-input content-guard-rule-select" data-rule-field="category" aria-label="规则分类">
-                            ${renderRuleSelectOptions(ruleCategoryLabels, rule.category, "自定义分类")}
-                        </select>
-                    </td>
-                    <td>
-                        <select class="field-input content-guard-rule-select" data-rule-field="match_type" aria-label="匹配方式">
-                            ${renderRuleSelectOptions(ruleMatchTypeLabels, rule.match_type)}
-                        </select>
-                        <textarea class="field-input content-guard-rule-patterns" data-rule-field="patterns" rows="2" aria-label="匹配项">${escapeHtml((rule.patterns || []).join("\n"))}</textarea>
-                    </td>
-                    <td>
-                        <textarea class="field-input content-guard-rule-patterns" data-rule-field="reason" rows="2" aria-label="命中原因">${escapeHtml(rule.reason || "")}</textarea>
-                    </td>
-                    <td>
-                        <select class="field-input content-guard-rule-select" data-rule-field="risk_level" aria-label="风险等级">
-                            ${renderRuleSelectOptions(ruleRiskLabels, rule.risk_level)}
-                        </select>
-                    </td>
-                    <td>
-                        <select class="field-input content-guard-rule-select" data-rule-field="action" aria-label="命中动作">
-                            ${renderRuleSelectOptions(ruleActionLabels, rule.action)}
-                        </select>
-                        <input class="field-input content-guard-rule-score" data-rule-field="score_delta" type="number" min="-100" max="0" value="${escapeHtml(String(rule.score_delta))}" aria-label="扣分">
-                    </td>
-                    <td><input class="field-input content-guard-rule-score" data-rule-field="confidence" type="number" min="0" max="1" step="0.01" value="${escapeHtml(String(rule.confidence))}" aria-label="可信度"></td>
-                    <td>
-                        <button class="table-action-btn" type="button" data-content-guard-delete-rule="${index}" aria-label="删除 ${escapeHtml(rule.name)}">删除</button>
-                    </td>
-                </tr>
-            `).join("");
+        const readRuleFromRow = (row) => {
+            const read = (field) => row.querySelector(`[data-rule-field="${field}"]`);
+            const patterns = String(read("patterns")?.value || "")
+                .split(/\r?\n/)
+                .map((item) => item.trim())
+                .filter(Boolean);
+            return {
+                id: String(read("id")?.value || "").trim(),
+                name: String(read("name")?.value || "").trim(),
+                category: String(read("category")?.value || "").trim(),
+                enabled: Boolean(read("enabled")?.checked),
+                match_type: read("match_type")?.value || "keyword_any",
+                patterns,
+                risk_level: read("risk_level")?.value || "medium",
+                action: read("action")?.value || "record",
+                score_delta: readNumberField(read("score_delta"), -8, { min: -100, max: 0, label: "扣分" }),
+                confidence: readNumberField(read("confidence"), 0.7, { min: 0, max: 1, label: "可信度" }),
+                reason: String(read("reason")?.value || "").trim(),
+            };
         };
 
-        const collectRules = () => {
+        const syncRenderedRules = () => {
             const rows = Array.from(rulesBody?.querySelectorAll("tr[data-rule-index]") || []);
-            return rows.map((row) => {
-                const read = (field) => row.querySelector(`[data-rule-field="${field}"]`);
-                const patterns = String(read("patterns")?.value || "")
-                    .split(/\r?\n/)
-                    .map((item) => item.trim())
-                    .filter(Boolean);
-                return {
-                    id: String(read("id")?.value || "").trim(),
-                    name: String(read("name")?.value || "").trim(),
-                    category: String(read("category")?.value || "").trim(),
-                    enabled: Boolean(read("enabled")?.checked),
-                    match_type: read("match_type")?.value || "keyword_any",
-                    patterns,
-                    risk_level: read("risk_level")?.value || "medium",
-                    action: read("action")?.value || "record",
-                    score_delta: readNumberField(read("score_delta"), -8, { min: -100, max: 0 }),
-                    confidence: readNumberField(read("confidence"), 0.7, { min: 0, max: 1 }),
-                    reason: String(read("reason")?.value || "").trim(),
-                };
+            rows.forEach((row) => {
+                const index = Number(row.dataset.ruleIndex);
+                if (!Number.isInteger(index) || index < 0 || index >= state.rules.length) return;
+                state.rules[index] = normalizeRuleForView(readRuleFromRow(row), index);
             });
         };
 
+        const getRuleFilters = () => ({
+            keyword: String(ruleSearchInput?.value || "").trim().toLowerCase(),
+            category: String(ruleCategoryFilter?.value || "").trim(),
+            enabled: String(ruleEnabledFilter?.value || "").trim(),
+        });
+
+        const filteredRuleEntries = () => {
+            const filters = getRuleFilters();
+            return (Array.isArray(state.rules) ? state.rules : [])
+                .map((rule, index) => ({ rule: normalizeRuleForView(rule, index), index }))
+                .filter(({ rule }) => {
+                    if (filters.category && rule.category !== filters.category) return false;
+                    if (filters.enabled === "true" && !rule.enabled) return false;
+                    if (filters.enabled === "false" && rule.enabled) return false;
+                    if (!filters.keyword) return true;
+                    const haystack = [
+                        rule.id,
+                        rule.name,
+                        rule.category,
+                        rule.reason,
+                        rule.match_type,
+                        rule.risk_level,
+                        rule.action,
+                        ...(Array.isArray(rule.patterns) ? rule.patterns : []),
+                    ].join(" ").toLowerCase();
+                    return haystack.includes(filters.keyword);
+                });
+        };
+
+        const renderRuleCategoryFilter = () => {
+            if (!ruleCategoryFilter) return;
+            const selected = ruleCategoryFilter.value;
+            const sourceCategories = state.ruleServerPageActive && state.ruleServerCategories.length
+                ? state.ruleServerCategories
+                : (state.rules || []).map((rule) => normalizeRuleForView(rule).category).filter(Boolean);
+            const categories = Array.from(new Set(sourceCategories)).sort();
+            ruleCategoryFilter.innerHTML = '<option value="">全部分类</option>' + categories.map((category) => `
+                <option value="${escapeHtml(category)}">${escapeHtml(ruleCategoryLabels[category] || category)}</option>
+            `).join("");
+            if (selected && categories.includes(selected)) ruleCategoryFilter.value = selected;
+        };
+
+        const renderRulePagination = (entries) => {
+            state.rulePageSize = Math.max(1, Number(rulePageSizeSelect?.value || state.rulePageSize || 10));
+            if (!state.ruleServerPageActive) {
+                state.ruleTotal = entries.length;
+                state.ruleTotalPages = Math.max(1, Math.ceil(state.ruleTotal / state.rulePageSize));
+                state.rulePage = Math.min(Math.max(1, state.rulePage), state.ruleTotalPages);
+            }
+            if (rulePageMeta) {
+                rulePageMeta.textContent = `第 ${formatNumber(state.rulePage)} 页，共 ${formatNumber(state.ruleTotalPages)} 页 · 共 ${formatNumber(state.ruleTotal)} 条`;
+            }
+            if (rulePrevPageBtn) rulePrevPageBtn.disabled = state.rulePage <= 1;
+            if (ruleNextPageBtn) ruleNextPageBtn.disabled = state.rulePage >= state.ruleTotalPages;
+        };
+
+        const renderRuleRow = ({ rule, index }) => `
+            <tr data-rule-index="${index}" data-rule-snapshot="${escapeHtml(JSON.stringify(rule))}">
+                <td>
+                    <label class="settings-switch-control content-guard-rule-switch">
+                        <input type="checkbox" data-rule-field="enabled" ${rule.enabled ? "checked" : ""} aria-label="启用 ${escapeHtml(rule.name)}">
+                        <span class="settings-switch-slider"></span>
+                    </label>
+                </td>
+                <td class="content-guard-rule-main-cell">
+                    <input class="field-input content-guard-rule-input" data-rule-field="name" value="${escapeHtml(rule.name)}" aria-label="规则名称">
+                    <input class="field-input content-guard-rule-id" data-rule-field="id" value="${escapeHtml(rule.id)}" aria-label="规则标识">
+                    <span class="status-badge status-degraded content-guard-rule-dirty-badge hidden">未保存</span>
+                    <details class="content-guard-rule-details">
+                        <summary>分类与标识</summary>
+                        <label>
+                            <span>分类</span>
+                            <input class="field-input content-guard-rule-input" data-rule-field="category" list="content-guard-rule-category-options" value="${escapeHtml(rule.category)}" aria-label="规则分类">
+                        </label>
+                    </details>
+                </td>
+                <td class="content-guard-rule-match-cell">
+                    <select class="field-input content-guard-rule-select" data-rule-field="match_type" aria-label="匹配方式">
+                        ${renderRuleSelectOptions(ruleMatchTypeLabels, rule.match_type)}
+                    </select>
+                    <textarea class="field-input content-guard-rule-patterns" data-rule-field="patterns" rows="2" aria-label="匹配项">${escapeHtml((rule.patterns || []).join("\n"))}</textarea>
+                    <details class="content-guard-rule-details">
+                        <summary>命中原因</summary>
+                        <textarea class="field-input content-guard-rule-patterns" data-rule-field="reason" rows="2" aria-label="命中原因">${escapeHtml(rule.reason || "")}</textarea>
+                    </details>
+                </td>
+                <td class="content-guard-rule-strategy-cell">
+                    <select class="field-input content-guard-rule-select" data-rule-field="risk_level" aria-label="风险等级">
+                        ${renderRuleSelectOptions(ruleRiskLabels, rule.risk_level)}
+                    </select>
+                    <select class="field-input content-guard-rule-select" data-rule-field="action" aria-label="命中动作">
+                        ${renderRuleSelectOptions(ruleActionLabels, rule.action)}
+                    </select>
+                    <details class="content-guard-rule-details">
+                        <summary>评分参数</summary>
+                        <label>
+                            <span>扣分</span>
+                            <input class="field-input content-guard-rule-score" data-rule-field="score_delta" type="number" min="-100" max="0" value="${escapeHtml(String(rule.score_delta))}" aria-label="扣分">
+                        </label>
+                        <label>
+                            <span>可信度</span>
+                            <input class="field-input content-guard-rule-score" data-rule-field="confidence" type="number" min="0" max="1" step="0.01" value="${escapeHtml(String(rule.confidence))}" aria-label="可信度">
+                        </label>
+                    </details>
+                </td>
+                <td>
+                    <div class="table-actions">
+                        <button class="table-action-btn" type="button" data-content-guard-save-rule="${index}" disabled>保存本行</button>
+                        <button class="table-action-btn" type="button" data-content-guard-revert-rule="${index}" disabled>撤销</button>
+                        <button class="table-action-btn" type="button" data-content-guard-delete-rule="${index}" aria-label="删除 ${escapeHtml(rule.name)}">删除</button>
+                    </div>
+                </td>
+            </tr>
+        `;
+
+        const markRuleRowDirty = (row, dirty) => {
+            if (!row) return;
+            row.dataset.dirty = dirty ? "true" : "false";
+            row.querySelector(".content-guard-rule-dirty-badge")?.classList.toggle("hidden", !dirty);
+            row.querySelector("[data-content-guard-save-rule]")?.toggleAttribute("disabled", !dirty);
+            row.querySelector("[data-content-guard-revert-rule]")?.toggleAttribute("disabled", !dirty);
+        };
+
+        const refreshRuleRowDirty = (row) => {
+            if (!row) return;
+            const snapshot = row.dataset.ruleSnapshot || "";
+            try {
+                const index = Number(row.dataset.ruleIndex);
+                const current = normalizeRuleForView(readRuleFromRow(row), index);
+                markRuleRowDirty(row, JSON.stringify(current) !== snapshot);
+            } catch {
+                markRuleRowDirty(row, true);
+            }
+        };
+
+        const replaceRuleRow = (row, index, rule) => {
+            row.outerHTML = renderRuleRow({ rule: normalizeRuleForView(rule, index), index });
+            scheduleResponsiveTableSync(document.querySelector(".content-guard-rules-panel"));
+        };
+
+        const renderRules = () => {
+            if (!rulesBody) return;
+            renderRuleCategoryFilter();
+            renderRuleCategoryDatalist();
+            const entries = state.ruleServerPageActive
+                ? state.ruleServerIndexes
+                    .filter((index) => Number.isInteger(index) && index >= 0 && index < state.rules.length)
+                    .map((index) => ({ rule: normalizeRuleForView(state.rules[index], index), index }))
+                : filteredRuleEntries();
+            renderRulePagination(entries);
+            const start = state.ruleServerPageActive ? 0 : (state.rulePage - 1) * state.rulePageSize;
+            const visibleEntries = state.ruleServerPageActive ? entries : entries.slice(start, start + state.rulePageSize);
+            if (!state.rules.length) {
+                rulesBody.innerHTML = '<tr><td colspan="5" class="table-muted">暂无规则</td></tr>';
+                return;
+            }
+            if (!visibleEntries.length) {
+                rulesBody.innerHTML = '<tr><td colspan="5" class="table-muted">没有匹配当前筛选条件的规则</td></tr>';
+                return;
+            }
+            rulesBody.innerHTML = visibleEntries.map(renderRuleRow).join("");
+            scheduleResponsiveTableSync(document.querySelector(".content-guard-rules-panel"));
+        };
+
+        const collectRules = () => {
+            syncRenderedRules();
+            return (state.rules || []).map(normalizeRuleForView);
+        };
+
+        const rulesController = createContentGuardRulesController({
+            sync: syncRenderedRules,
+            render: renderRules,
+            collect: collectRules,
+            setPage: (page) => {
+                state.rulePage = page;
+            },
+            normalize: normalizeRuleForView,
+        });
+
         const validateRules = (rules) => {
+            if (!Array.isArray(rules) || !rules.length) {
+                throw new Error("至少保留一条内容防护规则；如需恢复默认规则，请使用重置规则");
+            }
             const ids = new Set();
             rules.forEach((rule) => {
                 rule.id = normalizeRuleId(rule.id);
@@ -9155,8 +10186,8 @@
         };
 
         const selectedTargetType = () => {
-            const checked = document.querySelector('input[name="content_guard_target_type"]:checked');
-            return checked?.value || "internal";
+            const active = document.querySelector("[data-content-guard-target-type].is-active");
+            return active?.dataset.contentGuardTargetType || "internal";
         };
 
         const getProviderModels = () => {
@@ -9165,31 +10196,138 @@
             return providers.find((item) => Number(item.id) === providerId)?.models || [];
         };
 
+        const refreshProbeAvailability = () => {
+            const internalTarget = selectedTargetType() === "internal";
+            const hasProvider = Boolean(providerSelect.value);
+            const hasModel = Boolean(providerModelSelect.value);
+            if (probeSubmitBtn) {
+                probeSubmitBtn.disabled = internalTarget && (!hasProvider || !hasModel);
+            }
+        };
+
         const renderProviderOptions = () => {
             const providers = Array.isArray(state.overview?.providers) ? state.overview.providers : [];
             const selectedProviderId = providerSelect.value;
+            if (!providers.length) {
+                providerSelect.innerHTML = '<option value="">暂无提供商</option>';
+                providerSelect.disabled = true;
+                renderProviderModelOptions();
+                refreshProbeAvailability();
+                return;
+            }
+            providerSelect.disabled = false;
             providerSelect.innerHTML = providers.map((provider) => `
-                <option value="${provider.id}" ${String(provider.id) === String(selectedProviderId) ? "selected" : ""}>${escapeHtml(provider.name)} · ${escapeHtml(provider.content_integrity_status_label || formatContentIntegrityStatusLabel(provider.content_integrity_status))}</option>
+                <option value="${provider.id}" ${String(provider.id) === String(selectedProviderId) ? "selected" : ""}>${escapeHtml(provider.name)} · ${escapeHtml(provider.enabled ? "已启用" : "已停用")} · ${escapeHtml(provider.content_integrity_status_label || formatContentIntegrityStatusLabel(provider.content_integrity_status))}</option>
             `).join("");
+            if (!providerSelect.value) providerSelect.value = String(providers[0].id || "");
             renderProviderModelOptions();
+            refreshProbeAvailability();
         };
 
         const renderProviderModelOptions = () => {
             const models = getProviderModels();
             const selectedModelId = providerModelSelect.value;
+            providerModelSelect.disabled = !models.length;
             providerModelSelect.innerHTML = models.map((model) => `
                 <option value="${model.id}" ${String(model.id) === String(selectedModelId) ? "selected" : ""}>${escapeHtml(model.model_name)} · ${escapeHtml(model.content_integrity_status_label || formatContentIntegrityStatusLabel(model.content_integrity_status))}</option>
             `).join("");
             if (!models.length) {
                 providerModelSelect.innerHTML = '<option value="">无可检测模型</option>';
+            } else if (!models.some((model) => String(model.id) === String(providerModelSelect.value))) {
+                providerModelSelect.value = String(models[0].id || "");
             }
+            refreshProbeAvailability();
+        };
+
+        const filteredGovernanceProviders = () => {
+            const providers = Array.isArray(state.overview?.providers) ? state.overview.providers : [];
+            const status = String(governanceStatusFilter?.value || "").trim();
+            return providers.filter((provider) => {
+                if (status && String(provider.content_integrity_status || "unknown") !== status) return false;
+                return true;
+            });
+        };
+
+        const renderGovernanceSelection = (visibleProviders = filteredGovernanceProviders()) => {
+            const visibleIds = new Set(visibleProviders.map((provider) => Number(provider.id)).filter(Boolean));
+            state.selectedGovernanceProviderIds.forEach((providerId) => {
+                if (!visibleIds.has(providerId)) state.selectedGovernanceProviderIds.delete(providerId);
+            });
+            const selectedCount = state.selectedGovernanceProviderIds.size;
+            if (governanceSelectionMeta) {
+                governanceSelectionMeta.textContent = `已选 ${formatNumber(selectedCount)} 个提供商`;
+            }
+            [governanceBatchRestoreBtn, governanceBatchIsolateBtn].forEach((button) => {
+                if (button) button.disabled = selectedCount === 0;
+            });
+            if (governanceSelectAll) {
+                const visibleCount = visibleProviders.length;
+                const selectedVisibleCount = visibleProviders
+                    .map((provider) => Number(provider.id))
+                    .filter((providerId) => state.selectedGovernanceProviderIds.has(providerId)).length;
+                governanceSelectAll.checked = visibleCount > 0 && selectedVisibleCount === visibleCount;
+                governanceSelectAll.indeterminate = selectedVisibleCount > 0 && selectedVisibleCount < visibleCount;
+                governanceSelectAll.disabled = visibleCount === 0;
+            }
+        };
+
+        const renderProviderGovernanceEvidence = (provider) => {
+            const models = Array.isArray(provider?.models) ? provider.models : [];
+            const events = Array.isArray(provider?.recent_events) ? provider.recent_events : [];
+            const modelCount = Number(provider?.model_count ?? models.length);
+            const modelLimit = Number(provider?.model_display_limit ?? models.length);
+            return `
+                <div class="content-guard-evidence">
+                    <div class="health-result-summary">
+                        <span class="status-badge ${resultStatusClass(provider?.content_integrity_status)}">${escapeHtml(provider?.content_integrity_status_label || formatContentIntegrityStatusLabel(provider?.content_integrity_status))}</span>
+                        <strong>${escapeHtml(provider?.name || "提供商")}</strong>
+                        <span>评分 ${escapeHtml(String(provider?.content_integrity_score ?? "-"))}</span>
+                    </div>
+                    <div class="content-guard-evidence-title">模型状态 · 已展示 ${formatNumber(Math.min(modelCount, modelLimit))}/${formatNumber(modelCount)}</div>
+                    <div class="table-shell">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>模型</th>
+                                    <th>内容状态</th>
+                                    <th>可信度</th>
+                                    <th>失败次数</th>
+                                    <th>原因</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${models.length ? models.map((model) => `
+                                    <tr>
+                                        <td>${escapeHtml(model.model_name || "-")}</td>
+                                        <td><span class="status-badge ${resultStatusClass(model.content_integrity_status)}">${escapeHtml(model.content_integrity_status_label || formatContentIntegrityStatusLabel(model.content_integrity_status))}</span></td>
+                                        <td>${escapeHtml(model.trust_status_label || formatModelTrustStatusLabel(model.trust_status))}</td>
+                                        <td>${formatNumber(model.content_probe_failure_count || 0)}</td>
+                                        <td>${escapeHtml(model.trust_status_reason || "-")}</td>
+                                    </tr>
+                                `).join("") : '<tr><td colspan="5"><div class="empty-state">暂无模型证据</div></td></tr>'}
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="content-guard-evidence-title">最近事件</div>
+                    <div class="content-guard-evidence-list">
+                        ${events.length ? events.map((event) => `
+                            <div class="content-guard-evidence-item">
+                                <strong>${escapeHtml(formatDate(event.created_at))} · ${escapeHtml(formatContentGuardResultLabel(event.content_guard_result))}</strong>
+                                <span>模型 ${escapeHtml(event.model_name || "-")} · Trace ${escapeHtml(event.trace_id || "-")}</span>
+                                <p>${escapeHtml(event.content_guard_reason || "无异常原因")}</p>
+                            </div>
+                        `).join("") : '<div class="content-guard-evidence-empty">暂无最近运行时证据</div>'}
+                    </div>
+                </div>
+            `;
         };
 
         const renderProviderGovernance = () => {
             if (!governanceBody) return;
-            const providers = Array.isArray(state.overview?.providers) ? state.overview.providers : [];
+            const providers = filteredGovernanceProviders();
             if (!providers.length) {
-                governanceBody.innerHTML = '<tr><td colspan="6" class="table-muted">暂无提供商</td></tr>';
+                governanceBody.innerHTML = '<tr><td colspan="7" class="table-muted">暂无匹配的提供商</td></tr>';
+                renderGovernanceSelection(providers);
                 return;
             }
             governanceBody.innerHTML = providers.map((provider) => {
@@ -9200,8 +10338,12 @@
                 const latestEventText = latestEvent
                     ? `${formatDate(latestEvent.created_at)} · ${formatContentGuardResultLabel(latestEvent.content_guard_result)}`
                     : "暂无最近事件";
+                const providerId = Number(provider.id);
                 return `
                     <tr>
+                        <td>
+                            <input type="checkbox" data-content-guard-governance-select="${providerId}" ${state.selectedGovernanceProviderIds.has(providerId) ? "checked" : ""} aria-label="选择 ${escapeHtml(provider.name || "提供商")}">
+                        </td>
                         <td>
                             <strong>${escapeHtml(provider.name || "-")}</strong>
                             <div class="table-muted">${escapeHtml(provider.base_url || "-")}</div>
@@ -9216,11 +10358,12 @@
                             <div class="table-muted">${escapeHtml(latestEventText)}</div>
                         </td>
                         <td>
-                            <strong>${formatNumber(models.length)}</strong>
+                            <strong>${formatNumber(provider.model_count ?? models.length)}</strong>
                             <div class="table-muted">异常 ${formatNumber(abnormalModels.length)} 个</div>
                         </td>
                         <td>
                             <div class="content-guard-governance-actions">
+                                <button class="table-action-btn" type="button" data-content-guard-provider-evidence="${providerId}">证据</button>
                                 <button class="table-action-btn" type="button" data-content-guard-provider-action="restore" data-provider-id="${provider.id}">恢复</button>
                                 <button class="table-action-btn danger" type="button" data-content-guard-provider-action="isolate" data-provider-id="${provider.id}">隔离</button>
                             </div>
@@ -9228,6 +10371,8 @@
                     </tr>
                 `;
             }).join("");
+            renderGovernanceSelection(providers);
+            scheduleResponsiveTableSync(document.querySelector(".content-guard-governance-panel"));
         };
 
         const renderProbeOptions = () => {
@@ -9245,25 +10390,105 @@
             `).join("");
         };
 
+        const confirmMissingTrustProbeKeys = async (probeKeys) => {
+            const selected = new Set(probeKeys);
+            const missingLabels = CONTENT_TRUST_PROBE_KEYS
+                .filter((key) => !selected.has(key))
+                .map((key) => contentGuardProbeLabels[key] || key);
+            if (!missingLabels.length) return true;
+            return confirmDangerAction({
+                title: "确认跳过必需探针",
+                message: `将跳过 ${missingLabels.join("、")}。本次结果不会写入模型可信状态，只作为手动检测记录。`,
+                confirmText: "继续检测",
+            });
+        };
+
         const applySettings = (settings) => {
             document.getElementById("content-guard-enabled").checked = settings.content_guard_enabled ?? true;
             document.getElementById("content-guard-precheck-auto-enabled").checked = settings.content_guard_precheck_auto_enabled ?? false;
             document.getElementById("content-guard-block-on-high-risk").checked = settings.content_guard_block_on_high_risk ?? true;
+            document.getElementById("content-guard-json-probe-enabled").checked = settings.content_guard_json_probe_enabled ?? false;
             document.getElementById("content-guard-low-trust-requires-buffer").checked = settings.content_guard_low_trust_requires_buffer ?? true;
             document.getElementById("content-guard-async-review-enabled").checked = settings.content_guard_async_review_enabled ?? true;
             document.getElementById("content-guard-url-check-enabled").checked = settings.content_guard_url_check_enabled ?? true;
+            document.getElementById("content-guard-enhanced-detection-enabled").checked = settings.content_guard_enhanced_detection_enabled ?? true;
+            document.getElementById("content-guard-enhanced-illegal-enabled").checked = settings.content_guard_enhanced_illegal_enabled ?? true;
+            document.getElementById("content-guard-enhanced-ad-enabled").checked = settings.content_guard_enhanced_ad_enabled ?? true;
+            document.getElementById("content-guard-enhanced-custom-enabled").checked = settings.content_guard_enhanced_custom_enabled ?? true;
+            document.getElementById("content-guard-enhanced-obfuscation-enabled").checked = settings.content_guard_enhanced_obfuscation_enabled ?? true;
             document.getElementById("content-guard-high-risk-strategy").value = settings.content_guard_high_risk_strategy || "switch_provider";
             document.getElementById("content-guard-max-detection-delay-ms").value = Math.max(0, Math.min(500, Number(settings.content_guard_max_detection_delay_ms ?? 300)));
             document.getElementById("content-guard-stream-mode").value = settings.content_guard_stream_mode || "buffer_300ms";
             document.getElementById("content-guard-probe-interval-sec").value = settings.content_guard_probe_interval_sec ?? 3600;
-            document.getElementById("content-guard-max-scan-bytes").value = settings.content_guard_max_scan_bytes ?? 16384;
-            document.getElementById("content-guard-stream-buffer-max-bytes").value = settings.content_guard_stream_buffer_max_bytes ?? 16384;
+            document.getElementById("content-guard-max-scan-bytes").value = Math.max(1024, Math.min(262144, Number(settings.content_guard_max_scan_bytes ?? 16384)));
+            document.getElementById("content-guard-stream-buffer-max-bytes").value = Math.max(1024, Math.min(262144, Number(settings.content_guard_stream_buffer_max_bytes ?? 16384)));
             document.getElementById("content-guard-high-risk-confidence-threshold").value = settings.content_guard_high_risk_confidence_threshold ?? 85;
+            document.getElementById("content-guard-enhanced-threshold").value = settings.content_guard_enhanced_threshold ?? 70;
+            document.getElementById("content-guard-enhanced-context-window-chars").value = settings.content_guard_enhanced_context_window_chars ?? 96;
             document.getElementById("content-guard-url-allowlist-json").value = settings.content_guard_url_allowlist_json || "";
+            if (manualNotice) {
+                const enabled = settings.content_guard_enabled ?? true;
+                manualNotice.textContent = enabled
+                    ? "可选能力探针只记录本次结果；固定答案、外链广告识别和流式污染检测齐全时，才会写入模型可信状态。"
+                    : "内容完整性总开关已关闭：代理检测、自动探针和自动隔离停用；当前能力探针仍可执行，必需探针齐全时结果会记录为手动可信来源。";
+                manualNotice.classList.toggle("is-warning", !enabled);
+            }
+        };
+
+        const loadRulesPage = async ({ resetPage = false, syncDraft = true } = {}) => {
+            if (syncDraft) rulesController.sync();
+            if (resetPage) state.rulePage = 1;
+            const filters = getRuleFilters();
+            const params = new URLSearchParams({
+                page: String(state.rulePage),
+                page_size: String(Math.max(1, Number(rulePageSizeSelect?.value || state.rulePageSize || 10))),
+            });
+            if (filters.keyword) params.set("keyword", filters.keyword);
+            if (filters.category) params.set("category", filters.category);
+            if (filters.enabled) params.set("enabled", filters.enabled);
+            const data = await api.get(`/api/content-guard/rules?${params.toString()}`);
+            const items = Array.isArray(data.items) ? data.items : [];
+            items.forEach((item) => {
+                const index = Number(item.source_index);
+                if (Number.isInteger(index) && index >= 0) {
+                    state.rules[index] = normalizeRuleForView(item, index);
+                }
+            });
+            state.ruleServerPageActive = true;
+            state.ruleServerIndexes = items
+                .map((item) => Number(item.source_index))
+                .filter((index) => Number.isInteger(index));
+            state.ruleServerCategories = Array.isArray(data.categories) ? data.categories : [];
+            state.rulePage = Number(data.page || state.rulePage || 1);
+            state.rulePageSize = Number(data.page_size || state.rulePageSize || 10);
+            state.ruleTotal = Number(data.total || 0);
+            state.ruleTotalPages = Math.max(1, Number(data.total_pages || 1));
+            renderRulesConfigurationAlert(data.rules_configuration);
+            rulesController.render();
+        };
+
+        const renderRulesConfigurationAlert = (configuration) => {
+            if (!rulesConfigAlert || !rulesConfigAlertMessage) return;
+            const errors = Array.isArray(configuration?.errors) ? configuration.errors : [];
+            const hasError = configuration?.valid === false || errors.length > 0;
+            rulesConfigAlert.classList.toggle("hidden", !hasError);
+            if (!hasError) {
+                rulesConfigAlertMessage.textContent = "";
+                return;
+            }
+            const reason = errors
+                .map((item) => item.reason || item.name || item.id)
+                .filter(Boolean)
+                .slice(0, 3)
+                .join("；");
+            rulesConfigAlertMessage.textContent = reason
+                ? `当前规则 JSON 配置损坏或存在无效规则：${reason}`
+                : "当前规则 JSON 配置损坏或存在无效规则，请修复后再保存。";
         };
 
         const renderOverview = (overview) => {
             state.overview = overview || {};
+            pageError?.classList.add("hidden");
             const summary = state.overview.summary || {};
             setText("content-guard-provider-count", formatNumber(summary.provider_count || 0));
             setText("content-guard-blocked-provider-count", formatNumber(summary.blocked_provider_count || 0));
@@ -9274,69 +10499,126 @@
             setText("content-guard-latency-p99", summary.latency_p99_ms == null ? "-" : `${formatNumber(summary.latency_p99_ms)} ms`);
             applySettings(state.overview.settings || {});
             state.rules = Array.isArray(state.overview.rules) ? state.overview.rules.map(normalizeRuleForView) : [];
-            renderRules();
+            renderRulesConfigurationAlert(state.overview.rules_configuration);
+            state.rulePage = 1;
+            state.ruleServerPageActive = false;
+            state.ruleServerIndexes = [];
+            rulesController.render();
             renderProviderOptions();
             renderProviderGovernance();
             renderProbeOptions();
         };
 
-        const loadOverview = async ({ manual = false } = {}) => {
+        const loadOverview = async ({ manual = false, throwOnError = false } = {}) => {
             try {
                 if (manual) setButtonLoading(refreshBtn, true);
-                const overview = await api.get("/api/content-guard/overview");
+                const params = new URLSearchParams({
+                    provider_page: String(state.governanceProviderPage || 1),
+                    provider_page_size: String(state.governanceProviderPageSize || 50),
+                });
+                if (state.governanceProviderKeyword) params.set("provider_keyword", state.governanceProviderKeyword);
+                const overview = await api.get(`/api/content-guard/overview?${params.toString()}`);
                 renderOverview(overview);
+                await loadRulesPage({ resetPage: true, syncDraft: false });
                 if (manual) {
                     setButtonTransientFeedback(refreshBtn, "success", { successText: "已刷新" });
                     showToast("内容防护已刷新");
                 }
             } catch (error) {
+                if (pageError) {
+                    pageError.classList.remove("hidden");
+                    if (pageErrorMessage) pageErrorMessage.textContent = error.message || "内容防护概览暂时无法加载，请重试。";
+                }
+                if (!state.overview) {
+                    rulesBody.innerHTML = '<tr><td colspan="9"><div class="empty-state">概览加载失败，请点击上方重试。</div></td></tr>';
+                    if (governanceBody) governanceBody.innerHTML = '<tr><td colspan="7"><div class="empty-state">概览加载失败，请点击上方重试。</div></td></tr>';
+                }
                 if (manual) setButtonTransientFeedback(refreshBtn, "error", { errorText: "失败" });
                 showToast(error.message, "error");
+                if (throwOnError) throw error;
             } finally {
                 if (manual) setButtonLoading(refreshBtn, false);
             }
+        };
+
+        const normalizeContentGuardUrlAllowlist = () => {
+            const input = document.getElementById("content-guard-url-allowlist-json");
+            const raw = String(input?.value || "").trim();
+            if (!raw) return "[]";
+            let items;
+            if (raw.startsWith("[")) {
+                try {
+                    items = JSON.parse(raw);
+                } catch (error) {
+                    throw new Error("URL 白名单 JSON 格式无效，请填写字符串数组或一行一个域名");
+                }
+                if (!Array.isArray(items)) {
+                    throw new Error("URL 白名单 JSON 必须是字符串数组");
+                }
+            } else if (raw.startsWith("{")) {
+                throw new Error("URL 白名单不能填写对象，请改为 JSON 字符串数组或一行一个域名");
+            } else {
+                items = raw.replace(/,/g, "\n").split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+            }
+            const cleaned = [];
+            const domainPattern = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/i;
+            items.forEach((item) => {
+                if (typeof item !== "string") {
+                    throw new Error("URL 白名单只允许字符串域名");
+                }
+                let domain = item.trim().toLowerCase().replace(/\.$/, "");
+                if (domain.includes("://")) {
+                    try {
+                        domain = new URL(domain).hostname.toLowerCase().replace(/\.$/, "");
+                    } catch (error) {
+                        throw new Error(`URL 白名单域名无效：${item}`);
+                    }
+                }
+                domain = domain.replace(/^www\./, "");
+                if (!domain || domain.length > 253 || !domainPattern.test(domain)) {
+                    throw new Error(`URL 白名单域名无效：${item}`);
+                }
+                if (!cleaned.includes(domain)) cleaned.push(domain);
+            });
+            const normalized = JSON.stringify(cleaned);
+            if (input) input.value = normalized;
+            return normalized;
         };
 
         const buildSettingsPayload = () => ({
             content_guard_enabled: document.getElementById("content-guard-enabled").checked,
             content_guard_precheck_auto_enabled: document.getElementById("content-guard-precheck-auto-enabled").checked,
             content_guard_block_on_high_risk: document.getElementById("content-guard-block-on-high-risk").checked,
+            content_guard_json_probe_enabled: document.getElementById("content-guard-json-probe-enabled").checked,
             content_guard_low_trust_requires_buffer: document.getElementById("content-guard-low-trust-requires-buffer").checked,
             content_guard_async_review_enabled: document.getElementById("content-guard-async-review-enabled").checked,
             content_guard_url_check_enabled: document.getElementById("content-guard-url-check-enabled").checked,
+            content_guard_enhanced_detection_enabled: document.getElementById("content-guard-enhanced-detection-enabled").checked,
+            content_guard_enhanced_illegal_enabled: document.getElementById("content-guard-enhanced-illegal-enabled").checked,
+            content_guard_enhanced_ad_enabled: document.getElementById("content-guard-enhanced-ad-enabled").checked,
+            content_guard_enhanced_custom_enabled: document.getElementById("content-guard-enhanced-custom-enabled").checked,
+            content_guard_enhanced_obfuscation_enabled: document.getElementById("content-guard-enhanced-obfuscation-enabled").checked,
             content_guard_high_risk_strategy: document.getElementById("content-guard-high-risk-strategy").value,
-            content_guard_max_detection_delay_ms: readNumberField(document.getElementById("content-guard-max-detection-delay-ms"), 300, { min: 0, max: 500 }),
+            content_guard_max_detection_delay_ms: readNumberField(document.getElementById("content-guard-max-detection-delay-ms"), 300, { min: 0, max: 500, label: "最大检测等待 ms" }),
             content_guard_stream_mode: document.getElementById("content-guard-stream-mode").value,
-            content_guard_probe_interval_sec: readNumberField(document.getElementById("content-guard-probe-interval-sec"), 3600, { min: 300 }),
-            content_guard_max_scan_bytes: readNumberField(document.getElementById("content-guard-max-scan-bytes"), 16384, { min: 1024 }),
-            content_guard_stream_buffer_max_bytes: readNumberField(document.getElementById("content-guard-stream-buffer-max-bytes"), 16384, { min: 1024 }),
-            content_guard_high_risk_confidence_threshold: readNumberField(document.getElementById("content-guard-high-risk-confidence-threshold"), 85, { min: 0, max: 100 }),
-            content_guard_url_allowlist_json: document.getElementById("content-guard-url-allowlist-json").value.trim(),
+            content_guard_probe_interval_sec: readNumberField(document.getElementById("content-guard-probe-interval-sec"), 3600, { min: 300, label: "自动预检间隔 s" }),
+            content_guard_max_scan_bytes: readNumberField(document.getElementById("content-guard-max-scan-bytes"), 16384, { min: 1024, max: 262144, label: "最大扫描字节 B" }),
+            content_guard_stream_buffer_max_bytes: readNumberField(document.getElementById("content-guard-stream-buffer-max-bytes"), 16384, { min: 1024, max: 262144, label: "流式缓冲上限 B" }),
+            content_guard_high_risk_confidence_threshold: readNumberField(document.getElementById("content-guard-high-risk-confidence-threshold"), 85, { min: 0, max: 100, label: "高风险置信阈值" }),
+            content_guard_enhanced_threshold: readNumberField(document.getElementById("content-guard-enhanced-threshold"), 70, { min: 0, max: 100, label: "增强检测阈值" }),
+            content_guard_enhanced_context_window_chars: readNumberField(document.getElementById("content-guard-enhanced-context-window-chars"), 96, { min: 24, max: 512, label: "增强上下文窗口" }),
+            content_guard_url_allowlist_json: normalizeContentGuardUrlAllowlist(),
         });
 
-        const buildProbePayload = () => {
-            const probeKeys = Array.from(probeOptionsNode.querySelectorAll("input[type='checkbox']:checked")).map((item) => item.value);
+        const buildProbePayload = (selectedProbeKeys = null) => {
+            const probeKeys = Array.isArray(selectedProbeKeys)
+                ? selectedProbeKeys
+                : Array.from(probeOptionsNode.querySelectorAll("input[type='checkbox']:checked")).map((item) => item.value);
             if (!probeKeys.length) {
                 throw new Error("请至少选择一个探针");
             }
             if (selectedTargetType() === "external") {
-                const baseUrl = document.getElementById("content-guard-external-base-url").value.trim();
-                const apiKey = externalApiKeyInput?.value.trim() || "";
-                const modelName = document.getElementById("content-guard-external-model-name").value.trim();
-                if (!baseUrl || !apiKey || !modelName) {
-                    throw new Error("请填写外部提供商接口地址、密钥和模型名");
-                }
-                return {
-                    target_type: "external",
-                    probe_keys: probeKeys,
-                    persist_internal_result: false,
-                    external: {
-                        base_url: baseUrl,
-                        api_key: apiKey,
-                        model_name: modelName,
-                        endpoint_path: document.getElementById("content-guard-external-endpoint-path").value,
-                    },
-                };
+                throw new Error("浏览器不接收外部 API Key；请先在后端托管提供商配置中维护外部服务，再选择本项目提供商执行能力探针");
             }
             if (!providerSelect.value || !providerModelSelect.value) {
                 throw new Error("请选择提供商和模型");
@@ -9353,7 +10635,7 @@
         const resultStatusClass = (statusValue) => {
             if (statusValue === "passed" || statusValue === "pass") return "status-healthy";
             if (statusValue === "blocked" || statusValue === "block") return "status-unhealthy";
-            if (statusValue === "review") return "status-degraded";
+            if (statusValue === "review" || statusValue === "error") return "status-degraded";
             return "status-unknown";
         };
 
@@ -9372,24 +10654,219 @@
                 const guard = item.content_guard || {};
                 const guardResult = guard.content_guard_result || (item.success ? "pass" : "review");
                 const reason = guard.content_guard_reason || item.message || item.support_label || "-";
+                const endpointPath = item.endpoint_path || item.endpoint || item.endpoint_label || "-";
+                const statusCode = item.status_code == null ? "-" : String(item.status_code);
+                const supportMode = item.adapted_success
+                    ? "适配成功"
+                    : (item.native_success ? "原生成功" : (item.support_label || item.support_mode || "-"));
+                const trace = item.trace_id || item.trace || item.fallback_trace || item.detection_trace || "-";
+                const traceText = Array.isArray(trace)
+                    ? trace.map((entry) => {
+                        if (typeof entry === "string") return entry;
+                        if (entry && typeof entry === "object") {
+                            return entry.label || entry.phase || entry.endpoint || entry.status || "";
+                        }
+                        return "";
+                    }).filter(Boolean).slice(0, 4).join(" / ")
+                    : String(trace || "-");
+                const matchedRules = Array.isArray(guard.matched_rules)
+                    ? guard.matched_rules
+                    : (Array.isArray(item.matched_rules) ? item.matched_rules : []);
+                const ruleIds = matchedRules
+                    .map((rule) => rule?.id || rule?.name)
+                    .filter(Boolean)
+                    .slice(0, 4)
+                    .join("、");
+                const categoriesText = formatContentGuardCategories(guard.content_guard_categories_json || guard.categories || matchedRules.map((rule) => rule?.category).filter(Boolean));
+                const confidence = guard.content_guard_confidence ?? guard.confidence;
+                const scoreDelta = guard.content_guard_score_delta ?? guard.score_delta;
+                const finalStrategy = guard.content_guard_final_strategy || guard.final_strategy || guard.content_guard_action || "-";
+                const persisted = result?.target?.type === "internal" && result?.summary?.content_guard_result
+                    ? "已写入"
+                    : (result?.target?.type === "internal" ? "未写入" : "外部不写入");
                 return `
                     <tr>
                         <td>${escapeHtml(item.probe_label || item.endpoint_label || item.probe_key || "-")}</td>
+                        <td>${escapeHtml(endpointPath)}</td>
                         <td><span class="status-badge ${resultStatusClass(guardResult)}">${escapeHtml(formatContentGuardResultLabel(guardResult))}</span></td>
                         <td>${escapeHtml(formatContentGuardRiskLabel(guard.content_guard_risk_level))}</td>
+                        <td>${escapeHtml(statusCode)}</td>
+                        <td>${escapeHtml(supportMode)}</td>
+                        <td>${escapeHtml(ruleIds || "-")}</td>
+                        <td>${escapeHtml(categoriesText)}</td>
+                        <td>${escapeHtml(confidence == null ? "-" : `${Math.round(Number(confidence || 0) * 100)}%`)} / ${escapeHtml(scoreDelta == null ? "-" : String(scoreDelta))}</td>
+                        <td>${escapeHtml(formatContentGuardActionLabel(finalStrategy))}</td>
+                        <td>${escapeHtml(persisted)}</td>
                         <td>${escapeHtml(String(item.latency_ms ?? 0))} ms</td>
+                        <td>${renderReasonHelp(traceText, "Trace")}</td>
                         <td class="content-guard-reason-cell">${renderReasonHelp(reason, "探针原因")}</td>
+                        <td>${renderContentGuardRawResponseButton(item, item.probe_label || item.endpoint_label || item.probe_key || "内容防护探针")}</td>
                     </tr>
                 `;
-            }).join("") : '<tr><td colspan="5" class="table-muted">未返回检测结果</td></tr>';
+            }).join("") : '<tr><td colspan="15" class="table-muted">未返回检测结果</td></tr>';
             scheduleResponsiveTableSync(document.querySelector(".content-guard-result-panel"));
         };
 
-        document.querySelectorAll('input[name="content_guard_target_type"]').forEach((input) => {
-            input.addEventListener("change", () => {
+        const renderProbeProgress = (probeKeys) => {
+            const statusNode = document.getElementById("content-guard-result-status");
+            if (statusNode) {
+                statusNode.className = "status-badge status-degraded";
+                statusNode.textContent = "执行中";
+            }
+            const providerName = providerSelect.options[providerSelect.selectedIndex]?.textContent?.split(" · ")[0]?.trim() || "提供商";
+            const modelName = providerModelSelect.options[providerModelSelect.selectedIndex]?.textContent?.split(" · ")[0]?.trim() || "模型";
+            document.getElementById("content-guard-result-summary").innerHTML = `
+                <strong>执行中</strong>
+                <span>${escapeHtml(providerName)} · ${escapeHtml(modelName)}</span>
+            `;
+            const rows = (Array.isArray(probeKeys) ? probeKeys : []).map((probeKey) => `
+                <tr>
+                    <td>${escapeHtml(contentGuardProbeLabels[probeKey] || probeKey)}</td>
+                    <td>-</td>
+                    <td><span class="status-badge status-degraded">执行中</span></td>
+                    <td>-</td>
+                    <td>-</td>
+                    <td>-</td>
+                    <td>-</td>
+                    <td>-</td>
+                    <td>-</td>
+                    <td>-</td>
+                    <td>等待结果</td>
+                    <td>-</td>
+                    <td>-</td>
+                    <td class="content-guard-reason-cell">正在执行内容防护探针</td>
+                    <td>-</td>
+                </tr>
+            `).join("");
+            document.getElementById("content-guard-result-body").innerHTML = rows || '<tr><td colspan="15" class="table-muted">正在准备探针</td></tr>';
+            scheduleResponsiveTableSync(document.querySelector(".content-guard-result-panel"));
+        };
+
+        const renderProbeFailure = (error) => {
+            const statusNode = document.getElementById("content-guard-result-status");
+            if (statusNode) {
+                statusNode.className = "status-badge status-unhealthy";
+                statusNode.textContent = "失败";
+            }
+            const message = error?.message || "探针执行失败";
+            document.getElementById("content-guard-result-summary").innerHTML = `
+                <strong>执行失败</strong>
+                <span>${escapeHtml(message)}</span>
+            `;
+            document.getElementById("content-guard-result-body").innerHTML = `
+                <tr>
+                    <td>内容防护探针</td>
+                    <td>-</td>
+                    <td><span class="status-badge status-unhealthy">失败</span></td>
+                    <td>-</td>
+                    <td>-</td>
+                    <td>-</td>
+                    <td>-</td>
+                    <td>-</td>
+                    <td>-</td>
+                    <td>-</td>
+                    <td>未写入</td>
+                    <td>-</td>
+                    <td>-</td>
+                    <td class="content-guard-reason-cell">${renderReasonHelp(message, "失败原因")}</td>
+                    <td>-</td>
+                </tr>
+            `;
+            scheduleResponsiveTableSync(document.querySelector(".content-guard-result-panel"));
+        };
+
+        const buildRuntimeEventParams = ({ exportMode = false } = {}) => {
+            const params = new URLSearchParams({
+                page: String(state.runtimeEventsPage),
+                page_size: String(state.runtimeEventsPageSize),
+            });
+            const keyword = String(runtimeEventsKeywordInput?.value || "").trim();
+            const riskLevel = String(runtimeEventsRiskLevelSelect?.value || "").trim();
+            const action = String(runtimeEventsActionSelect?.value || "").trim();
+            const modelName = String(runtimeEventsModelNameInput?.value || "").trim();
+            if (keyword) params.set("keyword", keyword);
+            if (riskLevel) params.set("risk_level", riskLevel);
+            if (action) params.set("action", action);
+            if (modelName) params.set("model_name", modelName);
+            if (exportMode) {
+                params.delete("page");
+                params.delete("page_size");
+                params.set("limit", "5000");
+            }
+            return params;
+        };
+
+        const renderRuntimeEventPagination = (data) => {
+            state.runtimeEventsTotal = Number(data?.total || 0);
+            const totalPages = Math.max(1, Math.ceil(state.runtimeEventsTotal / state.runtimeEventsPageSize));
+            if (state.runtimeEventsPage > totalPages) state.runtimeEventsPage = totalPages;
+            if (runtimeEventsPageMeta) {
+                runtimeEventsPageMeta.textContent = `第 ${formatNumber(state.runtimeEventsPage)} 页，共 ${formatNumber(totalPages)} 页 · 共 ${formatNumber(state.runtimeEventsTotal)} 条`;
+            }
+            if (runtimeEventsPrevBtn) runtimeEventsPrevBtn.disabled = state.runtimeEventsPage <= 1;
+            if (runtimeEventsNextBtn) runtimeEventsNextBtn.disabled = state.runtimeEventsPage >= totalPages;
+        };
+
+        const renderRuntimeEvents = (events) => {
+            if (!runtimeEventsBody) return;
+            const rows = Array.isArray(events) ? events : [];
+            runtimeEventsBody.innerHTML = rows.length ? rows.map((event) => {
+                const providerName = event.provider_name || (event.provider_id ? `提供商 #${event.provider_id}` : "");
+                const modelName = event.model_name || event.requested_model || "";
+                const providerText = [providerName, modelName].filter(Boolean).join(" / ") || "-";
+                const resultText = `${formatContentGuardResultLabel(event.guard_result)} · ${formatContentGuardRiskLabel(event.risk_level)}`;
+                return `
+                    <tr>
+                        <td>${escapeHtml(formatDate(event.created_at))}</td>
+                        <td>${escapeHtml(providerText)}</td>
+                        <td>${escapeHtml(event.guard_stage || "-")}</td>
+                        <td><span class="status-badge ${resultStatusClass(event.guard_result)}">${escapeHtml(resultText)}</span></td>
+                        <td class="content-guard-reason-cell">${renderReasonHelp(event.reason || event.excerpt || "-", "事件原因")}</td>
+                        <td>${escapeHtml(event.trace_id || "-")}</td>
+                    </tr>
+                `;
+            }).join("") : '<tr><td colspan="6" class="table-muted">暂无运行时内容防护事件</td></tr>';
+            prepareSettingsTooltipTriggers(runtimeEventsBody);
+            scheduleResponsiveTableSync(document.querySelector(".content-guard-runtime-events-table"));
+        };
+
+        const loadRuntimeEvents = async ({ manual = false } = {}) => {
+            if (!runtimeEventsBody) return;
+            const params = buildRuntimeEventParams();
+            if (manual) setButtonLoading(runtimeEventsRefreshBtn, true);
+            runtimeEventsBody.innerHTML = '<tr><td colspan="6" class="table-muted">加载中</td></tr>';
+            try {
+                const data = await api.get(`/api/content-guard/runtime/events?${params.toString()}`);
+                renderRuntimeEvents(data.events || []);
+                renderRuntimeEventPagination(data);
+                if (manual) {
+                    setButtonTransientFeedback(runtimeEventsRefreshBtn, "success", { successText: "已刷新" });
+                    showToast("内容防护事件已刷新");
+                }
+            } catch (error) {
+                runtimeEventsBody.innerHTML = '<tr><td colspan="6" class="table-muted">运行时事件加载失败</td></tr>';
+                if (manual) setButtonTransientFeedback(runtimeEventsRefreshBtn, "error", { errorText: "失败" });
+                showToast(error.message, "error");
+            } finally {
+                if (manual) setButtonLoading(runtimeEventsRefreshBtn, false);
+            }
+        };
+
+        document.querySelectorAll("[data-content-guard-target-type]").forEach((button) => {
+            button.addEventListener("click", () => {
+                if (button.disabled) {
+                    showToast("外部提供商请先纳入后端托管配置，再以本项目提供商执行能力探针", "error");
+                    return;
+                }
+                document.querySelectorAll("[data-content-guard-target-type]").forEach((item) => {
+                    const active = item === button;
+                    item.classList.toggle("is-active", active);
+                    item.setAttribute("aria-pressed", active ? "true" : "false");
+                });
                 const external = selectedTargetType() === "external";
                 internalFields.classList.toggle("hidden", external);
                 externalFields.classList.toggle("hidden", !external);
+                externalFields.hidden = !external;
             });
         });
         tabButtons.forEach((button) => {
@@ -9397,47 +10874,237 @@
         });
         providerSelect.addEventListener("change", renderProviderModelOptions);
         refreshBtn?.addEventListener("click", () => loadOverview({ manual: true }));
-        externalApiKeyToggleBtn?.addEventListener("click", () => {
-            if (!externalApiKeyInput) return;
-            const visible = externalApiKeyInput.type === "text";
-            externalApiKeyInput.type = visible ? "password" : "text";
-            externalApiKeyToggleBtn.setAttribute("aria-label", visible ? "显示密钥" : "隐藏密钥");
-            externalApiKeyToggleBtn.innerHTML = `<i class="bi ${visible ? "bi-eye" : "bi-eye-slash"}" aria-hidden="true"></i>`;
-            showToast(visible ? "密钥已隐藏" : "密钥已显示");
+        pageRetryBtn?.addEventListener("click", () => loadOverview({ manual: true }));
+        [ruleSearchInput, ruleCategoryFilter, ruleEnabledFilter].forEach((node) => {
+            node?.addEventListener("input", async () => {
+                try {
+                    await loadRulesPage({ resetPage: true });
+                } catch (error) {
+                    state.ruleServerPageActive = false;
+                    rulesController.render();
+                    showToast(error.message, "error");
+                }
+            });
+            node?.addEventListener("change", async () => {
+                try {
+                    await loadRulesPage({ resetPage: true });
+                } catch (error) {
+                    state.ruleServerPageActive = false;
+                    rulesController.render();
+                    showToast(error.message, "error");
+                }
+            });
         });
-        externalApiKeyClearBtn?.addEventListener("click", () => {
-            if (!externalApiKeyInput) return;
-            externalApiKeyInput.value = "";
-            externalApiKeyInput.type = "password";
-            externalApiKeyToggleBtn?.setAttribute("aria-label", "显示密钥");
-            if (externalApiKeyToggleBtn) externalApiKeyToggleBtn.innerHTML = '<i class="bi bi-eye" aria-hidden="true"></i>';
-            showToast("密钥已清除");
+        rulePageSizeSelect?.addEventListener("change", async () => {
+            state.rulePageSize = Number(rulePageSizeSelect.value || 10);
+            try {
+                await loadRulesPage({ resetPage: true, syncDraft: false });
+            } catch (error) {
+                state.ruleServerPageActive = false;
+                rulesController.render();
+                showToast(error.message, "error");
+            }
+        });
+        rulePrevPageBtn?.addEventListener("click", async () => {
+            if (state.rulePage <= 1) return;
+            state.rulePage -= 1;
+            try {
+                await loadRulesPage();
+            } catch (error) {
+                state.ruleServerPageActive = false;
+                rulesController.render();
+                showToast(error.message, "error");
+            }
+        });
+        ruleNextPageBtn?.addEventListener("click", async () => {
+            if (state.rulePage >= state.ruleTotalPages) return;
+            state.rulePage += 1;
+            try {
+                await loadRulesPage();
+            } catch (error) {
+                state.ruleServerPageActive = false;
+                rulesController.render();
+                showToast(error.message, "error");
+            }
+        });
+        const debouncedLoadRuntimeEvents = debounce(() => {
+            state.runtimeEventsPage = 1;
+            loadRuntimeEvents();
+        }, 250);
+        [runtimeEventsKeywordInput, runtimeEventsModelNameInput].forEach((node) => {
+            node?.addEventListener("input", debouncedLoadRuntimeEvents);
+        });
+        [runtimeEventsRiskLevelSelect, runtimeEventsActionSelect].forEach((node) => {
+            node?.addEventListener("change", () => {
+                state.runtimeEventsPage = 1;
+                loadRuntimeEvents();
+            });
+        });
+        const debouncedLoadGovernanceProviders = debounce(() => {
+            state.governanceProviderKeyword = String(governanceSearchInput?.value || "").trim();
+            state.governanceProviderPage = 1;
+            state.selectedGovernanceProviderIds.clear();
+            loadOverview();
+        }, 300);
+        governanceSearchInput?.addEventListener("input", debouncedLoadGovernanceProviders);
+        governanceStatusFilter?.addEventListener("change", () => {
+            state.selectedGovernanceProviderIds.clear();
+            renderProviderGovernance();
+        });
+        runtimeEventsRefreshBtn?.addEventListener("click", () => loadRuntimeEvents({ manual: true }));
+        runtimeEventsExportBtn?.addEventListener("click", () => {
+            const params = buildRuntimeEventParams({ exportMode: true });
+            setButtonTransientFeedback(runtimeEventsExportBtn, "success", { successText: "准备导出" });
+            window.location.href = `/api/content-guard/runtime/events/export?${params.toString()}`;
+        });
+        runtimeEventsPrevBtn?.addEventListener("click", () => {
+            if (state.runtimeEventsPage <= 1) return;
+            state.runtimeEventsPage -= 1;
+            loadRuntimeEvents();
+        });
+        runtimeEventsNextBtn?.addEventListener("click", () => {
+            const totalPages = Math.max(1, Math.ceil((state.runtimeEventsTotal || 0) / state.runtimeEventsPageSize));
+            if (state.runtimeEventsPage >= totalPages) return;
+            state.runtimeEventsPage += 1;
+            loadRuntimeEvents();
         });
         addRuleBtn?.addEventListener("click", () => {
-            state.rules = collectRules();
+            state.rules = rulesController.collect();
             state.rules.push(normalizeRuleForView({
                 id: nextCustomRuleId(),
                 name: "新规则",
                 category: "custom_content_guard",
                 enabled: true,
                 match_type: "keyword_any",
-                patterns: ["待填写"],
+                patterns: [],
                 risk_level: "medium",
                 action: "record",
                 score_delta: -8,
                 confidence: 0.7,
             }, state.rules.length));
-            renderRules();
+            state.ruleServerPageActive = false;
+            state.rulePage = Math.max(1, Math.ceil(state.rules.length / Math.max(1, state.rulePageSize || 10)));
+            rulesController.render();
             setButtonTransientFeedback(addRuleBtn, "success", { successText: "已新增" });
         });
-        rulesBody?.addEventListener("click", (event) => {
+        rulesBody?.addEventListener("input", (event) => {
+            const field = event.target.closest("[data-rule-field]");
+            if (!field) return;
+            refreshRuleRowDirty(field.closest("tr[data-rule-index]"));
+        });
+        rulesBody?.addEventListener("change", (event) => {
+            const field = event.target.closest("[data-rule-field]");
+            if (!field) return;
+            refreshRuleRowDirty(field.closest("tr[data-rule-index]"));
+        });
+        rulesBody?.addEventListener("click", async (event) => {
+            const saveRowButton = event.target.closest("[data-content-guard-save-rule]");
+            if (saveRowButton) {
+                const row = saveRowButton.closest("tr[data-rule-index]");
+                const index = Number(row?.dataset.ruleIndex);
+                if (!row || !Number.isInteger(index) || index < 0 || index >= state.rules.length) return;
+                try {
+                    const nextRules = (state.rules || []).map((rule, ruleIndex) => normalizeRuleForView(rule, ruleIndex));
+                    nextRules[index] = normalizeRuleForView(readRuleFromRow(row), index);
+                    validateRules(nextRules);
+                    setButtonLoading(saveRowButton, true);
+                    const response = await api.put("/api/content-guard/rules", { rules: nextRules });
+                    state.rules = Array.isArray(response.rules) ? response.rules.map(normalizeRuleForView) : nextRules;
+                    const savedRule = normalizeRuleForView(state.rules[index], index);
+                    replaceRuleRow(row, index, savedRule);
+                    setButtonTransientFeedback(saveRowButton, "success", { successText: "已保存" });
+                    showToast(`规则「${savedRule.name || savedRule.id}」已保存`);
+                } catch (error) {
+                    setButtonTransientFeedback(saveRowButton, "error", { errorText: "失败" });
+                    showToast(error.message, "error");
+                } finally {
+                    setButtonLoading(saveRowButton, false);
+                }
+                return;
+            }
+            const revertRowButton = event.target.closest("[data-content-guard-revert-rule]");
+            if (revertRowButton) {
+                const row = revertRowButton.closest("tr[data-rule-index]");
+                const index = Number(row?.dataset.ruleIndex);
+                if (!row || !Number.isInteger(index) || index < 0 || index >= state.rules.length) return;
+                const snapshot = safeJsonParse(row.dataset.ruleSnapshot || "");
+                if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return;
+                state.rules[index] = normalizeRuleForView(snapshot, index);
+                replaceRuleRow(row, index, state.rules[index]);
+                showToast("已撤销本行修改");
+                return;
+            }
             const button = event.target.closest("[data-content-guard-delete-rule]");
             if (!button) return;
             const index = Number(button.dataset.contentGuardDeleteRule);
-            state.rules = collectRules().filter((_rule, ruleIndex) => ruleIndex !== index);
-            renderRules();
+            rulesController.sync();
+            const deletedRule = state.rules[index];
+            if (!deletedRule) return;
+            const confirmed = await confirmDangerAction({
+                title: "删除内容防护规则",
+                message: `将删除规则「${deletedRule.name || deletedRule.id}」。删除后需点击保存才会正式生效，可在提示中撤销本次删除。`,
+                confirmText: "删除",
+            });
+            if (!confirmed) return;
+            state.rules = state.rules.filter((_rule, ruleIndex) => ruleIndex !== index);
+            state.ruleServerPageActive = false;
+            rulesController.render();
+            showActionToast("规则已从草稿中删除", {
+                type: "success",
+                actionText: "撤销",
+                onAction: () => {
+                    rulesController.sync();
+                    state.rules.splice(Math.min(index, state.rules.length), 0, deletedRule);
+                    state.ruleServerPageActive = false;
+                    rulesController.render();
+                    showToast("已撤销删除");
+                },
+            });
+        });
+        governanceSelectAll?.addEventListener("change", () => {
+            const providers = filteredGovernanceProviders();
+            const checked = Boolean(governanceSelectAll.checked);
+            providers.forEach((provider) => {
+                const providerId = Number(provider.id);
+                if (!providerId) return;
+                if (checked) {
+                    state.selectedGovernanceProviderIds.add(providerId);
+                } else {
+                    state.selectedGovernanceProviderIds.delete(providerId);
+                }
+            });
+            renderProviderGovernance();
+        });
+        governanceBody?.addEventListener("change", (event) => {
+            const checkbox = event.target.closest("[data-content-guard-governance-select]");
+            if (!checkbox) return;
+            const providerId = Number(checkbox.dataset.contentGuardGovernanceSelect || 0);
+            if (!providerId) return;
+            if (checkbox.checked) {
+                state.selectedGovernanceProviderIds.add(providerId);
+            } else {
+                state.selectedGovernanceProviderIds.delete(providerId);
+            }
+            renderGovernanceSelection();
         });
         governanceBody?.addEventListener("click", async (event) => {
+            const evidenceButton = event.target.closest("[data-content-guard-provider-evidence]");
+            if (evidenceButton) {
+                const providerId = Number(evidenceButton.dataset.contentGuardProviderEvidence || 0);
+                const provider = (Array.isArray(state.overview?.providers) ? state.overview.providers : [])
+                    .find((item) => Number(item.id) === providerId);
+                if (!provider) {
+                    setButtonTransientFeedback(evidenceButton, "error", { errorText: "无数据" });
+                    showToast("未找到该提供商的内容防护证据", "error");
+                    return;
+                }
+                openHealthCheckResultModal(
+                    `内容防护证据 · ${provider.name || "提供商"}`,
+                    renderProviderGovernanceEvidence(provider),
+                    evidenceButton
+                );
+                return;
+            }
             const button = event.target.closest("[data-content-guard-provider-action]");
             if (!button) return;
             const providerId = Number(button.dataset.providerId || 0);
@@ -9456,14 +11123,50 @@
                 setButtonLoading(button, false);
             }
         });
+        const runGovernanceBatchAction = async (action, button) => {
+            const providerIds = Array.from(state.selectedGovernanceProviderIds).filter(Boolean);
+            if (!providerIds.length) {
+                showToast("请先选择提供商", "error");
+                return;
+            }
+            const actionLabel = action === "restore" ? "恢复" : "隔离";
+            const confirmed = action === "isolate"
+                ? await confirmDangerAction({
+                    title: "批量隔离提供商",
+                    message: `将隔离 ${formatNumber(providerIds.length)} 个提供商及其挂载模型。`,
+                    confirmText: "隔离",
+                })
+                : true;
+            if (!confirmed) return;
+            let successCount = 0;
+            try {
+                setButtonLoading(button, true);
+                for (const providerId of providerIds) {
+                    await api.post(`/api/content-guard/providers/${providerId}/${action}`, {});
+                    successCount += 1;
+                }
+                state.selectedGovernanceProviderIds.clear();
+                setButtonTransientFeedback(button, "success", { successText: "已完成" });
+                showToast(`已${actionLabel} ${formatNumber(successCount)} 个提供商`);
+                await loadOverview();
+            } catch (error) {
+                setButtonTransientFeedback(button, "error", { errorText: "失败" });
+                showToast(`批量${actionLabel}中断：已完成 ${formatNumber(successCount)} 个，${error.message}`, "error");
+                await loadOverview();
+            } finally {
+                setButtonLoading(button, false);
+            }
+        };
+        governanceBatchRestoreBtn?.addEventListener("click", () => runGovernanceBatchAction("restore", governanceBatchRestoreBtn));
+        governanceBatchIsolateBtn?.addEventListener("click", () => runGovernanceBatchAction("isolate", governanceBatchIsolateBtn));
         saveRulesBtn?.addEventListener("click", async () => {
             try {
-                const rules = collectRules();
+                const rules = rulesController.collect();
                 validateRules(rules);
                 setButtonLoading(saveRulesBtn, true);
                 const response = await api.put("/api/content-guard/rules", { rules });
                 state.rules = Array.isArray(response.rules) ? response.rules.map(normalizeRuleForView) : rules;
-                renderRules();
+                await loadRulesPage({ resetPage: true });
                 setButtonTransientFeedback(saveRulesBtn, "success", { successText: "已保存" });
                 showToast("内容防护规则已保存");
             } catch (error) {
@@ -9474,12 +11177,18 @@
             }
         });
         resetRulesBtn?.addEventListener("click", async () => {
-            if (!window.confirm("恢复默认规则？")) return;
+            rulesController.sync();
+            const confirmed = await confirmDangerAction({
+                title: "恢复默认规则",
+                message: `将用系统默认规则覆盖当前 ${formatNumber(state.rules.length)} 条规则，未保存的新增、删除和编辑都会丢失。`,
+                confirmText: "恢复默认",
+            });
+            if (!confirmed) return;
             try {
                 setButtonLoading(resetRulesBtn, true);
                 const response = await api.post("/api/content-guard/rules/reset", {});
                 state.rules = Array.isArray(response.rules) ? response.rules.map(normalizeRuleForView) : [];
-                renderRules();
+                await loadRulesPage({ resetPage: true });
                 setButtonTransientFeedback(resetRulesBtn, "success", { successText: "已恢复" });
                 showToast("默认规则已恢复");
             } catch (error) {
@@ -9489,13 +11198,23 @@
                 setButtonLoading(resetRulesBtn, false);
             }
         });
+        rulesConfigResetBtn?.addEventListener("click", () => resetRulesBtn?.click());
         inspectForm?.addEventListener("submit", async (event) => {
             event.preventDefault();
             try {
                 const text = inspectText.value.trim();
                 if (!text) throw new Error("请输入检测文本");
+                const payload = { text };
+                const endpointPath = String(inspectEndpointPath?.value || "").trim();
+                const requestPayload = parseOptionalJsonObject(inspectRequestPayload?.value, "请求上下文 JSON");
+                const maxScanBytes = readNumberField(inspectMaxScanBytes, 0, { min: 0, label: "最大扫描字节 B" });
+                const urlAllowlist = String(inspectUrlAllowlist?.value || "").trim();
+                if (endpointPath) payload.endpoint_path = endpointPath;
+                if (requestPayload) payload.request_payload = requestPayload;
+                if (maxScanBytes > 0) payload.max_scan_bytes = maxScanBytes;
+                if (urlAllowlist) payload.url_allowlist_json = urlAllowlist;
                 setButtonLoading(inspectSubmitBtn, true);
-                const result = await api.post("/api/content-guard/runtime/inspect-text", { text });
+                const result = await api.post("/api/content-guard/runtime/inspect-text", payload);
                 const guard = result.result || {};
                 const guardResult = guard.content_guard_result || "pass";
                 const matchedRules = Array.isArray(result.matched_rules) ? result.matched_rules : [];
@@ -9534,11 +11253,10 @@
             event.preventDefault();
             try {
                 setButtonLoading(settingsSubmitBtn, true);
-                const response = await api.put("/api/content-guard/settings", buildSettingsPayload());
-                applySettings(response.settings || {});
+                await api.put("/api/content-guard/settings", buildSettingsPayload());
+                await loadOverview({ throwOnError: true });
                 setButtonTransientFeedback(settingsSubmitBtn, "success", { successText: "已保存" });
                 showToast("内容防护设置已保存");
-                await loadOverview();
             } catch (error) {
                 setButtonTransientFeedback(settingsSubmitBtn, "error", { errorText: "失败" });
                 showToast(error.message, "error");
@@ -9549,9 +11267,17 @@
         probeForm?.addEventListener("submit", async (event) => {
             event.preventDefault();
             try {
+                const selectedProbeKeys = Array.from(probeOptionsNode.querySelectorAll("input[type='checkbox']:checked")).map((item) => item.value);
+                if (!selectedProbeKeys.length) {
+                    throw new Error("请至少选择一个探针");
+                }
+                if (!(await confirmMissingTrustProbeKeys(selectedProbeKeys))) return;
+                renderProbeProgress(selectedProbeKeys);
+                activateContentGuardTab("results");
                 setButtonLoading(probeSubmitBtn, true);
-                const usedExternalTarget = selectedTargetType() === "external";
-                const result = await api.post("/api/content-guard/precheck/probe", buildProbePayload());
+                const result = await api.post("/api/content-guard/precheck/trust-probe", buildProbePayload(selectedProbeKeys));
+                const selectedProviderId = providerSelect.value;
+                const selectedModelId = providerModelSelect.value;
                 renderProbeResult(result);
                 activateContentGuardTab("results");
                 setButtonTransientFeedback(probeSubmitBtn, result?.summary?.status === "passed" ? "success" : "error", {
@@ -9563,15 +11289,19 @@
                 const total = Number(summary.total || 0);
                 const passed = Number(summary.passed || 0);
                 const failed = Number(summary.failed || Math.max(0, total - passed));
-                showToast(`检测完成：${targetName}，通过 ${passed}/${total}，失败 ${failed}，${formatContentGuardResultLabel(summary.content_guard_result)}`);
-                if (usedExternalTarget && externalApiKeyInput) {
-                    externalApiKeyInput.value = "";
-                    externalApiKeyInput.type = "password";
-                    externalApiKeyToggleBtn?.setAttribute("aria-label", "显示密钥");
-                    if (externalApiKeyToggleBtn) externalApiKeyToggleBtn.innerHTML = '<i class="bi bi-eye" aria-hidden="true"></i>';
-                }
+                showToast(`检测完成：${targetName}，通过 ${passed}/${total}，失败 ${failed}，${formatContentGuardResultLabel(summary.content_guard_result || summary.status)}`);
                 await loadOverview();
+                if (selectedProviderId) {
+                    providerSelect.value = selectedProviderId;
+                    renderProviderModelOptions();
+                }
+                if (selectedModelId) {
+                    providerModelSelect.value = selectedModelId;
+                    refreshProbeAvailability();
+                }
             } catch (error) {
+                renderProbeFailure(error);
+                activateContentGuardTab("results");
                 setButtonTransientFeedback(probeSubmitBtn, "error", { errorText: "失败" });
                 showToast(error.message, "error");
             } finally {
@@ -9581,18 +11311,14 @@
 
         activateContentGuardTab(state.activeTab);
         await loadOverview();
+        await loadRuntimeEvents();
     }
 
     async function initSettings() {
         const form = document.getElementById("settings-form");
         const submitBtn = document.getElementById("settings-submit-btn");
-        const providerSelect = document.getElementById("setting-default-provider-id");
-        const routeModeSelect = document.getElementById("setting-route-mode");
-        const manualAllowFallbackInput = document.getElementById("setting-manual-allow-fallback");
         const healthCheckIntervalInput = document.getElementById("setting-health-check-interval-sec");
         const settingsHelpCopy = {
-            "setting-route-mode": ["路由主策略说明", "当前统一使用健康优先：先排除权限、能力、健康和容量不满足的候选，再按近期会话、负载和得分分发。推荐保持默认值。"],
-            "setting-default-provider-id": ["默认提供商说明", "指定全局默认提供商。适合希望默认走某条稳定线路的场景；不确定时留空，由健康优先策略自动选择。"],
             "setting-global-timeout-ms": ["全局超时说明", "单次非流式上游请求的默认等待时间。推荐 30000 ms；上游慢或长任务较多可适当增大。"],
             "setting-global-max-retries": ["全局最大重试次数说明", "可恢复错误下最多换候选重试几次。推荐 2；过大可能放大延迟和上游消耗。"],
             "setting-global-max-request-tokens": ["全局最大请求说明", "进入上游前允许的最大请求 token 估算值。0 表示不限制；生产环境建议结合模型上下文设置。"],
@@ -9607,6 +11333,10 @@
             "setting-circuit-breaker-threshold": ["熔断阈值说明", "同一提供商或模型连续失败达到该次数后进入熔断。推荐 3；不稳定上游可适当调高。"],
             "setting-request-log-retention-days": ["请求日志保留说明", "请求日志保留天数。推荐 90 d；合规或排障要求更高时再增大。"],
             "setting-admin-audit-log-retention-days": ["审计日志保留说明", "管理员操作审计日志保留天数。推荐 180 d，便于追踪配置变更。"],
+            "setting-global-qps-limit": ["全局 QPS 说明", "全站每秒允许进入 /v1 链路的最大请求数。推荐 20；0 表示不限制。"],
+            "setting-global-rpm-limit": ["全局 RPM 说明", "全站每分钟允许进入 /v1 链路的最大请求数。推荐 20；0 表示不限制。"],
+            "setting-account-qps-limit": ["单账户 QPS 说明", "单个账户下所有 API Key 合计每秒请求上限。推荐 20；0 表示不限制。"],
+            "setting-account-rpm-limit": ["单账户 RPM 说明", "单个账户下所有 API Key 合计每分钟请求上限。推荐 20；0 表示不限制。"],
             "setting-global-max-active-requests": ["全局最大活跃请求说明", "全站同时处理的最大请求数。推荐 20；高并发环境需结合 Redis 和机器资源调整。"],
             "setting-global-max-active-streams": ["全局最大流式请求说明", "全站同时处理的最大流式请求数。推荐 10；流式连接占用时间长，建议保守。"],
             "setting-api-key-max-active-requests": ["单密钥最大活跃请求说明", "单个 API Key 同时请求上限。推荐 20，用于限制单密钥挤占全局容量。"],
@@ -9629,7 +11359,6 @@
             "setting-responses-chat-adapter-search-proxy-url": ["搜索代理地址说明", "web_search 代理服务地址。仅在启用搜索代理时填写。"],
             "setting-responses-chat-adapter-model-map-json": ["模型映射 JSON 说明", "Responses 模型到 Chat 上游模型的映射表。推荐使用对象 JSON，例如 {\"gpt-4o\":\"deepseek-chat\"}。"],
             "setting-responses-chat-adapter-upstreams-json": ["多上游 JSON 说明", "为不同模型配置不同上游地址、密钥和模型名。生产多渠道适配时推荐使用对象 JSON。"],
-            "setting-manual-allow-fallback": ["默认提供商不可用时允许回退说明", "默认提供商失败后是否允许选择其它候选。推荐开启，避免单线路故障导致请求直接失败。"],
             "setting-enable-token-logging": ["记录 token 使用量说明", "开启后记录上游 usage 中的 token 数据，用于统计和计费。推荐开启。"],
             "setting-enable-payload-logging": ["记录请求与响应正文说明", "开启后可保存截断正文用于排障。生产默认关闭，避免敏感内容和存储压力。"],
             "setting-enable-stream-response-persist": ["记录流式最终回复文本说明", "开启后保存流式输出文本。生产默认关闭；仅排障时短期开启。"],
@@ -9666,14 +11395,7 @@
         };
         ensureSettingsHelp();
         initSettingsTooltipLayer();
-        const [providers, settings] = await Promise.all([getProviderOptions(), api.get("/api/settings")]);
-
-        providerSelect.innerHTML = '<option value="">未设置</option>' + providers.map((provider) => `
-            <option value="${provider.id}">${escapeHtml(provider.name)}</option>
-        `).join("");
-
-        routeModeSelect.value = FIXED_ROUTE_MODE;
-        document.getElementById("setting-default-provider-id").value = settings.default_provider_id ?? "";
+        const settings = await api.get("/api/settings");
         document.getElementById("setting-global-timeout-ms").value = settings.global_timeout_ms;
         document.getElementById("setting-global-max-retries").value = settings.global_max_retries;
         document.getElementById("setting-route-exhausted-retry-max-wait-seconds").value = settings.route_exhausted_retry_max_wait_seconds ?? 600;
@@ -9681,6 +11403,7 @@
         document.getElementById("setting-trusted-providers-only").checked = settings.trusted_providers_only ?? false;
         document.getElementById("setting-global-max-request-tokens").value = settings.global_max_request_tokens ?? 0;
         document.getElementById("setting-max-candidate-count").value = settings.max_candidate_count ?? 10;
+        document.getElementById("setting-route-candidate-expand-count").value = settings.route_candidate_expand_count ?? 5;
         document.getElementById("setting-max-v1-request-body-bytes").value = settings.max_v1_request_body_bytes ?? 20971520;
         document.getElementById("setting-max-v1-chat-request-body-bytes").value = settings.max_v1_chat_request_body_bytes ?? 0;
         document.getElementById("setting-max-v1-responses-request-body-bytes").value = settings.max_v1_responses_request_body_bytes ?? 0;
@@ -9693,7 +11416,6 @@
         healthCheckIntervalInput.min = "300";
         document.getElementById("setting-recovery-probe-interval-sec").value = settings.recovery_probe_interval_sec;
         document.getElementById("setting-max-logged-body-bytes").value = settings.max_logged_body_bytes;
-        manualAllowFallbackInput.checked = settings.manual_allow_fallback;
         document.getElementById("setting-auto-health-check").checked = settings.auto_health_check;
         document.getElementById("setting-enable-token-logging").checked = settings.enable_token_logging;
         document.getElementById("setting-enable-payload-logging").checked = settings.enable_payload_logging;
@@ -9702,6 +11424,10 @@
         document.getElementById("setting-allow-public-user-registration").checked = settings.allow_public_user_registration;
         document.getElementById("setting-request-log-retention-days").value = settings.request_log_retention_days;
         document.getElementById("setting-admin-audit-log-retention-days").value = settings.admin_audit_log_retention_days;
+        document.getElementById("setting-global-qps-limit").value = settings.global_qps_limit ?? 20;
+        document.getElementById("setting-global-rpm-limit").value = settings.global_rpm_limit ?? 20;
+        document.getElementById("setting-account-qps-limit").value = settings.account_qps_limit ?? 20;
+        document.getElementById("setting-account-rpm-limit").value = settings.account_rpm_limit ?? 20;
         document.getElementById("setting-global-max-active-requests").value = settings.global_max_active_requests;
         document.getElementById("setting-global-max-active-streams").value = settings.global_max_active_streams;
         document.getElementById("setting-api-key-max-active-requests").value = settings.api_key_max_active_requests;
@@ -9748,9 +11474,6 @@
             event.preventDefault();
             try {
                 const payload = {
-                    route_mode: FIXED_ROUTE_MODE,
-                    default_provider_id: providerSelect.value ? Number(providerSelect.value) : null,
-                    manual_allow_fallback: manualAllowFallbackInput.checked,
                     global_timeout_ms: Number(document.getElementById("setting-global-timeout-ms").value),
                     global_max_retries: Number(document.getElementById("setting-global-max-retries").value),
                     route_exhausted_retry_max_wait_seconds: Math.min(600, Math.max(0, Number(document.getElementById("setting-route-exhausted-retry-max-wait-seconds").value || 600))),
@@ -9758,6 +11481,7 @@
                     trusted_providers_only: document.getElementById("setting-trusted-providers-only").checked,
                     global_max_request_tokens: Number(document.getElementById("setting-global-max-request-tokens").value),
                     max_candidate_count: readNaturalNumberSetting("setting-max-candidate-count", "最大候选数", 1, 500),
+                    route_candidate_expand_count: readNaturalNumberSetting("setting-route-candidate-expand-count", "候选扩展数", 0, 100),
                     max_v1_request_body_bytes: Number(document.getElementById("setting-max-v1-request-body-bytes").value),
                     max_v1_chat_request_body_bytes: Number(document.getElementById("setting-max-v1-chat-request-body-bytes").value),
                     max_v1_responses_request_body_bytes: Number(document.getElementById("setting-max-v1-responses-request-body-bytes").value),
@@ -9777,6 +11501,10 @@
                     allow_public_user_registration: document.getElementById("setting-allow-public-user-registration").checked,
                     request_log_retention_days: Number(document.getElementById("setting-request-log-retention-days").value),
                     admin_audit_log_retention_days: Number(document.getElementById("setting-admin-audit-log-retention-days").value),
+                    global_qps_limit: Number(document.getElementById("setting-global-qps-limit").value),
+                    global_rpm_limit: Number(document.getElementById("setting-global-rpm-limit").value),
+                    account_qps_limit: Number(document.getElementById("setting-account-qps-limit").value),
+                    account_rpm_limit: Number(document.getElementById("setting-account-rpm-limit").value),
                     global_max_active_requests: Number(document.getElementById("setting-global-max-active-requests").value),
                     global_max_active_streams: Number(document.getElementById("setting-global-max-active-streams").value),
                     api_key_max_active_requests: Number(document.getElementById("setting-api-key-max-active-requests").value),
@@ -10588,6 +12316,12 @@
         const environmentNameInput = document.getElementById("logs-environment-name");
         const contentGuardResultInput = document.getElementById("logs-content-guard-result");
         const contentGuardRiskLevelInput = document.getElementById("logs-content-guard-risk-level");
+        const contentGuardActionInput = document.getElementById("logs-content-guard-action");
+        const contentGuardFinalStrategyInput = document.getElementById("logs-content-guard-final-strategy");
+        const contentGuardStageInput = document.getElementById("logs-content-guard-stage");
+        const contentGuardCategoryInput = document.getElementById("logs-content-guard-category");
+        const contentGuardSwitchedProviderInput = document.getElementById("logs-content-guard-switched-provider");
+        const contentGuardAdaptationSkippedInput = document.getElementById("logs-content-guard-adaptation-skipped");
         const excludeHealthChecksInput = document.getElementById("logs-exclude-health-checks");
         const pageSizeSelect = document.getElementById("logs-page-size");
         const pageMeta = document.getElementById("logs-page-meta");
@@ -10610,15 +12344,23 @@
             "logs-environment-name",
             "logs-content-guard-result",
             "logs-content-guard-risk-level",
+            "logs-content-guard-action",
+            "logs-content-guard-final-strategy",
+            "logs-content-guard-stage",
+            "logs-content-guard-switched-provider",
+            "logs-content-guard-adaptation-skipped",
         ];
         const debouncedFilterIds = [
             "logs-model-query",
             "logs-api-client-key-query-manual",
+            "logs-content-guard-category",
             "logs-conversation-key",
         ];
         if (
             !tableBody || !refreshBtn || !exportBtn || !lastRefreshLabel || !providerSelect || !modelSelect
-            || !apiClientKeyIdSelect || !apiClientKeyQuerySelect || !excludeHealthChecksInput || !pageSizeSelect
+            || !apiClientKeyIdSelect || !apiClientKeyQuerySelect || !contentGuardActionInput
+            || !contentGuardFinalStrategyInput || !contentGuardStageInput || !contentGuardCategoryInput
+            || !contentGuardSwitchedProviderInput || !contentGuardAdaptationSkippedInput || !excludeHealthChecksInput || !pageSizeSelect
             || !pageMeta || !prevPageBtn || !nextPageBtn || !traceModal || !traceContent || !closeBtn
         ) {
             return;
@@ -10702,6 +12444,12 @@
             const success = document.getElementById("logs-success").value;
             const contentGuardResult = contentGuardResultInput?.value || "";
             const contentGuardRiskLevel = contentGuardRiskLevelInput?.value || "";
+            const contentGuardAction = contentGuardActionInput?.value || "";
+            const contentGuardFinalStrategy = contentGuardFinalStrategyInput?.value || "";
+            const contentGuardStage = contentGuardStageInput?.value || "";
+            const contentGuardCategory = contentGuardCategoryInput?.value.trim() || "";
+            const contentGuardSwitchedProvider = contentGuardSwitchedProviderInput?.value || "";
+            const contentGuardAdaptationSkipped = contentGuardAdaptationSkippedInput?.value || "";
             const conversationKey = document.getElementById("logs-conversation-key").value.trim();
             const tenantName = tenantNameInput.value.trim();
             const projectName = projectNameInput.value.trim();
@@ -10722,7 +12470,15 @@
             if (environmentName) params.set("environment_name", environmentName);
             if (contentGuardResult) params.set("content_guard_result", contentGuardResult);
             if (contentGuardRiskLevel) params.set("content_guard_risk_level", contentGuardRiskLevel);
+            if (contentGuardAction) params.set("content_guard_action", contentGuardAction);
+            if (contentGuardFinalStrategy) params.set("content_guard_final_strategy", contentGuardFinalStrategy);
+            if (contentGuardStage) params.set("content_guard_guard_stage", contentGuardStage);
+            if (contentGuardCategory) params.set("content_guard_category", contentGuardCategory);
+            if (contentGuardSwitchedProvider) params.set("content_guard_switched_provider", contentGuardSwitchedProvider);
+            if (contentGuardAdaptationSkipped) params.set("content_guard_adaptation_skipped", contentGuardAdaptationSkipped);
             params.set("exclude_health_checks", excludeHealthChecksInput.checked ? "true" : "false");
+            params.set("wait_for_latest", "true");
+            params.set("wait_timeout_ms", "2000");
             params.set("limit", "5000");
             setButtonTransientFeedback(exportBtn, "success", { successText: "准备导出" });
             window.location.href = `/user/logs/export?${params.toString()}`;
@@ -10749,7 +12505,9 @@
             document.querySelectorAll("[data-log-summary-cost]").forEach((node) => {
                 const key = node.dataset.logSummaryCost;
                 const value = summary?.[key];
-                node.textContent = value == null || Number.isNaN(Number(value)) ? "0" : formatAdaptiveDecimal(value, { maxDecimals: 9, fallback: "0" });
+                node.textContent = value == null || Number.isNaN(Number(value))
+                    ? "0 $"
+                    : `${formatAdaptiveDecimal(value, { maxDecimals: 9, fallback: "0" })} $`;
             });
         }
 
@@ -10824,6 +12582,30 @@
             }
             if (!initialFilterValuesApplied && currentParams.get("success")) {
                 document.getElementById("logs-success").value = currentParams.get("success");
+            }
+            if (!initialFilterValuesApplied && currentParams.get("content_guard_result")) {
+                contentGuardResultInput.value = currentParams.get("content_guard_result");
+            }
+            if (!initialFilterValuesApplied && currentParams.get("content_guard_risk_level")) {
+                contentGuardRiskLevelInput.value = currentParams.get("content_guard_risk_level");
+            }
+            if (!initialFilterValuesApplied && currentParams.get("content_guard_action")) {
+                contentGuardActionInput.value = currentParams.get("content_guard_action");
+            }
+            if (!initialFilterValuesApplied && currentParams.get("content_guard_final_strategy")) {
+                contentGuardFinalStrategyInput.value = currentParams.get("content_guard_final_strategy");
+            }
+            if (!initialFilterValuesApplied && currentParams.get("content_guard_guard_stage")) {
+                contentGuardStageInput.value = currentParams.get("content_guard_guard_stage");
+            }
+            if (!initialFilterValuesApplied && currentParams.get("content_guard_category")) {
+                contentGuardCategoryInput.value = currentParams.get("content_guard_category");
+            }
+            if (!initialFilterValuesApplied && currentParams.get("content_guard_switched_provider")) {
+                contentGuardSwitchedProviderInput.value = currentParams.get("content_guard_switched_provider");
+            }
+            if (!initialFilterValuesApplied && currentParams.get("content_guard_adaptation_skipped")) {
+                contentGuardAdaptationSkippedInput.value = currentParams.get("content_guard_adaptation_skipped");
             }
             initialFilterValuesApplied = true;
         }
@@ -10933,10 +12715,21 @@
         }
 
         function compactDetailSummary(payload) {
-            const keys = ["auth_result", "validation_stage", "permission_result", "result", "status_code", "error_code", "billing_stage", "guard_result", "stream_result"];
+            const keyLabels = {
+                auth_result: "鉴权结果",
+                validation_stage: "校验阶段",
+                permission_result: "权限结果",
+                result: "结果",
+                status_code: "状态码",
+                error_code: "错误码",
+                billing_stage: "计费阶段",
+                guard_result: "防护结果",
+                stream_result: "流式结果",
+            };
+            const keys = Object.keys(keyLabels);
             return keys
                 .filter((key) => payload[key] !== undefined && payload[key] !== null && payload[key] !== "")
-                .map((key) => `${key}: ${payload[key]}`)
+                .map((key) => `${keyLabels[key]}：${formatLogStatusLabel(payload[key])}`)
                 .join(" · ") || "已记录结构化详情";
         }
 
@@ -10964,6 +12757,12 @@
             const success = document.getElementById("logs-success").value;
             const contentGuardResult = contentGuardResultInput?.value || "";
             const contentGuardRiskLevel = contentGuardRiskLevelInput?.value || "";
+            const contentGuardAction = contentGuardActionInput?.value || "";
+            const contentGuardFinalStrategy = contentGuardFinalStrategyInput?.value || "";
+            const contentGuardStage = contentGuardStageInput?.value || "";
+            const contentGuardCategory = contentGuardCategoryInput?.value.trim() || "";
+            const contentGuardSwitchedProvider = contentGuardSwitchedProviderInput?.value || "";
+            const contentGuardAdaptationSkipped = contentGuardAdaptationSkippedInput?.value || "";
             const conversationKey = document.getElementById("logs-conversation-key").value.trim();
             const tenantName = tenantNameInput.value.trim();
             const projectName = projectNameInput.value.trim();
@@ -10985,16 +12784,20 @@
             if (environmentName) params.set("environment_name", environmentName);
             if (contentGuardResult) params.set("content_guard_result", contentGuardResult);
             if (contentGuardRiskLevel) params.set("content_guard_risk_level", contentGuardRiskLevel);
+            if (contentGuardAction) params.set("content_guard_action", contentGuardAction);
+            if (contentGuardFinalStrategy) params.set("content_guard_final_strategy", contentGuardFinalStrategy);
+            if (contentGuardStage) params.set("content_guard_guard_stage", contentGuardStage);
+            if (contentGuardCategory) params.set("content_guard_category", contentGuardCategory);
+            if (contentGuardSwitchedProvider) params.set("content_guard_switched_provider", contentGuardSwitchedProvider);
+            if (contentGuardAdaptationSkipped) params.set("content_guard_adaptation_skipped", contentGuardAdaptationSkipped);
             params.set("exclude_health_checks", excludeHealthChecks ? "true" : "false");
             syncRequestLogUrl(params);
             params.set("_ts", Date.now().toString());
+            params.set("wait_for_latest", "true");
+            params.set("wait_timeout_ms", manual && feedbackSource === "refresh" ? "2000" : "1000");
             const loadSeq = ++requestLogLoadSeq;
             tableBody.innerHTML = '<tr><td colspan="7"><div class="empty-state">正在加载日志...</div></td></tr>';
             try {
-                if (manual && feedbackSource === "refresh") {
-                    params.set("wait_for_latest", "true");
-                    params.set("wait_timeout_ms", "2000");
-                }
                 const data = await api.get(`/api/user/logs?${params.toString()}`);
                 if (loadSeq !== requestLogLoadSeq) return;
                 requestLogItems = data.items || [];
@@ -11039,9 +12842,14 @@
                     refreshFeedbackStatus = "success";
                 }
                 if (manual) {
-                    const queueSuffix = data.queue_timed_out
-                        ? `，但日志队列仍有 ${formatNumber((data.queued_request_logs || 0) + (data.processing_request_logs || 0))} 条待落库`
-                        : "";
+                    const queueBacklog = Number(data.queued_request_logs || 0) + Number(data.processing_request_logs || 0);
+                    const queueDeadLetter = Number(data.dead_letter_request_logs || 0);
+                    const queueFailures = Number(data.failed_request_log_writes || 0);
+                    const queueParts = [];
+                    if (data.queue_timed_out) queueParts.push(`日志队列仍有 ${formatNumber(queueBacklog)} 条待落库`);
+                    if (queueDeadLetter > 0) queueParts.push(`死信 ${formatNumber(queueDeadLetter)} 条`);
+                    if (queueFailures > 0) queueParts.push(`失败写入 ${formatNumber(queueFailures)} 次`);
+                    const queueSuffix = queueParts.length ? `，${queueParts.join("，")}` : "";
                     showToast(`日志已刷新，第 ${state.page} 页 / ${Math.max(1, Math.ceil((state.total || 0) / state.pageSize))} 页${queueSuffix}`);
                 }
             } catch (error) {
@@ -11201,16 +13009,16 @@
                 {
                     title: "内容防护",
                     items: [
-                        ["结果", formatLogStatusLabel(log.content_guard_result || "-")],
-                        ["风险", formatLogStatusLabel(log.content_guard_risk_level || "-")],
-                        ["动作", formatLogStatusLabel(log.content_guard_action || "-")],
+                        ["结果", formatContentGuardResultLabel(log.content_guard_result || "-")],
+                        ["风险", formatContentGuardRiskLabel(log.content_guard_risk_level || "-")],
+                        ["动作", formatContentGuardActionLabel(log.content_guard_action || "-")],
                         ["耗时", formatLatencyMs(log.content_guard_latency_ms)],
                         ["分类", formatContentGuardCategories(log.content_guard_categories_json)],
                         ["原因", log.content_guard_reason || "-"],
                         ["证据", log.content_guard_excerpt || "-"],
                         ["缓冲等待", formatLatencyMs(log.content_guard_buffer_wait_ms)],
                         ["重试提供商", log.content_guard_retry_provider_count ?? "-"],
-                        ["最终策略", formatLogStatusLabel(log.content_guard_final_strategy || "-")],
+                        ["最终策略", formatContentGuardActionLabel(log.content_guard_final_strategy || "-")],
                     ],
                 },
                 {
@@ -11282,16 +13090,16 @@
                     {
                         title: "内容防护",
                         items: [
-                            ["结果", formatLogStatusLabel(log.content_guard_result || "-")],
-                            ["风险", formatLogStatusLabel(log.content_guard_risk_level || "-")],
-                            ["动作", formatLogStatusLabel(log.content_guard_action || "-")],
+                            ["结果", formatContentGuardResultLabel(log.content_guard_result || "-")],
+                            ["风险", formatContentGuardRiskLabel(log.content_guard_risk_level || "-")],
+                            ["动作", formatContentGuardActionLabel(log.content_guard_action || "-")],
                             ["耗时", formatLatencyMs(log.content_guard_latency_ms)],
                             ["分类", formatContentGuardCategories(log.content_guard_categories_json)],
                             ["原因", log.content_guard_reason || "-"],
                             ["证据", log.content_guard_excerpt || "-"],
                             ["缓冲等待", formatLatencyMs(log.content_guard_buffer_wait_ms)],
                             ["重试提供商", log.content_guard_retry_provider_count ?? "-"],
-                            ["最终策略", formatLogStatusLabel(log.content_guard_final_strategy || "-")],
+                            ["最终策略", formatContentGuardActionLabel(log.content_guard_final_strategy || "-")],
                         ],
                     },
                     {
@@ -12020,7 +13828,7 @@
 
         function renderAlertSuggestion(type) {
             if (type === "provider") return "先检查提供商健康、熔断和最近延迟，再决定是否临时下线。";
-            if (type === "api_key") return "优先核对密钥状态、余额和授权渠道，再决定是否轮换或恢复。";
+            if (type === "api_key") return "优先核对密钥状态、余额和授权提供商，再决定是否轮换或恢复。";
             if (type === "account") return "先确认账户额度、冻结金额和最近消费，再决定调账或提升配额。";
             return "结合失败率、消息内容和相关日志，优先处理影响正式流量的问题。";
         }
@@ -12823,7 +14631,7 @@
             if (item?.auto_sync_provider_bindings) {
                 return {
                     countText: `${formatNumber(state.providers.length || item.allowed_provider_ids.length || 0)} 个`,
-                    nameText: "全部渠道（自动同步）",
+                    nameText: "全部提供商（自动同步）",
                 };
             }
             const providerNames = (item?.allowed_providers || [])
@@ -12851,7 +14659,7 @@
                         <input type="checkbox" data-api-key-model-name="${escapeHtml(modelName)}" ${selectedSet.has(modelName) ? "checked" : ""}>
                         <div class="playground-provider-option-copy">
                             <strong>${escapeHtml(modelName)}</strong>
-                            <span>${model.enabled ? "已启用" : "已禁用"} · 可用渠道 ${formatNumber(providerCount)}</span>
+                            <span>${model.enabled ? "已启用" : "已禁用"} · 可用提供商 ${formatNumber(providerCount)}</span>
                         </div>
                         <div>${statusBadge(healthStatus)}</div>
                     </label>
@@ -12919,7 +14727,7 @@
                 const templateProviderIds = getProviderSelectionForTemplate(item);
                 const isAllProvidersTemplate = !uniqueProviderIds(item.allowed_provider_ids || []).length;
                 const templateProviderNames = isAllProvidersTemplate
-                    ? "全部渠道"
+                    ? "全部提供商"
                     : templateProviderIds
                         .map((providerId) => state.providers.find((provider) => provider.id === providerId)?.name || String(providerId))
                         .join(", ");
@@ -12930,7 +14738,7 @@
                             <div class="table-muted">${escapeHtml(item.remark || "-")}</div>
                         </td>
                         <td>
-                            <strong>${isAllProvidersTemplate ? "全部渠道" : `${formatNumber(templateProviderIds.length)} 个`}</strong>
+                            <strong>${isAllProvidersTemplate ? "全部提供商" : `${formatNumber(templateProviderIds.length)} 个`}</strong>
                             <div class="table-muted">${escapeHtml(templateProviderNames)}</div>
                         </td>
                         <td>
@@ -13345,14 +15153,6 @@
                 showToast(error.message, "error");
             }
         });
-        contentGuardFilter?.addEventListener("change", async () => {
-            state.page = 1;
-            try {
-                await loadTableData({ silent: true });
-            } catch (error) {
-                showToast(error.message, "error");
-            }
-        });
         ownerFilter.addEventListener("change", async () => {
             state.page = 1;
             try {
@@ -13457,13 +15257,13 @@
             openBatchProviderModal();
         });
         authorizeAllBtn?.addEventListener("click", async () => {
-            if (!window.confirm("确认将全部 API Key 恢复为全渠道授权吗？")) {
+            if (!window.confirm("确认将全部 API Key 恢复为全提供商授权吗？")) {
                 return;
             }
             try {
                 setButtonLoading(authorizeAllBtn, true);
                 const result = await api.post("/api/api-keys/batch/providers/authorize-all");
-                showToast(`已恢复 ${formatNumber(result.affected_count || 0)} 个 API Key 的全渠道授权`);
+                showToast(`已恢复 ${formatNumber(result.affected_count || 0)} 个 API Key 的全提供商授权`);
                 await loadData({ silent: true, reloadReference: true });
             } catch (error) {
                 showToast(error.message, "error");
@@ -13507,7 +15307,7 @@
                     auto_sync_provider_bindings: providerAuthorizationPayload.auto_sync_provider_bindings,
                     allowed_provider_ids: providerAuthorizationPayload.allowed_provider_ids,
                 });
-                showToast(`已批量更新渠道授权 ${formatNumber(result.affected_count || 0)} 个`);
+                showToast(`已批量更新提供商授权 ${formatNumber(result.affected_count || 0)} 个`);
                 closeBatchProviderModal();
                 await loadTableData({ silent: true });
             } catch (error) {
@@ -13892,6 +15692,12 @@
         const environmentNameInput = document.getElementById("logs-environment-name");
         const contentGuardResultInput = document.getElementById("logs-content-guard-result");
         const contentGuardRiskLevelInput = document.getElementById("logs-content-guard-risk-level");
+        const contentGuardActionInput = document.getElementById("logs-content-guard-action");
+        const contentGuardFinalStrategyInput = document.getElementById("logs-content-guard-final-strategy");
+        const contentGuardStageInput = document.getElementById("logs-content-guard-stage");
+        const contentGuardCategoryInput = document.getElementById("logs-content-guard-category");
+        const contentGuardSwitchedProviderInput = document.getElementById("logs-content-guard-switched-provider");
+        const contentGuardAdaptationSkippedInput = document.getElementById("logs-content-guard-adaptation-skipped");
         const excludeHealthChecksInput = document.getElementById("logs-exclude-health-checks");
         const pageSizeSelect = document.getElementById("logs-page-size");
         const pageMeta = document.getElementById("logs-page-meta");
@@ -13903,6 +15709,7 @@
         const loggingTabButtons = Array.from(document.querySelectorAll("[data-logging-tab]"));
         const requestPanels = Array.from(document.querySelectorAll('[data-logging-panel="request"]'));
         const typedPanel = document.querySelector('[data-logging-panel="typed"]');
+        const logsPageTitle = document.getElementById("logs-page-title");
         const typedLogsTitle = document.getElementById("typed-logs-title");
         const typedLogsKicker = document.getElementById("typed-logs-kicker");
         const typedLogsRefreshBtn = document.getElementById("typed-logs-refresh-btn");
@@ -13910,6 +15717,8 @@
         const typedLogsLastRefresh = document.getElementById("typed-logs-last-refresh");
         const typedLogsKeywordLabel = document.getElementById("typed-logs-keyword-label");
         const typedLogsKeywordInput = document.getElementById("typed-logs-keyword");
+        const typedLogsSummary = document.getElementById("typed-logs-summary");
+        const typedLogsMetaStrip = document.getElementById("typed-logs-meta-strip");
         const typedLogsPageSizeSelect = document.getElementById("typed-logs-page-size");
         const typedLogsTableHead = document.getElementById("typed-logs-table-head");
         const typedLogsTableBody = document.getElementById("typed-logs-table-body");
@@ -13917,18 +15726,60 @@
         const typedLogsPrevBtn = document.getElementById("typed-logs-prev-page-btn");
         const typedLogsNextBtn = document.getElementById("typed-logs-next-page-btn");
         const closeBtn = document.getElementById("log-trace-close");
-        if (
-            !tableBody || !refreshBtn || !exportBtn || !lastRefreshLabel || !clearBtn
-            || !providerSelect || !providerTrustLevelSelect || !modelSelect || !modelQueryInput
-            || !userAccountSelect || !userAccountQueryInput || !apiClientKeyIdSelect || !apiClientKeyQuerySelect
-            || !apiClientKeyQueryManualInput || !tenantNameInput || !projectNameInput || !appNameInput
-            || !environmentNameInput || !contentGuardResultInput || !contentGuardRiskLevelInput
-            || !excludeHealthChecksInput || !pageSizeSelect || !pageMeta || !prevPageBtn || !nextPageBtn
-            || !traceModal || !traceContent || !detailCards || !typedPanel || !typedLogsTitle
-            || !typedLogsKicker || !typedLogsRefreshBtn || !typedLogsExportBtn || !typedLogsLastRefresh || !typedLogsKeywordLabel
-            || !typedLogsKeywordInput || !typedLogsPageSizeSelect || !typedLogsTableHead || !typedLogsTableBody
-            || !typedLogsPageMeta || !typedLogsPrevBtn || !typedLogsNextBtn || !closeBtn || !loggingTabButtons.length
-        ) {
+        const typedLogNodes = [
+            typedPanel,
+            typedLogsTitle,
+            typedLogsKicker,
+            typedLogsRefreshBtn,
+            typedLogsExportBtn,
+            typedLogsLastRefresh,
+            typedLogsKeywordLabel,
+            typedLogsKeywordInput,
+            typedLogsSummary,
+            typedLogsMetaStrip,
+            typedLogsPageSizeSelect,
+            typedLogsTableHead,
+            typedLogsTableBody,
+            typedLogsPageMeta,
+            typedLogsPrevBtn,
+            typedLogsNextBtn,
+        ];
+        const typedLogsAvailable = typedLogNodes.every(Boolean);
+        const requestLogNodes = [
+            tableBody,
+            refreshBtn,
+            exportBtn,
+            lastRefreshLabel,
+            clearBtn,
+            providerSelect,
+            providerTrustLevelSelect,
+            modelSelect,
+            modelQueryInput,
+            userAccountSelect,
+            userAccountQueryInput,
+            apiClientKeyIdSelect,
+            apiClientKeyQuerySelect,
+            apiClientKeyQueryManualInput,
+            tenantNameInput,
+            projectNameInput,
+            appNameInput,
+            environmentNameInput,
+            contentGuardResultInput,
+            contentGuardRiskLevelInput,
+            contentGuardActionInput,
+            contentGuardFinalStrategyInput,
+            contentGuardStageInput,
+            contentGuardCategoryInput,
+            contentGuardSwitchedProviderInput,
+            contentGuardAdaptationSkippedInput,
+            excludeHealthChecksInput,
+            pageSizeSelect,
+            pageMeta,
+            prevPageBtn,
+            nextPageBtn,
+        ];
+        const requestLogsAvailable = requestLogNodes.every(Boolean);
+        if (!traceModal || !traceContent || !detailCards || !closeBtn || !loggingTabButtons.length) {
             return;
         }
         const immediateFilterIds = [
@@ -13942,6 +15793,11 @@
             "logs-success",
             "logs-content-guard-result",
             "logs-content-guard-risk-level",
+            "logs-content-guard-action",
+            "logs-content-guard-final-strategy",
+            "logs-content-guard-stage",
+            "logs-content-guard-switched-provider",
+            "logs-content-guard-adaptation-skipped",
             "logs-tenant-name",
             "logs-project-name",
             "logs-app-name",
@@ -13951,6 +15807,7 @@
             "logs-model-query",
             "logs-user-account-query",
             "logs-api-client-key-query-manual",
+            "logs-content-guard-category",
             "logs-conversation-key",
         ];
         const currentParams = new URLSearchParams(window.location.search);
@@ -13962,125 +15819,43 @@
             total: 0,
             activeTab: currentParams.get("tab") || "request",
         };
+        if (!requestLogsAvailable && state.activeTab === "request" && typedLogsAvailable) {
+            state.activeTab = "exceptions";
+        }
+        if (!typedLogsAvailable && state.activeTab !== "request") {
+            state.activeTab = "request";
+        }
+        if (!requestLogsAvailable && state.activeTab === "request") {
+            return;
+        }
+        if (!requestLogsAvailable) {
+            loggingTabButtons.forEach((button) => {
+                if (button.dataset.loggingTab === "request") {
+                    button.disabled = true;
+                    button.title = "请求日志区域未加载";
+                }
+            });
+        }
+        if (!typedLogsAvailable) {
+            loggingTabButtons.forEach((button) => {
+                if (button.dataset.loggingTab !== "request") {
+                    button.disabled = true;
+                    button.title = "类型化日志区域未加载";
+                }
+            });
+        }
         const typedState = {
             page: 1,
             pageSize: 20,
             total: 0,
         };
         const typedFilterState = {};
+        const typedPaginationState = {};
         let requestLogItems = [];
         let requestLogLoadSeq = 0;
         let typedLogItems = [];
         let typedLogLoadSeq = 0;
         let initialFilterValuesApplied = false;
-        if (currentParams.get("conversation_key")) {
-            document.getElementById("logs-conversation-key").value = currentParams.get("conversation_key");
-        }
-        if (currentParams.get("model_query")) {
-            modelQueryInput.value = currentParams.get("model_query");
-        }
-        if (currentParams.get("provider_trust_level")) {
-            providerTrustLevelSelect.value = currentParams.get("provider_trust_level");
-        }
-        if (currentParams.get("user_account_query")) {
-            userAccountQueryInput.value = currentParams.get("user_account_query");
-        }
-        if (currentParams.get("api_client_key_query_text")) {
-            apiClientKeyQueryManualInput.value = currentParams.get("api_client_key_query_text");
-        }
-        if (currentParams.get("exclude_health_checks") === "false") {
-            excludeHealthChecksInput.checked = false;
-        }
-        pageSizeSelect.value = String(state.pageSize);
-
-        for (const id of immediateFilterIds) {
-            document.getElementById(id).addEventListener("change", () => {
-                state.page = 1;
-                loadLogs();
-            });
-        }
-        const debouncedLoadLogs = debounce(() => {
-            state.page = 1;
-            loadLogs();
-        });
-        for (const id of debouncedFilterIds) {
-            document.getElementById(id).addEventListener("input", () => {
-                state.page = 1;
-                debouncedLoadLogs();
-            });
-        }
-        pageSizeSelect.addEventListener("change", () => {
-            state.pageSize = Number.parseInt(pageSizeSelect.value || "50", 10) || 50;
-            state.page = 1;
-            loadLogs();
-        });
-        prevPageBtn.addEventListener("click", async () => {
-            if (state.page <= 1) return;
-            state.page -= 1;
-            await loadLogs();
-        });
-        nextPageBtn.addEventListener("click", async () => {
-            const totalPages = Math.max(1, Math.ceil((state.total || 0) / state.pageSize));
-            if (state.page >= totalPages) return;
-            state.page += 1;
-            await loadLogs();
-        });
-        exportBtn.addEventListener("click", () => {
-            const params = new URLSearchParams();
-            const logType = document.getElementById("logs-log-type").value;
-            const providerId = providerSelect.value;
-            const providerTrustLevel = providerTrustLevelSelect.value;
-            const modelName = modelSelect.value;
-            const modelQuery = modelQueryInput.value.trim();
-            const userAccountId = userAccountSelect.value;
-            const userAccountQuery = userAccountQueryInput.value.trim();
-            const apiClientKeyId = apiClientKeyIdSelect.value;
-            const apiClientKeyQuery = apiClientKeyQueryManualInput.value.trim() || apiClientKeyQuerySelect.value;
-            const success = document.getElementById("logs-success").value;
-            const contentGuardResult = contentGuardResultInput.value;
-            const contentGuardRiskLevel = contentGuardRiskLevelInput.value;
-            const conversationKey = document.getElementById("logs-conversation-key").value.trim();
-            const tenantName = tenantNameInput.value.trim();
-            const projectName = projectNameInput.value.trim();
-            const appName = appNameInput.value.trim();
-            const environmentName = environmentNameInput.value.trim();
-            if (logType) params.set("log_type", logType);
-            if (providerId) params.set("provider_id", providerId);
-            if (providerTrustLevel) params.set("provider_trust_level", providerTrustLevel);
-            if (modelName) params.set("model_name", modelName);
-            if (modelQuery) params.set("model_query", modelQuery);
-            if (userAccountId) params.set("user_account_id", userAccountId);
-            if (userAccountQuery) params.set("user_account_query", userAccountQuery);
-            if (apiClientKeyId) params.set("api_client_key_id", apiClientKeyId);
-            if (apiClientKeyQuery) params.set("api_client_key_query", apiClientKeyQuery);
-            if (apiClientKeyQueryManualInput.value.trim()) params.set("api_client_key_query_text", apiClientKeyQueryManualInput.value.trim());
-            if (success) params.set("success", success);
-            if (contentGuardResult) params.set("content_guard_result", contentGuardResult);
-            if (contentGuardRiskLevel) params.set("content_guard_risk_level", contentGuardRiskLevel);
-            if (conversationKey) params.set("conversation_key", conversationKey);
-            if (tenantName) params.set("tenant_name", tenantName);
-            if (projectName) params.set("project_name", projectName);
-            if (appName) params.set("app_name", appName);
-            if (environmentName) params.set("environment_name", environmentName);
-            params.set("exclude_health_checks", excludeHealthChecksInput.checked ? "true" : "false");
-            params.set("limit", "5000");
-            setButtonTransientFeedback(exportBtn, "success", { successText: "准备导出" });
-            window.location.href = `/api/logs/export?${params.toString()}`;
-        });
-
-        refreshBtn.addEventListener("click", async (event) => {
-            event.preventDefault();
-            try {
-                setButtonLoading(refreshBtn, true);
-                await loadFilterOptions();
-                await loadLogs({ manual: true, feedbackSource: "refresh" });
-            } catch (error) {
-                updateLogRefreshResultLabel(lastRefreshLabel, "error", new Date());
-                showToast(error.message, "error");
-                setButtonLoading(refreshBtn, false);
-                setButtonTransientFeedback(refreshBtn, "error", { errorText: "刷新失败" });
-            }
-        });
         const traceDialog = traceModal.querySelector('[role="dialog"]') || traceModal.querySelector(".modal-card");
         const traceModalController = modalManager.register({
             modal: traceModal,
@@ -14088,73 +15863,203 @@
             getInitialFocus: () => closeBtn,
         });
         closeBtn.addEventListener("click", () => traceModalController.close());
-        clearBtn.addEventListener("click", async () => {
-            const confirmed = await confirmLogDangerAction({
-                title: "清空请求日志",
-                message: "该操作只会清空请求日志列表，不会清空异常事件、健康检查、计费、后台任务或素材日志。",
-                confirmText: "确认清空",
-            });
-            if (!confirmed) return;
-            try {
-                setButtonLoading(clearBtn, true);
-                await api.delete("/api/logs");
-                showToast("请求日志已清空");
-                await loadFilterOptions();
-                await loadLogs({ manual: true });
-            } catch (error) {
-                showToast(error.message, "error");
-            } finally {
-                setButtonLoading(clearBtn, false);
+        if (requestLogsAvailable) {
+            if (currentParams.get("conversation_key")) {
+                document.getElementById("logs-conversation-key").value = currentParams.get("conversation_key");
             }
-        });
-        typedLogsExportBtn.addEventListener("click", () => {
-            const config = typedLogConfigs[state.activeTab];
-            if (!config) return;
-            const params = buildTypedLogParams(config, { exportMode: true });
-            params.set("log_type", state.activeTab);
-            params.set("limit", "5000");
-            setButtonTransientFeedback(typedLogsExportBtn, "success", { successText: "准备导出" });
-            window.location.href = `/api/logging/export?${params.toString()}`;
-        });
+            if (currentParams.get("model_query")) {
+                modelQueryInput.value = currentParams.get("model_query");
+            }
+            if (currentParams.get("provider_trust_level")) {
+                providerTrustLevelSelect.value = currentParams.get("provider_trust_level");
+            }
+            if (currentParams.get("user_account_query")) {
+                userAccountQueryInput.value = currentParams.get("user_account_query");
+            }
+            if (currentParams.get("api_client_key_query_text")) {
+                apiClientKeyQueryManualInput.value = currentParams.get("api_client_key_query_text");
+            }
+            if (currentParams.get("exclude_health_checks") === "false") {
+                excludeHealthChecksInput.checked = false;
+            }
+            pageSizeSelect.value = String(state.pageSize);
+
+            for (const id of immediateFilterIds) {
+                document.getElementById(id).addEventListener("change", () => {
+                    state.page = 1;
+                    loadLogs();
+                });
+            }
+            const debouncedLoadLogs = debounce(() => {
+                state.page = 1;
+                loadLogs();
+            });
+            for (const id of debouncedFilterIds) {
+                document.getElementById(id).addEventListener("input", () => {
+                    state.page = 1;
+                    debouncedLoadLogs();
+                });
+            }
+            pageSizeSelect.addEventListener("change", () => {
+                state.pageSize = Number.parseInt(pageSizeSelect.value || "50", 10) || 50;
+                state.page = 1;
+                loadLogs();
+            });
+            prevPageBtn.addEventListener("click", async () => {
+                if (state.page <= 1) return;
+                state.page -= 1;
+                await loadLogs();
+            });
+            nextPageBtn.addEventListener("click", async () => {
+                const totalPages = Math.max(1, Math.ceil((state.total || 0) / state.pageSize));
+                if (state.page >= totalPages) return;
+                state.page += 1;
+                await loadLogs();
+            });
+            exportBtn.addEventListener("click", () => {
+                const params = new URLSearchParams();
+                const logType = document.getElementById("logs-log-type").value;
+                const providerId = providerSelect.value;
+                const providerTrustLevel = providerTrustLevelSelect.value;
+                const modelName = modelSelect.value;
+                const modelQuery = modelQueryInput.value.trim();
+                const userAccountId = userAccountSelect.value;
+                const userAccountQuery = userAccountQueryInput.value.trim();
+                const apiClientKeyId = apiClientKeyIdSelect.value;
+                const apiClientKeyQuery = apiClientKeyQueryManualInput.value.trim() || apiClientKeyQuerySelect.value;
+                const success = document.getElementById("logs-success").value;
+                const contentGuardResult = contentGuardResultInput.value;
+                const contentGuardRiskLevel = contentGuardRiskLevelInput.value;
+                const contentGuardAction = contentGuardActionInput.value;
+                const contentGuardFinalStrategy = contentGuardFinalStrategyInput.value;
+                const contentGuardStage = contentGuardStageInput.value;
+                const contentGuardCategory = contentGuardCategoryInput.value.trim();
+                const contentGuardSwitchedProvider = contentGuardSwitchedProviderInput.value;
+                const contentGuardAdaptationSkipped = contentGuardAdaptationSkippedInput.value;
+                const conversationKey = document.getElementById("logs-conversation-key").value.trim();
+                const tenantName = tenantNameInput.value.trim();
+                const projectName = projectNameInput.value.trim();
+                const appName = appNameInput.value.trim();
+                const environmentName = environmentNameInput.value.trim();
+                if (logType) params.set("log_type", logType);
+                if (providerId) params.set("provider_id", providerId);
+                if (providerTrustLevel) params.set("provider_trust_level", providerTrustLevel);
+                if (modelName) params.set("model_name", modelName);
+                if (modelQuery) params.set("model_query", modelQuery);
+                if (userAccountId) params.set("user_account_id", userAccountId);
+                if (userAccountQuery) params.set("user_account_query", userAccountQuery);
+                if (apiClientKeyId) params.set("api_client_key_id", apiClientKeyId);
+                if (apiClientKeyQuery) params.set("api_client_key_query", apiClientKeyQuery);
+                if (apiClientKeyQueryManualInput.value.trim()) params.set("api_client_key_query_text", apiClientKeyQueryManualInput.value.trim());
+                if (success) params.set("success", success);
+                if (contentGuardResult) params.set("content_guard_result", contentGuardResult);
+                if (contentGuardRiskLevel) params.set("content_guard_risk_level", contentGuardRiskLevel);
+                if (contentGuardAction) params.set("content_guard_action", contentGuardAction);
+                if (contentGuardFinalStrategy) params.set("content_guard_final_strategy", contentGuardFinalStrategy);
+                if (contentGuardStage) params.set("content_guard_guard_stage", contentGuardStage);
+                if (contentGuardCategory) params.set("content_guard_category", contentGuardCategory);
+                if (contentGuardSwitchedProvider) params.set("content_guard_switched_provider", contentGuardSwitchedProvider);
+                if (contentGuardAdaptationSkipped) params.set("content_guard_adaptation_skipped", contentGuardAdaptationSkipped);
+                if (conversationKey) params.set("conversation_key", conversationKey);
+                if (tenantName) params.set("tenant_name", tenantName);
+                if (projectName) params.set("project_name", projectName);
+                if (appName) params.set("app_name", appName);
+                if (environmentName) params.set("environment_name", environmentName);
+                params.set("exclude_health_checks", excludeHealthChecksInput.checked ? "true" : "false");
+                params.set("wait_for_latest", "true");
+                params.set("wait_timeout_ms", "2000");
+                params.set("limit", "5000");
+                setButtonTransientFeedback(exportBtn, "success", { successText: "准备导出" });
+                window.location.href = `/api/logs/export?${params.toString()}`;
+            });
+
+            refreshBtn.addEventListener("click", async (event) => {
+                event.preventDefault();
+                try {
+                    setButtonLoading(refreshBtn, true);
+                    await loadFilterOptions();
+                    await loadLogs({ manual: true, feedbackSource: "refresh" });
+                } catch (error) {
+                    updateLogRefreshResultLabel(lastRefreshLabel, "error", new Date());
+                    showToast(error.message, "error");
+                    setButtonLoading(refreshBtn, false);
+                    setButtonTransientFeedback(refreshBtn, "error", { errorText: "刷新失败" });
+                }
+            });
+            clearBtn.addEventListener("click", async () => {
+                const confirmed = await confirmLogDangerAction({
+                    title: "清空请求日志",
+                    message: "该操作只会清空请求日志列表，不会清空异常事件、健康检查、计费、后台任务或素材日志。",
+                    confirmText: "确认清空",
+                });
+                if (!confirmed) return;
+                try {
+                    setButtonLoading(clearBtn, true);
+                    await api.delete("/api/logs");
+                    showToast("请求日志已清空");
+                    await loadFilterOptions();
+                    await loadLogs({ manual: true });
+                } catch (error) {
+                    showToast(error.message, "error");
+                } finally {
+                    setButtonLoading(clearBtn, false);
+                }
+            });
+        }
+        if (typedLogsAvailable) {
+            typedLogsExportBtn.addEventListener("click", () => {
+                const config = typedLogConfigs[state.activeTab];
+                if (!config) return;
+                const params = buildTypedLogParams(config, { exportMode: true });
+                params.set("typed_log_type", state.activeTab);
+                params.set("limit", "5000");
+                params.set("wait_for_latest", "true");
+                params.set("wait_timeout_ms", "2000");
+                setButtonTransientFeedback(typedLogsExportBtn, "success", { successText: "准备导出" });
+                window.location.href = `/api/logging/export?${params.toString()}`;
+            });
+        }
         loggingTabButtons.forEach((button) => {
             button.addEventListener("click", () => setActiveLoggingTab(button.dataset.loggingTab));
         });
         const debouncedLoadTypedLogs = debounce(() => {
             snapshotCurrentTypedFilters();
-            typedState.page = 1;
+            resetCurrentTypedPagination();
             loadTypedLogs();
         });
-        typedLogsKeywordInput.addEventListener("input", debouncedLoadTypedLogs);
-        typedLogsPageSizeSelect.addEventListener("change", () => {
-            typedState.pageSize = Number.parseInt(typedLogsPageSizeSelect.value || "20", 10) || 20;
-            typedState.page = 1;
-            loadTypedLogs();
-        });
-        typedLogsPrevBtn.addEventListener("click", () => {
-            if (typedState.page <= 1) return;
-            typedState.page -= 1;
-            loadTypedLogs();
-        });
-        typedLogsNextBtn.addEventListener("click", () => {
-            const totalPages = Math.max(1, Math.ceil((typedState.total || 0) / typedState.pageSize));
-            if (typedState.page >= totalPages) return;
-            typedState.page += 1;
-            loadTypedLogs();
-        });
-        typedLogsRefreshBtn.addEventListener("click", () => loadTypedLogs({ manual: true }));
-        typedLogsTableBody.addEventListener("click", async (event) => {
-            const button = event.target.closest('[data-action="show-typed-log"]');
-            if (!button) return;
-            const item = typedLogItems[Number.parseInt(button.dataset.index || "-1", 10)] || {};
-            setButtonLoading(button, true);
-            try {
-                await renderTypedLogDetail(item);
-            } catch (error) {
-                showToast(error.message, "error");
-            } finally {
-                setButtonLoading(button, false);
-            }
-        });
+        if (typedLogsAvailable) {
+            typedLogsKeywordInput.addEventListener("input", debouncedLoadTypedLogs);
+            typedLogsPageSizeSelect.addEventListener("change", () => {
+                typedState.pageSize = Number.parseInt(typedLogsPageSizeSelect.value || "20", 10) || 20;
+                resetCurrentTypedPagination();
+                loadTypedLogs();
+            });
+            typedLogsPrevBtn.addEventListener("click", () => {
+                if (typedState.page <= 1) return;
+                typedState.page -= 1;
+                loadTypedLogs();
+            });
+            typedLogsNextBtn.addEventListener("click", () => {
+                const totalPages = Math.max(1, Math.ceil((typedState.total || 0) / typedState.pageSize));
+                if (typedState.page >= totalPages) return;
+                typedState.page += 1;
+                loadTypedLogs();
+            });
+            typedLogsRefreshBtn.addEventListener("click", () => loadTypedLogs({ manual: true }));
+            typedLogsTableBody.addEventListener("click", async (event) => {
+                const button = event.target.closest('[data-action="show-typed-log"]');
+                if (!button) return;
+                const item = typedLogItems[Number.parseInt(button.dataset.index || "-1", 10)] || {};
+                setButtonLoading(button, true);
+                try {
+                    await renderTypedLogDetail(item);
+                } catch (error) {
+                    showToast(error.message, "error");
+                } finally {
+                    setButtonLoading(button, false);
+                }
+            });
+        }
 
         function renderLogSummary(summary) {
             document.querySelectorAll("[data-log-summary]").forEach((node) => {
@@ -14245,6 +16150,24 @@
             if (!initialFilterValuesApplied && currentParams.get("content_guard_risk_level")) {
                 contentGuardRiskLevelInput.value = currentParams.get("content_guard_risk_level");
             }
+            if (!initialFilterValuesApplied && currentParams.get("content_guard_action")) {
+                contentGuardActionInput.value = currentParams.get("content_guard_action");
+            }
+            if (!initialFilterValuesApplied && currentParams.get("content_guard_final_strategy")) {
+                contentGuardFinalStrategyInput.value = currentParams.get("content_guard_final_strategy");
+            }
+            if (!initialFilterValuesApplied && currentParams.get("content_guard_guard_stage")) {
+                contentGuardStageInput.value = currentParams.get("content_guard_guard_stage");
+            }
+            if (!initialFilterValuesApplied && currentParams.get("content_guard_category")) {
+                contentGuardCategoryInput.value = currentParams.get("content_guard_category");
+            }
+            if (!initialFilterValuesApplied && currentParams.get("content_guard_switched_provider")) {
+                contentGuardSwitchedProviderInput.value = currentParams.get("content_guard_switched_provider");
+            }
+            if (!initialFilterValuesApplied && currentParams.get("content_guard_adaptation_skipped")) {
+                contentGuardAdaptationSkippedInput.value = currentParams.get("content_guard_adaptation_skipped");
+            }
             initialFilterValuesApplied = true;
         }
 
@@ -14260,7 +16183,7 @@
         }
 
         const typedLogConfigs = createTypedLogConfigs({ renderTypedPrimary, formatMetricValue });
-        hydrateTypedFiltersFromUrl();
+        if (typedLogsAvailable) hydrateTypedFiltersFromUrl();
 
         function getTypedFilterNode(key) {
             return document.getElementById(`typed-logs-filter-${key}`);
@@ -14271,8 +16194,18 @@
             nextParams.delete("_ts");
             if (tab && tab !== "request") {
                 nextParams.set("tab", tab);
+                if (nextParams.has("page")) {
+                    nextParams.set("typed_page", nextParams.get("page"));
+                    nextParams.delete("page");
+                }
+                if (nextParams.has("page_size")) {
+                    nextParams.set("typed_page_size", nextParams.get("page_size"));
+                    nextParams.delete("page_size");
+                }
             } else {
                 nextParams.delete("tab");
+                nextParams.delete("typed_page");
+                nextParams.delete("typed_page_size");
             }
             const query = nextParams.toString();
             const nextUrl = query ? `${window.location.pathname}?${query}` : window.location.pathname;
@@ -14280,11 +16213,12 @@
         }
 
         function hydrateTypedFiltersFromUrl() {
+            if (!typedLogsAvailable) return;
             const config = typedLogConfigs[state.activeTab];
             if (!config) return;
-            typedState.page = Math.max(1, Number.parseInt(currentParams.get("page") || "1", 10) || 1);
-            typedState.pageSize = [20, 50, 100, 200].includes(Number.parseInt(currentParams.get("page_size") || "20", 10))
-                ? Number.parseInt(currentParams.get("page_size") || "20", 10)
+            typedState.page = Math.max(1, Number.parseInt(currentParams.get("typed_page") || currentParams.get("page") || "1", 10) || 1);
+            typedState.pageSize = [20, 50, 100, 200].includes(Number.parseInt(currentParams.get("typed_page_size") || currentParams.get("page_size") || "20", 10))
+                ? Number.parseInt(currentParams.get("typed_page_size") || currentParams.get("page_size") || "20", 10)
                 : 20;
             typedLogsPageSizeSelect.value = String(typedState.pageSize);
             const snapshot = { keyword: currentParams.get("keyword") || "" };
@@ -14292,6 +16226,7 @@
                 snapshot[filter.key] = currentParams.get(filter.param || filter.key) || "";
             });
             typedFilterState[state.activeTab] = snapshot;
+            typedPaginationState[state.activeTab] = { page: typedState.page, pageSize: typedState.pageSize };
         }
 
         function readTypedFilterValue(node) {
@@ -14300,6 +16235,7 @@
         }
 
         function snapshotCurrentTypedFilters(tab = state.activeTab) {
+            if (!typedLogsAvailable) return;
             const config = typedLogConfigs[tab];
             if (!config) return;
             const snapshot = { keyword: typedLogsKeywordInput.value.trim() };
@@ -14307,6 +16243,30 @@
                 snapshot[filter.key] = readTypedFilterValue(getTypedFilterNode(filter.key));
             });
             typedFilterState[tab] = snapshot;
+        }
+
+        function snapshotCurrentTypedPagination(tab = state.activeTab) {
+            if (!typedLogsAvailable || !typedLogConfigs[tab]) return;
+            typedPaginationState[tab] = {
+                page: Math.max(1, Number.parseInt(String(typedState.page || 1), 10) || 1),
+                pageSize: [20, 50, 100, 200].includes(Number.parseInt(String(typedState.pageSize || 20), 10))
+                    ? Number.parseInt(String(typedState.pageSize || 20), 10)
+                    : 20,
+            };
+        }
+
+        function restoreTypedPagination(tab) {
+            const snapshot = typedPaginationState[tab] || {};
+            const page = Math.max(1, Number.parseInt(String(snapshot.page || 1), 10) || 1);
+            const pageSize = Number.parseInt(String(snapshot.pageSize || 20), 10);
+            typedState.page = page;
+            typedState.pageSize = [20, 50, 100, 200].includes(pageSize) ? pageSize : 20;
+            typedLogsPageSizeSelect.value = String(typedState.pageSize);
+        }
+
+        function resetCurrentTypedPagination(tab = state.activeTab) {
+            typedState.page = 1;
+            snapshotCurrentTypedPagination(tab);
         }
 
         function renderTypedFilterField(filter, value) {
@@ -14337,6 +16297,7 @@
         }
 
         function renderTypedFilterControls(tab) {
+            if (!typedLogsAvailable) return;
             const config = typedLogConfigs[tab];
             if (!config) return;
             const snapshot = typedFilterState[tab] || {};
@@ -14351,16 +16312,26 @@
             (config.filters || []).forEach((filter) => {
                 const node = getTypedFilterNode(filter.key);
                 if (!node) return;
+                if (filter.key === "start_at" || filter.key === "end_at") {
+                    node.closest("label")?.querySelector("span")?.setAttribute("data-typed-time-label", filter.key);
+                }
                 if (filter.type === "select") {
                     node.addEventListener("change", () => {
                         snapshotCurrentTypedFilters(tab);
-                        typedState.page = 1;
+                        resetCurrentTypedPagination(tab);
                         loadTypedLogs();
                     });
                     return;
                 }
                 node.addEventListener("input", debouncedLoadTypedLogs);
             });
+        }
+
+        function applyTypedTimeFilterMeta(timeFilter = {}) {
+            const startLabel = document.querySelector('[data-typed-time-label="start_at"]');
+            const endLabel = document.querySelector('[data-typed-time-label="end_at"]');
+            if (startLabel) startLabel.textContent = timeFilter.start_label || "开始时间";
+            if (endLabel) endLabel.textContent = timeFilter.end_label || "结束时间";
         }
 
         function buildTypedLogParams(config, { exportMode = false } = {}) {
@@ -14387,28 +16358,80 @@
             `;
         }
 
+        function renderTypedSummary(config, data) {
+            const summary = data?.summary || {};
+            const cards = typeof config.summaryCards === "function"
+                ? config.summaryCards(summary, data)
+                : [
+                    ["总数", formatNumber(summary.total ?? data?.total ?? 0)],
+                    ["当前页", formatNumber(summary.page_count ?? (data?.items || []).length)],
+                ];
+            typedLogsSummary.innerHTML = cards.map(([label, value, tone]) => `
+                <article class="typed-log-summary-item ${tone ? `typed-log-summary-${escapeHtml(tone)}` : ""}">
+                    <span>${escapeHtml(label)}</span>
+                    <strong>${escapeHtml(String(value ?? "-"))}</strong>
+                </article>
+            `).join("");
+        }
+
+        function renderTypedMetaStrip(data) {
+            const timeFilter = data?.time_filter || {};
+            const queue = data?.queue_status || {};
+            const retention = data?.retention || {};
+            const queueBacklog = Number(queue.total || 0);
+            const queueDeadLetter = Number(queue.dead_letter || 0);
+            const queueFailures = Number(queue.failure_count || 0);
+            const queueText = queue.available === false
+                ? `事件队列状态不可用${queue.error ? `：${queue.error}` : ""}`
+                : [
+                    `事件队列 ${formatNumber(queueBacklog)} 条待落库`,
+                    queueDeadLetter > 0 ? `死信 ${formatNumber(queueDeadLetter)} 条` : null,
+                    queueFailures > 0 ? `失败写入 ${formatNumber(queueFailures)} 次` : null,
+                ].filter(Boolean).join(" · ");
+            typedLogsMetaStrip.innerHTML = `
+                <span>时间筛选字段：${escapeHtml(timeFilter.label || timeFilter.field || "创建时间")}</span>
+                <span>${escapeHtml(queueText)}</span>
+                <span>保留策略：${escapeHtml(retention.label || "-")}</span>
+                <button class="table-action-btn" type="button" data-action="open-retention-settings">配置保留期</button>
+            `;
+            typedLogsMetaStrip.querySelector('[data-action="open-retention-settings"]')?.addEventListener("click", () => {
+                const target = retention.settings_url || "/settings";
+                navigateWithinShell(target).catch(() => {
+                    window.location.href = target;
+                });
+            });
+        }
+
         function formatLogStatusLabel(value) {
             return formatTypedLogStatusLabel(value);
         }
 
         function setActiveLoggingTab(tab) {
             const previousTab = state.activeTab;
-            const normalizedTab = tab === "request" || typedLogConfigs[tab] ? tab : "request";
+            const normalizedTab = tab === "request" || (typedLogsAvailable && typedLogConfigs[tab]) ? tab : "request";
             if (previousTab !== normalizedTab && typedLogConfigs[previousTab]) {
                 snapshotCurrentTypedFilters(previousTab);
+                snapshotCurrentTypedPagination(previousTab);
             }
             state.activeTab = normalizedTab;
             loggingTabButtons.forEach((button) => {
-                button.classList.toggle("active", button.dataset.loggingTab === normalizedTab);
+                const selected = button.dataset.loggingTab === normalizedTab;
+                button.classList.toggle("active", selected);
+                button.setAttribute("aria-selected", selected ? "true" : "false");
+                button.tabIndex = selected ? 0 : -1;
             });
             const isRequestTab = normalizedTab === "request";
             requestPanels.forEach((panel) => panel.classList.toggle("hidden", !isRequestTab));
-            typedPanel.classList.toggle("hidden", isRequestTab);
+            typedPanel?.classList.toggle("hidden", isRequestTab);
+            if (logsPageTitle) {
+                const title = isRequestTab ? "请求日志中心" : `${typedLogConfigs[normalizedTab]?.title || "类型化日志"}中心`;
+                logsPageTitle.textContent = title;
+            }
             if (isRequestTab) {
-                loadLogs();
+                if (requestLogsAvailable) loadLogs();
                 return;
             }
-            typedState.page = 1;
+            restoreTypedPagination(normalizedTab);
             renderTypedFilterControls(normalizedTab);
             loadTypedLogs();
         }
@@ -14423,9 +16446,12 @@
         }
 
         async function loadTypedLogs({ manual = false } = {}) {
+            if (!typedLogsAvailable) return;
             const config = typedLogConfigs[state.activeTab];
             if (!config) return;
             const params = buildTypedLogParams(config);
+            params.set("wait_for_latest", "true");
+            params.set("wait_timeout_ms", manual ? "2000" : "1000");
             snapshotCurrentTypedFilters();
             typedLogsTitle.textContent = config.title;
             typedLogsKicker.textContent = "类型化日志";
@@ -14438,6 +16464,9 @@
                 const data = await api.get(`${config.endpoint}?${params.toString()}`);
                 if (loadSeq !== typedLogLoadSeq) return;
                 typedLogItems = data.items || [];
+                applyTypedTimeFilterMeta(data.time_filter || {});
+                renderTypedSummary(config, data);
+                renderTypedMetaStrip(data);
                 typedLogsTableHead.innerHTML = config.columns.map(([label]) => `<th>${escapeHtml(label)}</th>`).join("") + "<th>详情</th>";
                 typedLogsTableBody.innerHTML = typedLogItems.map((item, index) => `
                     <tr>
@@ -14446,6 +16475,7 @@
                     </tr>
                 `).join("") || `<tr><td colspan="${config.columns.length + 1}"><div class="empty-state">没有匹配的日志</div></td></tr>`;
                 renderTypedPagination(data.total ?? 0);
+                snapshotCurrentTypedPagination();
                 updateLogRefreshResultLabel(typedLogsLastRefresh, "success", new Date());
                 if (manual) showToast(`${config.title}已刷新`);
                 enhanceInteractiveButtons(typedLogsTableBody);
@@ -14541,6 +16571,8 @@
                             ["消息", item.message],
                             ["堆栈哈希", item.stack_hash],
                             ["堆栈摘要", item.stack_excerpt],
+                            ["详情 JSON", item.detail_json],
+                            ["展示口径", "敏感字段已脱敏，长文本已按后端上限截断"],
                         ],
                     },
                 ]);
@@ -14569,6 +16601,15 @@
                             ["成功", run.success_probes],
                             ["失败", run.failed_probes],
                             ["耗时", run.duration_ms == null ? "-" : `${formatNumber(run.duration_ms)} ms`],
+                        ],
+                    },
+                    {
+                        title: "当前行上下文",
+                        items: [
+                            ["运行批次", item.run_id],
+                            ["触发方式", formatLogStatusLabel(item.trigger_type)],
+                            ["范围", `${formatLogStatusLabel(item.scope_type)} ${item.scope_id || ""}`.trim()],
+                            ["创建时间", formatDate(item.created_at)],
                         ],
                     },
                     {
@@ -14625,8 +16666,155 @@
                         ],
                     },
                 ]);
+            } else if (tab === "content-guard-events") {
+                const matchedRules = normalizeJsonObject(item.matched_rules_json);
+                const matchedCategories = normalizeJsonObject(item.matched_categories_json);
+                const ruleRows = Array.isArray(matchedRules)
+                    ? matchedRules.map((rule) => [
+                        rule.id || rule.rule_id || "-",
+                        rule.name || "-",
+                        rule.risk_level || rule.risk || "-",
+                        rule.action || item.action || "-",
+                    ])
+                    : [];
+                renderDetailCards([
+                    {
+                        title: "检测事件",
+                        items: [
+                            ["阶段", formatLogStatusLabel(item.guard_stage)],
+                            ["结果", formatContentGuardResultLabel(item.guard_result)],
+                            ["风险", formatContentGuardRiskLabel(item.risk_level)],
+                            ["动作", formatLogStatusLabel(item.action || "-")],
+                            ["提供商处置后状态", formatLogStatusLabel(item.provider_status_after || "-")],
+                            ["时间", formatDate(item.created_at)],
+                        ],
+                    },
+                    {
+                        title: "请求上下文",
+                        items: [
+                            ["链路 ID", item.trace_id],
+                            ["请求日志 ID", item.request_log_id],
+                            ["提供商", item.provider_name || item.provider_id],
+                            ["提供商模型 ID", item.provider_model_id],
+                            ["实际模型", item.model_name],
+                            ["请求模型", item.requested_model],
+                            ["请求路径", item.request_path],
+                            ["是否流式", item.is_stream == null ? "-" : (item.is_stream ? "是" : "否")],
+                        ],
+                    },
+                    {
+                        title: "命中证据",
+                        items: [
+                            ["原因", item.reason],
+                            ["片段", item.excerpt],
+                            ["分类", Array.isArray(matchedCategories) ? matchedCategories.join("、") : JSON.stringify(matchedCategories || {})],
+                            ["诊断", item.diagnostics_json],
+                        ],
+                    },
+                    {
+                        title: "规则明细",
+                        html: renderMiniTable(
+                            ["规则 ID", "规则名", "风险", "动作"],
+                            ruleRows
+                        ),
+                    },
+                ]);
             } else if (tab === "background-jobs") {
                 renderDetailCards(buildBackgroundJobDetailGroups(item || {}));
+            } else if (tab === "admin-audits") {
+                renderDetailCards([
+                    {
+                        title: "审计摘要",
+                        items: [
+                            ["管理员", item.actor_username || item.actor_user_id],
+                            ["操作动作", formatLogStatusLabel(item.action)],
+                            ["风险等级", formatLogStatusLabel(item.risk_level)],
+                            ["摘要", item.summary],
+                            ["时间", formatDate(item.created_at)],
+                        ],
+                    },
+                    {
+                        title: "对象上下文",
+                        items: [
+                            ["对象类型", formatLogStatusLabel(item.entity_type)],
+                            ["对象 ID", item.entity_id],
+                            ["对象名称", item.entity_name],
+                            ["目标用户 ID", item.target_user_id],
+                            ["请求 Trace", item.request_trace_id],
+                            ["来源 IP", item.source_ip],
+                        ],
+                    },
+                    {
+                        title: "变更详情",
+                        items: [
+                            ["变更前", item.before_json],
+                            ["变更后", item.after_json],
+                            ["变更字段", item.changed_fields_json],
+                            ["详情", item.detail_json],
+                        ],
+                    },
+                ]);
+            } else if (tab === "user-operations") {
+                renderDetailCards([
+                    {
+                        title: "操作摘要",
+                        items: [
+                            ["用户", item.username || item.user_account_id],
+                            ["操作动作", formatLogStatusLabel(item.action)],
+                            ["结果", formatLogStatusLabel(item.result)],
+                            ["摘要", item.summary],
+                            ["时间", formatDate(item.created_at)],
+                        ],
+                    },
+                    {
+                        title: "对象上下文",
+                        items: [
+                            ["对象类型", formatLogStatusLabel(item.entity_type)],
+                            ["对象 ID", item.entity_id],
+                            ["对象名称", item.entity_name],
+                            ["链路 ID", item.trace_id],
+                            ["来源 IP", item.source_ip],
+                        ],
+                    },
+                    {
+                        title: "详情",
+                        items: [
+                            ["详情 JSON", item.detail_json],
+                        ],
+                    },
+                ]);
+            } else if (tab === "alert-events") {
+                renderDetailCards([
+                    {
+                        title: "告警摘要",
+                        items: [
+                            ["告警键", item.alert_key],
+                            ["标题", item.title],
+                            ["消息", item.message],
+                            ["类型", formatLogStatusLabel(item.alert_type)],
+                            ["级别", formatLogStatusLabel(item.severity)],
+                            ["状态", formatLogStatusLabel(item.status)],
+                        ],
+                    },
+                    {
+                        title: "处理时间",
+                        items: [
+                            ["首次出现", formatDate(item.first_seen_at)],
+                            ["最近出现", formatDate(item.last_seen_at)],
+                            ["最近通知", formatDate(item.last_notified_at)],
+                            ["确认时间", formatDate(item.acknowledged_at)],
+                            ["解决时间", formatDate(item.resolved_at)],
+                        ],
+                    },
+                    {
+                        title: "告警载荷",
+                        items: [
+                            ["载荷 JSON", item.payload_json],
+                            ["创建时间", formatDate(item.created_at)],
+                            ["更新时间", formatDate(item.updated_at)],
+                        ],
+                    },
+                ]);
             } else if (tab === "asset-events") {
                 renderDetailCards([
                     {
@@ -14636,6 +16824,7 @@
                             ["内容类型", item.content_type],
                             ["文件大小", item.file_size_bytes == null ? "-" : formatBytes(item.file_size_bytes)],
                             ["哈希前缀", item.sha256_prefix],
+                            ["完整 SHA256", item.sha256_hex],
                         ],
                     },
                     {
@@ -14661,7 +16850,7 @@
                 renderDetailCards([
                     {
                         title: typedLogConfigs[tab]?.title || "日志详情",
-                        html: renderTypedFieldList(Object.entries(item || {}).slice(0, 24)),
+                        html: renderTypedFieldList(Object.entries(item || {})),
                     },
                 ]);
             }
@@ -14688,6 +16877,12 @@
             const success = document.getElementById("logs-success").value;
             const contentGuardResult = contentGuardResultInput.value;
             const contentGuardRiskLevel = contentGuardRiskLevelInput.value;
+            const contentGuardAction = contentGuardActionInput.value;
+            const contentGuardFinalStrategy = contentGuardFinalStrategyInput.value;
+            const contentGuardStage = contentGuardStageInput.value;
+            const contentGuardCategory = contentGuardCategoryInput.value.trim();
+            const contentGuardSwitchedProvider = contentGuardSwitchedProviderInput.value;
+            const contentGuardAdaptationSkipped = contentGuardAdaptationSkippedInput.value;
             const conversationKey = document.getElementById("logs-conversation-key").value.trim();
             const tenantName = tenantNameInput.value.trim();
             const projectName = projectNameInput.value.trim();
@@ -14706,6 +16901,12 @@
             if (success) params.set("success", success);
             if (contentGuardResult) params.set("content_guard_result", contentGuardResult);
             if (contentGuardRiskLevel) params.set("content_guard_risk_level", contentGuardRiskLevel);
+            if (contentGuardAction) params.set("content_guard_action", contentGuardAction);
+            if (contentGuardFinalStrategy) params.set("content_guard_final_strategy", contentGuardFinalStrategy);
+            if (contentGuardStage) params.set("content_guard_guard_stage", contentGuardStage);
+            if (contentGuardCategory) params.set("content_guard_category", contentGuardCategory);
+            if (contentGuardSwitchedProvider) params.set("content_guard_switched_provider", contentGuardSwitchedProvider);
+            if (contentGuardAdaptationSkipped) params.set("content_guard_adaptation_skipped", contentGuardAdaptationSkipped);
             if (conversationKey) params.set("conversation_key", conversationKey);
             if (tenantName) params.set("tenant_name", tenantName);
             if (projectName) params.set("project_name", projectName);
@@ -14714,13 +16915,11 @@
             params.set("exclude_health_checks", excludeHealthChecks ? "true" : "false");
             syncLoggingUrl(params, "request");
             params.set("_ts", Date.now().toString());
+            params.set("wait_for_latest", "true");
+            params.set("wait_timeout_ms", manual && feedbackSource === "refresh" ? "2000" : "1000");
             const loadSeq = ++requestLogLoadSeq;
             tableBody.innerHTML = '<tr><td colspan="7"><div class="empty-state">正在加载请求日志...</div></td></tr>';
             try {
-            if (manual && feedbackSource === "refresh") {
-                params.set("wait_for_latest", "true");
-                params.set("wait_timeout_ms", "2000");
-            }
             const data = await api.get(`/api/logs?${params.toString()}`);
                 if (loadSeq !== requestLogLoadSeq) return;
                 requestLogItems = data.items || [];
@@ -14766,9 +16965,14 @@
                     refreshFeedbackStatus = "success";
                 }
                 if (manual) {
-                    const queueSuffix = data.queue_timed_out
-                        ? `，但日志队列仍有 ${formatNumber((data.queued_request_logs || 0) + (data.processing_request_logs || 0))} 条待落库`
-                        : "";
+                    const queueBacklog = Number(data.queued_request_logs || 0) + Number(data.processing_request_logs || 0);
+                    const queueDeadLetter = Number(data.dead_letter_request_logs || 0);
+                    const queueFailures = Number(data.failed_request_log_writes || 0);
+                    const queueParts = [];
+                    if (data.queue_timed_out) queueParts.push(`日志队列仍有 ${formatNumber(queueBacklog)} 条待落库`);
+                    if (queueDeadLetter > 0) queueParts.push(`死信 ${formatNumber(queueDeadLetter)} 条`);
+                    if (queueFailures > 0) queueParts.push(`失败写入 ${formatNumber(queueFailures)} 次`);
+                    const queueSuffix = queueParts.length ? `，${queueParts.join("，")}` : "";
                     showToast(`日志已刷新，第 ${state.page} 页 / ${Math.max(1, Math.ceil((state.total || 0) / state.pageSize))} 页${queueSuffix}`);
                 }
             } catch (error) {
@@ -14789,87 +16993,89 @@
             }
         }
 
-        excludeHealthChecksInput.addEventListener("change", async () => {
-            state.page = 1;
+        if (requestLogsAvailable) {
+            excludeHealthChecksInput.addEventListener("change", async () => {
+                state.page = 1;
+                await loadFilterOptions();
+                await loadLogs();
+            });
+
+            tableBody.addEventListener("click", (event) => {
+                const button = event.target.closest('button[data-action]');
+                if (!button) return;
+                if (button.dataset.action === "open-conversation") {
+                    const conversationKey = decodeURIComponent(button.dataset.conversationKey);
+                    const target = `/conversations?conversation_key=${encodeURIComponent(conversationKey)}`;
+                    navigateWithinShell(target).catch(() => {
+                        window.location.href = target;
+                    });
+                    return;
+                }
+                if (button.dataset.action !== "show-trace") return;
+                const log = requestLogItems[Number.parseInt(button.dataset.index || "-1", 10)] || {};
+                const detail = {
+                    id: log.id,
+                    log_type: log.log_type,
+                    request_id: log.request_id,
+                    conversation_key: log.conversation_key,
+                    session_id: log.session_id,
+                    requested_model: log.requested_model,
+                    model_name: log.model_name,
+                    display_model: log.display_model,
+                    provider_name: log.provider_name,
+                    user_account_id: log.user_account_id,
+                    user_account_name: log.user_account_name,
+                    api_client_key_id: log.api_client_key_id,
+                    api_client_key_name: log.api_client_key_name,
+                    api_client_key_prefix: log.api_client_key_prefix,
+                    api_client_auth_result: log.api_client_auth_result,
+                    http_method: log.http_method,
+                    has_image_input: log.has_image_input,
+                    uses_image_generation: log.uses_image_generation,
+                    request_modality: log.request_modality,
+                    generated_images_count: log.generated_images_count,
+                    generated_image_mime_types: log.generated_image_mime_types,
+                    generated_image_approx_bytes: log.generated_image_approx_bytes,
+                    has_partial_generated_image: log.has_partial_generated_image,
+                    generated_image_result_truncated: log.generated_image_result_truncated,
+                    image_response_mode: log.image_response_mode,
+                    upstream_usage_missing: log.upstream_usage_missing,
+                    reasoning_level: log.reasoning_level,
+                    model_reasoning_effort: log.model_reasoning_effort,
+                    attempt_count: log.attempt_count,
+                    success: log.success,
+                    status_code: log.status_code,
+                    latency_ms: log.latency_ms,
+                    ttfb_ms: log.ttfb_ms,
+                    duration_ms: log.duration_ms,
+                    tps: log.tps,
+                    prompt_tokens: log.prompt_tokens,
+                    completion_tokens: log.completion_tokens,
+                    total_tokens: log.total_tokens,
+                    cache_read_tokens: log.cache_read_tokens,
+                    cache_write_tokens: log.cache_write_tokens,
+                    billing_multiplier: log.billing_multiplier,
+                    channel_price_input_per_1k: log.channel_price_input_per_1k,
+                    channel_price_output_per_1k: log.channel_price_output_per_1k,
+                    channel_price_cache_per_1k: log.channel_price_cache_per_1k,
+                    prompt_cost: log.prompt_cost,
+                    completion_cost: log.completion_cost,
+                    total_cost: log.total_cost,
+                    billing_calculation: formatBillingCalculation(log),
+                    finish_reason: log.finish_reason,
+                    upstream_request_id: log.upstream_request_id,
+                    request_body_json: safeJsonParse(log.request_body_json || "") ?? log.request_body_json,
+                    response_body_json: safeJsonParse(log.response_body_json || "") ?? log.response_body_json,
+                    response_text: log.response_text,
+                    trace: safeJsonParse(log.trace_json || "") ?? log.trace_json,
+                    created_at: log.created_at,
+                };
+                traceContent.textContent = formatLogRawJson(detail);
+                traceModalController.open(button);
+            });
+
             await loadFilterOptions();
-            await loadLogs();
-        });
-
-        tableBody.addEventListener("click", (event) => {
-            const button = event.target.closest('button[data-action]');
-            if (!button) return;
-            if (button.dataset.action === "open-conversation") {
-                const conversationKey = decodeURIComponent(button.dataset.conversationKey);
-                const target = `/conversations?conversation_key=${encodeURIComponent(conversationKey)}`;
-                navigateWithinShell(target).catch(() => {
-                    window.location.href = target;
-                });
-                return;
-            }
-            if (button.dataset.action !== "show-trace") return;
-            const log = requestLogItems[Number.parseInt(button.dataset.index || "-1", 10)] || {};
-            const detail = {
-                id: log.id,
-                log_type: log.log_type,
-                request_id: log.request_id,
-                conversation_key: log.conversation_key,
-                session_id: log.session_id,
-                requested_model: log.requested_model,
-                model_name: log.model_name,
-                display_model: log.display_model,
-                provider_name: log.provider_name,
-                user_account_id: log.user_account_id,
-                user_account_name: log.user_account_name,
-                api_client_key_id: log.api_client_key_id,
-                api_client_key_name: log.api_client_key_name,
-                api_client_key_prefix: log.api_client_key_prefix,
-                api_client_auth_result: log.api_client_auth_result,
-                http_method: log.http_method,
-                has_image_input: log.has_image_input,
-                uses_image_generation: log.uses_image_generation,
-                request_modality: log.request_modality,
-                generated_images_count: log.generated_images_count,
-                generated_image_mime_types: log.generated_image_mime_types,
-                generated_image_approx_bytes: log.generated_image_approx_bytes,
-                has_partial_generated_image: log.has_partial_generated_image,
-                generated_image_result_truncated: log.generated_image_result_truncated,
-                image_response_mode: log.image_response_mode,
-                upstream_usage_missing: log.upstream_usage_missing,
-                reasoning_level: log.reasoning_level,
-                model_reasoning_effort: log.model_reasoning_effort,
-                attempt_count: log.attempt_count,
-                success: log.success,
-                status_code: log.status_code,
-                latency_ms: log.latency_ms,
-                ttfb_ms: log.ttfb_ms,
-                duration_ms: log.duration_ms,
-                tps: log.tps,
-                prompt_tokens: log.prompt_tokens,
-                completion_tokens: log.completion_tokens,
-                total_tokens: log.total_tokens,
-                cache_read_tokens: log.cache_read_tokens,
-                cache_write_tokens: log.cache_write_tokens,
-                billing_multiplier: log.billing_multiplier,
-                channel_price_input_per_1k: log.channel_price_input_per_1k,
-                channel_price_output_per_1k: log.channel_price_output_per_1k,
-                channel_price_cache_per_1k: log.channel_price_cache_per_1k,
-                prompt_cost: log.prompt_cost,
-                completion_cost: log.completion_cost,
-                total_cost: log.total_cost,
-                billing_calculation: formatBillingCalculation(log),
-                finish_reason: log.finish_reason,
-                upstream_request_id: log.upstream_request_id,
-                request_body_json: safeJsonParse(log.request_body_json || "") ?? log.request_body_json,
-                response_body_json: safeJsonParse(log.response_body_json || "") ?? log.response_body_json,
-                response_text: log.response_text,
-                trace: safeJsonParse(log.trace_json || "") ?? log.trace_json,
-                created_at: log.created_at,
-            };
-            traceContent.textContent = formatLogRawJson(detail);
-            traceModalController.open(button);
-        });
-
-        await loadFilterOptions();
+        }
         setActiveLoggingTab(state.activeTab);
     }
 
@@ -15661,7 +17867,17 @@
         if (!root) return;
         const refreshBtn = document.getElementById("operations-refresh-btn");
         const windowSelect = document.getElementById("operations-window-minutes");
+        const bandwidthInput = document.getElementById("operations-network-bandwidth-mbps");
+        const bandwidthApplyBtn = document.getElementById("operations-network-bandwidth-apply-btn");
+        const bandwidthSourceNode = document.getElementById("operations-network-bandwidth-source");
         let loading = false;
+        const bandwidthStorageKey = "operationsNetworkBandwidthMbps";
+        try {
+            const savedBandwidth = window.localStorage?.getItem(bandwidthStorageKey);
+            if (bandwidthInput && savedBandwidth) bandwidthInput.value = savedBandwidth;
+        } catch (_) {
+            // localStorage 可能被隐私模式禁用，忽略即可。
+        }
 
         const setText = (id, value) => {
             const node = document.getElementById(id);
@@ -15738,6 +17954,260 @@
                     </tr>
                 `;
             }).join("");
+        }
+
+        const CONFIG_SETTING_LABELS = {
+            global_qps_limit: "全局 QPS",
+            global_rpm_limit: "全局 RPM",
+            account_qps_limit: "账户 QPS",
+            account_rpm_limit: "账户 RPM",
+            global_max_active_requests: "全局请求",
+            global_max_active_streams: "全局流式",
+            api_key_max_active_requests: "密钥请求",
+            api_key_max_active_streams: "密钥流式",
+            account_max_active_requests: "账户请求",
+            account_max_active_streams: "账户流式",
+            provider_max_active_requests: "提供商请求",
+            provider_max_active_streams: "提供商流式",
+            concurrency_lease_ttl_seconds: "租约 TTL s",
+            stream_connect_timeout_seconds: "连接超时 s",
+            stream_first_token_timeout_seconds: "首包超时 s",
+            stream_idle_timeout_seconds: "空闲超时 s",
+            stream_max_duration_seconds: "最长流式 s",
+            max_v1_request_body_bytes: "请求体 B",
+            max_v1_chat_request_body_bytes: "Chat 请求体 B",
+            max_v1_responses_request_body_bytes: "Responses 请求体 B",
+            long_output_stream_threshold_tokens: "长输出 token",
+            max_non_stream_response_body_bytes: "非流式响应 B",
+            stream_token_capture_max_bytes: "流式捕获 B",
+            max_logged_metadata_bytes: "日志元数据 B",
+            max_logged_body_bytes: "日志正文 B",
+            async_request_logging: "异步日志",
+            max_candidate_count: "候选数",
+            route_candidate_expand_count: "候选扩展数",
+            route_candidate_cache_ttl_sec: "路由缓存 s",
+            model_list_cache_ttl_sec: "模型缓存 s",
+            provider_status_cache_ttl_sec: "状态缓存 s",
+        };
+
+        const ENV_SETTING_LABELS = {
+            WEB_CONCURRENCY: "Web worker",
+            DB_POOL_SIZE: "数据库连接池",
+            DB_MAX_OVERFLOW: "连接池溢出",
+            REDIS_MAX_CONNECTIONS: "Redis 连接",
+            REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS: "Redis 连接超时 s",
+            REDIS_SOCKET_TIMEOUT_SECONDS: "Redis 读写超时 s",
+            ENABLE_BACKGROUND_WORKERS: "Web 内后台",
+            ASYNC_REQUEST_LOG_ENABLED: "异步请求日志",
+            REQUEST_LOG_QUEUE_WORKER_COUNT: "日志队列 worker",
+            REQUEST_LOG_QUEUE_BATCH_SIZE: "日志批量",
+            REQUEST_LOG_INGRESS_QUEUE_SIZE: "日志入口队列",
+            LOGGING_EVENT_QUEUE_WORKER_COUNT: "事件队列 worker",
+            LOGGING_EVENT_QUEUE_BATCH_SIZE: "事件批量",
+            TOKEN_FINALIZE_WORKER_COUNT: "计费补全 worker",
+            TOKEN_FINALIZE_QUEUE_SIZE: "计费队列",
+            WORKER_THREADPOOL_TOKENS: "线程池令牌",
+            REQUEST_TIMEOUT_MS: "请求超时 ms",
+            V1_REQUEST_BODY_IDLE_TIMEOUT_SECONDS: "请求体空闲超时 s",
+            UPSTREAM_MAX_CONNECTIONS: "上游总连接",
+            UPSTREAM_MAX_KEEPALIVE_CONNECTIONS: "上游保活连接",
+            UPSTREAM_POOL_TIMEOUT_S: "上游池等待 s",
+            UPSTREAM_KEEPALIVE_EXPIRY_SECONDS: "上游保活 s",
+            UPSTREAM_DNS_CACHE_TTL_SECONDS: "DNS 缓存 s",
+            UPSTREAM_REQUESTS_POOL_BLOCK: "上游池阻塞",
+            ROUTE_CAPACITY_PREFILTER_ENABLED: "容量预筛",
+        };
+
+        const CONFIG_BOTTLENECK_LABELS = {
+            cpu: "CPU",
+            memory: "内存",
+            database: "数据库",
+            upstream: "上游连接",
+            bandwidth: "出口带宽",
+            active_ratio: "请求比例",
+            profile_cap: "方案上限",
+        };
+
+        const NETWORK_SOURCE_LABELS = {
+            manual: "手动输入",
+            required: "待输入",
+        };
+
+        function readOperationsBandwidthMbps() {
+            const value = Number(bandwidthInput?.value || 0);
+            return Number.isFinite(value) && value > 0 ? Math.min(100000, value) : 0;
+        }
+
+        function persistOperationsBandwidthMbps() {
+            const value = readOperationsBandwidthMbps();
+            try {
+                if (value > 0) {
+                    window.localStorage?.setItem(bandwidthStorageKey, String(value));
+                } else {
+                    window.localStorage?.removeItem(bandwidthStorageKey);
+                }
+            } catch (_) {
+                // localStorage 不可用时仍允许本次输入参与计算。
+            }
+            return value;
+        }
+
+        function configurationDisplayValue(value) {
+            if (typeof value === "boolean") return value ? "开启" : "关闭";
+            if (typeof value === "number") return formatNumber(value);
+            return value ?? "-";
+        }
+
+        function updateBandwidthSourceLabel(recommendations) {
+            if (!bandwidthSourceNode) return;
+            const detected = recommendations?.detected || {};
+            const source = detected.network_bandwidth_source || (readOperationsBandwidthMbps() > 0 ? "manual" : "required");
+            const bandwidth = Number(detected.network_bandwidth_mbps || readOperationsBandwidthMbps() || 0);
+            const pressure = detected.network_pressure || {};
+            const pressureText = pressure.available && typeof pressure.observed_mbps === "number"
+                ? ` · 当前 ${formatNumber(pressure.observed_mbps)} Mbps`
+                : "";
+            bandwidthSourceNode.textContent = bandwidth > 0
+                ? `${NETWORK_SOURCE_LABELS[source] || source} · ${formatNumber(bandwidth)} Mbps${pressureText}`
+                : "无法自动获取公网带宽，请输入后计算";
+        }
+
+        function renderConfigurationRecommendations(recommendations) {
+            const summary = document.getElementById("operations-config-summary");
+            const profileList = document.getElementById("operations-config-profile-list");
+            const envList = document.getElementById("operations-config-env-list");
+            if (!summary || !profileList || !envList) return;
+            updateBandwidthSourceLabel(recommendations);
+            if (!recommendations || recommendations.available === false) {
+                summary.textContent = recommendations?.reason || "暂无可用宿主信息";
+                profileList.innerHTML = recommendations?.requires_network_bandwidth
+                    ? '<div class="empty-state">请输入出口带宽 Mbps 后计算宿主方案</div>'
+                    : '<div class="empty-state">无法生成配置方案</div>';
+                envList.innerHTML = '<div class="empty-state">暂无运行时建议</div>';
+                return;
+            }
+            const detected = recommendations.detected || {};
+            summary.textContent = [
+                recommendations.host_class || "未知档位",
+                `${formatNumber(detected.cpu_count || 0)} 核`,
+                formatBytes(detected.memory_total_bytes),
+                detected.network_bandwidth_mbps ? `${formatNumber(detected.network_bandwidth_mbps)} Mbps` : "",
+                detected.memory_available_bytes ? `可用 ${formatBytes(detected.memory_available_bytes)}` : "",
+            ].filter(Boolean).join(" · ");
+            const profiles = Array.isArray(recommendations.profiles) ? recommendations.profiles : [];
+            profileList.innerHTML = profiles.map((profile) => renderConfigurationProfile(profile)).join("")
+                || '<div class="empty-state">暂无配置方案</div>';
+            const recommendedProfile = profiles.find((profile) => profile.id === recommendations.recommended_profile_id) || profiles[0];
+            renderConfigurationEnvSuggestions(recommendedProfile?.env_suggestions || {});
+        }
+
+        function renderConfigurationProfile(profile) {
+            const capacity = profile.estimated_capacity || {};
+            const diff = profile.settings_diff || {};
+            const basis = profile.calculation_basis || {};
+            const networkKbps = basis.per_request_network_kbps || {};
+            const hasCalculationBasis = Boolean(basis.active_bottleneck || basis.stream_bottleneck || basis.limits);
+            const activeLimits = basis.limits?.active || {};
+            const streamLimits = basis.limits?.stream || {};
+            const explanations = Array.isArray(profile.explanations) ? profile.explanations : [];
+            const basisRows = hasCalculationBasis ? [
+                ["请求瓶颈", CONFIG_BOTTLENECK_LABELS[basis.active_bottleneck] || basis.active_bottleneck || "-"],
+                ["流式瓶颈", CONFIG_BOTTLENECK_LABELS[basis.stream_bottleneck] || basis.stream_bottleneck || "-"],
+                ["带宽来源", NETWORK_SOURCE_LABELS[basis.network_bandwidth_source] || basis.network_bandwidth_source || "-"],
+                ["出口带宽", basis.network_bandwidth_mbps == null ? null : `${formatNumber(basis.network_bandwidth_mbps)} Mbps`],
+                ["可用带宽", basis.usable_bandwidth_mbps == null ? null : `${formatNumber(basis.usable_bandwidth_mbps)} Mbps`],
+                ["非流式带宽", networkKbps.non_stream == null ? null : `${formatNumber(networkKbps.non_stream)} kbps`],
+                ["流式带宽", networkKbps.stream == null ? null : `${formatNumber(networkKbps.stream)} kbps`],
+                ["可用预算", formatBytes(basis.usable_memory_bytes)],
+                ["请求内存", formatBytes(basis.per_request_memory_bytes?.mixed)],
+                ["CPU 请求", activeLimits.cpu],
+                ["内存请求", activeLimits.memory],
+                ["DB 请求", activeLimits.database],
+                ["上游请求", activeLimits.upstream],
+                ["带宽请求", activeLimits.bandwidth],
+                ["CPU 流式", streamLimits.cpu],
+                ["内存流式", streamLimits.memory],
+                ["DB 流式", streamLimits.database],
+                ["上游流式", streamLimits.upstream],
+                ["带宽流式", streamLimits.bandwidth],
+            ].filter(([, value]) => value !== undefined && value !== null && value !== "" && value !== "-") : [];
+            const diffRows = Object.entries(diff).map(([key, item]) => {
+                const current = configurationDisplayValue(item?.current);
+                const recommended = configurationDisplayValue(item?.recommended);
+                const changed = String(current) !== String(recommended);
+                return `
+                    <div class="operations-config-diff-row" data-changed="${changed ? "true" : "false"}">
+                        <span>${escapeHtml(CONFIG_SETTING_LABELS[key] || key)}</span>
+                        <strong>${escapeHtml(current)} → ${escapeHtml(recommended)}</strong>
+                    </div>
+                `;
+            }).join("");
+            return `
+                <article class="operations-profile-card" data-recommended="${profile.recommended ? "true" : "false"}">
+                    <div class="operations-profile-head">
+                        <div>
+                            <h4>${escapeHtml(profile.name || profile.id || "-")}</h4>
+                            <span>${escapeHtml(profile.summary || "")}</span>
+                        </div>
+                        ${profile.recommended ? '<b class="operations-profile-badge">推荐</b>' : ""}
+                    </div>
+                    <div class="operations-capacity-grid">
+                        <div><span>非流式稳定</span><strong>${formatNumber(capacity.non_stream_stable || 0)}</strong></div>
+                        <div><span>非流式峰值</span><strong>${formatNumber(capacity.non_stream_peak || 0)}</strong></div>
+                        <div><span>流式稳定</span><strong>${formatNumber(capacity.stream_stable || 0)}</strong></div>
+                        <div><span>流式峰值</span><strong>${formatNumber(capacity.stream_peak || 0)}</strong></div>
+                    </div>
+                    <div class="operations-basis-grid">
+                        ${basisRows.length ? basisRows.map(([label, value]) => `
+                            <div>
+                                <span>${escapeHtml(label)}</span>
+                                <strong>${escapeHtml(typeof value === "number" ? formatNumber(value) : value)}</strong>
+                            </div>
+                        `).join("") : '<div class="operations-basis-stale"><span>瓶颈依据</span><strong>后端需重启后刷新</strong></div>'}
+                    </div>
+                    ${explanations.length ? `
+                        <div class="operations-profile-explanations">
+                            ${explanations.map((item) => `<p>${escapeHtml(item)}</p>`).join("")}
+                        </div>
+                    ` : ""}
+                    <div class="operations-config-diff">${diffRows}</div>
+                    <div class="operations-profile-actions">
+                        <button class="table-action-btn interactive-btn" type="button" data-action="apply-operations-profile" data-profile-id="${escapeHtml(profile.id || "")}">套用</button>
+                    </div>
+                </article>
+            `;
+        }
+
+        function renderConfigurationEnvSuggestions(suggestions) {
+            const envList = document.getElementById("operations-config-env-list");
+            if (!envList) return;
+            const entries = Object.entries(suggestions || {});
+            envList.innerHTML = entries.map(([key, value]) => `
+                <div class="operations-env-item">
+                    <span>${escapeHtml(ENV_SETTING_LABELS[key] || key)}</span>
+                    <strong>${escapeHtml(configurationDisplayValue(value))}</strong>
+                    <code>${escapeHtml(key)}</code>
+                    <em>重启生效</em>
+                </div>
+            `).join("") || '<div class="empty-state">暂无运行时建议</div>';
+        }
+
+        async function applyConfigurationProfile(profileId, button) {
+            if (!profileId || !button) return;
+            try {
+                setButtonLoading(button, true);
+                const bandwidth = persistOperationsBandwidthMbps();
+                const query = bandwidth > 0 ? `?network_bandwidth_mbps=${encodeURIComponent(bandwidth)}` : "";
+                await api.post(`/api/metrics/system/configuration-profiles/${encodeURIComponent(profileId)}/apply${query}`, {});
+                setButtonTransientFeedback(button, "success", { successText: "已套用" });
+                showToast("宿主推荐配置已套用");
+                await loadOperationsMetrics(false);
+            } catch (error) {
+                setButtonTransientFeedback(button, "error", { errorText: "失败" });
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(button, false);
+            }
         }
 
         function renderMetrics(metrics) {
@@ -15871,6 +18341,7 @@
                 maxPoints: 72,
             });
             renderProviders(metrics.providers || []);
+            renderConfigurationRecommendations(metrics.configuration_recommendations);
         }
 
         function formatOperationsStatusLabel(value) {
@@ -15908,6 +18379,7 @@
         }
 
         async function loadOperationsMetrics(manual = false) {
+            if (!manual && document.visibilityState === "hidden") return;
             if (loading) return;
             loading = true;
             try {
@@ -15915,7 +18387,13 @@
                 const windowMinutes = Number(windowSelect?.value || 5);
                 // 性能优化：仅手动刷新时写入告警表，自动轮询时不写入
                 const refreshAlerts = manual ? "true" : "false";
-                const metrics = await api.get(`/api/metrics/system?window_minutes=${encodeURIComponent(windowMinutes)}&refresh_alerts=${refreshAlerts}`);
+                const params = new URLSearchParams({
+                    window_minutes: String(windowMinutes),
+                    refresh_alerts: refreshAlerts,
+                });
+                const bandwidth = readOperationsBandwidthMbps();
+                if (bandwidth > 0) params.set("network_bandwidth_mbps", String(bandwidth));
+                const metrics = await api.get(`/api/metrics/system?${params.toString()}`);
                 renderMetrics(metrics);
                 if (manual) {
                     setButtonTransientFeedback(refreshBtn, "success", { successText: "已刷新" });
@@ -15934,15 +18412,609 @@
 
         refreshBtn?.addEventListener("click", () => loadOperationsMetrics(true));
         windowSelect?.addEventListener("change", () => loadOperationsMetrics(false));
+        bandwidthApplyBtn?.addEventListener("click", () => {
+            persistOperationsBandwidthMbps();
+            loadOperationsMetrics(true);
+        });
+        bandwidthInput?.addEventListener("keydown", (event) => {
+            if (event.key !== "Enter") return;
+            persistOperationsBandwidthMbps();
+            loadOperationsMetrics(true);
+        });
+        document.getElementById("operations-config-profile-list")?.addEventListener("click", (event) => {
+            const button = event.target.closest('[data-action="apply-operations-profile"]');
+            if (!button) return;
+            applyConfigurationProfile(button.dataset.profileId || "", button);
+        });
         await loadOperationsMetrics(false);
         // 性能优化：从5秒改为15秒轮询，减少66%的请求
         const timer = window.setInterval(() => loadOperationsMetrics(false), 15000);
         registerPageCleanup(() => window.clearInterval(timer));
     }
 
+    async function initIpManagementPage() {
+        const refreshBtn = document.getElementById("ip-management-refresh-btn");
+        const settingsForm = document.getElementById("ip-settings-form");
+        const settingsSaveBtn = document.getElementById("ip-settings-save-btn");
+        const rulesBody = document.getElementById("ip-rule-body");
+        const eventsBody = document.getElementById("ip-event-body");
+        const ruleFilterForm = document.getElementById("ip-rule-filter-form");
+        const eventFilterForm = document.getElementById("ip-event-filter-form");
+        const rulePagination = document.getElementById("ip-rule-pagination");
+        const eventPagination = document.getElementById("ip-event-pagination");
+        const ruleModal = document.getElementById("ip-rule-modal");
+        const ruleForm = document.getElementById("ip-rule-form");
+        const ruleModalTitle = document.getElementById("ip-rule-modal-title");
+        const ruleModalClose = document.getElementById("ip-rule-modal-close");
+        const ruleSubmitBtn = document.getElementById("ip-rule-submit-btn");
+        const resolutionTestForm = document.getElementById("ip-resolution-test-form");
+        const ruleTestForm = document.getElementById("ip-rule-test-form");
+        const resolutionTestResult = document.getElementById("ip-resolution-test-result");
+        const ruleTestResult = document.getElementById("ip-rule-test-result");
+        const cleanupBtn = document.getElementById("ip-event-cleanup-btn");
+        const newRuleBtn = document.getElementById("ip-rule-new-btn");
+        const tabButtons = Array.from(document.querySelectorAll("[data-ip-tab]"));
+        const tabPanels = Array.from(document.querySelectorAll("[data-ip-panel]"));
+        const state = {
+            activeTab: "settings",
+            overview: null,
+            settings: null,
+            rules: [],
+            events: [],
+            rulePage: 1,
+            rulePageSize: 20,
+            ruleTotal: 0,
+            eventPage: 1,
+            eventPageSize: 20,
+            eventTotal: 0,
+        };
+        const booleanFields = [
+            "enabled",
+            "observe_only_enabled",
+            "trusted_proxy_resolution_enabled",
+            "apply_external_v1_enabled",
+            "apply_internal_api_enabled",
+            "apply_user_pages_enabled",
+            "rule_engine_enabled",
+            "block_action_enabled",
+            "rate_limit_enabled",
+            "event_logging_enabled",
+            "store_raw_headers_enabled",
+            "ip_masking_enabled",
+            "fail_open_enabled",
+        ];
+        const scopeLabels = {
+            external_v1: "/v1/*",
+            internal_api: "/api/*",
+            user_pages: "用户端",
+            all: "全部",
+        };
+        const matchTypeLabels = {
+            exact_ip: "精确 IP",
+            cidr: "CIDR",
+            range: "IP 范围",
+        };
+        const actionLabels = {
+            allow: "放行",
+            record: "记录",
+            rate_limit: "限流",
+            block: "阻断",
+        };
+        const resolutionStatusLabels = {
+            disabled: "解析关闭",
+            direct: "直连来源",
+            trusted_proxy: "可信代理",
+            all_forwarded_entries_trusted: "全链可信",
+            untrusted_header_ignored: "未信任头已忽略",
+            invalid_header_ignored: "无效头已忽略",
+            trusted_proxy_no_valid_header: "无有效转发头",
+            invalid_direct_client: "直连 IP 无效",
+        };
+
+        const textLines = (value) => String(value || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+        const setText = (id, value) => {
+            const node = document.getElementById(id);
+            if (node) node.textContent = value;
+        };
+        const labelOf = (labels, value) => labels[String(value || "")] || String(value || "-");
+        const checked = (name) => Boolean(document.getElementById(`ip-setting-${name}`)?.checked);
+        const selectValues = (node) => Array.from(node?.selectedOptions || []).map((option) => option.value).filter(Boolean);
+        const toIsoOrEmpty = (value) => {
+            const raw = String(value || "").trim();
+            if (!raw) return "";
+            const date = new Date(raw);
+            return Number.isNaN(date.getTime()) ? "" : date.toISOString();
+        };
+        const buildQuery = (params) => {
+            const query = new URLSearchParams();
+            Object.entries(params).forEach(([key, value]) => {
+                if (value === undefined || value === null || value === "") return;
+                query.set(key, String(value));
+            });
+            const text = query.toString();
+            return text ? `?${text}` : "";
+        };
+        const statusBadge = (text, tone = "unknown") => `<span class="status-badge status-${escapeHtml(tone)}">${escapeHtml(text)}</span>`;
+        const helpAttrs = (title, copy) => `data-settings-tooltip-trigger="true" data-settings-tooltip-title="${escapeHtml(title)}" data-settings-tooltip-copy="${escapeHtml(copy)}"`;
+        const actionHelpIcon = '<i class="bi bi-question-circle ip-action-help-icon" aria-hidden="true"></i>';
+        const renderJson = (node, value) => {
+            if (node) node.textContent = JSON.stringify(value, null, 2);
+        };
+
+        function activateTab(tabName) {
+            const normalized = tabName || "settings";
+            state.activeTab = normalized;
+            tabButtons.forEach((button) => {
+                const active = button.dataset.ipTab === normalized;
+                button.classList.toggle("is-active", active);
+                button.setAttribute("aria-selected", active ? "true" : "false");
+            });
+            tabPanels.forEach((panel) => {
+                panel.hidden = panel.dataset.ipPanel !== normalized;
+            });
+        }
+
+        function fillSettings(settings) {
+            state.settings = settings || {};
+            booleanFields.forEach((field) => {
+                const input = document.getElementById(`ip-setting-${field}`);
+                if (input) input.checked = Boolean(state.settings[field]);
+            });
+            const cidrs = document.getElementById("ip-setting-trusted-proxy-cidrs");
+            if (cidrs) cidrs.value = Array.isArray(state.settings.trusted_proxy_cidrs) ? state.settings.trusted_proxy_cidrs.join("\n") : "";
+            const headerOrder = document.getElementById("ip-setting-trusted-header-order");
+            if (headerOrder) {
+                const selected = new Set(Array.isArray(state.settings.trusted_header_order) ? state.settings.trusted_header_order : []);
+                Array.from(headerOrder.options).forEach((option) => {
+                    option.selected = selected.has(option.value);
+                });
+            }
+            const testHeaderOrder = document.getElementById("ip-test-trusted-header-order");
+            if (testHeaderOrder) {
+                const selected = new Set(Array.isArray(state.settings.trusted_header_order) ? state.settings.trusted_header_order : []);
+                Array.from(testHeaderOrder.options).forEach((option) => {
+                    option.selected = selected.has(option.value);
+                });
+            }
+            const sampleRate = document.getElementById("ip-setting-event-sample-rate");
+            if (sampleRate) sampleRate.value = String(state.settings.event_sample_rate ?? 100);
+            const retentionDays = document.getElementById("ip-setting-event-retention-days");
+            if (retentionDays) retentionDays.value = String(state.settings.event_retention_days ?? 30);
+        }
+
+        function readSettings() {
+            const headerOrder = document.getElementById("ip-setting-trusted-header-order");
+            const payload = {};
+            booleanFields.forEach((field) => {
+                payload[field] = checked(field);
+            });
+            payload.trusted_proxy_cidrs = textLines(document.getElementById("ip-setting-trusted-proxy-cidrs")?.value);
+            payload.trusted_header_order = selectValues(headerOrder);
+            payload.event_sample_rate = Number(document.getElementById("ip-setting-event-sample-rate")?.value || 100);
+            payload.event_retention_days = Number(document.getElementById("ip-setting-event-retention-days")?.value || 30);
+            return payload;
+        }
+
+        function renderOverview(data) {
+            const settings = data?.settings || {};
+            const summary = data?.summary || {};
+            state.overview = data || null;
+            fillSettings(settings);
+            setText("ip-metric-enabled", settings.enabled ? "开启" : "关闭");
+            setText("ip-metric-rule-count", formatNumber(summary.rule_count || 0));
+            setText("ip-metric-enabled-rule-count", formatNumber(summary.enabled_rule_count || 0));
+            setText("ip-metric-event-count", formatNumber(summary.event_count || 0));
+            setText("ip-metric-block-count", formatNumber(summary.recent_block_count || 0));
+            setText("ip-metric-rate-count", formatNumber(summary.recent_rate_limit_count || 0));
+            setText("ip-metric-trusted-count", formatNumber(summary.recent_trusted_proxy_hit_count || 0));
+            setText("ip-metric-invalid-count", formatNumber(summary.recent_invalid_header_ignored_count || 0));
+        }
+
+        async function loadOverview() {
+            renderOverview(await api.get("/api/ip-management/overview"));
+        }
+
+        function ruleFilterParams() {
+            return {
+                keyword: document.getElementById("ip-rule-keyword")?.value.trim(),
+                scope: document.getElementById("ip-rule-scope")?.value,
+                action: document.getElementById("ip-rule-action")?.value,
+                enabled: document.getElementById("ip-rule-enabled")?.value,
+                page: state.rulePage,
+                page_size: state.rulePageSize,
+            };
+        }
+
+        function eventFilterParams() {
+            return {
+                keyword: document.getElementById("ip-event-keyword")?.value.trim(),
+                ip: document.getElementById("ip-event-ip")?.value.trim(),
+                scope: document.getElementById("ip-event-scope")?.value,
+                decision: document.getElementById("ip-event-decision")?.value,
+                status_code: document.getElementById("ip-event-status-code")?.value,
+                started_at: toIsoOrEmpty(document.getElementById("ip-event-started-at")?.value),
+                ended_at: toIsoOrEmpty(document.getElementById("ip-event-ended-at")?.value),
+                page: state.eventPage,
+                page_size: state.eventPageSize,
+            };
+        }
+
+        function renderPager(container, { page, pageSize, total, onPrev, onNext }) {
+            if (!container) return;
+            const totalPages = Math.max(1, Math.ceil(Number(total || 0) / Number(pageSize || 20)));
+            container.innerHTML = `
+                <span>第 ${formatNumber(page)} / ${formatNumber(totalPages)} 页，共 ${formatNumber(total || 0)} 条</span>
+                <div>
+                    <button class="table-action-btn interactive-btn" type="button" data-page-action="prev" ${page <= 1 ? "disabled" : ""} ${helpAttrs("上一页说明", "切换到当前列表的上一页。仅影响列表浏览，不会修改任何规则或事件数据。")}>上一页 ${actionHelpIcon}</button>
+                    <button class="table-action-btn interactive-btn" type="button" data-page-action="next" ${page >= totalPages ? "disabled" : ""} ${helpAttrs("下一页说明", "切换到当前列表的下一页。若按钮不可用，表示已经到达最后一页或没有更多数据。")}>下一页 ${actionHelpIcon}</button>
+                </div>
+            `;
+            container.querySelector('[data-page-action="prev"]')?.addEventListener("click", onPrev);
+            container.querySelector('[data-page-action="next"]')?.addEventListener("click", onNext);
+            enhanceInteractiveButtons(container);
+        }
+
+        function renderRules(items) {
+            if (!rulesBody) return;
+            state.rules = Array.isArray(items) ? items : [];
+            if (!state.rules.length) {
+                rulesBody.innerHTML = '<tr><td colspan="8"><div class="empty-state">暂无 IP 规则</div></td></tr>';
+                scheduleResponsiveTableSync(document);
+                return;
+            }
+            rulesBody.innerHTML = state.rules.map((rule) => `
+                <tr>
+                    <td><strong>${escapeHtml(rule.name || "-")}</strong><div class="table-muted">${escapeHtml(rule.reason || "-")}</div></td>
+                    <td>${statusBadge(rule.enabled ? "启用" : "停用", rule.enabled ? "healthy" : "unknown")}</td>
+                    <td>${escapeHtml(labelOf(scopeLabels, rule.scope))}</td>
+                    <td><strong>${escapeHtml(labelOf(matchTypeLabels, rule.match_type))}</strong><div class="table-muted">${escapeHtml(rule.normalized_value || rule.match_value || "-")}</div></td>
+                    <td>${statusBadge(labelOf(actionLabels, rule.action), rule.action === "block" ? "unhealthy" : (rule.action === "rate_limit" ? "degraded" : "healthy"))}</td>
+                    <td>QPS ${formatNumber(rule.rate_qps_limit || 0)} / RPM ${formatNumber(rule.rate_rpm_limit || 0)}</td>
+                    <td>${formatNumber(rule.priority || 0)}</td>
+                    <td>
+                        <div class="table-actions">
+                            <button class="table-action-btn interactive-btn" type="button" data-ip-rule-action="edit" data-id="${rule.id}" ${helpAttrs("编辑规则说明", "打开当前规则表单并修改名称、状态、作用域、匹配值、动作、限流和原因。保存后才会生效。")}>编辑 ${actionHelpIcon}</button>
+                            <button class="table-action-btn interactive-btn" type="button" data-ip-rule-action="toggle" data-id="${rule.id}" ${helpAttrs(rule.enabled ? "停用规则说明" : "启用规则说明", rule.enabled ? "让当前规则停止参与后续匹配，但保留配置和历史事件，适合临时回滚或灰度下线。" : "让当前规则参与后续匹配。启用前请确认作用域、优先级和动作不会误伤正常来源。")}>${rule.enabled ? "停用" : "启用"} ${actionHelpIcon}</button>
+                            <button class="table-action-btn interactive-btn" type="button" data-ip-rule-action="test" data-id="${rule.id}" ${helpAttrs("测试规则说明", "把当前规则的代表 IP 和作用域带入测试分区，用于验证规则匹配结果；不会真实执行阻断或限流。")}>测试 ${actionHelpIcon}</button>
+                            <button class="table-action-btn interactive-btn danger" type="button" data-ip-rule-action="delete" data-id="${rule.id}" ${helpAttrs("删除规则说明", "永久删除当前 IP 规则。删除前会二次确认；删除后该规则不再参与匹配，历史事件仍可用于追溯。")}>删除 ${actionHelpIcon}</button>
+                        </div>
+                    </td>
+                </tr>
+            `).join("");
+            enhanceInteractiveButtons(rulesBody);
+            scheduleResponsiveTableSync(document);
+        }
+
+        function renderEvents(items) {
+            if (!eventsBody) return;
+            state.events = Array.isArray(items) ? items : [];
+            if (!state.events.length) {
+                eventsBody.innerHTML = '<tr><td colspan="9"><div class="empty-state">暂无 IP 管理事件</div></td></tr>';
+                scheduleResponsiveTableSync(document);
+                return;
+            }
+            eventsBody.innerHTML = state.events.map((event) => `
+                <tr>
+                    <td>${escapeHtml(formatDate(event.created_at))}</td>
+                    <td>${escapeHtml(event.display_client_ip || event.resolved_client_ip || "-")}</td>
+                    <td>${escapeHtml(event.direct_client_ip || "-")}</td>
+                    <td><span class="ip-management-path">${escapeHtml(event.http_method || "-")} ${escapeHtml(event.request_path || "-")}</span><div class="table-muted">${escapeHtml(labelOf(resolutionStatusLabels, event.resolution_status))}</div></td>
+                    <td>${statusBadge(labelOf(actionLabels, event.decision), event.decision === "block" ? "unhealthy" : (event.decision === "rate_limit" ? "degraded" : "healthy"))}</td>
+                    <td>${event.enforced ? statusBadge("已执行", "unhealthy") : statusBadge("未执行", "unknown")}</td>
+                    <td>${escapeHtml(event.matched_rule_name || "-")}</td>
+                    <td><code>${escapeHtml(event.trace_id || "-")}</code></td>
+                    <td><button class="table-action-btn interactive-btn" type="button" data-ip-event-action="detail" data-id="${event.id}" ${helpAttrs("事件详情说明", "查看该事件完整 JSON，包括解析来源、可信代理判断、命中规则、执行结果和审计字段。")}>详情 ${actionHelpIcon}</button></td>
+                </tr>
+            `).join("");
+            enhanceInteractiveButtons(eventsBody);
+            scheduleResponsiveTableSync(document);
+        }
+
+        async function loadRules() {
+            const data = await api.get(`/api/ip-management/rules${buildQuery(ruleFilterParams())}`);
+            state.ruleTotal = Number(data.total || 0);
+            state.rulePage = Number(data.page || state.rulePage);
+            state.rulePageSize = Number(data.page_size || state.rulePageSize);
+            renderRules(data.items || []);
+            renderPager(rulePagination, {
+                page: state.rulePage,
+                pageSize: state.rulePageSize,
+                total: state.ruleTotal,
+                onPrev: async () => {
+                    state.rulePage = Math.max(1, state.rulePage - 1);
+                    await loadRules();
+                },
+                onNext: async () => {
+                    state.rulePage += 1;
+                    await loadRules();
+                },
+            });
+        }
+
+        async function loadEvents() {
+            const data = await api.get(`/api/ip-management/events${buildQuery(eventFilterParams())}`);
+            state.eventTotal = Number(data.total || 0);
+            state.eventPage = Number(data.page || state.eventPage);
+            state.eventPageSize = Number(data.page_size || state.eventPageSize);
+            renderEvents(data.items || []);
+            renderPager(eventPagination, {
+                page: state.eventPage,
+                pageSize: state.eventPageSize,
+                total: state.eventTotal,
+                onPrev: async () => {
+                    state.eventPage = Math.max(1, state.eventPage - 1);
+                    await loadEvents();
+                },
+                onNext: async () => {
+                    state.eventPage += 1;
+                    await loadEvents();
+                },
+            });
+        }
+
+        function setRuleModalVisible(visible) {
+            if (!ruleModal) return;
+            ruleModal.classList.toggle("hidden", !visible);
+            ruleModal.setAttribute("aria-hidden", visible ? "false" : "true");
+            if (visible) ruleForm?.focus();
+        }
+
+        function openRuleModal(rule = null) {
+            if (!ruleForm) return;
+            ruleForm.reset();
+            document.getElementById("ip-rule-id").value = rule?.id || "";
+            document.getElementById("ip-rule-name").value = rule?.name || "";
+            document.getElementById("ip-rule-form-enabled").value = String(Boolean(rule?.enabled));
+            document.getElementById("ip-rule-form-scope").value = rule?.scope || "external_v1";
+            document.getElementById("ip-rule-match-type").value = rule?.match_type || "cidr";
+            document.getElementById("ip-rule-match-value").value = rule?.match_value || "";
+            document.getElementById("ip-rule-form-action").value = rule?.action || "record";
+            document.getElementById("ip-rule-priority").value = String(rule?.priority ?? 100);
+            document.getElementById("ip-rule-qps").value = String(rule?.rate_qps_limit ?? 0);
+            document.getElementById("ip-rule-rpm").value = String(rule?.rate_rpm_limit ?? 0);
+            document.getElementById("ip-rule-reason").value = rule?.reason || "";
+            if (ruleModalTitle) ruleModalTitle.textContent = rule?.id ? "编辑规则" : "新建规则";
+            setRuleModalVisible(true);
+        }
+
+        function readRuleForm() {
+            return {
+                name: document.getElementById("ip-rule-name")?.value.trim(),
+                enabled: document.getElementById("ip-rule-form-enabled")?.value === "true",
+                scope: document.getElementById("ip-rule-form-scope")?.value || "external_v1",
+                match_type: document.getElementById("ip-rule-match-type")?.value || "cidr",
+                match_value: document.getElementById("ip-rule-match-value")?.value.trim(),
+                action: document.getElementById("ip-rule-form-action")?.value || "record",
+                priority: Number(document.getElementById("ip-rule-priority")?.value || 100),
+                rate_qps_limit: Number(document.getElementById("ip-rule-qps")?.value || 0),
+                rate_rpm_limit: Number(document.getElementById("ip-rule-rpm")?.value || 0),
+                reason: document.getElementById("ip-rule-reason")?.value.trim() || null,
+            };
+        }
+
+        function showEventDetail(event) {
+            const modal = document.createElement("div");
+            modal.className = "modal-shell";
+            modal.innerHTML = `
+                <div class="modal-card modal-lg" role="dialog" aria-modal="true" aria-labelledby="ip-event-detail-title" tabindex="-1">
+                    <div class="modal-head">
+                        <div><div class="panel-kicker">IP 管理事件</div><h2 id="ip-event-detail-title">事件详情</h2></div>
+                        <button class="icon-btn interactive-btn" type="button" data-close aria-label="关闭">×</button>
+                    </div>
+                    <pre class="ip-management-result">${escapeHtml(JSON.stringify(event, null, 2))}</pre>
+                </div>
+            `;
+            document.body.appendChild(modal);
+            const close = () => modal.remove();
+            modal.querySelector("[data-close]")?.addEventListener("click", close);
+            modal.addEventListener("click", (event) => {
+                if (event.target === modal) close();
+            });
+            modal.querySelector('[role="dialog"]')?.focus();
+            enhanceInteractiveButtons(modal);
+        }
+
+        refreshBtn?.addEventListener("click", async () => {
+            setButtonLoading(refreshBtn, true);
+            try {
+                await Promise.all([loadOverview(), loadRules(), loadEvents()]);
+                setButtonTransientFeedback(refreshBtn, "success", { successText: "已刷新" });
+            } catch (error) {
+                setButtonTransientFeedback(refreshBtn, "error", { errorText: "失败" });
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(refreshBtn, false);
+            }
+        });
+        tabButtons.forEach((button) => button.addEventListener("click", () => activateTab(button.dataset.ipTab)));
+        settingsForm?.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            setButtonLoading(settingsSaveBtn, true);
+            try {
+                const data = await api.put("/api/ip-management/settings", readSettings());
+                fillSettings(data.settings || {});
+                await loadOverview();
+                setButtonTransientFeedback(settingsSaveBtn, "success", { successText: "已保存" });
+            } catch (error) {
+                setButtonTransientFeedback(settingsSaveBtn, "error", { errorText: "失败" });
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(settingsSaveBtn, false);
+            }
+        });
+        ruleFilterForm?.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            state.rulePage = 1;
+            await loadRules();
+        });
+        eventFilterForm?.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            state.eventPage = 1;
+            await loadEvents();
+        });
+        newRuleBtn?.addEventListener("click", () => openRuleModal());
+        ruleModalClose?.addEventListener("click", () => setRuleModalVisible(false));
+        ruleModal?.addEventListener("click", (event) => {
+            if (event.target === ruleModal) setRuleModalVisible(false);
+        });
+        ruleForm?.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            const ruleId = document.getElementById("ip-rule-id")?.value;
+            setButtonLoading(ruleSubmitBtn, true);
+            try {
+                if (ruleId) {
+                    await api.put(`/api/ip-management/rules/${encodeURIComponent(ruleId)}`, readRuleForm());
+                } else {
+                    await api.post("/api/ip-management/rules", readRuleForm());
+                }
+                setRuleModalVisible(false);
+                await Promise.all([loadOverview(), loadRules()]);
+                showToast("规则已保存");
+            } catch (error) {
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(ruleSubmitBtn, false);
+            }
+        });
+        rulesBody?.addEventListener("click", async (event) => {
+            const button = event.target.closest("[data-ip-rule-action]");
+            if (!button) return;
+            const ruleId = button.dataset.id;
+            const action = button.dataset.ipRuleAction;
+            const rule = state.rules.find((item) => String(item.id) === String(ruleId));
+            if (action === "edit") {
+                openRuleModal(rule);
+                return;
+            }
+            if (action === "test") {
+                const normalizedValue = String(rule?.normalized_value || rule?.match_value || "");
+                document.getElementById("ip-rule-test-ip").value = normalizedValue.includes("/")
+                    ? normalizedValue.split("/")[0]
+                    : normalizedValue.split("-")[0];
+                document.getElementById("ip-rule-test-scope").value = rule?.scope === "all" ? "external_v1" : (rule?.scope || "external_v1");
+                activateTab("test");
+                ruleTestResult?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+                return;
+            }
+            if (action === "delete") {
+                const ok = await confirmDangerAction({ title: "删除 IP 规则", message: `确认删除规则「${rule?.name || ruleId}」？`, confirmText: "删除" });
+                if (!ok) return;
+                setButtonLoading(button, true);
+                try {
+                    await api.delete(`/api/ip-management/rules/${encodeURIComponent(ruleId)}`);
+                    await Promise.all([loadOverview(), loadRules()]);
+                    showToast("规则已删除");
+                } catch (error) {
+                    showToast(error.message, "error");
+                } finally {
+                    setButtonLoading(button, false);
+                }
+                return;
+            }
+            if (action === "toggle") {
+                setButtonLoading(button, true);
+                try {
+                    await api.post(`/api/ip-management/rules/${encodeURIComponent(ruleId)}/${rule?.enabled ? "disable" : "enable"}`, {});
+                    await Promise.all([loadOverview(), loadRules()]);
+                    setButtonTransientFeedback(button, "success", { successText: rule?.enabled ? "已停用" : "已启用" });
+                } catch (error) {
+                    setButtonTransientFeedback(button, "error", { errorText: "失败" });
+                    showToast(error.message, "error");
+                } finally {
+                    setButtonLoading(button, false);
+                }
+            }
+        });
+        eventsBody?.addEventListener("click", async (event) => {
+            const button = event.target.closest("[data-ip-event-action]");
+            if (!button) return;
+            setButtonLoading(button, true);
+            try {
+                const data = await api.get(`/api/ip-management/events/${encodeURIComponent(button.dataset.id)}`);
+                showEventDetail(data.event || {});
+            } catch (error) {
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(button, false);
+            }
+        });
+        cleanupBtn?.addEventListener("click", async () => {
+            const ok = await confirmDangerAction({ title: "清理事件", message: "将按当前保留天数清理旧 IP 管理事件。", confirmText: "清理" });
+            if (!ok) return;
+            setButtonLoading(cleanupBtn, true);
+            try {
+                const data = await api.post("/api/ip-management/events/cleanup", {});
+                await Promise.all([loadOverview(), loadEvents()]);
+                setButtonTransientFeedback(cleanupBtn, "success", { successText: `清理 ${formatNumber(data.deleted || 0)} 条` });
+            } catch (error) {
+                setButtonTransientFeedback(cleanupBtn, "error", { errorText: "失败" });
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(cleanupBtn, false);
+            }
+        });
+        resolutionTestForm?.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            const submit = event.submitter;
+            setButtonLoading(submit, true);
+            try {
+                const headers = {};
+                const xff = document.getElementById("ip-test-xff")?.value.trim();
+                const forwarded = document.getElementById("ip-test-forwarded")?.value.trim();
+                const cf = document.getElementById("ip-test-cf")?.value.trim();
+                if (xff) headers["x-forwarded-for"] = xff;
+                if (forwarded) headers.forwarded = forwarded;
+                if (cf) headers["cf-connecting-ip"] = cf;
+                const testHeaderOrder = document.getElementById("ip-test-trusted-header-order");
+                const selectedHeaderOrder = selectValues(testHeaderOrder);
+                const data = await api.post("/api/ip-management/test-resolution", {
+                    direct_client_ip: document.getElementById("ip-test-direct-ip")?.value.trim() || null,
+                    headers,
+                    trusted_proxy_cidrs: textLines(document.getElementById("ip-test-cidrs")?.value),
+                    trusted_header_order: selectedHeaderOrder.length
+                        ? selectedHeaderOrder
+                        : (Array.isArray(state.settings?.trusted_header_order) ? state.settings.trusted_header_order : []),
+                    trusted_proxy_resolution_enabled: true,
+                });
+                renderJson(resolutionTestResult, data.resolution || data);
+                setButtonTransientFeedback(submit, "success", { successText: "已测试" });
+            } catch (error) {
+                renderJson(resolutionTestResult, { error: error.message });
+                setButtonTransientFeedback(submit, "error", { errorText: "失败" });
+            } finally {
+                setButtonLoading(submit, false);
+            }
+        });
+        ruleTestForm?.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            const submit = event.submitter;
+            setButtonLoading(submit, true);
+            try {
+                const data = await api.post("/api/ip-management/test-rule", {
+                    ip: document.getElementById("ip-rule-test-ip")?.value.trim(),
+                    scope: document.getElementById("ip-rule-test-scope")?.value || "external_v1",
+                    request_path: document.getElementById("ip-rule-test-path")?.value.trim() || "/v1/chat/completions",
+                    http_method: "POST",
+                });
+                renderJson(ruleTestResult, data.result || data);
+                setButtonTransientFeedback(submit, "success", { successText: "已测试" });
+            } catch (error) {
+                renderJson(ruleTestResult, { error: error.message });
+                setButtonTransientFeedback(submit, "error", { errorText: "失败" });
+            } finally {
+                setButtonLoading(submit, false);
+            }
+        });
+
+        activateTab("settings");
+        await Promise.all([loadOverview(), loadRules(), loadEvents()]);
+    }
+
     async function initializePage() {
         try {
             runPageCleanup();
+            currentPageAbortController.abort();
+            currentPageAbortController = new AbortController();
             page = document.body.dataset.page;
             initBillingTooltipLayer();
             initProviderStatusTooltipLayer();
@@ -15956,6 +19028,7 @@
             if (page === "models") await initModels();
             if (page === "settings") await initSettings();
             if (page === "content-guard") await initContentGuardPage();
+            if (page === "ip-management") await initIpManagementPage();
             if (page === "playground") await initPlayground();
             if (page === "benchmark") await initBenchmark();
             if (page === "operations") await initOperationsPage();
@@ -15986,7 +19059,14 @@
             window.location.href = guardRedirect;
             return;
         }
-        const response = await fetch(targetPath, { headers: { "X-Requested-With": "shell-nav" } });
+        if (shellNavigationAbortController) {
+            shellNavigationAbortController.abort();
+        }
+        shellNavigationAbortController = new AbortController();
+        const response = await fetch(targetPath, {
+            headers: { "X-Requested-With": "shell-nav" },
+            signal: composeAbortSignal(shellNavigationAbortController.signal, API_TIMEOUT_MS),
+        });
         if (response.redirected && new URL(response.url, window.location.origin).pathname !== target.pathname) {
             window.location.href = response.url;
             return;
@@ -16047,6 +19127,7 @@
             try {
                 await navigateWithinShell(targetPath);
             } catch (error) {
+                if (error?.name === "AbortError") return;
                 showToast(error.message, "error");
                 window.location.href = targetPath;
             }
@@ -16055,7 +19136,8 @@
         window.addEventListener("popstate", async () => {
             try {
                 await navigateWithinShell(`${window.location.pathname}${window.location.search}`, { replace: true });
-            } catch {
+            } catch (error) {
+                if (error?.name === "AbortError") return;
                 window.location.reload();
             }
         });
