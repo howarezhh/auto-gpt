@@ -32,6 +32,7 @@ class AppSetting(Base):
     content_guard_block_on_high_risk: Mapped[bool] = mapped_column(Boolean, nullable=False, default=content_guard_default("content_guard_block_on_high_risk"))
     content_guard_probe_interval_sec: Mapped[int] = mapped_column(Integer, nullable=False, default=content_guard_default("content_guard_probe_interval_sec"))
     content_guard_json_probe_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=content_guard_default("content_guard_json_probe_enabled"))
+    content_guard_probe_protocol_type: Mapped[str] = mapped_column(Text, nullable=False, default=content_guard_default("content_guard_probe_protocol_type"))
     content_guard_max_scan_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=content_guard_default("content_guard_max_scan_bytes"))
     content_guard_stream_buffer_max_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=content_guard_default("content_guard_stream_buffer_max_bytes"))
     content_guard_low_trust_requires_buffer: Mapped[bool] = mapped_column(Boolean, nullable=False, default=content_guard_default("content_guard_low_trust_requires_buffer"))
