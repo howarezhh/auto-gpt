@@ -4,7 +4,7 @@ from datetime import datetime
 import os
 from types import SimpleNamespace
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 from app.models.app_setting import AppSetting
@@ -23,8 +23,9 @@ def _make_session(*tables):
         "postgresql+psycopg://aotu_gpt:zhh123456@127.0.0.1:5432/aotu_gpt_test",
     )
     engine = create_engine(database_url, future=True)
-    for table in reversed(tables):
-        table.__table__.drop(bind=engine, checkfirst=True)
+    with engine.begin() as conn:
+        for table in reversed(tables):
+            conn.execute(text(f'DROP TABLE IF EXISTS "{table.__table__.name}" CASCADE'))
     for table in tables:
         table.__table__.create(bind=engine, checkfirst=True)
     return sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
@@ -115,6 +116,15 @@ def test_content_guard_runtime_events_use_event_provider_and_model_without_reque
 def test_typed_content_guard_events_fallback_to_request_log_context() -> None:
     session_factory = _make_session(Provider, AppSetting, RequestLog, RequestContentGuardEvent)
     with session_factory() as db:
+        db.add(
+            Provider(
+                id=11,
+                name="回填提供商",
+                base_url="https://example.com/v1",
+                api_key="sk-test",
+            )
+        )
+        db.flush()
         request_log = RequestLog(
             log_type="chat",
             trace_id="trace-content-guard-fallback",

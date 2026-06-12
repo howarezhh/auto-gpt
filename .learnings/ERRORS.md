@@ -814,6 +814,38 @@ SyntaxError: Unexpected token ')'
 
 ---
 
+## [ERR-20260613-003] postgres_test_drop_table_foreign_key_dependency
+
+**Logged**: 2026-06-13T00:40:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+PostgreSQL-backed regression tests failed when a helper dropped `request_logs` while `request_content_guard_events` still had a foreign key dependency.
+
+### Error
+```text
+psycopg.errors.DependentObjectsStillExist: cannot drop table request_logs because other objects depend on it
+```
+
+### Context
+- `tests/test_background_guard_regression.py` creates partial table sets for focused tests.
+- Existing test database state may include dependent tables from earlier tests.
+
+### Suggested Fix
+Focused PostgreSQL test helpers that rebuild tables should drop with `DROP TABLE IF EXISTS ... CASCADE` or explicitly drop dependent tables first.
+
+### Metadata
+- Reproducible: yes
+- Related Files: tests/test_background_guard_regression.py
+
+### Resolution
+- **Resolved**: 2026-06-13T00:40:00+08:00
+- **Notes**: Updated the helper to execute `DROP TABLE IF EXISTS "<table>" CASCADE` inside a transaction and reran the file successfully.
+
+---
+
 ## [ERR-20260613-002] pwsh_scriptblock_python_pipe_and_sqlalchemy_grouping
 
 **Logged**: 2026-06-13T00:00:00+08:00
