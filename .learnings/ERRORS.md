@@ -814,6 +814,39 @@ SyntaxError: Unexpected token ')'
 
 ---
 
+## [ERR-20260613-002] pwsh_scriptblock_python_pipe_and_sqlalchemy_grouping
+
+**Logged**: 2026-06-13T00:00:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tooling
+
+### Summary
+Nested `pwsh -Command` strings can still cause Python here-string bodies to be parsed by the outer PowerShell, and PostgreSQL may reject repeated SQLAlchemy `coalesce()` expressions in `SELECT` and `GROUP BY` when bind parameter names differ.
+
+### Error
+```text
+ParserError: The 'from' keyword is not supported in this version of the language.
+psycopg.errors.GroupingError: column "provider_models.model_group" must appear in the GROUP BY clause or be used in an aggregate function
+```
+
+### Context
+- Attempted to run an ad hoc Python aggregation script through a quoted nested `pwsh -Command`.
+- Attempted to group by `func.coalesce(ProviderModel.model_group, "unknown")` while selecting a separately constructed `coalesce()` expression.
+
+### Suggested Fix
+Use `pwsh -NoLogo -NoProfile -Command { @' ... '@ | .\.venv\Scripts\python.exe - }` for multiline Python snippets, and group directly by the nullable column or reuse an exact labeled expression/subquery before applying Python-side defaults.
+
+### Metadata
+- Reproducible: yes
+- Related Files: app/models/request_log.py, app/models/provider_model.py
+
+### Resolution
+- **Resolved**: 2026-06-13T00:00:00+08:00
+- **Notes**: Switched to PowerShell scriptblock form and grouped by `ProviderModel.model_group`, applying the `unknown` fallback in Python.
+
+---
+
 ## [ERR-20260613-001] python_non_ascii_bytes_literal
 
 **Logged**: 2026-06-13T00:33:00+08:00
