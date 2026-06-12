@@ -283,9 +283,12 @@ API Key: sk-yyyy
         model_name: str | None = None,
         requested_protocol: str | None = None,
     ) -> str:
-        normalized_group = ProviderService.normalize_model_group(
-            model_group or ProviderService.infer_model_group(model_name or "")
-        )
+        try:
+            normalized_group = ProviderService.normalize_model_group(
+                model_group or ProviderService.infer_model_group(model_name or "")
+            )
+        except ValueError:
+            normalized_group = ProviderService.infer_model_group(model_name or "")
         if normalized_group == "gemini":
             return "gemini"
         if normalized_group == "claude":

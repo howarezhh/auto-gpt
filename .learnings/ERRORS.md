@@ -814,6 +814,38 @@ SyntaxError: Unexpected token ')'
 
 ---
 
+## [ERR-20260613-001] python_non_ascii_bytes_literal
+
+**Logged**: 2026-06-13T00:33:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+Python compile check failed because a test used non-ASCII Chinese text directly inside a `b''` bytes literal.
+
+### Error
+```text
+SyntaxError: bytes can only contain ASCII literal characters
+```
+
+### Context
+- `tests/test_content_guard_regression.py` added native SSE chunk fixtures containing Chinese text.
+- Python bytes literals only allow ASCII source characters.
+
+### Suggested Fix
+Use a normal Unicode string and call `.encode("utf-8")` when constructing bytes fixtures that contain Chinese text.
+
+### Metadata
+- Reproducible: yes
+- Related Files: tests/test_content_guard_regression.py
+
+### Resolution
+- **Resolved**: 2026-06-13T00:33:00+08:00
+- **Notes**: Replaced the non-ASCII `b''` fixtures with UTF-8 encoded strings.
+
+---
+
 ## [ERR-20260612-002] in_app_browser_kernel_assets_missing
 
 **Logged**: 2026-06-12T12:18:00+08:00

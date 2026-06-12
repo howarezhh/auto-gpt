@@ -227,6 +227,54 @@ def test_content_guard_probe_uses_native_endpoint_for_native_protocol_mounts() -
     assert endpoint_path == "/native/gemini"
 
 
+def test_runtime_stream_guard_scans_native_gemini_and_claude_sse_events() -> None:
+    setting = SimpleNamespace(
+        content_guard_enabled=True,
+        content_guard_stream_mode="pass_through_scan",
+        content_guard_rules_json="",
+        content_guard_url_allowlist_json="[]",
+        content_guard_url_check_enabled=True,
+    )
+    request_payload = {"messages": [{"role": "user", "content": "不要输出广告或外链"}]}
+
+    gemini_result = ContentRuntimeGuardService.inspect_stream_chunk(
+        event_buffer=bytearray(),
+        chunk='data: {"candidates":[{"content":{"parts":[{"text":"正常回答 https://ad.example.com"}]},"finishReason":"STOP"}]}\n\n'.encode("utf-8"),
+        setting=setting,
+        endpoint_path="/chat/completions",
+        request_payload=request_payload,
+    )
+    claude_result = ContentRuntimeGuardService.inspect_stream_chunk(
+        event_buffer=bytearray(),
+        chunk='event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"加入社群领取免费key"}}\n\n'.encode("utf-8"),
+        setting=setting,
+        endpoint_path="/chat/completions",
+        request_payload=request_payload,
+    )
+
+    assert gemini_result.result == ContentGuardService.RESULT_BLOCK
+    assert "unexpected_link" in gemini_result.categories
+    assert claude_result.result == ContentGuardService.RESULT_BLOCK
+    assert any(rule.get("id") == "api_key_community_promotion" for rule in claude_result.matched_rules)
+
+
+def test_native_stream_probe_terminal_events_follow_official_stream_shapes() -> None:
+    assert ContentGuardProbeService.extract_probe_sse_text_delta(
+        '{"candidates":[{"content":{"parts":[{"text":"AOTU_CONTENT_GUARD_OK"}]},"finishReason":"STOP"}]}'
+    ) == "AOTU_CONTENT_GUARD_OK"
+    assert ContentGuardProbeService.native_stream_event_is_terminal(
+        "gemini",
+        {"candidates": [{"finishReason": "STOP"}]},
+    )
+    assert ContentGuardProbeService.extract_probe_sse_text_delta(
+        '{"type":"content_block_delta","delta":{"type":"text_delta","text":"AOTU_CONTENT_GUARD_OK"}}'
+    ) == "AOTU_CONTENT_GUARD_OK"
+    assert ContentGuardProbeService.native_stream_event_is_terminal(
+        "claude_messages",
+        {"type": "message_stop"},
+    )
+
+
 def test_content_guard_vision_probe_passes_when_upstream_reads_image(monkeypatch) -> None:
     async def fake_send(provider, provider_model, *, endpoint_path, payload, endpoint_label):
         assert payload["messages"][0]["content"][1]["type"] == "image_url"

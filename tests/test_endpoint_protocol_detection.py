@@ -542,6 +542,48 @@ def test_interactive_model_health_does_not_run_trust_probe(monkeypatch) -> None:
     assert "trust_status" not in result
 
 
+def test_single_endpoint_mode_uses_native_stream_probe_for_gemini_group(monkeypatch) -> None:
+    provider = SimpleNamespace(id=1, protocol_type="both")
+    provider_model = SimpleNamespace(
+        id=11,
+        model_name="gemini-3.1-pro",
+        model_group="gemini",
+        protocol_type="responses",
+        supports_stream=True,
+        supports_chat_completions=False,
+        supports_responses=False,
+    )
+    called = {}
+
+    async def fake_native_stream_probe(provider_arg, model_arg, **kwargs):
+        called["native_stream"] = (provider_arg, model_arg, kwargs)
+        return {"success": True, "endpoint_path": "/models/gemini-3.1-pro:streamGenerateContent?alt=sse"}
+
+    async def fail_formal_stream_probe(*args, **kwargs):
+        raise AssertionError("Gemini 分组的单模型健康检测不应走 Chat/Responses")
+
+    monkeypatch.setattr(HealthService, "_probe_native_health_stream_endpoint", staticmethod(fake_native_stream_probe))
+    monkeypatch.setattr(HealthService, "_probe_formal_stream_endpoint", staticmethod(fail_formal_stream_probe))
+
+    phases = HealthService._build_probe_phase_groups(
+        provider,
+        phase_keys={"text_stream"},
+        interactive_mode=True,
+        single_endpoint_mode=True,
+    )
+
+    assert [phase["key"] for phase in phases] == ["text_stream"]
+    assert phases[0]["targets"](provider_model) is True
+    runnable_probes = [probe for probe in phases[0]["probes"] if probe.get("targets", lambda model: True)(provider_model)]
+    assert [probe["key"] for probe in runnable_probes] == ["selected_native_text_stream_endpoint"]
+
+    result = asyncio.run(runnable_probes[0]["probe"](provider_model))
+
+    assert result["success"] is True
+    assert called["native_stream"][0] is provider
+    assert called["native_stream"][1] is provider_model
+
+
 def test_endpoint_protocol_detection_rate_limit_does_not_send_or_update(monkeypatch) -> None:
     sent = False
 

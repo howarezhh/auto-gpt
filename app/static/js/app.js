@@ -283,6 +283,13 @@
         return PROVIDER_MODEL_PROTOCOL_LABELS[fallbackProtocol] ? fallbackProtocol : "responses";
     }
 
+    function nativeEndpointPathPlaceholder(protocolType) {
+        const normalized = String(protocolType || "").trim();
+        if (normalized === "gemini") return "/models/{model}:{action}";
+        if (normalized === "claude_messages") return "/v1/messages";
+        return "仅 Gemini/Claude 原生协议需要填写";
+    }
+
     function isProviderModelProtocolLocked(modelGroup, modelName = "") {
         return ["gemini", "claude"].includes(normalizeModelGroup(modelGroup, inferModelGroup(modelName)));
     }
@@ -8601,6 +8608,7 @@
             modelTableBody.innerHTML = items.map((item) => {
                 const provider = item.provider || {};
                 const model = item.model || {};
+                const protocolLocked = isProviderModelProtocolLocked(model.model_group, model.model_name);
                 return `
                 <tr>
                     <td>
@@ -8612,7 +8620,7 @@
                     </td>
                     <td class="provider-model-status-cell">${renderStatusWithErrorHint(model.health_status, model.last_error)}</td>
                     <td>
-                        <select class="field-input" data-model-field="protocol_type" data-provider-id="${provider.id}" data-model-id="${model.id}" aria-label="端点协议">
+                        <select class="field-input" data-model-field="protocol_type" data-provider-id="${provider.id}" data-model-id="${model.id}" aria-label="端点协议" ${protocolLocked ? 'disabled title="Gemini/Claude 分组必须使用对应官方原生端点协议，提供商地址仍可通过 Base URL 和原生接口路径配置。"' : ""}>
                             ${renderProviderModelProtocolOptions(model)}
                         </select>
                         <div class="table-muted">${escapeHtml(formatProviderModelProtocolLabel(model))}</div>
@@ -9193,6 +9201,7 @@
         const providerModelEditTrustInput = document.getElementById("provider-model-edit-trust");
         const providerModelEditProtocolInput = document.getElementById("provider-model-edit-protocol");
         const providerModelEditGroupInput = document.getElementById("provider-model-edit-group");
+        const providerModelEditNativeEndpointPathInput = document.getElementById("provider-model-edit-native-endpoint-path");
         const providerModelEditMultiplierInput = document.getElementById("provider-model-edit-multiplier");
         const providerModelEditInputPriceInput = document.getElementById("provider-model-edit-input-price");
         const providerModelEditOutputPriceInput = document.getElementById("provider-model-edit-output-price");
@@ -9227,13 +9236,17 @@
 
         function normalizeProviderModelProtocolType(configOrValue = "responses") {
             if (typeof configOrValue === "object" && configOrValue !== null) {
+                const modelName = configOrValue.model_name || "";
+                const modelGroup = normalizeModelGroup(configOrValue.model_group, inferModelGroup(modelName));
                 const rawProtocolType = String(configOrValue.protocol_type || "").trim();
-                if (PROVIDER_MODEL_PROTOCOL_LABELS[rawProtocolType]) return rawProtocolType;
+                if (PROVIDER_MODEL_PROTOCOL_LABELS[rawProtocolType]) {
+                    return protocolTypeForModelGroup(modelGroup, modelName, rawProtocolType);
+                }
                 const supportsChat = configOrValue.supports_chat_completions === true;
                 const supportsResponses = configOrValue.supports_responses !== false;
-                if (supportsChat && supportsResponses) return "both";
-                if (supportsChat) return "chat_completions";
-                return "responses";
+                if (supportsChat && supportsResponses) return protocolTypeForModelGroup(modelGroup, modelName, "both");
+                if (supportsChat) return protocolTypeForModelGroup(modelGroup, modelName, "chat_completions");
+                return protocolTypeForModelGroup(modelGroup, modelName, "responses");
             }
             const normalized = String(configOrValue || "responses").trim();
             return PROVIDER_MODEL_PROTOCOL_LABELS[normalized] ? normalized : "responses";
@@ -9245,6 +9258,27 @@
                 return configOrValue.protocol_label;
             }
             return PROVIDER_MODEL_PROTOCOL_LABELS[protocolType] || PROVIDER_MODEL_PROTOCOL_LABELS.responses;
+        }
+
+        function syncProviderModelEditProtocolLock(modelName = "") {
+            if (!providerModelEditProtocolInput) return;
+            const modelGroup = normalizeModelGroup(providerModelEditGroupInput?.value, inferModelGroup(modelName));
+            const locked = isProviderModelProtocolLocked(modelGroup, modelName);
+            if (locked) {
+                providerModelEditProtocolInput.value = protocolTypeForModelGroup(
+                    modelGroup,
+                    modelName,
+                    providerModelEditProtocolInput.value,
+                );
+                providerModelEditProtocolInput.disabled = true;
+                providerModelEditProtocolInput.title = "Gemini/Claude 分组必须使用对应官方原生端点协议，提供商地址仍可通过 Base URL 和原生接口路径配置。";
+            } else {
+                providerModelEditProtocolInput.disabled = false;
+                providerModelEditProtocolInput.removeAttribute("title");
+            }
+            if (providerModelEditNativeEndpointPathInput) {
+                providerModelEditNativeEndpointPathInput.placeholder = nativeEndpointPathPlaceholder(providerModelEditProtocolInput.value);
+            }
         }
 
         function renderProviderModelFilterOptions(selectedProviderId = providerModelProviderSelect?.value || "") {
@@ -9424,10 +9458,15 @@
             providerModelEditModelIdInput.value = String(modelId);
             providerModelEditTrustInput.value = normalizeProviderModelTrustEditValue(modelConfig);
             providerModelEditProtocolInput.value = normalizeProviderModelProtocolType(modelConfig);
+            if (providerModelEditNativeEndpointPathInput) {
+                providerModelEditNativeEndpointPathInput.value = modelConfig.native_endpoint_path || "";
+                providerModelEditNativeEndpointPathInput.placeholder = nativeEndpointPathPlaceholder(providerModelEditProtocolInput.value);
+            }
             if (providerModelEditGroupInput) {
                 providerModelEditGroupInput.innerHTML = renderModelGroupOptions(modelConfig.model_group, modelConfig.model_name);
                 providerModelEditGroupInput.value = normalizeModelGroup(modelConfig.model_group, inferModelGroup(modelConfig.model_name));
             }
+            syncProviderModelEditProtocolLock(modelConfig.model_name);
             providerModelEditMultiplierInput.value = modelConfig.price_multiplier ?? 1;
             setOptionalPriceInput(providerModelEditInputPriceInput, modelConfig.input_price_per_1k);
             setOptionalPriceInput(providerModelEditOutputPriceInput, modelConfig.output_price_per_1k);
@@ -10034,10 +10073,17 @@
             }
             let payload;
             try {
+                const modelGroup = normalizeModelGroup(providerModelEditGroupInput?.value, inferModelGroup(modelConfig.model_name));
+                const protocolType = protocolTypeForModelGroup(
+                    modelGroup,
+                    modelConfig.model_name,
+                    normalizeProviderModelProtocolType(providerModelEditProtocolInput.value),
+                );
                 payload = {
                     content_integrity_status: providerModelEditTrustInput.value,
-                    protocol_type: normalizeProviderModelProtocolType(providerModelEditProtocolInput.value),
-                    model_group: normalizeModelGroup(providerModelEditGroupInput?.value, inferModelGroup(modelConfig.model_name)),
+                    protocol_type: protocolType,
+                    native_endpoint_path: providerModelEditNativeEndpointPathInput?.value.trim() || null,
+                    model_group: modelGroup,
                     price_multiplier: multiplier,
                     input_price_per_1k: readOptionalPriceInput(providerModelEditInputPriceInput, "输入单价"),
                     output_price_per_1k: readOptionalPriceInput(providerModelEditOutputPriceInput, "输出单价"),
@@ -10062,6 +10108,25 @@
                 showToast(error.message, "error");
             } finally {
                 setButtonLoading(providerModelEditSubmitBtn, false);
+            }
+        });
+
+        providerModelEditGroupInput?.addEventListener("change", () => {
+            const providerId = Number(providerModelEditProviderIdInput.value);
+            const modelId = Number(providerModelEditModelIdInput.value);
+            const { modelConfig } = getProviderModelContext(providerId, modelId);
+            syncProviderModelEditProtocolLock(modelConfig?.model_name || "");
+        });
+
+        providerModelEditProtocolInput?.addEventListener("change", () => {
+            const providerId = Number(providerModelEditProviderIdInput.value);
+            const modelId = Number(providerModelEditModelIdInput.value);
+            const { modelConfig } = getProviderModelContext(providerId, modelId);
+            if (isProviderModelProtocolLocked(providerModelEditGroupInput?.value, modelConfig?.model_name || "")) {
+                syncProviderModelEditProtocolLock(modelConfig?.model_name || "");
+            }
+            if (providerModelEditNativeEndpointPathInput) {
+                providerModelEditNativeEndpointPathInput.placeholder = nativeEndpointPathPlaceholder(providerModelEditProtocolInput.value);
             }
         });
 

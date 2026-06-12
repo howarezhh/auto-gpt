@@ -64,12 +64,30 @@ def test_frontend_probe_buttons_use_per_model_live_results() -> None:
     assert '"/api/providers/models/protocol-detection"' in app_js
 
 
-def test_provider_form_exposes_native_protocol_and_custom_path() -> None:
+def test_provider_form_keeps_protocol_on_model_config_and_provider_type_dropdown() -> None:
     providers_html = read_text("app/templates/providers.html")
+    provider_models_html = read_text("app/templates/provider_models.html")
     app_js = read_text("app/static/js/app.js")
 
-    assert 'id="provider-protocol-type"' in providers_html
-    assert 'id="provider-native-endpoint-path"' in providers_html
-    assert 'native_endpoint_path: providerNativeEndpointPathInput?.value.trim() || null' in app_js
-    assert 'inferProviderProtocolFromType(providerTypeInput.value)' in app_js
+    assert 'id="provider-protocol-type"' not in providers_html
+    assert 'id="provider-native-endpoint-path"' not in providers_html
+    assert '<select class="field-input" id="provider-type">' in providers_html
+    for label in ("OpenAI", "OpenAI-Response", "Gemini", "Anthropic", "Azure OpenAI", "New API", "CherryIN", "Ollama"):
+        assert label in providers_html
+    assert 'data-model-config-field="native_endpoint_path"' in app_js
+    assert 'id="provider-model-edit-native-endpoint-path"' in provider_models_html
+    assert "providerModelEditNativeEndpointPathInput?.value.trim() || null" in app_js
     assert 'inferProviderModelProtocolType(nameInput.value)' in app_js
+
+
+def test_frontend_locks_native_protocol_by_model_group() -> None:
+    app_js = read_text("app/static/js/app.js")
+
+    assert "function protocolTypeForModelGroup" in app_js
+    assert 'if (group === "gemini") return "gemini";' in app_js
+    assert 'if (group === "claude") return "claude_messages";' in app_js
+    assert "function isProviderModelProtocolLocked" in app_js
+    assert "syncModelProtocolLock(row)" in app_js
+    assert "syncProviderModelEditProtocolLock(modelConfig.model_name)" in app_js
+    assert "protocol_type: protocolType" in app_js
+    assert "Gemini/Claude 分组必须使用对应官方原生端点协议，提供商地址仍可通过 Base URL 和原生接口路径配置。" in app_js

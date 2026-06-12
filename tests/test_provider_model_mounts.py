@@ -39,6 +39,26 @@ def test_model_group_inference_covers_mainstream_model_families() -> None:
     assert ProviderService.infer_model_group("unknown-local-model") == "unknown"
 
 
+def test_model_group_forces_native_protocol_even_when_saved_protocol_is_wrong() -> None:
+    gemini_model = SimpleNamespace(
+        model_name="custom-gemini-alias",
+        model_group="gemini",
+        protocol_type="responses",
+        supports_chat_completions=False,
+        supports_responses=True,
+    )
+    claude_model = SimpleNamespace(
+        model_name="custom-claude-alias",
+        model_group="claude",
+        protocol_type="both",
+        supports_chat_completions=True,
+        supports_responses=True,
+    )
+
+    assert ProviderService.provider_model_protocol_type(gemini_model) == "gemini"
+    assert ProviderService.provider_model_protocol_type(claude_model) == "claude_messages"
+
+
 def test_provider_model_mount_list_filters_by_model_group() -> None:
     captured = []
 

@@ -432,6 +432,101 @@ def test_native_usage_mapping_preserves_gemini_and_claude_token_fields():
     assert LogService.extract_cache_tokens({"usage": claude_usage}) == (10, 20)
 
 
+def test_claude_native_payload_preserves_explicit_cache_control():
+    payload = NativeProtocolAdapter.openai_to_native_payload(
+        "claude_messages",
+        "/chat/completions",
+        {
+            "model": "claude-3-5-sonnet-latest",
+            "max_tokens": 64,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "稳定系统提示",
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "稳定上下文",
+                            "cache_control": {"type": "ephemeral"},
+                        },
+                        {"type": "text", "text": "本轮问题"},
+                    ],
+                },
+            ],
+        },
+    )
+
+    assert payload["system"][0]["cache_control"] == {"type": "ephemeral"}
+    assert payload["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in payload
+
+
+def test_claude_native_payload_adds_default_automatic_cache_control():
+    payload = NativeProtocolAdapter.openai_to_native_payload(
+        "claude_messages",
+        "/chat/completions",
+        {
+            "model": "claude-3-5-sonnet-latest",
+            "messages": [{"role": "user", "content": "长上下文问题"}],
+        },
+    )
+
+    assert payload["cache_control"] == {"type": "ephemeral"}
+
+
+def test_gemini_native_payload_preserves_cached_content_reference():
+    payload = NativeProtocolAdapter.openai_to_native_payload(
+        "gemini",
+        "/chat/completions",
+        {
+            "model": "gemini-2.5-pro",
+            "cached_content": "cachedContents/abc123",
+            "messages": [{"role": "user", "content": "继续基于缓存上下文回答"}],
+        },
+    )
+
+    assert payload["cachedContent"] == "cachedContents/abc123"
+
+
+def test_log_service_extracts_openai_compatible_domestic_cache_fields():
+    from app.services.log_service import LogService
+
+    qwen_usage = {
+        "input_tokens": 1000,
+        "output_tokens": 100,
+        "total_tokens": 1100,
+        "input_tokens_details": {
+            "cached_tokens": 800,
+            "cache_creation_tokens": 200,
+        },
+    }
+    deepseek_usage = {
+        "prompt_tokens": 1200,
+        "completion_tokens": 100,
+        "total_tokens": 1300,
+        "prompt_cache_hit_tokens": 900,
+    }
+    glm_usage = {
+        "prompt_tokens": 1200,
+        "completion_tokens": 100,
+        "total_tokens": 1300,
+        "cached_tokens": 850,
+    }
+
+    assert LogService.extract_cache_tokens({"usage": qwen_usage}) == (800, 200)
+    assert LogService.extract_cache_tokens({"usage": deepseek_usage}) == (900, None)
+    assert LogService.extract_cache_tokens({"usage": glm_usage}) == (850, None)
+
+
 def test_log_service_extracts_raw_gemini_usage_metadata():
     from app.services.log_service import LogService
 

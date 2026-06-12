@@ -169,17 +169,20 @@ class NativeProtocolAdapter:
             native["generationConfig"] = generation_config
         if system_parts:
             native["systemInstruction"] = {"parts": system_parts}
+        cached_content = payload.get("cachedContent") or payload.get("cached_content")
+        if isinstance(cached_content, str) and cached_content.strip():
+            native["cachedContent"] = cached_content.strip()
         return native
 
     @staticmethod
     def _openai_to_claude_payload(endpoint_path: str, payload: dict[str, Any]) -> dict[str, Any]:
         messages = NativeProtocolAdapter._messages_from_openai_payload(endpoint_path, payload)
-        system_parts: list[str] = []
+        system_parts: list[dict[str, Any]] = []
         claude_messages: list[dict[str, Any]] = []
         for message in messages:
             role = str(message.get("role") or "user")
             if role == "system":
-                system_parts.append(NativeProtocolAdapter._content_to_text(message.get("content")))
+                system_parts.extend(NativeProtocolAdapter._claude_blocks_from_content(message.get("content")))
                 continue
             claude_messages.append(
                 {
@@ -193,7 +196,16 @@ class NativeProtocolAdapter:
             "messages": claude_messages or [{"role": "user", "content": [{"type": "text", "text": "ping"}]}],
         }
         if system_parts:
-            native["system"] = "\n".join(part for part in system_parts if part)
+            native["system"] = (
+                "\n".join(str(part.get("text") or "") for part in system_parts if isinstance(part, dict) and part.get("type") == "text")
+                if not NativeProtocolAdapter._blocks_have_cache_control(system_parts)
+                else system_parts
+            )
+        explicit_cache_control = payload.get("cache_control")
+        if isinstance(explicit_cache_control, dict):
+            native["cache_control"] = dict(explicit_cache_control)
+        elif not NativeProtocolAdapter._claude_payload_has_cache_control(native):
+            native["cache_control"] = {"type": "ephemeral"}
         for key in ("temperature", "top_p", "stop_sequences"):
             if key in payload:
                 native[key] = payload[key]
@@ -260,7 +272,9 @@ class NativeProtocolAdapter:
                 elif isinstance(item, dict):
                     item_type = item.get("type")
                     if item_type in {"text", "input_text"}:
-                        blocks.append({"type": "text", "text": str(item.get("text") or "")})
+                        block = {"type": "text", "text": str(item.get("text") or "")}
+                        NativeProtocolAdapter._copy_cache_control(item, block)
+                        blocks.append(block)
                     elif item_type in {"image_url", "input_image"}:
                         image_url = item.get("image_url")
                         if isinstance(image_url, dict):
@@ -268,9 +282,38 @@ class NativeProtocolAdapter:
                         if isinstance(image_url, str) and image_url.startswith("data:image/"):
                             header, _, data = image_url.partition(",")
                             media_type = header.removeprefix("data:").split(";")[0] or "image/png"
-                            blocks.append({"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}})
+                            block = {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}}
+                            NativeProtocolAdapter._copy_cache_control(item, block)
+                            blocks.append(block)
             return blocks
         return [{"type": "text", "text": NativeProtocolAdapter._content_to_text(content)}]
+
+    @staticmethod
+    def _copy_cache_control(source: dict[str, Any], target: dict[str, Any]) -> None:
+        cache_control = source.get("cache_control")
+        if isinstance(cache_control, dict):
+            target["cache_control"] = dict(cache_control)
+
+    @staticmethod
+    def _blocks_have_cache_control(blocks: list[dict[str, Any]]) -> bool:
+        return any(isinstance(block, dict) and isinstance(block.get("cache_control"), dict) for block in blocks)
+
+    @staticmethod
+    def _claude_payload_has_cache_control(payload: dict[str, Any]) -> bool:
+        if isinstance(payload.get("cache_control"), dict):
+            return True
+        system = payload.get("system")
+        if isinstance(system, list) and NativeProtocolAdapter._blocks_have_cache_control(system):
+            return True
+        messages = payload.get("messages")
+        if isinstance(messages, list):
+            for message in messages:
+                if not isinstance(message, dict):
+                    continue
+                content = message.get("content")
+                if isinstance(content, list) and NativeProtocolAdapter._blocks_have_cache_control(content):
+                    return True
+        return False
 
     @staticmethod
     def _content_to_text(content: Any) -> str:

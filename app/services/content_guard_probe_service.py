@@ -1367,6 +1367,7 @@ class ContentGuardProbeService:
                     ),
                 ))
             saw_done = False
+            native_done_seen = False
             for event in events:
                 if "data: [DONE]" in event.replace("\r", ""):
                     saw_done = True
@@ -1422,7 +1423,35 @@ class ContentGuardProbeService:
                     delta_text = ContentGuardProbeService.extract_probe_sse_text_delta(data)
                     if delta_text:
                         text_parts.append(delta_text)
-            if not saw_done:
+                    if native_protocol:
+                        parsed_event = safeJsonParse(data)
+                        if ContentGuardProbeService.native_stream_event_is_terminal(native_protocol, parsed_event):
+                            native_done_seen = True
+            output_text = "".join(text_parts).strip()
+            if not saw_done and not native_done_seen and native_protocol and output_text:
+                if not ContentGuardProbeService.fixed_answer_matches(output_text):
+                    return with_stream_raw(ContentGuardProbeService.probe_failure(
+                        endpoint_path=endpoint_path,
+                        endpoint_label=endpoint_label,
+                        support_label="原生流式探针固定答案不一致",
+                        latency_ms=int((time.perf_counter() - started) * 1000),
+                        status_code=200,
+                        guard_result=ContentGuardProbeService.review_result(
+                            f"原生流式探针聚合文本与固定答案不一致，实际聚合文本：{output_text[:180] or '空'}",
+                            category="native_sse_fixed_answer_mismatch",
+                            excerpt=output_text[:300],
+                        ),
+                    ), output_text=output_text)
+                return with_stream_raw(ContentGuardProbeService.probe_success(
+                    endpoint_path=endpoint_path,
+                    endpoint_label=endpoint_label,
+                    support_label="原生流式探针通过",
+                    latency_ms=int((time.perf_counter() - started) * 1000),
+                    status_code=200,
+                    message="原生流式输出与固定答案一致，连接结束即视为完成",
+                    trace=fallback_trace,
+                ), output_text=output_text)
+            if not saw_done and not native_done_seen:
                 latency_ms = int((time.perf_counter() - started) * 1000)
                 guard_result = ContentGuardResult(
                     result=ContentGuardService.RESULT_PASS,
@@ -1451,8 +1480,7 @@ class ContentGuardProbeService:
                     "retryable": False,
                     "stream_done_seen": False,
                     "content_guard": ContentGuardProbeService.serialize_guard_result(guard_result),
-                }), output_text="".join(text_parts).strip())
-            output_text = "".join(text_parts).strip()
+                }), output_text=output_text)
             if not ContentGuardProbeService.fixed_answer_matches(output_text):
                 return with_stream_raw(ContentGuardProbeService.probe_failure(
                     endpoint_path=endpoint_path,
@@ -1546,6 +1574,23 @@ class ContentGuardProbeService:
                 return "".join(parts)
         ProxyService = _proxy_service()
         return ProxyService._extract_response_text(parsed, limit_bytes=4096) or ""
+
+    @staticmethod
+    def native_stream_event_is_terminal(native_protocol: str, event: Any) -> bool:
+        if not isinstance(event, dict):
+            return False
+        if native_protocol == NativeProtocolAdapter.GEMINI:
+            for candidate in event.get("candidates") or []:
+                if isinstance(candidate, dict) and str(candidate.get("finishReason") or "").strip():
+                    return True
+            return False
+        if native_protocol == NativeProtocolAdapter.CLAUDE_MESSAGES:
+            event_type = str(event.get("type") or "").strip()
+            if event_type == "message_stop":
+                return True
+            delta = event.get("delta") if isinstance(event.get("delta"), dict) else {}
+            return event_type == "message_delta" and bool(str(delta.get("stop_reason") or "").strip())
+        return False
 
     @staticmethod
     def pollution_result_from_sections(
