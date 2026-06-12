@@ -1,3 +1,4 @@
+from app.utils.timezone import now_beijing
 from datetime import datetime
 
 from decimal import Decimal
@@ -40,12 +41,12 @@ class ApiClientKey(Base):
     latency_bias: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     success_rate_bias: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
         nullable=False,
-        default=datetime.utcnow,
-        onupdate=datetime.utcnow,
+        default=now_beijing,
+        onupdate=now_beijing,
     )
 
     provider_bindings = relationship(

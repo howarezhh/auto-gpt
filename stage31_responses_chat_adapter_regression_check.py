@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import datetime, timedelta
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -25,6 +25,7 @@ from app.services.responses_chat_adapter_service import (
     ResponsesChatAdapterService,
 )
 from app.services.setting_service import SettingService
+from app.utils.timezone import now_beijing
 
 
 def _assert(condition: bool, message: str) -> None:
@@ -361,7 +362,7 @@ def _database_cleanup_should_delete_expired_sessions() -> None:
             ResponsesChatAdapterSession(
                 response_id="resp_cleanup_test",
                 messages_json="[]",
-                expires_at=datetime.utcnow() - timedelta(seconds=5),
+                expires_at=now_beijing() - timedelta(seconds=5),
             )
         )
         db.commit()

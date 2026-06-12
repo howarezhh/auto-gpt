@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -32,6 +32,7 @@ from app.services.proxy_service import PreparedUpstreamRequest, ProxyService
 from app.services.router_service import RoutePolicyContext, RouterService
 from app.services.token_usage_service import TokenUsageService
 from app.services.user_auth_service import USER_ROLE_ADMIN, UserAuthService
+from app.utils.timezone import now_beijing
 
 
 class _FakeStreamResponse:
@@ -651,7 +652,7 @@ def main() -> None:
                 provider_b_current.circuit_state = "closed"
                 provider_b_model.health_status = "unhealthy"
                 provider_b_model.circuit_state = "open"
-                provider_b_model.circuit_opened_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=120)
+                provider_b_model.circuit_opened_at = now_beijing() - timedelta(seconds=120)
                 db.commit()
                 ModelCatalogService.invalidate_model_runtime_cache()
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 
 from sqlalchemy import text
@@ -20,6 +20,7 @@ from app.models.request_log import RequestLog
 from app.models.provider import Provider
 from app.models.user_account import UserAccount
 from app.services.system_metrics_service import SystemMetricsService
+from app.utils.timezone import now_beijing
 
 
 def _assert(condition: bool, message: str) -> None:
@@ -30,7 +31,7 @@ def _assert(condition: bool, message: str) -> None:
 def main() -> None:
     Base.metadata.create_all(bind=engine)
     with SessionLocal() as db:
-        now = datetime.now(UTC).replace(tzinfo=None)
+        now = now_beijing()
         db.add(
             Provider(
                 id=1,

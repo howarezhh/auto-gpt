@@ -9,13 +9,13 @@ CREATE TABLE IF NOT EXISTS alert_events (
     message TEXT NOT NULL,
     payload_json TEXT,
     status TEXT NOT NULL DEFAULT 'active',
-    first_seen_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    last_seen_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    first_seen_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Shanghai'),
+    last_seen_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Shanghai'),
     last_notified_at TIMESTAMP,
     acknowledged_at TIMESTAMP,
     resolved_at TIMESTAMP,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Shanghai'),
+    updated_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Shanghai')
 );
 
 CREATE INDEX IF NOT EXISTS ix_alert_events_alert_key ON alert_events (alert_key);
@@ -33,8 +33,8 @@ CREATE TABLE IF NOT EXISTS alert_subscriptions (
     notify_failure_rate_alerts BOOLEAN NOT NULL DEFAULT TRUE,
     browser_notifications_enabled BOOLEAN NOT NULL DEFAULT FALSE,
     poll_interval_seconds INTEGER NOT NULL DEFAULT 30,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Shanghai'),
+    updated_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Shanghai')
 );
 
 CREATE INDEX IF NOT EXISTS ix_alert_subscriptions_user_account_id ON alert_subscriptions (user_account_id);

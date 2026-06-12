@@ -1,3 +1,4 @@
+from app.utils.timezone import now_beijing
 from datetime import datetime
 from sqlalchemy import Boolean, DateTime, Integer, Text
 from sqlalchemy.orm import Mapped, mapped_column
@@ -14,5 +15,5 @@ class ApiKeyPolicyTemplate(Base):
     expires_in_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     allowed_provider_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     allowed_model_names_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing, onupdate=now_beijing)

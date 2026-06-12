@@ -9,6 +9,21 @@ $Port = 8000
 $PipIndexUrl = "https://pypi.tuna.tsinghua.edu.cn/simple"
 $EnableReload = $false
 $AllowForceKillPortProcess = $false
+$RunStateDir = Join-Path $ProjectRoot ".run"
+$RunPidFile = Join-Path $RunStateDir "run.ps1.pid"
+
+function Test-CommandLineContains {
+    param(
+        [string]$CommandLine,
+        [string]$Needle
+    )
+
+    if ([string]::IsNullOrWhiteSpace($CommandLine) -or [string]::IsNullOrWhiteSpace($Needle)) {
+        return $false
+    }
+
+    return $CommandLine.IndexOf($Needle, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+}
 
 function Resolve-BootstrapPythonExe {
     $candidates = @(
@@ -316,10 +331,14 @@ function Stop-ProjectProcesses {
             return $false
         }
 
-        $usesProjectPython = $commandLine -like "*$ProjectPythonExe*"
-        $usesProjectRoot = $commandLine -like "*$ProjectRootPath*"
-        $isProjectUvicorn = $commandLine -like "*-m uvicorn*" -and $commandLine -like "*app.main:app*"
-        $matchesPort = $commandLine -like "*--port $ProjectPort*"
+        if ([int]$_.ProcessId -eq [int]$PID) {
+            return $false
+        }
+
+        $usesProjectPython = Test-CommandLineContains -CommandLine $commandLine -Needle $ProjectPythonExe
+        $usesProjectRoot = Test-CommandLineContains -CommandLine $commandLine -Needle $ProjectRootPath
+        $isProjectUvicorn = (Test-CommandLineContains -CommandLine $commandLine -Needle "-m uvicorn") -and (Test-CommandLineContains -CommandLine $commandLine -Needle "app.main:app")
+        $matchesPort = Test-CommandLineContains -CommandLine $commandLine -Needle "--port $ProjectPort"
 
         return ($isProjectUvicorn -and ($usesProjectPython -or $usesProjectRoot -or $matchesPort))
     })
@@ -331,13 +350,116 @@ function Stop-ProjectProcesses {
 
     $processIds = $matchedProcesses | Select-Object -ExpandProperty ProcessId -Unique
     foreach ($processId in $processIds) {
+        Stop-ProcessTree -RootProcessId ([int]$processId) -Reason "旧项目进程"
+    }
+
+    Start-Sleep -Seconds 1
+}
+
+function Get-ChildProcessIds {
+    param(
+        [int]$ParentProcessId
+    )
+
+    try {
+        return @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$ParentProcessId" | Select-Object -ExpandProperty ProcessId)
+    }
+    catch {
+        return @()
+    }
+}
+
+function Stop-ProcessTree {
+    param(
+        [int]$RootProcessId,
+        [string]$Reason = "旧进程"
+    )
+
+    if ($RootProcessId -eq $PID) {
+        Write-Warning "跳过当前脚本自身 PID: $RootProcessId"
+        return
+    }
+
+    foreach ($childProcessId in @(Get-ChildProcessIds -ParentProcessId $RootProcessId)) {
+        if ($childProcessId -ne $PID) {
+            Stop-ProcessTree -RootProcessId ([int]$childProcessId) -Reason $Reason
+        }
+    }
+
+    try {
+        Stop-Process -Id $RootProcessId -Force -ErrorAction Stop
+        Write-Host "已停止${Reason} PID: $RootProcessId"
+    }
+    catch {
         try {
-            Stop-Process -Id $processId -Force -ErrorAction Stop
-            Write-Host "已停止旧进程 PID: $processId"
+            taskkill /PID $RootProcessId /F | Out-Null
+            Write-Host "已通过 taskkill 停止${Reason} PID: $RootProcessId"
         }
         catch {
-            Write-Warning "停止旧进程 PID $processId 失败: $($_.Exception.Message)"
+            Write-Warning "停止${Reason} PID $RootProcessId 失败: $($_.Exception.Message)"
         }
+    }
+}
+
+function Stop-ProjectRunScriptProcesses {
+    param(
+        [string]$ProjectRootPath,
+        [string]$RunScriptPath,
+        [string]$RunPidFilePath,
+        [bool]$AllowRelativeRunScriptMatch = $false
+    )
+
+    Write-Host "检查并停止该项目旧 run.ps1 启动宿主..."
+
+    $targetProcessIds = New-Object System.Collections.Generic.HashSet[int]
+
+    if (Test-Path -LiteralPath $RunPidFilePath) {
+        try {
+            $pidText = (Get-Content -Raw -LiteralPath $RunPidFilePath).Trim()
+            $pidFromFile = 0
+            if ([int]::TryParse($pidText, [ref]$pidFromFile) -and $pidFromFile -gt 0 -and $pidFromFile -ne $PID) {
+                [void]$targetProcessIds.Add($pidFromFile)
+            }
+        }
+        catch {
+            Write-Warning "读取旧 run.ps1 PID 文件失败: $($_.Exception.Message)"
+        }
+    }
+
+    $matchedProcesses = @(Get-CimInstance Win32_Process | Where-Object {
+        if ([int]$_.ProcessId -eq [int]$PID) {
+            return $false
+        }
+
+        $commandLine = $_.CommandLine
+        if ([string]::IsNullOrWhiteSpace($commandLine)) {
+            return $false
+        }
+
+        $processName = $_.Name
+        $isPowerShellHost = $processName -in @("pwsh.exe", "powershell.exe")
+        if (-not $isPowerShellHost) {
+            return $false
+        }
+
+        $usesProjectRoot = Test-CommandLineContains -CommandLine $commandLine -Needle $ProjectRootPath
+        $usesRunScriptPath = Test-CommandLineContains -CommandLine $commandLine -Needle $RunScriptPath
+        $usesRunScriptName = Test-CommandLineContains -CommandLine $commandLine -Needle "run.ps1"
+
+        return $usesRunScriptPath -or ($usesRunScriptName -and $usesProjectRoot) -or ($AllowRelativeRunScriptMatch -and $usesRunScriptName)
+    })
+
+    foreach ($process in $matchedProcesses) {
+        [void]$targetProcessIds.Add([int]$process.ProcessId)
+    }
+
+    if ($targetProcessIds.Count -eq 0) {
+        Write-Host "未发现需要清理的旧 run.ps1 启动宿主。"
+        return
+    }
+
+    foreach ($processId in $targetProcessIds) {
+        Stop-ProcessTree -RootProcessId ([int]$processId) -Reason "旧 run.ps1 启动宿主"
     }
 
     Start-Sleep -Seconds 1
@@ -505,16 +627,81 @@ function Get-ProjectStartupMutexName {
     return "Local\aotu-gpt-run-$suffix"
 }
 
+function Try-AcquireProjectStartupMutex {
+    param(
+        [System.Threading.Mutex]$Mutex
+    )
+
+    try {
+        return $Mutex.WaitOne(0)
+    }
+    catch [System.Threading.AbandonedMutexException] {
+        Write-Warning "检测到旧启动进程异常退出，已接管本项目启动锁。"
+        return $true
+    }
+}
+
+function Wait-ProjectStartupMutexOrStopOldRun {
+    param(
+        [System.Threading.Mutex]$Mutex,
+        [string]$ProjectRootPath,
+        [string]$ProjectPythonExe,
+        [int]$ProjectPort,
+        [string]$RunScriptPath,
+        [string]$RunPidFilePath
+    )
+
+    if (Try-AcquireProjectStartupMutex -Mutex $Mutex) {
+        return $true
+    }
+
+    Write-Warning "检测到另一个本项目 run.ps1 正在启动或运行，尝试停止旧启动进程后重新接管。"
+    Stop-ProjectProcesses -ProjectRootPath $ProjectRootPath -ProjectPythonExe $ProjectPythonExe -ProjectPort $ProjectPort
+
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        Start-Sleep -Seconds 1
+        if (Try-AcquireProjectStartupMutex -Mutex $Mutex) {
+            return $true
+        }
+    }
+
+    Stop-ProjectRunScriptProcesses `
+        -ProjectRootPath $ProjectRootPath `
+        -RunScriptPath $RunScriptPath `
+        -RunPidFilePath $RunPidFilePath `
+        -AllowRelativeRunScriptMatch $true
+
+    for ($attempt = 1; $attempt -le 5; $attempt++) {
+        Start-Sleep -Seconds 1
+        if (Try-AcquireProjectStartupMutex -Mutex $Mutex) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
 $ProjectStartupMutex = $null
 $HasProjectStartupMutex = $false
 
 try {
+    Stop-ProjectProcesses -ProjectRootPath $ProjectRoot -ProjectPythonExe $PythonExe -ProjectPort $Port
+
     $mutexName = Get-ProjectStartupMutexName -ProjectRootPath $ProjectRoot
     $ProjectStartupMutex = New-Object System.Threading.Mutex($false, $mutexName)
-    if (-not $ProjectStartupMutex.WaitOne(0)) {
-        throw "检测到另一个本项目 run.ps1 正在启动或运行。请先关闭旧启动窗口，或等待旧进程退出后再重新执行。"
+    if (-not (Wait-ProjectStartupMutexOrStopOldRun `
+        -Mutex $ProjectStartupMutex `
+        -ProjectRootPath $ProjectRoot `
+        -ProjectPythonExe $PythonExe `
+        -ProjectPort $Port `
+        -RunScriptPath $MyInvocation.MyCommand.Path `
+        -RunPidFilePath $RunPidFile)) {
+        throw "检测到另一个本项目 run.ps1 正在启动或运行，且自动停止旧进程后仍无法接管启动锁。请手动关闭旧启动窗口后再重新执行。"
     }
     $HasProjectStartupMutex = $true
+
+    New-Item -ItemType Directory -Force -Path $RunStateDir | Out-Null
+    Set-Content -LiteralPath $RunPidFile -Value "$PID" -Encoding UTF8
 
     Set-Location $ProjectRoot
     Set-LocalDevRuntimeFallbacks -ProjectRootPath $ProjectRoot
@@ -548,6 +735,7 @@ try {
     Write-Host "Python 解释器: $PythonExe"
     Write-Host "启动模式: $(if ($EnableReload) { 'reload' } else { 'stable(no-reload)' })"
 
+    $env:TZ = "Asia/Shanghai"
     & $PythonExe -m pip install --upgrade pip -i $PipIndexUrl
     & $PythonExe -m pip install -r requirements.txt -i $PipIndexUrl
 
@@ -562,6 +750,16 @@ try {
     & $PythonExe @UvicornArgs
 }
 finally {
+    if (Test-Path -LiteralPath $RunPidFile) {
+        try {
+            $pidText = (Get-Content -Raw -LiteralPath $RunPidFile).Trim()
+            if ($pidText -eq "$PID") {
+                Remove-Item -LiteralPath $RunPidFile -Force -ErrorAction SilentlyContinue
+            }
+        }
+        catch {
+        }
+    }
     if ($HasProjectStartupMutex -and $null -ne $ProjectStartupMutex) {
         try {
             $ProjectStartupMutex.ReleaseMutex()

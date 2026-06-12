@@ -1,3 +1,4 @@
+import re
 from datetime import datetime
 from typing import Any
 
@@ -37,6 +38,51 @@ PROVIDER_TRUST_STATUS_LABELS = {
     "untrusted": "不可信",
     "unknown": "未检测",
 }
+
+MAINTENANCE_WINDOW_TIMEZONE = "Asia/Shanghai"
+MAINTENANCE_WINDOW_DAILY_RE = re.compile(r"^每日\s+(\d{2}:\d{2})-(\d{2}:\d{2})\s+Asia/Shanghai$")
+MAINTENANCE_WINDOW_WEEKLY_RE = re.compile(r"^每周([一二三四五六日])\s+(\d{2}:\d{2})-(\d{2}:\d{2})\s+Asia/Shanghai$")
+MAINTENANCE_WINDOW_ONCE_RE = re.compile(
+    r"^单次\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})-(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})\s+Asia/Shanghai$"
+)
+
+
+def _validate_maintenance_time_range(start: str, end: str) -> None:
+    try:
+        datetime.strptime(start, "%H:%M")
+        datetime.strptime(end, "%H:%M")
+    except ValueError as exc:
+        raise ValueError("维护窗口时间必须使用 HH:MM 格式") from exc
+    if start == end:
+        raise ValueError("维护窗口开始时间和结束时间不能相同")
+
+
+def normalize_provider_maintenance_window(value: str | None) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    daily = MAINTENANCE_WINDOW_DAILY_RE.match(text)
+    if daily:
+        start, end = daily.groups()
+        _validate_maintenance_time_range(start, end)
+        return f"每日 {start}-{end} {MAINTENANCE_WINDOW_TIMEZONE}"
+    weekly = MAINTENANCE_WINDOW_WEEKLY_RE.match(text)
+    if weekly:
+        weekday, start, end = weekly.groups()
+        _validate_maintenance_time_range(start, end)
+        return f"每周{weekday} {start}-{end} {MAINTENANCE_WINDOW_TIMEZONE}"
+    once = MAINTENANCE_WINDOW_ONCE_RE.match(text)
+    if once:
+        start_text, end_text = once.groups()
+        try:
+            start_at = datetime.strptime(start_text, "%Y-%m-%d %H:%M")
+            end_at = datetime.strptime(end_text, "%Y-%m-%d %H:%M")
+        except ValueError as exc:
+            raise ValueError("单次维护窗口必须使用 YYYY-MM-DD HH:MM 格式") from exc
+        if end_at <= start_at:
+            raise ValueError("单次维护窗口结束时间必须晚于开始时间")
+        return f"单次 {start_text}-{end_text} {MAINTENANCE_WINDOW_TIMEZONE}"
+    raise ValueError("维护窗口仅支持北京时间：每日 HH:MM-HH:MM Asia/Shanghai、每周日 HH:MM-HH:MM Asia/Shanghai、单次 YYYY-MM-DD HH:MM-YYYY-MM-DD HH:MM Asia/Shanghai")
 
 
 def normalize_provider_trust_level(value: str | None) -> str:
@@ -177,6 +223,11 @@ class ProviderModelConfigOut(ProviderModelConfigBase):
     protocol_type: str = "responses"
     protocol_label: str = "Responses API"
     health_status: str
+    db_health: str = "unknown"
+    runtime_health: str | None = None
+    effective_health: str = "unknown"
+    state_source: str = "db"
+    health_state_updated_at: datetime | str | None = None
     circuit_state: str
     circuit_opened_at: datetime | None
     last_check_at: datetime | None
@@ -197,6 +248,7 @@ class ProviderModelConfigOut(ProviderModelConfigBase):
     success_rate: float | None = None
     avg_first_token_latency_ms: float | None = None
     stability_score: float | None = None
+    quality_window_minutes: int = 60
     created_at: datetime
     updated_at: datetime
 
@@ -213,6 +265,11 @@ class ProviderModelMountProviderOut(BaseModel):
     region_tag: str | None = None
     enabled: bool
     health_status: str
+    db_health: str = "unknown"
+    runtime_health: str | None = None
+    effective_health: str = "unknown"
+    state_source: str = "db"
+    health_state_updated_at: datetime | str | None = None
     trust_status: str = "unknown"
     trust_status_label: str = "未检测"
     trust_status_reason: str | None = None
@@ -228,6 +285,7 @@ class ProviderModelMountListResponse(BaseModel):
     page: int
     page_size: int
     total_pages: int
+    quality_window_hours: int = 1
     items: list[ProviderModelMountOut]
 
 
@@ -272,6 +330,19 @@ class ProviderModelConfigUpdate(BaseModel):
 
 class ProviderBatchConnectivityTestRequest(BaseModel):
     provider_ids: list[int] = Field(default_factory=list)
+
+
+class ProviderEndpointProtocolDetectionRequest(BaseModel):
+    provider_ids: list[int] = Field(default_factory=list)
+
+
+class ProviderModelEndpointProtocolDetectionTarget(BaseModel):
+    provider_id: int = Field(..., ge=1)
+    provider_model_id: int = Field(..., ge=1)
+
+
+class ProviderModelEndpointProtocolDetectionRequest(BaseModel):
+    targets: list[ProviderModelEndpointProtocolDetectionTarget] = Field(default_factory=list)
 
 
 class ProviderBatchImportRequest(BaseModel):
@@ -362,6 +433,11 @@ class ProviderBase(BaseModel):
     def normalize_protocol_type(cls, value: str | None) -> str:
         return normalize_provider_protocol_type(value)
 
+    @field_validator("maintenance_window")
+    @classmethod
+    def normalize_maintenance_window(cls, value: str | None) -> str | None:
+        return normalize_provider_maintenance_window(value)
+
     @field_validator("trust_level")
     @classmethod
     def normalize_trust_level(cls, value: str | None) -> str:
@@ -437,6 +513,13 @@ class ProviderUpdate(BaseModel):
             return None
         return normalize_provider_protocol_type(value)
 
+    @field_validator("maintenance_window")
+    @classmethod
+    def normalize_maintenance_window(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return normalize_provider_maintenance_window(value)
+
     @field_validator("trust_level")
     @classmethod
     def normalize_trust_level(cls, value: str | None) -> str | None:
@@ -500,6 +583,11 @@ class ProviderOut(BaseModel):
     model_config_count: int = 0
     model_configs_truncated: bool = False
     health_status: str
+    db_health: str = "unknown"
+    runtime_health: str | None = None
+    effective_health: str = "unknown"
+    state_source: str = "db"
+    health_state_updated_at: datetime | str | None = None
     last_check_at: datetime | None
     last_latency_ms: int | None
     failure_count: int
@@ -509,6 +597,7 @@ class ProviderOut(BaseModel):
     success_rate: float | None = None
     avg_first_token_latency_ms: float | None = None
     stability_score: float | None = None
+    quality_window_minutes: int = 60
     best_input_price_per_1k: float | None = None
     best_output_price_per_1k: float | None = None
     credential_rotated_at: datetime | None = None
@@ -539,6 +628,11 @@ class ProviderOptionOut(BaseModel):
     region_tag: str | None = None
     enabled: bool
     health_status: str
+    db_health: str = "unknown"
+    runtime_health: str | None = None
+    effective_health: str = "unknown"
+    state_source: str = "db"
+    health_state_updated_at: datetime | str | None = None
     protocol_type: str = "both"
     protocol_label: str = "双协议"
     models: list[str] = Field(default_factory=list)
@@ -563,6 +657,11 @@ class ProviderPlaygroundOut(BaseModel):
     region_tag: str | None = None
     enabled: bool
     health_status: str
+    db_health: str = "unknown"
+    runtime_health: str | None = None
+    effective_health: str = "unknown"
+    state_source: str = "db"
+    health_state_updated_at: datetime | str | None = None
     protocol_type: str = "both"
     protocol_label: str = "双协议"
     models: list[str] = Field(default_factory=list)
@@ -577,6 +676,11 @@ class ProviderSummaryOut(BaseModel):
     enabled: bool
     priority: int
     health_status: str
+    db_health: str = "unknown"
+    runtime_health: str | None = None
+    effective_health: str = "unknown"
+    state_source: str = "db"
+    health_state_updated_at: datetime | str | None = None
     protocol_type: str = "both"
     protocol_label: str = "双协议"
     circuit_state: str

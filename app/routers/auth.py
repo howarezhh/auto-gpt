@@ -1,3 +1,4 @@
+from app.utils.timezone import now_beijing
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, Form, Request
@@ -241,7 +242,7 @@ def register_submit(
             },
             status_code=400,
         )
-    user.last_login_at = datetime.utcnow()
+    user.last_login_at = now_beijing()
     db.commit()
     db.refresh(user)
     UserAuthService.login_user(request, user)

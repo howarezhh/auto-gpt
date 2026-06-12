@@ -1,3 +1,4 @@
+from app.utils.timezone import now_beijing
 from datetime import datetime
 from decimal import Decimal
 
@@ -38,7 +39,7 @@ class ApiClientBillingRecord(Base):
     unit_cache_read_price_per_1k: Mapped[Decimal | None] = mapped_column(Numeric(DB_PRICE_PRECISION, DB_PRICE_SCALE), nullable=True)
     unit_cache_write_price_per_1k: Mapped[Decimal | None] = mapped_column(Numeric(DB_PRICE_PRECISION, DB_PRICE_SCALE), nullable=True)
     remark: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing)
 
     api_client_key = relationship("ApiClientKey")
     request_log = relationship("RequestLog")

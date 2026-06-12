@@ -1,3 +1,4 @@
+from app.utils.timezone import now_beijing
 from datetime import datetime, timedelta
 from decimal import Decimal
 
@@ -89,7 +90,7 @@ class ApiKeyAdminService:
         cached = CacheService.get(cache_key)
         if isinstance(cached, dict):
             return ApiKeySummaryOut.model_validate(cached)
-        now = datetime.utcnow()
+        now = now_beijing()
         has_provider = ApiKeyAdminService._api_key_has_provider_expr()
         balance_exhausted = ApiKeyAdminService._api_key_balance_exhausted_expr()
         key_count_row = db.execute(
@@ -194,7 +195,7 @@ class ApiKeyAdminService:
         page_size: int,
     ) -> ApiKeyListResponse:
         normalized_keyword = keyword.strip().lower() if keyword and keyword.strip() else None
-        now = datetime.utcnow()
+        now = now_beijing()
         filters = []
         stmt = (
             select(ApiClientKey)
@@ -590,7 +591,7 @@ class ApiKeyAdminService:
     @staticmethod
     def batch_expire(db: Session, payload: ApiKeyBatchActionIn) -> ApiKeyBatchActionResultOut:
         items = list(db.scalars(select(ApiClientKey).where(ApiClientKey.id.in_(payload.api_key_ids))))
-        now = datetime.utcnow()
+        now = now_beijing()
         for item in items:
             item.expires_at = now
         db.commit()
@@ -773,7 +774,7 @@ class ApiKeyAdminService:
         status = "active"
         if not api_key.enabled:
             status = "disabled"
-        elif api_key.expires_at is not None and api_key.expires_at <= datetime.utcnow():
+        elif api_key.expires_at is not None and api_key.expires_at <= now_beijing():
             status = "expired"
         elif owner_balance_amount is not None and owner_balance_amount <= Decimal("0"):
             status = "balance_exhausted"
@@ -846,7 +847,7 @@ class ApiKeyAdminService:
         window_hours: int = 24,
     ) -> ApiKeyRecentUsageOut:
         normalized_window_hours = max(1, min(int(window_hours or 24), API_KEY_RECENT_USAGE_MAX_WINDOW_HOURS))
-        since = datetime.utcnow() - timedelta(hours=normalized_window_hours)
+        since = now_beijing() - timedelta(hours=normalized_window_hours)
         recent_stmt = select(
             func.count(RequestLog.id).label("recent_requests"),
             func.sum(case((RequestLog.success.is_(False), 1), else_=0)).label("recent_failed_requests"),
@@ -908,7 +909,7 @@ class ApiKeyAdminService:
     ) -> ApiKeyCostInsightResponseOut:
         normalized_group_by = group_by if group_by in {"user", "model", "provider"} else "user"
         normalized_window_days = max(1, min(window_days, 365))
-        since = datetime.utcnow() - timedelta(days=normalized_window_days)
+        since = now_beijing() - timedelta(days=normalized_window_days)
         if normalized_group_by == "model":
             value_expr = func.coalesce(RequestLog.requested_model, RequestLog.model_name, "unknown")
         elif normalized_group_by == "provider":

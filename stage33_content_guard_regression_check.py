@@ -5,7 +5,7 @@ import httpx
 import os
 import re
 import time
-from datetime import datetime, timedelta
+from datetime import timedelta
 from html.parser import HTMLParser
 from pathlib import Path
 from fastapi import FastAPI
@@ -18,6 +18,7 @@ from app.models.provider_model import ProviderModel
 from app.schemas.content_guard import ContentGuardExternalTarget, ContentGuardRulesUpdate, ContentGuardRunRequest, ContentGuardSettingsUpdate, ContentGuardTextInspectRequest
 from app.schemas.setting import SettingUpdate
 from app.utils.content_guard_config import CONTENT_GUARD_MAX_SCAN_BYTES_LIMIT, CONTENT_GUARD_STREAM_BUFFER_MAX_BYTES_LIMIT
+from app.utils.timezone import now_beijing
 from app.services.content_guard_probe_service import ContentGuardProbeService
 import app.services.content_guard_module_service as content_guard_module_service
 from app.services.content_guard_module_service import ContentGuardModuleService
@@ -797,11 +798,11 @@ def _check_content_guard_record_violation_semantics() -> None:
     )
     ContentGuardService.record_violation(db, provider=provider, provider_model=provider_model, result=block_result, auto_commit=False)
     _assert(provider.content_integrity_status == "blocked", "高风险命中必须隔离 provider")
-    _assert(provider.circuit_state == "open", "高风险命中必须打开 provider 熔断")
-    _assert(provider.circuit_opened_at is not None, "高风险命中必须记录 provider 熔断开启时间")
+    _assert(provider.circuit_state == "closed", "高风险命中不得用 provider 熔断表达内容风险")
+    _assert(provider.circuit_opened_at is None, "高风险内容隔离不得记录 provider 熔断开启时间")
     _assert(provider_model.content_integrity_status == "blocked", "高风险命中必须隔离 model")
-    _assert(provider_model.circuit_state == "open", "高风险命中必须打开 model 熔断")
-    _assert(provider_model.circuit_opened_at is not None, "高风险命中必须记录 model 熔断开启时间")
+    _assert(provider_model.circuit_state == "closed", "高风险命中不得用 model 熔断表达内容风险")
+    _assert(provider_model.circuit_opened_at is None, "高风险内容隔离不得记录 model 熔断开启时间")
     _assert(any(isinstance(item, AlertEvent) for item in db.added), "高风险运行时隔离必须写入统一 alert_events")
 
 
@@ -879,7 +880,7 @@ def _check_content_guard_route_cache_and_scheduler_policy() -> None:
         model_name="stage33-blocked-content-model",
         enabled=True,
         content_integrity_status="blocked",
-        content_probe_last_failed_at=datetime.utcnow() - timedelta(minutes=30),
+        content_probe_last_failed_at=now_beijing() - timedelta(minutes=30),
     )
     setting = type("Setting", (), {"content_guard_probe_interval_sec": 300})()
     _assert(
@@ -903,7 +904,7 @@ def _check_content_guard_route_cache_and_scheduler_policy() -> None:
         model_name="stage33-recent-unknown-content-model",
         enabled=True,
         content_integrity_status="unknown",
-        content_probe_last_failed_at=datetime.utcnow() - timedelta(seconds=60),
+        content_probe_last_failed_at=now_beijing() - timedelta(seconds=60),
     )
     _assert(
         HealthService._should_run_scheduled_content_probe(provider, recent_unknown_model, setting=setting) is False,
@@ -915,7 +916,7 @@ def _check_content_guard_route_cache_and_scheduler_policy() -> None:
         model_name="stage33-stale-degraded-content-model",
         enabled=True,
         content_integrity_status="degraded",
-        content_probe_last_failed_at=datetime.utcnow() - timedelta(seconds=301),
+        content_probe_last_failed_at=now_beijing() - timedelta(seconds=301),
     )
     _assert(
         HealthService._should_run_scheduled_content_probe(provider, stale_degraded_model, setting=setting) is True,
@@ -1345,7 +1346,7 @@ async def _check_scheduled_content_probe_batch_policy() -> None:
             model_name="stage33-recent-model",
             enabled=True,
             content_integrity_status="passed",
-            content_probe_last_passed_at=datetime.utcnow(),
+            content_probe_last_passed_at=now_beijing(),
         )
     ]
     no_due_results = await HealthService._run_scheduled_content_trust_probes(
@@ -1423,7 +1424,7 @@ def _check_content_probe_health_window_and_recovery() -> None:
         circuit_state="open",
         content_integrity_status="blocked",
         content_probe_failure_count=2,
-        content_probe_last_failed_at=datetime.utcnow() - timedelta(minutes=11),
+        content_probe_last_failed_at=now_beijing() - timedelta(minutes=11),
     )
     provider.provider_models = [provider_model]
     db = _ProbeHealthSession()
@@ -1472,7 +1473,7 @@ def _check_content_probe_health_window_and_recovery() -> None:
         "content_guard_reason": "单次高风险探针失败",
         "content_guard_action": "block",
     }
-    provider_model.content_probe_last_failed_at = datetime.utcnow() - timedelta(minutes=11)
+    provider_model.content_probe_last_failed_at = now_beijing() - timedelta(minutes=11)
     provider_model.content_probe_failure_count = 2
     ContentGuardProbeService.apply_content_probe_health(
         db,
@@ -1503,7 +1504,7 @@ def _check_content_probe_health_window_and_recovery() -> None:
     _assert(provider_model.content_probe_failure_count == 1, "窗口外单次高风险失败不得沿用旧失败次数")
     _assert(provider_model.content_integrity_status == "degraded", "非缺项的单次高风险探针失败不得绕过 10 分钟窗口直接 blocked")
 
-    provider_model.content_probe_last_failed_at = datetime.utcnow()
+    provider_model.content_probe_last_failed_at = now_beijing()
     provider_model.content_probe_failure_count = 2
     ContentGuardProbeService.apply_content_probe_health(
         db,
@@ -1538,9 +1539,9 @@ def _check_content_probe_health_window_and_recovery() -> None:
         endpoint_results=pass_endpoint_results,
     )
     _assert(provider_model.content_integrity_status == "passed", "blocked 模型通过可信探针后必须恢复为 passed")
-    _assert(provider_model.circuit_state == "closed", "blocked 模型通过可信探针后必须关闭内容熔断")
+    _assert(provider_model.circuit_state == "open", "内容可信探针通过不得修改模型熔断状态")
     _assert(provider.content_integrity_status == "passed", "provider 在所有启用模型通过后必须自动恢复 passed")
-    _assert(provider.circuit_state == "closed", "provider 在所有启用模型通过后必须关闭内容熔断")
+    _assert(provider.circuit_state == "open", "内容可信探针通过不得修改 provider 熔断状态")
     serialized = loads_json(provider_model.content_probe_results_json, {})
     _assert(serialized.get("status") == "passed", f"探针序列化状态必须写最终模型状态：{serialized}")
     _assert(serialized.get("provider_status") == "passed", f"探针序列化必须记录最终 provider 状态：{serialized}")
@@ -1810,12 +1811,12 @@ def _check_content_guard_auto_isolation() -> None:
     )
     _assert(provider.trust_level == "standard", f"自动隔离不得改写提供商信任等级：{provider.trust_level}")
     _assert(provider.content_integrity_status == "blocked", f"自动隔离必须标记内容完整性 blocked：{provider.content_integrity_status}")
-    _assert(provider.circuit_state == "open", f"自动隔离必须打开提供商熔断：{provider.circuit_state}")
-    _assert(provider.circuit_opened_at is not None, "自动隔离必须记录 provider 级熔断打开时间")
+    _assert(provider.circuit_state == "closed", f"自动隔离不得用提供商熔断表达内容风险：{provider.circuit_state}")
+    _assert(provider.circuit_opened_at is None, "自动隔离不得记录 provider 级熔断打开时间")
     _assert(provider.content_integrity_score <= 20, f"自动隔离必须压低内容完整性分：{provider.content_integrity_score}")
     model = provider.provider_models[0]
     _assert(model.content_integrity_status == "blocked", f"自动隔离必须同步隔离挂载模型：{model.content_integrity_status}")
-    _assert(model.circuit_state == "open", f"自动隔离必须同步熔断挂载模型：{model.circuit_state}")
+    _assert(model.circuit_state == "closed", f"自动隔离不得用模型熔断表达内容风险：{model.circuit_state}")
     _assert(isolation_payload["auto_isolated"] is True, "告警 payload 必须标记已自动隔离")
 
     isolated_at = isolation_payload["isolated_at"]
@@ -1825,7 +1826,7 @@ def _check_content_guard_auto_isolation() -> None:
 
 
 def _check_monitoring_alert_write_stability() -> None:
-    now = datetime.utcnow()
+    now = now_beijing()
     alert_key = "monitoring:content_guard_high_risk_provider:3399"
     stable_payload = {
         "provider_id": 3399,
@@ -2073,7 +2074,7 @@ def _check_external_probe_security_boundaries() -> None:
     _assert(provider.id < 0 and provider_model.id < 0, "外部渠道检测目标必须使用稳定负数临时标识，避免伪造正式 id=0")
     _assert(provider_model.supports_stream is False, "外部渠道未声明能力时不得默认支持流式检测")
     _assert(provider_model.supports_tools is False, "外部渠道未声明能力时不得默认支持工具调用检测")
-    _assert(resolved_target["type"] == "external" and resolved_target["endpoint_path"] == "/responses", "外部渠道目标摘要必须保留检测端点")
+    _assert(resolved_target["type"] == "external" and resolved_target["endpoint_path"] == "/chat/completions", "外部渠道目标摘要必须保留默认 Chat 检测端点")
 
 
 def _check_content_probe_target_boundaries() -> None:
@@ -2458,8 +2459,8 @@ def _check_content_guard_template_dom_contract() -> None:
 def _check_frontend_and_log_wiring() -> None:
     checks = [
         ("app/templates/providers.html", [
-            "provider-trust-level",
-            "provider-content-integrity-status",
+            "providers-trust-selected-btn",
+            "<th>质量</th>",
         ]),
         ("app/templates/api_keys.html", []),
         ("app/templates/user_api_keys.html", [
@@ -2571,7 +2572,7 @@ def _check_frontend_and_log_wiring() -> None:
             "ix_request_logs_content_guard_buffer_wait",
         ]),
         ("app/templates/base.html", [
-            "?v=20260610-",
+            "path='js/app.js') }}?v=",
             "/content-guard",
             "内容防护",
         ]),

@@ -95,7 +95,7 @@ class UserAuthService:
             return None
         if not UserAuthService.verify_password(password, user.password_hash):
             return None
-        user.last_login_at = datetime.utcnow()
+        user.last_login_at = now_beijing()
         db.commit()
         db.refresh(user)
         return user
@@ -333,3 +333,5 @@ def require_session_api_user(
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="请先登录")
     return user
+
+from app.utils.timezone import now_beijing

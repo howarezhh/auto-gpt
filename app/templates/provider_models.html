@@ -51,6 +51,14 @@
             </select>
         </label>
         <label>
+            <span>统计时间</span>
+            <select class="field-input" id="provider-model-quality-window">
+                <option value="1" selected>近1小时</option>
+                <option value="24">近1天</option>
+                <option value="168">近1周</option>
+            </select>
+        </label>
+        <label>
             <span>每页数量</span>
             <select class="field-input" id="provider-model-page-size">
                 <option value="10">10</option>
@@ -73,6 +81,7 @@
             <button class="btn btn-ghost interactive-btn" id="provider-model-select-visible-btn" type="button">选择本页</button>
             <button class="btn btn-ghost interactive-btn" id="provider-model-clear-selection-btn" type="button">清空</button>
             <button class="btn btn-ghost interactive-btn" id="provider-model-test-selected-btn" type="button">测试选中</button>
+            <button class="btn btn-ghost interactive-btn" id="provider-model-protocol-detect-selected-btn" type="button">协议检测选中</button>
             <button class="btn btn-ghost interactive-btn" id="provider-model-trust-selected-btn" type="button">可信检测选中</button>
         </div>
     </div>

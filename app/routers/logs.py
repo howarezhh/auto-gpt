@@ -1,3 +1,4 @@
+from app.utils.timezone import now_beijing
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -218,7 +219,7 @@ async def export_logs(
         content_guard_adaptation_skipped=content_guard_adaptation_skipped,
         limit=limit,
     )
-    filename = f"logs-export-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.csv"
+    filename = f"logs-export-{now_beijing().strftime('%Y%m%d-%H%M%S')}.csv"
     _record_log_admin_audit(
         db,
         request=request,

@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.services.admin_audit_service import AdminAuditService
 from app.services.user_auth_service import UserAuthService
+from app.utils.timezone import now_beijing
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 REPORT_ROOT = PROJECT_ROOT / "data" / "benchmark-reports"
@@ -135,7 +136,7 @@ _jobs_lock = threading.Lock()
 
 
 def _now_text() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return now_beijing().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _prune_finished_jobs_locked() -> None:

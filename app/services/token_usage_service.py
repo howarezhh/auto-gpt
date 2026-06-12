@@ -1,3 +1,4 @@
+from app.utils.timezone import now_beijing, now_beijing_aware
 import base64
 import binascii
 import asyncio
@@ -6,7 +7,7 @@ import logging
 import math
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from functools import lru_cache
 from typing import Any
@@ -389,7 +390,7 @@ class TokenUsageService:
             scheduler.add_job(
                 TokenUsageService.finalize_single_log,
                 "date",
-                run_date=datetime.now() + timedelta(milliseconds=delay_ms),
+                run_date=now_beijing() + timedelta(milliseconds=delay_ms),
                 kwargs={
                     "log_id": log_id,
                     "model_name": model_name,
@@ -530,7 +531,7 @@ class TokenUsageService:
             )
             log_by_id = {int(log.id): log for log in logs if log.id is not None}
             usage_delta_by_api_key: dict[int, dict[str, int]] = {}
-            now = datetime.utcnow()
+            now = now_beijing()
             for job in jobs:
                 log = log_by_id.get(int(job.log_id))
                 if log is None or not TokenUsageService._can_fast_finalize_no_charge_batch_item(log):
@@ -738,7 +739,7 @@ class TokenUsageService:
         try:
             payload = dumps_json(
                 {
-                    "failed_at": datetime.now(UTC).isoformat(),
+                    "failed_at": now_beijing_aware().isoformat(),
                     "request_log_id": log.id,
                     "trace_id": log.trace_id,
                     "request_id": log.request_id,
@@ -776,7 +777,7 @@ class TokenUsageService:
     def _write_finalize_alert(db, log: RequestLog) -> None:
         from app.models.alert_event import AlertEvent
 
-        now = datetime.utcnow()
+        now = now_beijing()
         alert_key = f"billing_finalize:{log.id}"
         item = db.scalar(select(AlertEvent).where(AlertEvent.alert_key == alert_key))
         if item is None:
@@ -999,7 +1000,7 @@ class TokenUsageService:
             if TokenUsageService._can_fast_finalize_no_charge(log):
                 billing_delta = Decimal("0")
                 log.billing_status = "no_charge"
-                log.billing_finalized_at = datetime.utcnow()
+                log.billing_finalized_at = now_beijing()
                 log.billing_error = None
             else:
                 billing_delta = BillingService.finalize_request_log_billing(db, log)
@@ -1134,7 +1135,7 @@ class TokenUsageService:
                 prompt_tokens_used=ApiClientKey.prompt_tokens_used + prompt_delta,
                 completion_tokens_used=ApiClientKey.completion_tokens_used + completion_delta,
                 total_tokens_used=ApiClientKey.total_tokens_used + total_delta,
-                last_used_at=datetime.utcnow(),
+                last_used_at=now_beijing(),
             )
         )
 
@@ -1155,7 +1156,7 @@ class TokenUsageService:
         scaled_cost_delta = money_to_scaled_int(billing_delta) if billing_delta is not None else 0
         if token_delta == 0 and scaled_cost_delta == 0 and int(request_delta or 0) == 0:
             return
-        usage_time = log.created_at or datetime.utcnow()
+        usage_time = log.created_at or now_beijing()
         day_key = usage_time.strftime("%Y%m%d")
         minute_key = usage_time.strftime("%Y%m%d%H%M")
         try:

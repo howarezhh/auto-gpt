@@ -1,3 +1,4 @@
+from app.utils.timezone import now_beijing
 from datetime import datetime, timedelta
 
 from sqlalchemy import case, func, literal, select
@@ -204,7 +205,7 @@ def build_dashboard_payload(db: Session) -> dict:
     api_key_summary = ApiKeyAdminService.get_summary(db)
     usage_overview = _dashboard_usage_overview(db)
     usage_summary = usage_overview["summary"]
-    recent_since = datetime.utcnow() - timedelta(hours=24)
+    recent_since = now_beijing() - timedelta(hours=24)
     recent_overview = _dashboard_recent_overview(db, recent_since=recent_since)
     recent_requests = recent_overview["recent_requests"]
     recent_failures = recent_overview["recent_failures"]

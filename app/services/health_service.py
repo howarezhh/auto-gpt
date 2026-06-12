@@ -1,7 +1,9 @@
+from app.utils.timezone import now_beijing
 import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 import time
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -21,6 +23,7 @@ from app.services.content_trust_probe_service import ContentTrustProbeService
 from app.services.log_service import LogService
 from app.logging.adapters.health_adapter import HealthLogRecorder
 from app.services.provider_health_state_service import ProviderHealthStateService
+from app.services.probe_rate_limit_service import ProbeRateLimitService
 from app.services.provider_service import ProviderService
 from app.services.proxy_service import ProxyService, StreamTimeoutPolicy
 from app.services.redis_service import RedisService
@@ -263,7 +266,7 @@ class HealthService:
         single_endpoint_mode: bool = False,
     ) -> dict:
         if not interactive_mode and not HealthService._claim_auto_model_probe_slot(provider.id, provider_model.id):
-            now = datetime.utcnow()
+            now = now_beijing()
             provider_model.health_status = "unhealthy"
             provider_model.circuit_state = "open"
             provider_model.circuit_opened_at = now
@@ -327,7 +330,8 @@ class HealthService:
             )
         )[0]
         HealthService._persist_model_health_result(db, provider, provider_model, model_result)
-        if interactive_mode:
+        requested_phase_keys = set(phase_keys or ())
+        if interactive_mode and "content_trust_probe" in requested_phase_keys:
             try:
                 trust_probe_result = await ContentTrustProbeService.run_trust_probe(
                     db,
@@ -385,7 +389,7 @@ class HealthService:
     @staticmethod
     def _claim_auto_model_probe_slot(provider_id: int, provider_model_id: int) -> bool:
         try:
-            minute_bucket = int(datetime.utcnow().timestamp() // 60)
+            minute_bucket = int(now_beijing().timestamp() // 60)
             key = f"health:auto-model-probe-rate:{provider_id}:{provider_model_id}:{minute_bucket}"
             client = RedisService.get_sync_client()
             pipe = client.pipeline()
@@ -1554,11 +1558,16 @@ class HealthService:
         parallel_phases: bool = False,
         single_endpoint_mode: bool = False,
     ) -> list[dict]:
+        manual_probe = bool(interactive_mode or progress_callback is not None)
+        if not manual_probe and HealthService._provider_in_maintenance(provider):
+            return [
+                HealthService._maintenance_model_result(provider, provider_model)
+                for provider_model in models_to_check
+            ]
         endpoint_results_by_model_id: dict[int, list[dict[str, Any]]] = {
             provider_model.id: []
             for provider_model in models_to_check
         }
-        manual_probe = bool(interactive_mode or progress_callback is not None)
         actual_models_to_check: list[ProviderModel] = []
         for provider_model in models_to_check:
             if manual_probe or HealthService._claim_auto_model_probe_slot(provider.id, provider_model.id):
@@ -1622,6 +1631,429 @@ class HealthService:
             )
             for provider_model in models_to_check
         ]
+
+    @staticmethod
+    def _provider_in_maintenance(provider: Any) -> bool:
+        return bool(getattr(provider, "maintenance_mode_enabled", False))
+
+    @staticmethod
+    def _provider_maintenance_message(provider: Any) -> str:
+        maintenance_window = str(getattr(provider, "maintenance_window", "") or "").strip()
+        if maintenance_window:
+            return f"提供商当前处于维护模式（{maintenance_window}），自动探针不执行；请在维护结束后重试，或由用户手动检测。"
+        return "提供商当前处于维护模式，自动探针不执行；请在维护结束后重试，或由用户手动检测。"
+
+    @staticmethod
+    def _maintenance_model_result(provider: Any, provider_model: Any) -> dict[str, Any]:
+        message = HealthService._provider_maintenance_message(provider)
+        return {
+            "provider_model_id": getattr(provider_model, "id", None),
+            "model_name": getattr(provider_model, "model_name", None),
+            "success": False,
+            "provider_success": False,
+            "status": "skipped",
+            "error_code": "provider_maintenance_mode",
+            "provider_maintenance_mode": True,
+            "health_status": getattr(provider_model, "health_status", "unknown"),
+            "latency_ms": 0,
+            "status_code": 503,
+            "message": message,
+            "endpoint_results": [
+                {
+                    "provider_model_id": getattr(provider_model, "id", None),
+                    "model_name": getattr(provider_model, "model_name", None),
+                    "endpoint_label": "维护模式",
+                    "capability_key": "provider_maintenance_mode",
+                    "success": False,
+                    "status_code": 503,
+                    "latency_ms": 0,
+                    "support_mode": "provider_maintenance_mode",
+                    "provider_maintenance_mode": True,
+                    "error_code": "provider_maintenance_mode",
+                    "message": message,
+                }
+            ],
+        }
+
+    @staticmethod
+    async def _claim_probe_rate_limit_result(
+        provider: Provider,
+        provider_model: ProviderModel,
+        *,
+        probe_type: str,
+        limit_per_minute: int | None = None,
+        window_seconds: int | None = None,
+    ) -> Any:
+        return await ProbeRateLimitService.claim(
+            provider,
+            provider_model,
+            probe_type=probe_type,
+            limit_per_minute=limit_per_minute,
+            window_seconds=window_seconds,
+        )
+
+    @staticmethod
+    def _endpoint_protocol_provider(target: dict[str, Any]) -> Any:
+        provider_payload = dict(target.get("provider") or {})
+        return SimpleNamespace(
+            id=provider_payload.get("id", target.get("provider_id")),
+            name=provider_payload.get("name", target.get("provider_name")),
+            base_url=provider_payload.get("base_url"),
+            api_key=provider_payload.get("api_key"),
+            provider_type=provider_payload.get("provider_type", "openai_compatible"),
+            protocol_type=provider_payload.get("protocol_type", target.get("previous_protocol_type") or "both"),
+            timeout_ms=provider_payload.get("timeout_ms", 30000),
+            max_retries=provider_payload.get("max_retries", 0),
+            first_token_timeout_sec=provider_payload.get("first_token_timeout_sec", 60),
+            maintenance_mode_enabled=provider_payload.get("maintenance_mode_enabled", False),
+            maintenance_window=provider_payload.get("maintenance_window"),
+        )
+
+    @staticmethod
+    def _endpoint_protocol_model(target: dict[str, Any]) -> Any:
+        return SimpleNamespace(
+            id=target.get("provider_model_id"),
+            provider_id=target.get("provider_id"),
+            model_name=target.get("model_name"),
+            supports_chat_completions=bool(target.get("previous_supports_chat_completions")),
+            supports_responses=bool(target.get("previous_supports_responses")),
+            protocol_type=target.get("previous_protocol_type") or "responses",
+        )
+
+    @staticmethod
+    def _endpoint_protocol_response_is_valid(endpoint_type: str, payload: Any) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        if endpoint_type == "chat_completions":
+            choices = payload.get("choices")
+            return payload.get("object") == "chat.completion" and isinstance(choices, list) and bool(choices)
+        if endpoint_type == "responses":
+            if payload.get("object") != "response":
+                return False
+            if str(payload.get("status") or "").lower() in {"failed", "cancelled", "incomplete"}:
+                return False
+            output = payload.get("output")
+            return isinstance(output, list) and bool(output)
+        return False
+
+    @staticmethod
+    def _endpoint_protocol_payload(endpoint_path: str, model_name: str) -> dict[str, Any]:
+        if endpoint_path == "/chat/completions":
+            return {
+                "model": model_name,
+                "messages": [{"role": "user", "content": "只回复 pong"}],
+                "max_tokens": 16,
+                "stream": False,
+            }
+        return {
+            "model": model_name,
+            "input": "只回复 pong",
+            "max_output_tokens": 16,
+            "stream": False,
+        }
+
+    @staticmethod
+    async def _probe_endpoint_protocol(
+        provider: Any,
+        *,
+        model_name: str,
+        endpoint_path: str,
+        setting: Any,
+        timeout_seconds: float | None,
+    ) -> dict[str, Any]:
+        started = time.perf_counter()
+        endpoint_type = "chat_completions" if endpoint_path == "/chat/completions" else "responses"
+        try:
+            payload = HealthService._endpoint_protocol_payload(endpoint_path, model_name)
+            prepared = ProxyService._prepare_upstream_request(provider, endpoint_path=endpoint_path, payload=payload)
+            response_payload, _ = await ProxyService._send_prepared_json(
+                provider,
+                prepared=prepared,
+                headers={"Accept-Encoding": "identity"},
+                requested_payload=payload,
+                setting=setting,
+                request_timeout_seconds=timeout_seconds,
+            )
+            success = HealthService._endpoint_protocol_response_is_valid(endpoint_type, response_payload)
+            return {
+                "endpoint_path": endpoint_path,
+                "endpoint_type": endpoint_type,
+                "success": success,
+                "support_state": "supported" if success else "unknown",
+                "latency_ms": int((time.perf_counter() - started) * 1000),
+                "message": "端点协议检测通过" if success else "端点返回结构不符合标准，保留原协议配置",
+            }
+        except httpx.HTTPStatusError as exc:
+            message = await HealthService._safe_error_text(exc.response)
+            status_code = exc.response.status_code
+            explicit_unsupported = HealthService._is_explicit_endpoint_unsupported(status_code, message)
+            return {
+                "endpoint_path": endpoint_path,
+                "endpoint_type": endpoint_type,
+                "success": False,
+                "support_state": "unsupported" if explicit_unsupported else "unknown",
+                "latency_ms": int((time.perf_counter() - started) * 1000),
+                "status_code": status_code,
+                "message": message,
+            }
+        except Exception as exc:
+            return {
+                "endpoint_path": endpoint_path,
+                "endpoint_type": endpoint_type,
+                "success": False,
+                "support_state": "unknown",
+                "latency_ms": int((time.perf_counter() - started) * 1000),
+                "message": str(exc),
+            }
+
+    @staticmethod
+    def _is_explicit_endpoint_unsupported(status_code: int | None, message: str) -> bool:
+        normalized = str(message or "").lower()
+        hints = ("cannot post", "not found", "unknown url", "unknown endpoint", "unsupported", "no route")
+        return status_code in {400, 404, 405} and any(hint in normalized for hint in hints)
+
+    @staticmethod
+    def _protocol_type_from_supports(supports_chat: bool, supports_responses: bool, fallback: str) -> str:
+        if supports_chat and supports_responses:
+            return "both"
+        if supports_chat:
+            return "chat_completions"
+        if supports_responses:
+            return "responses"
+        return fallback or "responses"
+
+    @staticmethod
+    async def _detect_endpoint_protocol_for_target(target: dict[str, Any]) -> dict[str, Any]:
+        provider = HealthService._endpoint_protocol_provider(target)
+        provider_model = HealthService._endpoint_protocol_model(target)
+        previous_chat = bool(target.get("previous_supports_chat_completions"))
+        previous_responses = bool(target.get("previous_supports_responses"))
+        previous_protocol = str(target.get("previous_protocol_type") or provider_model.protocol_type or "responses")
+        limit_result = await HealthService._claim_probe_rate_limit_result(
+            provider,
+            provider_model,
+            probe_type="endpoint_protocol",
+        )
+        if limit_result is not None and not getattr(limit_result, "allowed", False):
+            return {
+                "provider_id": target.get("provider_id"),
+                "provider_name": target.get("provider_name"),
+                "provider_model_id": target.get("provider_model_id"),
+                "model_name": target.get("model_name"),
+                "status": "rate_limited",
+                "error_code": ProbeRateLimitService.ERROR_CODE,
+                "message": getattr(limit_result, "reason", "探针频率限制"),
+                "updated": False,
+                "update_allowed": False,
+                "supports_chat_completions": previous_chat,
+                "supports_responses": previous_responses,
+                "protocol_type": previous_protocol,
+                "protocol_label": ProviderService.provider_protocol_label(previous_protocol),
+                "endpoint_results": [],
+                "latency_ms": 0,
+            }
+        setting = await ProxyService._get_setting_async()
+        timeout_seconds = None
+        try:
+            timeout_ms = int(getattr(provider, "timeout_ms", 0) or 0)
+            timeout_seconds = timeout_ms / 1000 if timeout_ms > 0 else None
+        except Exception:
+            timeout_seconds = None
+        endpoint_results = [
+            await HealthService._probe_endpoint_protocol(
+                provider,
+                model_name=str(target.get("model_name") or ""),
+                endpoint_path="/chat/completions",
+                setting=setting,
+                timeout_seconds=timeout_seconds,
+            ),
+            await HealthService._probe_endpoint_protocol(
+                provider,
+                model_name=str(target.get("model_name") or ""),
+                endpoint_path="/responses",
+                setting=setting,
+                timeout_seconds=timeout_seconds,
+            ),
+        ]
+        chat_state = endpoint_results[0]["support_state"]
+        responses_state = endpoint_results[1]["support_state"]
+        supports_chat = True if chat_state == "supported" else (False if chat_state == "unsupported" else previous_chat)
+        supports_responses = True if responses_state == "supported" else (False if responses_state == "unsupported" else previous_responses)
+        has_confident_result = any(item["support_state"] in {"supported", "unsupported"} for item in endpoint_results)
+        protocol_type = HealthService._protocol_type_from_supports(supports_chat, supports_responses, previous_protocol)
+        update_allowed = bool(has_confident_result and (supports_chat or supports_responses))
+        status_text = "passed" if update_allowed else "failed"
+        message = "端点协议检测完成" if update_allowed else "端点协议检测未获得可沉淀结论，保留原协议配置"
+        return {
+            "provider_id": target.get("provider_id"),
+            "provider_name": target.get("provider_name"),
+            "provider_model_id": target.get("provider_model_id"),
+            "model_name": target.get("model_name"),
+            "status": status_text,
+            "message": message,
+            "updated": False,
+            "update_allowed": update_allowed,
+            "supports_chat_completions": supports_chat if update_allowed else previous_chat,
+            "supports_responses": supports_responses if update_allowed else previous_responses,
+            "protocol_type": protocol_type if update_allowed else previous_protocol,
+            "protocol_label": ProviderService.provider_protocol_label(protocol_type if update_allowed else previous_protocol),
+            "endpoint_results": endpoint_results,
+            "latency_ms": sum(int(item.get("latency_ms") or 0) for item in endpoint_results),
+        }
+
+    @staticmethod
+    async def _run_endpoint_protocol_detection_targets(
+        db: Session,
+        targets: list[dict[str, Any]],
+        *,
+        trigger_type: str,
+    ) -> dict[str, Any]:
+        manual_trigger = str(trigger_type or "").startswith("manual")
+        async def run_one(target: dict[str, Any]) -> dict[str, Any]:
+            provider = HealthService._endpoint_protocol_provider(target)
+            if not manual_trigger and HealthService._provider_in_maintenance(provider):
+                previous_protocol = str(target.get("previous_protocol_type") or "responses")
+                return {
+                    "provider_id": target.get("provider_id"),
+                    "provider_name": target.get("provider_name"),
+                    "provider_model_id": target.get("provider_model_id"),
+                    "model_name": target.get("model_name"),
+                    "status": "skipped",
+                    "error_code": "provider_maintenance_mode",
+                    "provider_maintenance_mode": True,
+                    "message": HealthService._provider_maintenance_message(provider),
+                    "updated": False,
+                    "update_allowed": False,
+                    "supports_chat_completions": bool(target.get("previous_supports_chat_completions")),
+                    "supports_responses": bool(target.get("previous_supports_responses")),
+                    "protocol_type": previous_protocol,
+                    "protocol_label": ProviderService.provider_protocol_label(previous_protocol),
+                    "endpoint_results": [],
+                    "latency_ms": 0,
+                }
+            return await HealthService._detect_endpoint_protocol_for_target(target)
+
+        model_results = await asyncio.gather(*(run_one(target) for target in targets))
+        updated_count = 0
+        for result in model_results:
+            if result.get("update_allowed"):
+                provider_model = db.get(ProviderModel, result.get("provider_model_id"))
+                if provider_model is not None:
+                    provider_model.supports_chat_completions = bool(result.get("supports_chat_completions"))
+                    provider_model.supports_responses = bool(result.get("supports_responses"))
+                    provider_model.protocol_type = str(result.get("protocol_type") or provider_model.protocol_type)
+                    result["updated"] = True
+                    updated_count += 1
+        if updated_count:
+            db.commit()
+            ProviderService.invalidate_provider_runtime_cache()
+        maintenance_blocked_count = sum(1 for item in model_results if item.get("error_code") == "provider_maintenance_mode")
+        provider_results: list[dict[str, Any]] = []
+        for provider_id in dict.fromkeys(item.get("provider_id") for item in model_results):
+            items = [item for item in model_results if item.get("provider_id") == provider_id]
+            provider_results.append(
+                {
+                    "provider_id": provider_id,
+                    "provider_name": items[0].get("provider_name") if items else None,
+                    "total": len(items),
+                    "updated_count": sum(1 for item in items if item.get("updated")),
+                    "success": any(item.get("update_allowed") for item in items),
+                    "model_results": items,
+                }
+            )
+        return {
+            "success": updated_count > 0 and maintenance_blocked_count < len(model_results),
+            "trigger_type": trigger_type,
+            "total": len(model_results),
+            "updated_count": updated_count,
+            "maintenance_blocked_count": maintenance_blocked_count,
+            "provider_results": provider_results,
+            "model_results": model_results,
+        }
+
+    @staticmethod
+    def _endpoint_protocol_target_from_model(provider: Provider, provider_model: ProviderModel) -> dict[str, Any]:
+        return {
+            "provider_id": provider.id,
+            "provider_name": provider.name,
+            "provider": {
+                "id": provider.id,
+                "name": provider.name,
+                "base_url": provider.base_url,
+                "api_key": provider.api_key,
+                "provider_type": provider.provider_type,
+                "protocol_type": provider.protocol_type,
+                "timeout_ms": provider.timeout_ms,
+                "max_retries": provider.max_retries,
+                "first_token_timeout_sec": provider.first_token_timeout_sec,
+                "maintenance_mode_enabled": provider.maintenance_mode_enabled,
+                "maintenance_window": provider.maintenance_window,
+            },
+            "provider_model_id": provider_model.id,
+            "model_name": provider_model.model_name,
+            "previous_supports_chat_completions": bool(provider_model.supports_chat_completions),
+            "previous_supports_responses": bool(provider_model.supports_responses),
+            "previous_protocol_type": provider_model.protocol_type,
+        }
+
+    @staticmethod
+    async def detect_endpoint_protocols_for_provider_ids(
+        db: Session,
+        *,
+        provider_ids: list[int],
+        trigger_type: str,
+    ) -> dict[str, Any]:
+        ids = [int(item) for item in provider_ids if int(item) > 0]
+        if not ids:
+            return {
+                "success": False,
+                "trigger_type": trigger_type,
+                "total": 0,
+                "updated_count": 0,
+                "maintenance_blocked_count": 0,
+                "provider_results": [],
+                "model_results": [],
+            }
+        providers = list(
+            db.scalars(
+                select(Provider)
+                .options(selectinload(Provider.provider_models))
+                .where(Provider.id.in_(ids))
+            )
+        )
+        targets = [
+            HealthService._endpoint_protocol_target_from_model(provider, provider_model)
+            for provider in providers
+            for provider_model in provider.provider_models
+            if provider_model.enabled
+        ]
+        return await HealthService._run_endpoint_protocol_detection_targets(
+            db,
+            targets,
+            trigger_type=trigger_type,
+        )
+
+    @staticmethod
+    async def detect_endpoint_protocols_for_provider_model_ids(
+        db: Session,
+        *,
+        targets: list[dict[str, Any]],
+        trigger_type: str,
+    ) -> dict[str, Any]:
+        resolved_targets: list[dict[str, Any]] = []
+        for target in targets:
+            provider_model_id = target.get("provider_model_id")
+            provider_id = target.get("provider_id")
+            provider_model = db.get(ProviderModel, provider_model_id) if provider_model_id is not None else None
+            provider = db.get(Provider, provider_id) if provider_id is not None else None
+            if provider_model is None or provider is None:
+                continue
+            resolved_targets.append(HealthService._endpoint_protocol_target_from_model(provider, provider_model))
+        return await HealthService._run_endpoint_protocol_detection_targets(
+            db,
+            resolved_targets,
+            trigger_type=trigger_type,
+        )
 
     @staticmethod
     def _build_probe_phase_groups(
@@ -2414,7 +2846,7 @@ class HealthService:
         )
         if last_probe_at is None:
             return True
-        return (datetime.utcnow() - last_probe_at).total_seconds() >= interval_seconds
+        return (now_beijing() - last_probe_at).total_seconds() >= interval_seconds
 
     @staticmethod
     def _capability_probe_cache_key(provider_id: int, provider_model_id: int, capability: str) -> str:
@@ -2483,7 +2915,7 @@ class HealthService:
         models_to_check: list[ProviderModel],
         model_results: list[dict[str, Any]],
     ) -> None:
-        checked_at = datetime.utcnow().isoformat()
+        checked_at = now_beijing().isoformat()
         for provider_model, model_result in zip(models_to_check, model_results, strict=False):
             for endpoint_result in model_result.get("endpoint_results") or []:
                 capability = endpoint_result.get("capability_key") or endpoint_result.get("endpoint_label")
@@ -2554,13 +2986,13 @@ class HealthService:
             except ValueError:
                 started_at = None
             if started_at is not None:
-                elapsed_seconds = (datetime.utcnow() - started_at).total_seconds()
+                elapsed_seconds = (now_beijing() - started_at).total_seconds()
                 if elapsed_seconds < HealthService.MANUAL_CHECK_MIN_INTERVAL_SEC:
                     remaining = max(1, int(HealthService.MANUAL_CHECK_MIN_INTERVAL_SEC - elapsed_seconds))
                     raise ValueError(f"{scope_label} 已有健康检查任务运行中，请在 {remaining} 秒后重试")
         CacheService.set(
             cache_key,
-            datetime.utcnow().isoformat(),
+            now_beijing().isoformat(),
             ttl_seconds=HealthService.MANUAL_CHECK_MIN_INTERVAL_SEC,
         )
 
@@ -2708,6 +3140,18 @@ class HealthService:
         endpoint_label = "chat/completions stream" if endpoint_path == "/chat/completions" else "responses stream"
         native_support_label = f"原生支持 {endpoint_label}"
         unsupported_label = f"不支持 {endpoint_label}"
+        limit_result = await HealthService._claim_probe_rate_limit_result(
+            provider,
+            provider_model,
+            probe_type="health_stream",
+        )
+        if limit_result is not None and not getattr(limit_result, "allowed", False):
+            return ProbeRateLimitService.rate_limited_probe_result(
+                limit_result,
+                endpoint_path=endpoint_path,
+                endpoint_label=endpoint_label,
+                support_label="流式健康探针已限频",
+            )
         stream_context = None
         exc_type = exc_value = exc_traceback = None
         try:
@@ -2719,15 +3163,16 @@ class HealthService:
                 endpoint_path,
                 stream_payload,
                 started=started,
+                extra_headers={"Accept-Encoding": "identity"},
                 stream_connect_timeout_seconds=(
-                    HealthService.INTERACTIVE_STREAM_CONNECT_TIMEOUT_SECONDS
+                    HealthService._interactive_stream_connect_timeout_seconds(provider)
                     if interactive_mode
                     else setting.stream_connect_timeout_seconds
                 ),
             )
             timeout_policy = (
                 StreamTimeoutPolicy(
-                    first_token_timeout_seconds=HealthService.INTERACTIVE_STREAM_FIRST_TOKEN_TIMEOUT_SECONDS,
+                    first_token_timeout_seconds=HealthService._interactive_stream_first_token_timeout_seconds(provider),
                     idle_timeout_seconds=max(0, int(getattr(setting, "stream_idle_timeout_seconds", 0) or 0)),
                     max_duration_seconds=max(0, int(getattr(setting, "stream_max_duration_seconds", 0) or 0)),
                 )
@@ -2816,14 +3261,18 @@ class HealthService:
             status_code = getattr(exc, "status_code", None)
             detail = getattr(exc, "detail", None)
             message = ProxyService._error_message_for_log(detail) if detail is not None else str(exc)
+            decompression_error = any(
+                hint in message.lower()
+                for hint in ("decompress", "incorrect header check", "content-encoding", "压缩")
+            )
             return {
                 "endpoint_path": endpoint_path,
                 "endpoint_label": endpoint_label,
                 "success": False,
                 "native_success": False,
                 "adapted_success": False,
-                "support_mode": "unsupported",
-                "support_label": unsupported_label,
+                "support_mode": "unknown" if decompression_error else "unsupported",
+                "support_label": "压缩响应异常，端点支持状态待确认" if decompression_error else unsupported_label,
                 "latency_ms": latency_ms,
                 "status_code": status_code,
                 "message": message,
@@ -2837,6 +3286,14 @@ class HealthService:
         finally:
             if stream_context is not None:
                 await stream_context.__aexit__(exc_type, exc_value, exc_traceback)
+
+    @staticmethod
+    def _interactive_stream_connect_timeout_seconds(provider: Provider) -> int:
+        return HealthService.INTERACTIVE_STREAM_CONNECT_TIMEOUT_SECONDS
+
+    @staticmethod
+    def _interactive_stream_first_token_timeout_seconds(provider: Provider) -> int:
+        return HealthService.INTERACTIVE_STREAM_FIRST_TOKEN_TIMEOUT_SECONDS
 
     @staticmethod
     def _should_retry_probe_result(result: dict[str, Any]) -> bool:
@@ -3093,7 +3550,7 @@ class HealthService:
                 timeout=provider.timeout_ms / 1000,
             )
             latency_ms = int((time.perf_counter() - started) * 1000)
-            provider.last_check_at = datetime.utcnow()
+            provider.last_check_at = now_beijing()
             provider.last_latency_ms = latency_ms
             success = response.status_code == 200
             if success:
@@ -3137,7 +3594,7 @@ class HealthService:
             }
         except Exception as exc:
             latency_ms = int((time.perf_counter() - started) * 1000)
-            provider.last_check_at = datetime.utcnow()
+            provider.last_check_at = now_beijing()
             provider.last_latency_ms = latency_ms
             provider.failure_count += 1
             provider.health_status = "unhealthy"
@@ -3175,7 +3632,7 @@ class HealthService:
         error_message: str | None,
     ) -> None:
         provider_model.health_status = health_status
-        provider_model.last_check_at = datetime.utcnow()
+        provider_model.last_check_at = now_beijing()
         provider_model.last_latency_ms = latency_ms
         provider_model.last_error = error_message
         if health_status == "healthy":
@@ -3183,10 +3640,6 @@ class HealthService:
             provider_model.success_count += 1
             provider_model.circuit_state = "closed"
             provider_model.circuit_opened_at = None
-            if provider_model.content_integrity_status in {"blocked", "degraded"}:
-                provider_model.content_integrity_status = "unknown"
-                provider_model.content_probe_last_failed_at = None
-                provider_model.content_probe_failure_count = 0
         elif health_status == "degraded":
             provider_model.failure_count = 0
             provider_model.success_count += 1
@@ -3198,13 +3651,13 @@ class HealthService:
             if health_status == "unhealthy":
                 provider_model.health_status = "unhealthy"
                 provider_model.circuit_state = "open"
-                provider_model.circuit_opened_at = datetime.utcnow()
+                provider_model.circuit_opened_at = now_beijing()
             elif provider.auto_circuit_break_enabled:
                 threshold = ProviderService.get_effective_circuit_breaker_threshold(db, provider)
                 if provider_model.circuit_state == "half_open" or provider_model.failure_count >= threshold:
                     provider_model.health_status = "unhealthy"
                     provider_model.circuit_state = "open"
-                    provider_model.circuit_opened_at = datetime.utcnow()
+                    provider_model.circuit_opened_at = now_beijing()
                 else:
                     provider_model.health_status = "degraded"
                     provider_model.circuit_state = "closed"
@@ -3226,7 +3679,7 @@ class HealthService:
         latency_ms: int,
         error_message: str | None,
     ) -> None:
-        now = datetime.utcnow()
+        now = now_beijing()
         provider.last_check_at = now
         provider.last_latency_ms = latency_ms
         provider.health_status = "unhealthy"

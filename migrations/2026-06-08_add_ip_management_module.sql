@@ -17,8 +17,8 @@ CREATE TABLE IF NOT EXISTS ip_management_settings (
     store_raw_headers_enabled BOOLEAN NOT NULL DEFAULT FALSE,
     ip_masking_enabled BOOLEAN NOT NULL DEFAULT FALSE,
     fail_open_enabled BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Shanghai'),
+    updated_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Shanghai')
 );
 
 INSERT INTO ip_management_settings (id)
@@ -41,8 +41,8 @@ CREATE TABLE IF NOT EXISTS ip_access_rules (
     reason TEXT,
     created_by_user_id INTEGER,
     created_by_username TEXT,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Shanghai'),
+    updated_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Shanghai')
 );
 
 CREATE TABLE IF NOT EXISTS ip_management_events (
@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS ip_management_events (
     api_client_key_id INTEGER,
     api_client_key_prefix TEXT,
     user_account_id INTEGER,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Shanghai')
 );
 
 CREATE INDEX IF NOT EXISTS ix_ip_access_rules_enabled_scope_priority ON ip_access_rules (enabled, scope, priority, id);

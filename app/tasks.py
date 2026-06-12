@@ -1,3 +1,4 @@
+from app.utils.timezone import now_beijing
 import inspect
 import logging
 import asyncio
@@ -44,7 +45,7 @@ return 0
 
 
 def _duration_ms(started_at: datetime, finished_at: datetime | None = None) -> int:
-    finished = finished_at or datetime.utcnow()
+    finished = finished_at or now_beijing()
     return int((finished - started_at).total_seconds() * 1000)
 
 
@@ -237,7 +238,7 @@ def distributed_job_lock(job_name: str, *, ttl_seconds: int | Callable[[], int])
             lock_key = f"scheduler:lock:{job_name}"
             state_key = f"scheduler:job:{job_name}:state"
             job_run_id = BackgroundJobLogRecorder.new_run_id()
-            started_at = datetime.utcnow()
+            started_at = now_beijing()
             client = None
             lock_acquired = False
             lock_status = "acquired"
@@ -256,7 +257,7 @@ def distributed_job_lock(job_name: str, *, ttl_seconds: int | Callable[[], int])
                     lock_status="unavailable_skipped",
                     status="skipped_lock_unavailable",
                     started_at=started_at,
-                    finished_at=datetime.utcnow(),
+                    finished_at=now_beijing(),
                     error=str(exc)[:1000],
                 )
                 return None
@@ -269,7 +270,7 @@ def distributed_job_lock(job_name: str, *, ttl_seconds: int | Callable[[], int])
                             "job_run_id": job_run_id,
                             "trigger_type": trigger_type,
                             "lock_status": "skipped_locked",
-                            "updated_at": datetime.utcnow().isoformat(),
+                            "updated_at": now_beijing().isoformat(),
                         },
                     )
                     await client.expire(state_key, max(lock_ttl_seconds, 300))
@@ -283,7 +284,7 @@ def distributed_job_lock(job_name: str, *, ttl_seconds: int | Callable[[], int])
                     lock_status="skipped_locked",
                     status="skipped_locked",
                     started_at=started_at,
-                    finished_at=datetime.utcnow(),
+                    finished_at=now_beijing(),
                 )
                 return None
             try:
@@ -297,8 +298,8 @@ def distributed_job_lock(job_name: str, *, ttl_seconds: int | Callable[[], int])
                             "job_run_id": job_run_id,
                             "trigger_type": trigger_type,
                             "lock_status": lock_status,
-                            "started_at": datetime.utcnow().isoformat(),
-                            "updated_at": datetime.utcnow().isoformat(),
+                            "started_at": now_beijing().isoformat(),
+                            "updated_at": now_beijing().isoformat(),
                         },
                     )
                     await client.expire(state_key, max(lock_ttl_seconds, 300))
@@ -314,7 +315,7 @@ def distributed_job_lock(job_name: str, *, ttl_seconds: int | Callable[[], int])
                 result = func(*args, **kwargs)
                 if inspect.isawaitable(result):
                     result = await result
-                finished_at = datetime.utcnow()
+                finished_at = now_beijing()
                 if client is not None and lock_acquired:
                     await client.hset(
                         state_key,
@@ -346,7 +347,7 @@ def distributed_job_lock(job_name: str, *, ttl_seconds: int | Callable[[], int])
                 )
                 return result
             except asyncio.CancelledError:
-                finished_at = datetime.utcnow()
+                finished_at = now_beijing()
                 try:
                     if client is not None and lock_acquired:
                         await client.hset(
@@ -376,7 +377,7 @@ def distributed_job_lock(job_name: str, *, ttl_seconds: int | Callable[[], int])
                 )
                 raise
             except Exception as exc:
-                finished_at = datetime.utcnow()
+                finished_at = now_beijing()
                 try:
                     if client is not None and lock_acquired:
                         await client.hset(
@@ -568,7 +569,7 @@ def _apply_runtime_healthy_signal(
     )
     if not status_changed:
         return False
-    now = datetime.utcnow()
+    now = now_beijing()
     provider_model.health_status = "healthy"
     provider_model.circuit_state = "closed"
     provider_model.circuit_opened_at = None
@@ -606,7 +607,7 @@ def _apply_runtime_probe_unavailable_unhealthy_signal(
 ) -> bool:
     previous_status = str(provider_model.health_status or "unknown")
     previous_circuit = str(provider_model.circuit_state or "closed")
-    now = datetime.utcnow()
+    now = now_beijing()
     message = (
         "短窗口正式请求异常信号需要健康探针确认，但探针未能触发或执行失败；"
         "为避免继续路由到疑似异常上游，已默认更新为异常状态。"

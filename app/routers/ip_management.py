@@ -191,7 +191,7 @@ def list_ip_events(
     if "api_key" in request.query_params:
         raise HTTPException(status_code=422, detail="IP 管理事件暂不支持 API Key 前缀筛选")
     if started_at is None and ended_at is None and not any((keyword, ip, decision, scope, status_code is not None)):
-        started_at = datetime.utcnow() - timedelta(days=7)
+        started_at = now_beijing() - timedelta(days=7)
     total, rows = IpManagementEventService.list_events(
         db,
         keyword=keyword,
@@ -255,3 +255,5 @@ def test_ip_rule(payload: IpRuleTestRequest, db: Session = Depends(get_db)) -> d
             "rule": IpManagementService.serialize_rule(match.rule) if match.rule is not None else None,
         }
     }
+
+from app.utils.timezone import now_beijing

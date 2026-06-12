@@ -58,7 +58,7 @@ return {'ok', ''}
                 )
             )
         if rpm_limit and rpm_limit > 0:
-            minute_key = datetime.utcnow().strftime("%Y%m%d%H%M")
+            minute_key = now_beijing().strftime("%Y%m%d%H%M")
             entries.append(
                 (
                     f"ipmgmt:rate:rpm:{scope}:{ip_hash}:{minute_key}",
@@ -85,3 +85,5 @@ return {'ok', ''}
         if code != "ok":
             key = str(result[1] if isinstance(result, list) and len(result) > 1 else "")
             raise RateLimitExceededError(messages.get(key, "来源 IP 超过限制"), code=str(code), key=key)
+
+from app.utils.timezone import now_beijing

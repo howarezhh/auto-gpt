@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
 from app.services.content_guard_service import ContentGuardResult, ContentGuardService
+from app.services.probe_rate_limit_service import ProbeRateLimitService
 from app.services.provider_service import ProviderService
 from app.services.setting_service import SettingService
 from app.utils.json_utils import dumps_json, safeJsonParse
@@ -60,12 +61,59 @@ class ContentGuardProbeService:
     DETECTION_TRAFFIC_TYPE = "content_guard_probe"
 
     @staticmethod
+    def provider_probe_timeout_seconds(provider: Provider | Any, fallback_seconds: float) -> float:
+        timeout_ms = getattr(provider, "timeout_ms", None)
+        try:
+            timeout_seconds = float(timeout_ms or 0) / 1000.0
+        except (TypeError, ValueError):
+            timeout_seconds = 0.0
+        return max(1.0, timeout_seconds) if timeout_seconds > 0 else float(fallback_seconds)
+
+    @staticmethod
+    def provider_stream_connect_timeout_seconds(provider: Provider | Any) -> float:
+        return ContentGuardProbeService.provider_probe_timeout_seconds(
+            provider,
+            ContentGuardProbeService.STREAM_CONNECT_TIMEOUT_SECONDS,
+        )
+
+    @staticmethod
+    def provider_stream_first_token_timeout_seconds(provider: Provider | Any) -> float:
+        first_token_timeout = getattr(provider, "first_token_timeout_sec", None)
+        try:
+            first_token_timeout_seconds = float(first_token_timeout or 0)
+        except (TypeError, ValueError):
+            first_token_timeout_seconds = 0.0
+        if first_token_timeout_seconds > 0:
+            return max(1.0, first_token_timeout_seconds)
+        return float(ContentGuardProbeService.STREAM_FIRST_TOKEN_TIMEOUT_SECONDS)
+
+    @staticmethod
     def content_probe_endpoint_path(provider: Provider, provider_model: ProviderModel) -> str | None:
-        if ProviderService.provider_supports_responses(provider) and bool(getattr(provider_model, "supports_responses", False)):
-            return "/responses"
-        if ProviderService.provider_supports_chat_completions(provider) and bool(getattr(provider_model, "supports_chat_completions", False)):
+        chat_supported = ProviderService.provider_supports_chat_completions(provider) and bool(getattr(provider_model, "supports_chat_completions", False))
+        responses_supported = ProviderService.provider_supports_responses(provider) and bool(getattr(provider_model, "supports_responses", False))
+        probe_protocol_type = ContentGuardProbeService._content_guard_probe_protocol_type()
+
+        if probe_protocol_type == "responses":
+            if responses_supported:
+                return "/responses"
+            if chat_supported:
+                return "/chat/completions"
+            return None
+        if chat_supported:
             return "/chat/completions"
+        if responses_supported:
+            return "/responses"
         return None
+
+    @staticmethod
+    def _content_guard_probe_protocol_type() -> str:
+        try:
+            value = str(getattr(SettingService.get_cached(), "content_guard_probe_protocol_type", "") or "")
+        except Exception:
+            value = ""
+        if value in {"chat_completions", "responses"}:
+            return value
+        return "chat_completions"
 
     @staticmethod
     def build_health_phase_specs(
@@ -88,7 +136,7 @@ class ContentGuardProbeService:
                         "probe": lambda model: ContentGuardProbeService.probe_fixed_answer(
                             provider,
                             model,
-                            endpoint_path=ContentGuardProbeService.content_probe_endpoint_path(provider, model) or "/responses",
+                            endpoint_path=ContentGuardProbeService.content_probe_endpoint_path(provider, model) or "/chat/completions",
                         ),
                     }
                 ],
@@ -105,7 +153,7 @@ class ContentGuardProbeService:
                         "probe": lambda model: ContentGuardProbeService.probe_pollution_rules(
                             provider,
                             model,
-                            endpoint_path=ContentGuardProbeService.content_probe_endpoint_path(provider, model) or "/responses",
+                            endpoint_path=ContentGuardProbeService.content_probe_endpoint_path(provider, model) or "/chat/completions",
                         ),
                     }
                 ],
@@ -123,7 +171,7 @@ class ContentGuardProbeService:
                         "probe": lambda model: ContentGuardProbeService.probe_sse(
                             provider,
                             model,
-                            endpoint_path=ContentGuardProbeService.content_probe_endpoint_path(provider, model) or "/responses",
+                            endpoint_path=ContentGuardProbeService.content_probe_endpoint_path(provider, model) or "/chat/completions",
                         ),
                     }
                 ],
@@ -144,7 +192,7 @@ class ContentGuardProbeService:
                             "probe": lambda model: ContentGuardProbeService.probe_json(
                                 provider,
                                 model,
-                                endpoint_path=ContentGuardProbeService.content_probe_endpoint_path(provider, model) or "/responses",
+                                endpoint_path=ContentGuardProbeService.content_probe_endpoint_path(provider, model) or "/chat/completions",
                             ),
                         }
                     ],
@@ -163,6 +211,20 @@ class ContentGuardProbeService:
     ) -> tuple[dict[str, Any] | None, int, int | None, list[dict[str, Any]], dict[str, Any] | None]:
         ProxyService = _proxy_service()
         started = time.perf_counter()
+        limit_result = await ProbeRateLimitService.claim(
+            provider,
+            provider_model,
+            probe_type=f"content_guard_json_{endpoint_path.strip('/').replace('/', '_') or 'endpoint'}",
+        )
+        if not limit_result.allowed:
+            return None, 0, 429, [], ContentGuardProbeService.mark_detection_result(
+                ProbeRateLimitService.rate_limited_probe_result(
+                    limit_result,
+                    endpoint_path=endpoint_path,
+                    endpoint_label=endpoint_label,
+                    support_label="内容防护探针已限频",
+                )
+            )
         setting = await ProxyService._get_setting_async()
         try:
             response, _, fallback_trace = await ProxyService._forward_json_with_endpoint_fallback(
@@ -172,6 +234,7 @@ class ContentGuardProbeService:
                 payload,
                 started=started,
                 setting=setting,
+                extra_headers={"Accept-Encoding": "identity"},
             )
             return (
                 response,
@@ -206,7 +269,7 @@ class ContentGuardProbeService:
                 "status_code": status_code,
                 "message": message,
                 "trace": [],
-                "retryable": False,
+                "retryable": status_code in {408, 429, 500, 502, 503, 504},
                 "error_detail": detail,
                 "raw_provider_response": {
                     "endpoint_path": endpoint_path,
@@ -221,9 +284,15 @@ class ContentGuardProbeService:
             status_code = getattr(exc, "status_code", None)
             detail = getattr(exc, "detail", None)
             message = ProxyService._error_message_for_log(detail) if detail is not None else str(exc)
+            decompression_error = ContentGuardProbeService._is_transport_decompression_error(message)
             guard_result = ContentGuardProbeService.review_result(
-                message or f"{endpoint_label} 网络请求失败",
-                category="content_probe_request_failure",
+                (
+                    f"上游响应压缩头与实际内容不一致：{message}；探针已请求 Accept-Encoding: identity，"
+                    "本次不作为内容可信失败写入。"
+                )
+                if decompression_error
+                else (message or f"{endpoint_label} 网络请求失败"),
+                category="content_probe_transport_decompression_error" if decompression_error else "content_probe_request_failure",
             )
             return None, int((time.perf_counter() - started) * 1000), status_code, [], ContentGuardProbeService.mark_detection_result({
                 "endpoint_path": endpoint_path,
@@ -232,12 +301,12 @@ class ContentGuardProbeService:
                 "native_success": False,
                 "adapted_success": False,
                 "support_mode": "probe_failed",
-                "support_label": f"{endpoint_label} 请求失败",
+                "support_label": "上游压缩响应异常，未判定内容污染" if decompression_error else f"{endpoint_label} 请求失败",
                 "latency_ms": int((time.perf_counter() - started) * 1000),
                 "status_code": status_code,
-                "message": message,
+                "message": guard_result.reason,
                 "trace": [],
-                "retryable": False,
+                "retryable": bool(decompression_error),
                 "raw_provider_response": {
                     "endpoint_path": endpoint_path,
                     "endpoint_label": endpoint_label,
@@ -832,6 +901,20 @@ class ContentGuardProbeService:
             max_value=ContentGuardProbeService.SSE_PROBE_MAX_BYTES,
         )
         fallback_trace: list[dict[str, Any]] = []
+        limit_result = await ProbeRateLimitService.claim(
+            provider,
+            provider_model,
+            probe_type=f"content_guard_sse_{endpoint_path.strip('/').replace('/', '_') or 'endpoint'}",
+        )
+        if not limit_result.allowed:
+            return ContentGuardProbeService.mark_detection_result(
+                ProbeRateLimitService.rate_limited_probe_result(
+                    limit_result,
+                    endpoint_path=endpoint_path,
+                    endpoint_label=endpoint_label,
+                    support_label="流式内容防护探针已限频",
+                )
+            )
         try:
             response, _prepared, stream_context, _fallback_trace = await ProxyService._open_stream_with_endpoint_fallback(
                 provider,
@@ -839,7 +922,8 @@ class ContentGuardProbeService:
                 endpoint_path,
                 payload,
                 started=started,
-                stream_connect_timeout_seconds=ContentGuardProbeService.STREAM_CONNECT_TIMEOUT_SECONDS,
+                stream_connect_timeout_seconds=ContentGuardProbeService.provider_stream_connect_timeout_seconds(provider),
+                extra_headers={"Accept-Encoding": "identity"},
             )
             fallback_trace = ContentGuardProbeService.mark_detection_trace(
                 _fallback_trace,
@@ -847,7 +931,7 @@ class ContentGuardProbeService:
                 endpoint_label=endpoint_label,
             )
             timeout_policy = StreamTimeoutPolicy(
-                first_token_timeout_seconds=ContentGuardProbeService.STREAM_FIRST_TOKEN_TIMEOUT_SECONDS,
+                first_token_timeout_seconds=ContentGuardProbeService.provider_stream_first_token_timeout_seconds(provider),
                 idle_timeout_seconds=ContentGuardProbeService.SSE_PROBE_IDLE_TIMEOUT_SECONDS,
                 max_duration_seconds=max_duration_seconds,
             )
@@ -1007,23 +1091,42 @@ class ContentGuardProbeService:
                 trace=fallback_trace,
             ), output_text=output_text)
         except Exception as exc:
+            exc_type, exc_value, exc_traceback = type(exc), exc, exc.__traceback__
             latency_ms = int((time.perf_counter() - started) * 1000)
             status_code = getattr(exc, "status_code", None)
             message = str(exc)
+            decompression_error = ContentGuardProbeService._is_transport_decompression_error(message)
             return ContentGuardProbeService.probe_failure(
                 endpoint_path=endpoint_path,
                 endpoint_label=endpoint_label,
-                support_label="SSE 探针失败",
+                support_label="上游压缩响应异常，未判定内容污染" if decompression_error else "SSE 探针失败",
                 latency_ms=latency_ms,
                 status_code=status_code,
                 guard_result=ContentGuardProbeService.review_result(
-                    message or "SSE 探针异常",
-                    category="sse_probe_exception",
+                    (
+                        f"上游响应压缩头与实际内容不一致：{message}；探针已请求 Accept-Encoding: identity，"
+                        "本次不作为内容可信失败写入。"
+                    )
+                    if decompression_error
+                    else (message or "SSE 探针异常"),
+                    category="sse_probe_transport_decompression_error" if decompression_error else "sse_probe_exception",
                 ),
+                retryable=decompression_error,
             )
         finally:
             if stream_context is not None:
                 await stream_context.__aexit__(exc_type, exc_value, exc_traceback)
+
+    @staticmethod
+    def _is_transport_decompression_error(message: str | None) -> bool:
+        normalized = str(message or "").strip().lower()
+        if not normalized:
+            return False
+        return (
+            "incorrect header check" in normalized
+            or ("decompress" in normalized and "header" in normalized)
+            or ("content-encoding" in normalized and "gzip" in normalized)
+        )
 
     @staticmethod
     def extract_probe_sse_text_delta(data: str) -> str:
@@ -1145,6 +1248,10 @@ class ContentGuardProbeService:
             endpoint_path=endpoint_path,
             prompt=ContentGuardProbeService.build_combined_pollution_probe_prompt(selected_scenarios),
         )
+        timeout_seconds = ContentGuardProbeService.provider_probe_timeout_seconds(
+            provider,
+            ContentGuardProbeService.POLLUTION_PROBE_TIMEOUT_SECONDS,
+        )
         try:
             response, _latency_ms, status_code, trace, error_result = await asyncio.wait_for(
                 ContentGuardProbeService.send_content_probe_json(
@@ -1154,11 +1261,11 @@ class ContentGuardProbeService:
                     payload=payload,
                     endpoint_label=endpoint_label,
                 ),
-                timeout=ContentGuardProbeService.POLLUTION_PROBE_TIMEOUT_SECONDS,
+                timeout=timeout_seconds,
             )
         except asyncio.TimeoutError:
             timeout_guard = ContentGuardProbeService.review_result(
-                f"外链广告识别组合探针超过 {ContentGuardProbeService.POLLUTION_PROBE_TIMEOUT_SECONDS:.1f}s 限制",
+                f"外链广告识别组合探针超过 {timeout_seconds:.1f}s 限制",
                 category="pollution_probe_timeout",
             )
             detections = [
@@ -1197,6 +1304,8 @@ class ContentGuardProbeService:
             failure["failed_scenarios"] = detections
             return failure
         if error_result is not None:
+            if ProbeRateLimitService.is_rate_limited_result(error_result):
+                return error_result
             error_guard = ContentGuardProbeService.review_result(
                 str(error_result.get("message") or error_result.get("reason") or "外链广告识别组合探针请求失败"),
                 category="pollution_probe_request_failed",
@@ -1303,6 +1412,10 @@ class ContentGuardProbeService:
             endpoint_path=endpoint_path,
             prompt=ContentGuardProbeService.build_combined_pollution_probe_prompt(combined_scenarios),
         )
+        timeout_seconds = ContentGuardProbeService.provider_probe_timeout_seconds(
+            provider,
+            ContentGuardProbeService.COMBINED_TEXT_PROBE_TIMEOUT_SECONDS,
+        )
 
         def paired_failure(guard_result: ContentGuardResult, *, status_code: int | None, trace: list[dict[str, Any]] | None = None) -> dict[str, dict[str, Any]]:
             fixed = ContentGuardProbeService.probe_failure(
@@ -1340,12 +1453,12 @@ class ContentGuardProbeService:
                     payload=payload,
                     endpoint_label=endpoint_label,
                 ),
-                timeout=ContentGuardProbeService.COMBINED_TEXT_PROBE_TIMEOUT_SECONDS,
+                timeout=timeout_seconds,
             )
         except asyncio.TimeoutError:
             return paired_failure(
                 ContentGuardProbeService.review_result(
-                    f"文本内容完整性组合探针超过 {ContentGuardProbeService.COMBINED_TEXT_PROBE_TIMEOUT_SECONDS:.1f}s 限制",
+                    f"文本内容完整性组合探针超过 {timeout_seconds:.1f}s 限制",
                     category="combined_text_probe_timeout",
                 ),
                 status_code=None,
@@ -1359,6 +1472,14 @@ class ContentGuardProbeService:
                 status_code=None,
             )
         if error_result is not None:
+            if ProbeRateLimitService.is_rate_limited_result(error_result):
+                fixed = dict(error_result)
+                fixed["endpoint_label"] = "固定答案完整性探针"
+                fixed["support_label"] = "固定答案探针已限频"
+                pollution = dict(error_result)
+                pollution["endpoint_label"] = "外链广告识别探针"
+                pollution["support_label"] = "外链广告识别探针已限频"
+                return {"fixed_answer": fixed, "pollution_rules": pollution}
             results = paired_failure(
                 ContentGuardProbeService.review_result(
                     str(error_result.get("message") or error_result.get("reason") or "文本内容完整性组合探针请求失败"),
@@ -1561,6 +1682,7 @@ class ContentGuardProbeService:
         latency_ms: int,
         status_code: int | None,
         guard_result: ContentGuardResult,
+        retryable: bool = False,
     ) -> dict[str, Any]:
         message = f"内容完整性探针失败：{guard_result.reason or guard_result.result}"
         return ContentGuardProbeService.mark_detection_result({
@@ -1582,7 +1704,7 @@ class ContentGuardProbeService:
                     "content_guard": ContentGuardProbeService.serialize_guard_result(guard_result),
                 }
             ],
-            "retryable": False,
+            "retryable": bool(retryable),
             "content_guard": ContentGuardProbeService.serialize_guard_result(guard_result),
         })
 
@@ -1678,7 +1800,7 @@ class ContentGuardProbeService:
         endpoint_results: list[dict[str, Any]] | None = None,
         detection_source: str = "automatic_probe",
     ) -> None:
-        now = datetime.utcnow()
+        now = now_beijing()
         normalized_source = str(detection_source or "automatic_probe").strip() or "automatic_probe"
         probe_results = [
             ContentGuardProbeService.summarize_probe_result(endpoint_result)
@@ -1712,14 +1834,10 @@ class ContentGuardProbeService:
             provider_model.content_probe_last_passed_at = now
             provider_model.content_probe_failure_count = 0
             provider_model.content_integrity_status = "passed"
-            provider_model.circuit_state = "closed"
-            provider_model.circuit_opened_at = None
             if provider.content_integrity_status in {"blocked", "degraded", "unknown", None}:
                 provider.content_integrity_status = "passed"
             provider.content_integrity_score = max(80, int(provider.content_integrity_score or 80))
-            if provider.circuit_state in {"open", "half_open"}:
-                provider.circuit_state = "closed"
-            ProviderService.refresh_provider_state(provider)
+            ProviderService.refresh_provider_content_integrity_state(provider)
             serialized_results["status"] = provider_model.content_integrity_status
             serialized_results["provider_status"] = str(provider.content_integrity_status or "unknown")
             serialized_results["provider_trust_level"] = str(provider.trust_level or "standard")
@@ -1753,18 +1871,17 @@ class ContentGuardProbeService:
         )
         if should_isolate:
             provider_model.content_integrity_status = "blocked"
-            provider_model.circuit_state = "open"
-            provider_model.circuit_opened_at = now
             provider.content_integrity_status = "blocked"
-            provider.circuit_state = "open"
         else:
             provider_model.content_integrity_status = "degraded"
             if provider.content_integrity_status != "blocked":
                 provider.content_integrity_status = "degraded"
-        ProviderService.refresh_provider_state(provider)
+        ProviderService.refresh_provider_content_integrity_state(provider)
         serialized_results["status"] = provider_model.content_integrity_status
         serialized_results["provider_status"] = str(provider.content_integrity_status or "unknown")
         serialized_results["provider_trust_level"] = str(provider.trust_level or "standard")
         provider_model.content_probe_results_json = dumps_json(serialized_results)
         ProviderService.invalidate_provider_runtime_cache()
         db.commit()
+
+from app.utils.timezone import now_beijing

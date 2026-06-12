@@ -1,3 +1,4 @@
+from app.utils.timezone import now_beijing
 from datetime import datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
@@ -355,7 +356,7 @@ class BillingService:
                     auto_commit=False,
                 )
                 return None
-            log.billing_finalized_at = datetime.utcnow()
+            log.billing_finalized_at = now_beijing()
             log.billing_error = None
             BillingLogRecorder.record_billing_process(
                 db,
@@ -505,7 +506,7 @@ class BillingService:
                 .limit(normalized_limit)
             )
         )
-        recent_since = datetime.utcnow() - timedelta(hours=24)
+        recent_since = now_beijing() - timedelta(hours=24)
         recent_billed_cost = db.scalar(
             select(func.sum(func.abs(record_model.amount))).where(
                 record_model.api_client_key_id == api_key_id,

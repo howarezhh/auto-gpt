@@ -171,7 +171,7 @@ class IpManagementEventService:
 
     @staticmethod
     def cleanup_old_events(db: Session, *, retention_days: int) -> int:
-        cutoff = datetime.utcnow() - timedelta(days=max(1, int(retention_days or 30)))
+        cutoff = now_beijing() - timedelta(days=max(1, int(retention_days or 30)))
         total_deleted = 0
         for _ in range(IpManagementEventService.CLEANUP_MAX_BATCHES):
             ids = list(
@@ -190,3 +190,5 @@ class IpManagementEventService:
             if len(ids) < IpManagementEventService.CLEANUP_BATCH_SIZE:
                 break
         return total_deleted
+
+from app.utils.timezone import now_beijing

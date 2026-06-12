@@ -1,3 +1,4 @@
+from app.utils.timezone import now_beijing
 from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, Numeric, Text
@@ -22,7 +23,7 @@ class RequestAuthEvent(Base):
     remaining_cost_daily: Mapped[float | None] = mapped_column(Float, nullable=True)
     policy_snapshot_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_code: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing, index=True)
 
 
 class RequestValidationEvent(Base):
@@ -38,7 +39,7 @@ class RequestValidationEvent(Base):
     request_body_summary_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_code: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
     safe_detail_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing, index=True)
 
 
 class RequestModelPermissionEvent(Base):
@@ -53,7 +54,7 @@ class RequestModelPermissionEvent(Base):
     required_capabilities_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     permission_result: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     reason_details_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing, index=True)
 
 
 class RequestRouteDecisionEvent(Base):
@@ -71,7 +72,7 @@ class RequestRouteDecisionEvent(Base):
     excluded_summary_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     diagnostics_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     retry_wait_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing, index=True)
 
 
 class RequestProviderAttemptEvent(Base):
@@ -94,7 +95,7 @@ class RequestProviderAttemptEvent(Base):
     upstream_request_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_code: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
     retryable: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing, index=True)
 
 
 class RequestUpstreamResponseEvent(Base):
@@ -111,7 +112,7 @@ class RequestUpstreamResponseEvent(Base):
     response_summary_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     response_text_excerpt: Mapped[str | None] = mapped_column(Text, nullable=True)
     response_body_truncated: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing, index=True)
 
 
 class RequestStreamEvent(Base):
@@ -129,7 +130,7 @@ class RequestStreamEvent(Base):
     sse_error_sent: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     done_sent: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     disconnect_status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing, index=True)
 
 
 class RequestErrorResponseEvent(Base):
@@ -148,7 +149,7 @@ class RequestErrorResponseEvent(Base):
     required_endpoint: Mapped[str | None] = mapped_column(Text, nullable=True)
     missing_capability: Mapped[str | None] = mapped_column(Text, nullable=True)
     diagnostic_sample_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing, index=True)
 
 
 class RequestContentGuardEvent(Base):
@@ -176,7 +177,7 @@ class RequestContentGuardEvent(Base):
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     score_delta: Mapped[int | None] = mapped_column(Integer, nullable=True)
     diagnostics_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing, index=True)
 
 
 class RequestBillingEvent(Base):
@@ -199,7 +200,7 @@ class RequestBillingEvent(Base):
     balance_after: Mapped[float | None] = mapped_column(Float, nullable=True)
     attempt_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing, index=True)
 
 
 class ExceptionEvent(Base):
@@ -228,8 +229,8 @@ class ExceptionEvent(Base):
     stack_hash: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
     stack_excerpt: Mapped[str | None] = mapped_column(Text, nullable=True)
     detail_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    occurred_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing)
 
 
 class HealthCheckRun(Base):
@@ -241,14 +242,14 @@ class HealthCheckRun(Base):
     scope_type: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     scope_id: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
     phase_keys_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    started_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing, index=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_probes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     success_probes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     failed_probes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     overall_result: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing)
 
 
 class HealthProbeEvent(Base):
@@ -268,7 +269,7 @@ class HealthProbeEvent(Base):
     error_code: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
     capability_result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     content_guard_result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing, index=True)
 
 
 class TokenFinalizeEvent(Base):
@@ -284,7 +285,7 @@ class TokenFinalizeEvent(Base):
     enable_usage_fill: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     result: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing, index=True)
 
 
 class BillingProcessEvent(Base):
@@ -302,7 +303,7 @@ class BillingProcessEvent(Base):
     billing_status: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     billing_record_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing, index=True)
 
 
 class BackgroundJobEvent(Base):
@@ -323,7 +324,7 @@ class BackgroundJobEvent(Base):
     failed_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     result_summary_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing, index=True)
 
 
 class UserOperationAuditLog(Base):
@@ -341,7 +342,7 @@ class UserOperationAuditLog(Base):
     source_ip: Mapped[str | None] = mapped_column(Text, nullable=True)
     trace_id: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
     result: Mapped[str] = mapped_column(Text, nullable=False, default="success", index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing, index=True)
 
 
 class AssetEvent(Base):
@@ -362,4 +363,4 @@ class AssetEvent(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     trace_id: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
     request_log_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing, index=True)

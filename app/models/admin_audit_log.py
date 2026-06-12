@@ -1,3 +1,4 @@
+from app.utils.timezone import now_beijing
 from datetime import datetime
 
 from sqlalchemy import DateTime, Integer, Text
@@ -25,4 +26,4 @@ class AdminAuditLog(Base):
     changed_fields_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     risk_level: Mapped[str] = mapped_column(Text, nullable=False, default="low", index=True)
     detail_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing, index=True)

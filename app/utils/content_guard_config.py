@@ -16,6 +16,7 @@ CONTENT_GUARD_STREAM_MODES = ("pass_through_scan", "buffer_300ms", "full_buffer"
 CONTENT_GUARD_RULE_MATCH_TYPES = ("keyword_any", "regex", "unexpected_url")
 CONTENT_GUARD_RULE_RISK_LEVELS = ("low", "medium", "high")
 CONTENT_GUARD_RULE_ACTIONS = ("allow", "record", "block")
+CONTENT_GUARD_PROBE_PROTOCOL_TYPES = ("chat_completions", "responses")
 
 CONTENT_GUARD_SETTING_DEFAULTS: dict[str, Any] = {
     "content_guard_enabled": True,
@@ -23,6 +24,7 @@ CONTENT_GUARD_SETTING_DEFAULTS: dict[str, Any] = {
     "content_guard_block_on_high_risk": True,
     "content_guard_probe_interval_sec": 3600,
     "content_guard_json_probe_enabled": False,
+    "content_guard_probe_protocol_type": "chat_completions",
     "content_guard_max_scan_bytes": 16384,
     "content_guard_stream_buffer_max_bytes": 16384,
     "content_guard_low_trust_requires_buffer": True,
@@ -70,6 +72,7 @@ CONTENT_GUARD_SETTING_GROUPS: dict[str, tuple[str, ...]] = {
         "content_guard_precheck_auto_enabled",
         "content_guard_probe_interval_sec",
         "content_guard_json_probe_enabled",
+        "content_guard_probe_protocol_type",
     ),
     "rules": ("content_guard_rules_json",),
 }
@@ -78,6 +81,7 @@ CONTENT_GUARD_SETTING_DESCRIPTIONS: dict[str, str] = {
     "content_guard_enabled": "内容防护治理总开关；关闭后运行时检测、自动预检和自动处置同时停用。",
     "content_guard_precheck_auto_enabled": "内容防护预先防护自动检测开关；仅在总开关启用时生效，不依赖健康检查总开关。",
     "content_guard_json_probe_enabled": "严格 JSON 探针开关；默认关闭，仅在内容防护页面启用后才参与可选能力检测。",
+    "content_guard_probe_protocol_type": "内容防护可信探针和预检探针的端点协议优先级；默认优先使用 Chat Completions。",
     "content_guard_block_on_high_risk": "高风险命中是否允许阻断、切换提供商或安全错误；record_only 策略下必须关闭。",
     "content_guard_high_risk_strategy": "高风险运行时处置策略。",
     "content_guard_stream_mode": "流式检测模式。",
@@ -140,6 +144,9 @@ def validate_content_guard_settings(values: dict[str, Any]) -> dict[str, Any]:
     stream_mode = str(normalized.get("content_guard_stream_mode") or "")
     if stream_mode not in CONTENT_GUARD_STREAM_MODES:
         raise ValueError("content_guard_stream_mode 无效")
+    probe_protocol_type = str(normalized.get("content_guard_probe_protocol_type") or "")
+    if probe_protocol_type not in CONTENT_GUARD_PROBE_PROTOCOL_TYPES:
+        raise ValueError("content_guard_probe_protocol_type 无效")
     if not bool(normalized.get("content_guard_enabled")) and bool(normalized.get("content_guard_precheck_auto_enabled")):
         raise ValueError("内容防护总开关关闭时不能启用自动预检")
     if strategy == "record_only" and bool(normalized.get("content_guard_block_on_high_risk")):

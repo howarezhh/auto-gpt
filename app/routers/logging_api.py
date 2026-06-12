@@ -356,6 +356,7 @@ def build_request_log_timeline_payload(
                 log,
                 include_payload_fields=False,
                 derive_image_observability=False,
+                raw_api_key_by_id=LogService.load_raw_api_keys_for_logs(db, [log]),
             )
         ).model_dump(mode="json"),
         "events": events,
@@ -420,6 +421,7 @@ async def list_request_logs(
         .offset((page - 1) * page_size)
         .limit(page_size)
     ).all()
+    raw_api_key_by_id = LogService.load_raw_api_keys_for_logs(db, items)
     return _page_response(
         page=page,
         page_size=page_size,
@@ -430,6 +432,7 @@ async def list_request_logs(
                 items,
                 include_payload_fields=False,
                 derive_image_observability=False,
+                raw_api_key_by_id=raw_api_key_by_id,
             )
         ],
     )
@@ -444,7 +447,10 @@ def get_request_log(request_log_id: int, db: Session = Depends(get_db)) -> dict[
     )
     if log is None:
         raise HTTPException(status_code=404, detail="request log not found")
-    return RequestLogOut.model_validate(LogService.serialize_logs([log])[0]).model_dump(mode="json")
+    raw_api_key_by_id = LogService.load_raw_api_keys_for_logs(db, [log])
+    return RequestLogOut.model_validate(
+        LogService.serialize_logs([log], raw_api_key_by_id=raw_api_key_by_id)[0]
+    ).model_dump(mode="json")
 
 
 @router.get("/request-logs/{request_log_id}/timeline")
@@ -535,11 +541,112 @@ def get_health_run(
         .order_by(HealthProbeEvent.created_at.asc(), HealthProbeEvent.id.asc())
         .limit(normalized_limit + 1)
     ).all()
+    probe_items = [_model_to_dict(item) for item in probes[:normalized_limit]]
     return {
         "run": _model_to_dict(run),
-        "probes": [_model_to_dict(item) for item in probes[:normalized_limit]],
+        "probes": probe_items,
+        "probe_summary": _health_probe_detail_summary_from_db(db, run_id),
         "probe_limit": normalized_limit,
         "probes_truncated": len(probes) > normalized_limit,
+    }
+
+
+def _health_probe_detail_summary_from_db(db: Session, run_id: str) -> dict[str, Any]:
+    summary = db.execute(
+        select(
+            func.count(HealthProbeEvent.id).label("probe_total"),
+            func.coalesce(func.sum(case((HealthProbeEvent.success.is_(True), 1), else_=0)), 0).label("probe_success"),
+            func.count(HealthProbeEvent.provider_id.distinct()).label("provider_count"),
+        ).where(HealthProbeEvent.run_id == run_id)
+    ).one()
+    model_ids = db.scalars(
+        select(HealthProbeEvent.provider_model_id)
+        .where(HealthProbeEvent.run_id == run_id, HealthProbeEvent.provider_model_id.is_not(None))
+        .distinct()
+    ).all()
+    model_names_without_id = db.scalars(
+        select(HealthProbeEvent.model_name)
+        .where(
+            HealthProbeEvent.run_id == run_id,
+            HealthProbeEvent.provider_model_id.is_(None),
+            HealthProbeEvent.model_name.is_not(None),
+        )
+        .distinct()
+    ).all()
+    provider_success_count = int(
+        db.scalar(
+            select(func.count(HealthProbeEvent.provider_id.distinct())).where(
+                HealthProbeEvent.run_id == run_id,
+                HealthProbeEvent.provider_id.is_not(None),
+                HealthProbeEvent.success.is_(True),
+            )
+        )
+        or 0
+    )
+    model_success_ids = db.scalars(
+        select(HealthProbeEvent.provider_model_id)
+        .where(
+            HealthProbeEvent.run_id == run_id,
+            HealthProbeEvent.provider_model_id.is_not(None),
+            HealthProbeEvent.success.is_(True),
+        )
+        .distinct()
+    ).all()
+    model_success_names_without_id = db.scalars(
+        select(HealthProbeEvent.model_name)
+        .where(
+            HealthProbeEvent.run_id == run_id,
+            HealthProbeEvent.provider_model_id.is_(None),
+            HealthProbeEvent.model_name.is_not(None),
+            HealthProbeEvent.success.is_(True),
+        )
+        .distinct()
+    ).all()
+    probe_total = int(summary.probe_total or 0)
+    probe_success = int(summary.probe_success or 0)
+    provider_count = int(summary.provider_count or 0)
+    model_count = len(model_ids) + len(model_names_without_id)
+    model_success_count = len(model_success_ids) + len(model_success_names_without_id)
+    return {
+        "probe_total": probe_total,
+        "probe_success": probe_success,
+        "probe_failed": max(0, probe_total - probe_success),
+        "provider_count": provider_count,
+        "provider_success_count": provider_success_count,
+        "provider_failed_count": max(0, provider_count - provider_success_count),
+        "model_count": model_count,
+        "model_success_count": model_success_count,
+        "model_failed_count": max(0, model_count - model_success_count),
+    }
+
+
+def _health_probe_detail_summary(probes: list[dict[str, Any]]) -> dict[str, Any]:
+    provider_ids = {item.get("provider_id") for item in probes if item.get("provider_id") is not None}
+    provider_success_ids = {
+        item.get("provider_id")
+        for item in probes
+        if item.get("provider_id") is not None and bool(item.get("success"))
+    }
+    model_keys = {
+        item.get("provider_model_id") or item.get("model_name")
+        for item in probes
+        if item.get("provider_model_id") is not None or item.get("model_name")
+    }
+    model_success_keys = {
+        item.get("provider_model_id") or item.get("model_name")
+        for item in probes
+        if (item.get("provider_model_id") is not None or item.get("model_name")) and bool(item.get("success"))
+    }
+    return {
+        "probe_total": len(probes),
+        "probe_success": sum(1 for item in probes if bool(item.get("success"))),
+        "probe_failed": sum(1 for item in probes if not bool(item.get("success"))),
+        "provider_count": len(provider_ids),
+        "provider_success_count": len(provider_success_ids),
+        "provider_failed_count": max(0, len(provider_ids) - len(provider_success_ids)),
+        "model_count": len(model_keys),
+        "model_success_count": len(model_success_keys),
+        "model_failed_count": max(0, len(model_keys) - len(model_success_keys)),
     }
 
 
@@ -723,8 +830,14 @@ def list_content_guard_events(
     end_at: datetime | None = None,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    query = select(RequestContentGuardEvent)
-    count_query = select(func.count()).select_from(RequestContentGuardEvent)
+    query = select(RequestContentGuardEvent, RequestLog).outerjoin(
+        RequestLog,
+        RequestLog.id == RequestContentGuardEvent.request_log_id,
+    )
+    count_query = select(func.count()).select_from(RequestContentGuardEvent).outerjoin(
+        RequestLog,
+        RequestLog.id == RequestContentGuardEvent.request_log_id,
+    )
     conditions = []
     if keyword:
         conditions.append(
@@ -740,6 +853,11 @@ def list_content_guard_events(
                 _contains(RequestContentGuardEvent.reason, keyword),
                 _contains(RequestContentGuardEvent.action, keyword),
                 _contains(RequestContentGuardEvent.excerpt, keyword),
+                _contains(RequestLog.trace_id, keyword),
+                _contains(RequestLog.provider_name, keyword),
+                _contains(RequestLog.model_name, keyword),
+                _contains(RequestLog.requested_model, keyword),
+                _contains(RequestLog.request_path, keyword),
             )
         )
     if matched_rule:
@@ -756,23 +874,29 @@ def list_content_guard_events(
             or_(
                 _contains(RequestContentGuardEvent.model_name, model_name),
                 _contains(RequestContentGuardEvent.requested_model, model_name),
+                _contains(RequestLog.model_name, model_name),
+                _contains(RequestLog.requested_model, model_name),
             )
         )
-    filters = {
+    direct_filters = {
         "guard_stage": guard_stage,
         "guard_result": guard_result,
         "risk_level": risk_level,
         "action": action,
-        "provider_id": provider_id,
-        "request_path": request_path,
-        "is_stream": is_stream,
         "request_log_id": request_log_id,
-        "trace_id": trace_id,
     }
-    for field_name, value in filters.items():
+    for field_name, value in direct_filters.items():
         if value is None or value == "":
             continue
         conditions.append(getattr(RequestContentGuardEvent, field_name) == value)
+    if provider_id is not None and provider_id != "":
+        conditions.append(or_(RequestContentGuardEvent.provider_id == provider_id, RequestLog.provider_id == provider_id))
+    if request_path:
+        conditions.append(or_(RequestContentGuardEvent.request_path == request_path, RequestLog.request_path == request_path))
+    if is_stream is not None and is_stream != "":
+        conditions.append(or_(RequestContentGuardEvent.is_stream == is_stream, RequestLog.is_stream == is_stream))
+    if trace_id:
+        conditions.append(or_(RequestContentGuardEvent.trace_id == trace_id, RequestLog.trace_id == trace_id))
     if start_at is not None:
         conditions.append(RequestContentGuardEvent.created_at >= start_at)
     if end_at is not None:
@@ -781,12 +905,20 @@ def list_content_guard_events(
         query = query.where(condition)
         count_query = count_query.where(condition)
     total = int(db.scalar(count_query) or 0)
-    rows = db.scalars(
+    rows = list(db.execute(
         query.order_by(desc(RequestContentGuardEvent.created_at), desc(RequestContentGuardEvent.id))
         .offset((page - 1) * page_size)
         .limit(page_size)
-    ).all()
-    data = _page_response(page=page, page_size=page_size, total=total, items=[_model_to_dict(item) for item in rows])
+    ))
+    data = _page_response(
+        page=page,
+        page_size=page_size,
+        total=total,
+        items=[
+            _content_guard_event_to_dict(event, request_log)
+            for event, request_log in rows
+        ],
+    )
     return _enrich_typed_log_response(db, "content-guard-events", data)
 
 
@@ -958,7 +1090,7 @@ def export_typed_logs(
     else:
         raise HTTPException(status_code=400, detail="unsupported typed log export")
     csv_text = _items_to_csv(data.get("items") or [], fieldnames=TYPED_LOG_EXPORT_FIELDS.get(log_type))
-    filename = f"{resolved_log_type}-export-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.csv"
+    filename = f"{resolved_log_type}-export-{now_beijing().strftime('%Y%m%d-%H%M%S')}.csv"
     _record_logging_admin_audit(
         db,
         request=request,
@@ -1058,7 +1190,7 @@ def _list_background_jobs(
         start_at=start_at,
         end_at=end_at,
     )
-    stale_before = datetime.utcnow() - BACKGROUND_JOB_STALE_AFTER
+    stale_before = now_beijing() - BACKGROUND_JOB_STALE_AFTER
     redis_candidates = [
         item
         for item in _redis_background_job_state_items(stale_before=stale_before)
@@ -1116,7 +1248,7 @@ def _latest_background_job_statuses(db: Session, job_names: list[str]) -> dict[s
             BackgroundJobEvent.started_at,
         ).where(BackgroundJobEvent.id.in_(select(latest_ids.c.id)))
     ).all()
-    stale_before = datetime.utcnow() - BACKGROUND_JOB_STALE_AFTER
+    stale_before = now_beijing() - BACKGROUND_JOB_STALE_AFTER
     statuses: dict[str, str] = {}
     for row in rows:
         status = str(row.status or "")
@@ -1156,7 +1288,7 @@ def _list_background_jobs_db_only(
         if status == "skipped":
             conditions.append(BackgroundJobEvent.status.in_(("skipped", "skipped_locked", "skipped_lock_unavailable")))
         elif status == "stale_running":
-            stale_before = datetime.utcnow() - BACKGROUND_JOB_STALE_AFTER
+            stale_before = now_beijing() - BACKGROUND_JOB_STALE_AFTER
             conditions.append(BackgroundJobEvent.status == "running")
             conditions.append(BackgroundJobEvent.started_at.is_not(None))
             conditions.append(BackgroundJobEvent.started_at <= stale_before)
@@ -1181,7 +1313,7 @@ def _list_background_jobs_db_only(
         .offset((page - 1) * page_size)
         .limit(page_size)
     ).all()
-    stale_before = datetime.utcnow() - BACKGROUND_JOB_STALE_AFTER
+    stale_before = now_beijing() - BACKGROUND_JOB_STALE_AFTER
     items = []
     for item in rows:
         payload = _model_to_dict(item)
@@ -1733,6 +1865,26 @@ def _model_to_dict(item) -> dict[str, Any]:
     return to_jsonable(payload)
 
 
+def _content_guard_event_to_dict(event: RequestContentGuardEvent, request_log: RequestLog | None) -> dict[str, Any]:
+    payload = _model_to_dict(event)
+    if request_log is None:
+        return payload
+    fallback_fields = {
+        "trace_id": request_log.trace_id,
+        "provider_id": request_log.provider_id,
+        "provider_name": request_log.provider_name,
+        "provider_model_id": request_log.resolved_provider_model_id,
+        "model_name": request_log.model_name,
+        "requested_model": request_log.requested_model,
+        "request_path": request_log.request_path,
+        "is_stream": request_log.is_stream,
+    }
+    for field_name, value in fallback_fields.items():
+        if payload.get(field_name) in (None, "") and value is not None:
+            payload[field_name] = value
+    return to_jsonable(payload)
+
+
 def _items_to_csv(items: list[dict[str, Any]], *, fieldnames: list[str] | None = None) -> str:
     buffer = io.StringIO()
     resolved_fieldnames: list[str] = list(fieldnames or [])
@@ -1809,3 +1961,5 @@ def _record_logging_admin_audit(
         source_ip=request.client.host if request.client else None,
         risk_level=risk_level,
     )
+
+from app.utils.timezone import now_beijing

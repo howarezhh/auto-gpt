@@ -1,3 +1,4 @@
+from app.utils.timezone import now_beijing
 import csv
 import hashlib
 import io
@@ -14,6 +15,7 @@ from app.models.request_log import RequestLog
 from app.services.cache_service import CacheService
 from app.services.error_catalog_service import ErrorCatalogService
 from app.services.openai_error_service import OpenAIErrorService
+from app.services.proxy_request_context import get_current_provider_candidate
 from app.services.redis_service import RedisService
 from app.services.runtime_state_service import RuntimeStateService
 from app.utils.json_utils import dumps_json, safeJsonParse
@@ -264,6 +266,20 @@ class LogService:
         enqueue_finalize: bool = True,
     ) -> RequestLog:
         """创建请求日志，并在必要时补充异步 token 统计任务。"""
+        if not success:
+            candidate_context = get_current_provider_candidate() or {}
+            if provider_id is None and candidate_context.get("provider_id") is not None:
+                provider_id = candidate_context.get("provider_id")
+            if provider_name is None and candidate_context.get("provider_name") is not None:
+                provider_name = candidate_context.get("provider_name")
+            if resolved_provider_model_id is None and candidate_context.get("resolved_provider_model_id") is not None:
+                resolved_provider_model_id = candidate_context.get("resolved_provider_model_id")
+            if model_name is None and candidate_context.get("model_name") is not None:
+                model_name = candidate_context.get("model_name")
+        if provider_id is not None:
+            provider_snapshot = db.get(Provider, provider_id)
+            if provider_snapshot is not None:
+                provider_name = provider_snapshot.name
         provider_model = None
         if resolved_provider_model_id is not None and (
             billing_multiplier is None
@@ -318,7 +334,7 @@ class LogService:
             success=success,
         )
         effective_duration_ms = LogService.resolve_duration_ms(latency_ms=latency_ms, duration_ms=duration_ms)
-        effective_attempt_count = attempt_count if attempt_count is not None else LogService.derive_attempt_count(trace)
+        effective_attempt_count = LogService.resolve_attempt_count(attempt_count=attempt_count, trace=trace)
         effective_tps = tps if tps is not None else LogService.compute_tps(
             completion_tokens=effective_completion_tokens,
             duration_ms=effective_duration_ms,
@@ -457,12 +473,12 @@ class LogService:
         )
         if log_type in LogService.HEALTH_CHECK_LOG_TYPES:
             log.billing_status = "skipped"
-            log.billing_finalized_at = datetime.utcnow()
+            log.billing_finalized_at = now_beijing()
             log.token_finalize_error = None
             log.billing_error = None
         elif LogService._should_mark_no_charge_without_finalize(log):
             log.billing_status = "no_charge"
-            log.billing_finalized_at = datetime.utcnow()
+            log.billing_finalized_at = now_beijing()
             log.token_finalize_error = None
             log.billing_error = None
         LogService.refresh_derived_fields(log, response_payload=token_response_payload, trace=trace)
@@ -541,6 +557,7 @@ class LogService:
         safe_context = {
             "code": error_context.get("code"),
             "message": error_context.get("message"),
+            "error_type": error_context.get("error_type"),
             "public_code": error_context.get("public_code"),
             "public_message": error_context.get("public_message"),
             "trace_id": error_context.get("trace_id"),
@@ -550,13 +567,27 @@ class LogService:
             "handling_strategy": error_context.get("handling_strategy"),
             "alert_level": error_context.get("alert_level"),
         }
+        safe_error = LogService._openai_error_from_context(safe_context)
         parsed = safeJsonParse(response_body_json) if response_body_json else None
         if isinstance(parsed, dict):
+            parsed.setdefault("error", safe_error)
             parsed.setdefault("error_context", safe_context)
             return dumps_json(parsed)
         if isinstance(parsed, list):
-            return dumps_json({"response_items": parsed, "error_context": safe_context})
-        return dumps_json({"error_context": safe_context})
+            return dumps_json({"response_items": parsed, "error": safe_error, "error_context": safe_context})
+        return dumps_json({"error": safe_error, "error_context": safe_context})
+
+    @staticmethod
+    def _openai_error_from_context(error_context: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "message": error_context.get("public_message") or error_context.get("message") or "",
+            "type": error_context.get("error_type") or "server_error",
+            "code": error_context.get("public_code") or error_context.get("code"),
+            "trace_id": error_context.get("trace_id"),
+            "retryable": error_context.get("retryable"),
+            "recoverable": error_context.get("recoverable"),
+            "category": error_context.get("category"),
+        }
 
     @staticmethod
     def _merge_error_context_into_trace(*, trace: list[dict] | dict | None, error_context: dict[str, Any]) -> list[dict] | dict:
@@ -1647,6 +1678,18 @@ class LogService:
         return conversation_key or fallback
 
     @staticmethod
+    def resolve_attempt_count(*, attempt_count: int | None, trace: list[dict] | dict | None) -> int:
+        derived = LogService.derive_attempt_count(trace)
+        if isinstance(trace, list) and trace:
+            has_route_wait = any(
+                isinstance(item, dict) and item.get("result") == "route_exhausted_wait_retry"
+                for item in trace
+            )
+            if derived > 0 or has_route_wait:
+                return derived
+        return int(attempt_count or 0)
+
+    @staticmethod
     def derive_attempt_count(trace: list[dict] | dict | None) -> int:
         if not isinstance(trace, list) or not trace:
             return 0
@@ -1670,12 +1713,7 @@ class LogService:
         )
         if direct_attempt_count > 0:
             return direct_attempt_count
-        # 当请求始终卡在“候选耗尽后等待重试”阶段时，至少回填内部重试轮次，避免 attempt_count 错误显示为 0。
-        return sum(
-            1
-            for item in trace
-            if isinstance(item, dict) and item.get("result") == "route_exhausted_wait_retry"
-        )
+        return 0
 
     @staticmethod
     def resolve_ttfb_ms(
@@ -2004,7 +2042,7 @@ class LogService:
         cached = CacheService.get(cache_key)
         if isinstance(cached, list):
             return cached
-        since = datetime.utcnow() - timedelta(minutes=window_minutes)
+        since = now_beijing() - timedelta(minutes=window_minutes)
         window_seconds = max(1, window_minutes * 60)
         results: list[dict] = []
         stmt = (
@@ -2108,7 +2146,7 @@ class LogService:
                 for item in cached
                 if isinstance(item, dict)
             }
-        since = datetime.utcnow() - timedelta(minutes=window_minutes)
+        since = now_beijing() - timedelta(minutes=window_minutes)
         stmt = (
             select(
                 RequestLog.provider_id,
@@ -2157,7 +2195,7 @@ class LogService:
 
     @staticmethod
     def _recent_runtime_second_bucket(value: datetime | None = None) -> int:
-        return int((value or datetime.utcnow()).timestamp())
+        return int((value or now_beijing()).timestamp())
 
     @staticmethod
     def _recent_runtime_cache_key(second_bucket: int, provider_id: int, provider_model_id: int) -> str:
@@ -2216,12 +2254,12 @@ class LogService:
                     pipe.hset(key, "latest_trace_id", log.trace_id)
                 if log.message:
                     pipe.hset(key, "latest_error_message", str(log.message)[:500])
-                pipe.hset(key, "latest_error_at", log.created_at.isoformat() if log.created_at else datetime.utcnow().isoformat())
+                pipe.hset(key, "latest_error_at", log.created_at.isoformat() if log.created_at else now_beijing().isoformat())
             if log.model_name:
                 pipe.hset(key, "model_name", log.model_name)
             if log.requested_model:
                 pipe.hset(key, "requested_model", log.requested_model)
-            pipe.hset(key, "latest_log_at", log.created_at.isoformat() if log.created_at else datetime.utcnow().isoformat())
+            pipe.hset(key, "latest_log_at", log.created_at.isoformat() if log.created_at else now_beijing().isoformat())
             if log.latency_ms is not None:
                 pipe.hincrbyfloat(key, "latency_sum", float(max(0, int(log.latency_ms))))
                 pipe.hincrby(key, "latency_count", 1)
@@ -2435,7 +2473,7 @@ class LogService:
                 return cached
             if None in requested_key:
                 return cached
-        since = datetime.utcnow() - timedelta(seconds=parsed_window_seconds)
+        since = now_beijing() - timedelta(seconds=parsed_window_seconds)
         stmt = (
             select(
                 RequestLog.provider_id,
@@ -2905,7 +2943,7 @@ class LogService:
         cached = CacheService.get(cache_key)
         if isinstance(cached, list):
             return cached
-        since = datetime.utcnow() - timedelta(minutes=window_minutes)
+        since = now_beijing() - timedelta(minutes=window_minutes)
         stmt = (
             select(
                 RequestLog.created_at,
@@ -3001,7 +3039,7 @@ class LogService:
         normalized_period = (period_type or "").strip().lower()
         if normalized_period not in {"day", "week", "month"}:
             raise ValueError("period_type must be one of: day, week, month")
-        since = datetime.utcnow() - timedelta(days=window_days)
+        since = now_beijing() - timedelta(days=window_days)
         bucket_expr = LogService._period_bucket_expr(db, normalized_period)
         rows = db.execute(
             select(
@@ -3186,4 +3224,4 @@ class LogService:
                     return datetime.strptime(value[:7], "%Y-%m")
             except ValueError:
                 pass
-        return LogService._period_start(datetime.utcnow(), period_type)
+        return LogService._period_start(now_beijing(), period_type)

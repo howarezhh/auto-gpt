@@ -1,3 +1,4 @@
+from app.utils.timezone import now_beijing
 from datetime import datetime
 
 from sqlalchemy import DateTime, ForeignKey, Integer, UniqueConstraint
@@ -15,7 +16,7 @@ class ApiClientKeyProviderBinding(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     api_client_key_id: Mapped[int] = mapped_column(ForeignKey("api_client_keys.id"), nullable=False, index=True)
     provider_id: Mapped[int] = mapped_column(ForeignKey("providers.id"), nullable=False, index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing)
 
     api_client_key = relationship("ApiClientKey", back_populates="provider_bindings")
     provider = relationship("Provider")

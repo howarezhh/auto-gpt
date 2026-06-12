@@ -81,7 +81,7 @@ class DataRetentionService:
         }
         changed = False
 
-        health_check_cutoff = datetime.utcnow() - timedelta(hours=DataRetentionService.HEALTH_CHECK_LOG_RETENTION_HOURS)
+        health_check_cutoff = now_beijing() - timedelta(hours=DataRetentionService.HEALTH_CHECK_LOG_RETENTION_HOURS)
         result["health_check_logs_deleted"] = DataRetentionService._delete_batched(
             db,
             RequestLog,
@@ -91,7 +91,7 @@ class DataRetentionService:
         changed = changed or result["health_check_logs_deleted"] > 0
 
         if request_log_retention_days > 0:
-            request_cutoff = datetime.utcnow() - timedelta(days=request_log_retention_days)
+            request_cutoff = now_beijing() - timedelta(days=request_log_retention_days)
             result["request_logs_deleted"] = DataRetentionService._delete_batched(
                 db,
                 RequestLog,
@@ -101,7 +101,7 @@ class DataRetentionService:
             changed = changed or result["request_logs_deleted"] > 0
 
         if admin_audit_log_retention_days > 0:
-            audit_cutoff = datetime.utcnow() - timedelta(days=admin_audit_log_retention_days)
+            audit_cutoff = now_beijing() - timedelta(days=admin_audit_log_retention_days)
             result["admin_audit_logs_deleted"] = DataRetentionService._delete_batched(
                 db,
                 AdminAuditLog,
@@ -110,7 +110,7 @@ class DataRetentionService:
             changed = changed or result["admin_audit_logs_deleted"] > 0
 
         if request_child_log_retention_days > 0:
-            request_child_cutoff = datetime.utcnow() - timedelta(days=request_child_log_retention_days)
+            request_child_cutoff = now_beijing() - timedelta(days=request_child_log_retention_days)
             for model in DataRetentionService.REQUEST_CHILD_EVENT_MODELS:
                 result["request_child_logs_deleted"] += DataRetentionService._delete_batched(
                     db,
@@ -128,7 +128,7 @@ class DataRetentionService:
             days=exception_log_retention_days,
         )
         if health_log_retention_days > 0:
-            health_cutoff = datetime.utcnow() - timedelta(days=health_log_retention_days)
+            health_cutoff = now_beijing() - timedelta(days=health_log_retention_days)
             result["health_probes_deleted"] = DataRetentionService._delete_batched(
                 db,
                 HealthProbeEvent,
@@ -141,7 +141,7 @@ class DataRetentionService:
             )
             changed = changed or result["health_probes_deleted"] > 0 or result["health_runs_deleted"] > 0
         if billing_log_retention_days > 0:
-            billing_cutoff = datetime.utcnow() - timedelta(days=billing_log_retention_days)
+            billing_cutoff = now_beijing() - timedelta(days=billing_log_retention_days)
             result["token_finalize_events_deleted"] = DataRetentionService._delete_batched(
                 db,
                 TokenFinalizeEvent,
@@ -204,7 +204,7 @@ class DataRetentionService:
     ) -> bool:
         if days <= 0:
             return changed
-        cutoff = datetime.utcnow() - timedelta(days=days)
+        cutoff = now_beijing() - timedelta(days=days)
         result[result_key] = DataRetentionService._delete_batched(db, model, model.created_at < cutoff)
         return changed or result[result_key] > 0
 
@@ -234,3 +234,5 @@ class DataRetentionService:
             if len(ids) < batch_size or deleted_count <= 0:
                 break
         return total_deleted
+
+from app.utils.timezone import now_beijing

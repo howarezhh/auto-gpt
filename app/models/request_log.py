@@ -1,3 +1,4 @@
+from app.utils.timezone import now_beijing
 from datetime import datetime
 from decimal import Decimal
 
@@ -131,4 +132,4 @@ class RequestLog(Base):
     api_client_auth_result: Mapped[str | None] = mapped_column(Text, nullable=True)
     api_client_policy_snapshot_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     trace_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing)

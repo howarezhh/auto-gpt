@@ -333,7 +333,7 @@ class ContentGuardService:
     ) -> ContentGuardResult:
         from app.services.content_guard_rule_service import ContentGuardRuleService
 
-        started = datetime.utcnow()
+        started = now_beijing()
         sample = cls._clip_text(cls.normalize_scan_text(text), max_scan_bytes=max_scan_bytes)
         if not sample:
             return ContentGuardResult(result=cls.RESULT_PASS, risk_level="low", reason="未检测到可扫描文本")
@@ -497,7 +497,7 @@ class ContentGuardService:
         enhanced_threshold: int | None = None,
         enhanced_context_window_chars: int | None = None,
     ) -> ContentGuardResult:
-        started = datetime.utcnow()
+        started = now_beijing()
         enhanced_options = cls._resolve_enhanced_detection_options(
             enhanced_detection_enabled=enhanced_detection_enabled,
             enhanced_illegal_enabled=enhanced_illegal_enabled,
@@ -557,7 +557,7 @@ class ContentGuardService:
         enhanced_threshold: int | None = None,
         enhanced_context_window_chars: int | None = None,
     ) -> ContentGuardResult:
-        started = datetime.utcnow()
+        started = now_beijing()
         if not data or data == "[DONE]":
             return cls._with_latency(
                 ContentGuardResult(result=cls.RESULT_PASS, risk_level="low", reason="SSE 控制事件"),
@@ -738,7 +738,7 @@ class ContentGuardService:
 
     @staticmethod
     def _with_latency(result: ContentGuardResult, *, started: datetime) -> ContentGuardResult:
-        result.latency_ms = max(0, int((datetime.utcnow() - started).total_seconds() * 1000))
+        result.latency_ms = max(0, int((now_beijing() - started).total_seconds() * 1000))
         return result
 
     @classmethod
@@ -978,7 +978,7 @@ class ContentGuardService:
     ) -> None:
         if result.result not in {cls.RESULT_REVIEW, cls.RESULT_BLOCK, cls.RESULT_ERROR}:
             return
-        now = datetime.utcnow()
+        now = now_beijing()
         final_strategy = str(getattr(result, "final_strategy", "") or getattr(result, "action", "") or "")
         if final_strategy in {"record_only", "record", "async_review"}:
             severe = False
@@ -989,17 +989,11 @@ class ContentGuardService:
             if is_severe:
                 provider.content_integrity_status = "blocked"
                 provider.content_integrity_score = max(0, int(provider.content_integrity_score or 80) + int(result.score_delta or -10))
-                if getattr(provider, "auto_circuit_break_enabled", True) is not False:
-                    provider.circuit_state = "open"
-                    if hasattr(provider, "circuit_opened_at"):
-                        provider.circuit_opened_at = now
         if provider_model is not None and is_severe:
             if source == "probe":
                 provider_model.content_probe_last_failed_at = now
                 provider_model.content_probe_failure_count = int(provider_model.content_probe_failure_count or 0) + 1
             provider_model.content_integrity_status = "blocked"
-            provider_model.circuit_state = "open"
-            provider_model.circuit_opened_at = now
         if is_severe and provider is not None:
             cls._upsert_content_guard_alert_event(
                 db,
@@ -1797,3 +1791,5 @@ class ContentGuardService:
             re.search(r"(不要|禁止|不得|不能|避免|不允许|无|去除|移除|不要提供).{0,16}(广告|推广|营销|落地页|优惠|链接|联系方式|外链)", text)
             or re.search(r"(广告|推广|营销|落地页|优惠|链接|联系方式|外链).{0,16}(不要|禁止|不得|不能|避免|不允许|无|去除|移除)", text)
         )
+
+from app.utils.timezone import now_beijing

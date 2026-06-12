@@ -940,7 +940,7 @@ class ResponsesChatAdapterService:
             row = db.get(ResponsesChatAdapterSession, response_id)
             if row is None:
                 return None
-            if row.expires_at is not None and row.expires_at < datetime.utcnow():
+            if row.expires_at is not None and row.expires_at < now_beijing():
                 db.delete(row)
                 db.commit()
                 return None
@@ -976,8 +976,8 @@ class ResponsesChatAdapterService:
             row.messages_json = dumps_json(payload.get("messages") or [])
             row.pending_tool_call_ids_json = dumps_json(payload.get("pending_tool_call_ids") or [])
             row.tool_round_count = int(payload.get("tool_round_count") or 0)
-            row.updated_at = datetime.utcnow()
-            row.expires_at = datetime.utcfromtimestamp(expires_at) if isinstance(expires_at, (int, float)) else None
+            row.updated_at = now_beijing()
+            row.expires_at = timestamp_to_beijing(expires_at) if isinstance(expires_at, (int, float)) else None
             db.commit()
         finally:
             db.close()
@@ -985,7 +985,7 @@ class ResponsesChatAdapterService:
     @staticmethod
     def cleanup_expired_database_sessions(db: Session) -> int:
         total_deleted = 0
-        cutoff = datetime.utcnow()
+        cutoff = now_beijing()
         batch_count = 0
         while True:
             if batch_count >= ResponsesChatAdapterService.DATABASE_CLEANUP_MAX_BATCHES:
@@ -1156,3 +1156,5 @@ class ResponsesChatAdapterService:
         if isinstance(value, str):
             return value
         return dumps_json(value)
+
+from app.utils.timezone import now_beijing, timestamp_to_beijing

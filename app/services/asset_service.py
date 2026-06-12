@@ -22,7 +22,7 @@ class AssetService:
         upload_file: UploadFile,
         actor_type: str = "system",
         actor_id: int | str | None = None,
-        storage_scope: str = "playground",
+        storage_scope: str = "playground_asset",
         trace_id: str | None = None,
     ) -> UploadedAsset:
         content_type = (upload_file.content_type or "").strip().lower()

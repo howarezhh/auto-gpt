@@ -114,6 +114,7 @@ def _effective_request_body_limit(setting, endpoint_path: str) -> int:
 
 async def _read_limited_v1_json_payload(request: Request, *, endpoint_path: str) -> dict:
     """在读取 JSON 请求体时执行应用层大小限制和结构化日志记录。"""
+    request.state.v1_requested_model = None
     setting = _get_setting_with_scoped_session()
     limit = _effective_request_body_limit(setting, endpoint_path)
     content_length = request.headers.get("content-length")
@@ -241,6 +242,8 @@ async def _read_limited_v1_json_payload(request: Request, *, endpoint_path: str)
         summarize_request_body_structure(payload),
         max_logged_body_bytes,
     )
+    requested_model = payload.get("model")
+    request.state.v1_requested_model = requested_model if isinstance(requested_model, str) else None
     return payload
 
 

@@ -81,7 +81,7 @@ class UserQuotaService:
                 month_tokens=0,
             )
 
-        now = datetime.utcnow()
+        now = now_beijing()
         day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
@@ -195,3 +195,5 @@ class UserQuotaService:
         db.refresh(user)
         ApiKeyAuthCache.invalidate_user(user.id)
         return user
+
+from app.utils.timezone import now_beijing

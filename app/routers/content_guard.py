@@ -1,3 +1,4 @@
+from app.utils.timezone import now_beijing
 import csv
 from datetime import datetime, timedelta
 from io import StringIO
@@ -357,7 +358,7 @@ def _default_runtime_event_start_at(
     )
     if has_filter:
         return start_at
-    return datetime.utcnow() - timedelta(days=DEFAULT_RUNTIME_EVENT_WINDOW_DAYS)
+    return now_beijing() - timedelta(days=DEFAULT_RUNTIME_EVENT_WINDOW_DAYS)
 
 
 @router.get("/runtime/events")

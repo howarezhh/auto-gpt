@@ -1,3 +1,4 @@
+from app.utils.timezone import now_beijing
 from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, Index, Integer, Text
@@ -27,8 +28,8 @@ class IpManagementSetting(Base):
     store_raw_headers_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     ip_masking_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     fail_open_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing, onupdate=now_beijing)
 
 
 class IpAccessRule(Base):
@@ -54,8 +55,8 @@ class IpAccessRule(Base):
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by_user_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_by_username: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing, onupdate=now_beijing)
 
 
 class IpManagementEvent(Base):
@@ -91,4 +92,4 @@ class IpManagementEvent(Base):
     api_client_key_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     api_client_key_prefix: Mapped[str | None] = mapped_column(Text, nullable=True)
     user_account_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing)

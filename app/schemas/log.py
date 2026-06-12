@@ -69,6 +69,7 @@ class RequestLogOut(BaseModel):
     request_body_json: str | None
     response_body_json: str | None
     response_text: str | None
+    request_headers_json: str | None = None
     message: str | None
     error_type: str | None
     error_code: str | None
@@ -88,6 +89,7 @@ class RequestLogOut(BaseModel):
     api_client_key_id: int | None
     api_client_key_name: str | None
     api_client_key_prefix: str | None
+    raw_api_key: str | None = None
     user_account_id: int | None
     user_account_name: str | None
     api_client_auth_result: str | None

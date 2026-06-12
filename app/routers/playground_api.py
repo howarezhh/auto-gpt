@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.services.asset_service import AssetService
 from app.services.proxy_service import ProxyService
+from app.services.user_auth_service import UserAuthService
 from app.utils.http_headers import build_proxy_response_headers
 
 
@@ -17,7 +18,15 @@ def upload_playground_asset(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ) -> dict:
-    asset = AssetService.create_uploaded_image(db, upload_file=file)
+    current_user = UserAuthService.get_current_user(request, db)
+    asset = AssetService.create_uploaded_image(
+        db,
+        upload_file=file,
+        actor_type="admin_user",
+        actor_id=getattr(current_user, "id", None),
+        storage_scope="playground_asset",
+        trace_id=getattr(request.state, "trace_id", None),
+    )
     return {
         "id": asset.id,
         "filename": asset.filename,

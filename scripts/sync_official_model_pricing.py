@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 import sys
@@ -18,6 +17,7 @@ from app.models.model_catalog import ModelCatalog  # noqa: E402
 from app.services.model_catalog_service import ModelCatalogService  # noqa: E402
 from app.services.model_pricing_service import ModelPricingService  # noqa: E402
 from app.utils.decimal_utils import PRICE_QUANT, to_price_decimal  # noqa: E402
+from app.utils.timezone import now_beijing  # noqa: E402
 
 
 USD_CNY_RATE = Decimal("6.7948")
@@ -181,7 +181,7 @@ MODEL_SPECS = [
             output_usd_per_1m="0.87",
             source_label="DeepSeek 官方 API 价格",
             source_url="https://api-docs.deepseek.com/quick_start/pricing",
-            note="DeepSeek 官方价格页注明：75% 优惠于 2026-05-31 15:59 UTC 结束后，API 价格正式调整为原价的 1/4；当前写入为 2026-06-01 后继续生效的官方价格。",
+            note="DeepSeek 官方价格页注明：75% 优惠于北京时间 2026-05-31 23:59 结束后，API 价格正式调整为原价的 1/4；当前写入为 2026-06-01 后继续生效的官方价格。",
         ),
         "remark": "DeepSeek 官方最新公开 API 模型，支持工具调用，当前不属于官方 Responses 原生模型。",
     },
@@ -810,7 +810,7 @@ def main() -> None:
         db.commit()
         ModelCatalogService.invalidate_model_runtime_cache()
         print(
-            f"[{datetime.now().isoformat(timespec='seconds')}] 已同步官方模型价格："
+            f"[{now_beijing().isoformat(timespec='seconds')}] 已同步官方模型价格："
             f"新增 {len(created)} 个，更新 {len(updated)} 个。"
         )
         if created:

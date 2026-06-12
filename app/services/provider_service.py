@@ -1,3 +1,4 @@
+from app.utils.timezone import now_beijing
 import json
 import math
 import re
@@ -43,6 +44,7 @@ from app.services.provider_capacity_service import (
     ProviderCapacitySnapshot,
     ProviderCapacityUnavailableError,
 )
+from app.services.provider_health_state_service import ProviderHealthStateService
 from app.services.setting_service import SettingService
 from app.services.upstream_client import UpstreamClientService
 from app.utils.decimal_utils import to_multiplier_decimal, to_price_decimal
@@ -611,7 +613,7 @@ API Key: sk-yyyy
             content_integrity_score=payload.content_integrity_score,
             content_guard_enabled=payload.content_guard_enabled,
             buffer_stream_for_guard=payload.buffer_stream_for_guard,
-            credential_rotated_at=datetime.utcnow(),
+            credential_rotated_at=now_beijing(),
             remark=payload.remark,
         )
         db.add(provider)
@@ -1145,7 +1147,7 @@ API Key: sk-yyyy
     def _ensure_manual_content_probe_reason(provider_model: ProviderModel) -> None:
         status = str(provider_model.content_integrity_status or "unknown")
         existing = ProviderService._parse_content_probe_results(provider_model.content_probe_results_json)
-        now = datetime.utcnow()
+        now = now_beijing()
         reason = {
             "passed": "管理员手动标记为可信。",
             "blocked": "管理员手动标记为异常，未填写检测明细。",
@@ -1439,7 +1441,7 @@ API Key: sk-yyyy
     ) -> Provider:
         provider.api_key = api_key.strip()
         provider.credential_hint = credential_hint
-        provider.credential_rotated_at = datetime.utcnow()
+        provider.credential_rotated_at = now_beijing()
         provider.health_status = "unknown"
         provider.circuit_state = "closed"
         provider.circuit_opened_at = None
@@ -1547,7 +1549,7 @@ API Key: sk-yyyy
         cached = CacheService.get(cache_key)
         if isinstance(cached, list):
             return cached
-        since = datetime.utcnow() - timedelta(hours=normalized_window_hours)
+        since = now_beijing() - timedelta(hours=normalized_window_hours)
         logs = db.execute(
             select(
                 RequestLog.id,
@@ -1601,12 +1603,18 @@ API Key: sk-yyyy
         metrics = metrics or {}
         trust_status = ProviderService.provider_model_trust_status(provider_model)
         content_probe_results = ProviderService._parse_content_probe_results(provider_model.content_probe_results_json)
+        health_state = ProviderHealthStateService.effective_model_health(provider_model)
         return {
             "id": provider_model.id,
             "model_name": provider_model.model_name,
             "enabled": provider_model.enabled,
             "priority": provider_model.priority,
             "health_status": provider_model.health_status,
+            "db_health": health_state["db_health"],
+            "runtime_health": health_state["runtime_health"],
+            "effective_health": health_state["effective_health"],
+            "state_source": health_state["state_source"],
+            "health_state_updated_at": health_state["health_state_updated_at"],
             "circuit_state": provider_model.circuit_state,
             "circuit_opened_at": provider_model.circuit_opened_at,
             "last_check_at": provider_model.last_check_at,
@@ -1834,17 +1842,10 @@ API Key: sk-yyyy
             provider.content_integrity_status = "passed"
             provider.trust_level = "trusted"
             provider.content_integrity_score = max(80, int(provider.content_integrity_score or 80))
-            if provider.circuit_state == "open" and provider.health_status != "unhealthy":
-                provider.circuit_state = "closed"
-                if hasattr(provider, "circuit_opened_at"):
-                    provider.circuit_opened_at = None
             return
         if "blocked" in statuses:
             provider.content_integrity_status = "blocked"
             provider.content_integrity_score = min(20, int(provider.content_integrity_score or 20))
-            provider.circuit_state = "open"
-            if hasattr(provider, "circuit_opened_at") and provider.circuit_opened_at is None:
-                provider.circuit_opened_at = datetime.utcnow()
             return
         if "degraded" in statuses:
             provider.content_integrity_status = "degraded"
@@ -1856,6 +1857,11 @@ API Key: sk-yyyy
         if provider.trust_level == "blocked":
             provider.trust_level = "standard"
         provider.content_integrity_score = max(60, int(provider.content_integrity_score or 80))
+
+    @staticmethod
+    def refresh_provider_content_integrity_state(provider: Provider) -> None:
+        enabled_models = [item for item in provider.provider_models if item.enabled]
+        ProviderService._refresh_provider_content_integrity_state(provider, enabled_models)
 
     @staticmethod
     def _resolve_model_configs(payload: ProviderCreate | ProviderUpdate, provider: Provider | None = None) -> list[ProviderModelConfigInput]:
@@ -2067,7 +2073,7 @@ API Key: sk-yyyy
                     {int(key): value for key, value in cached_model_stats.items()},
                 )
 
-        since = datetime.utcnow() - timedelta(minutes=ProviderService.QUALITY_WINDOW_MINUTES)
+        since = now_beijing() - timedelta(minutes=ProviderService.QUALITY_WINDOW_MINUTES)
         rows = db.execute(
             select(
                 RequestLog.provider_id,

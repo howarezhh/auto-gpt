@@ -1,3 +1,4 @@
+from app.utils.timezone import now_beijing
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import base64
@@ -226,7 +227,7 @@ class ApiKeyService:
                 remaining_balance=remaining_balance,
                 policy_snapshot_json=policy_snapshot_json,
             )
-        if api_client_key.expires_at is not None and api_client_key.expires_at <= datetime.utcnow():
+        if api_client_key.expires_at is not None and api_client_key.expires_at <= now_beijing():
             ApiKeyAuthCache.invalidate_hash(key_hash)
             raise ApiClientAuthError(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -406,7 +407,7 @@ class ApiKeyService:
                 remaining_balance=remaining_balance,
                 policy_snapshot_json=policy_snapshot_json,
             )
-        if api_client_key.expires_at is not None and api_client_key.expires_at <= datetime.utcnow():
+        if api_client_key.expires_at is not None and api_client_key.expires_at <= now_beijing():
             raise ApiClientAuthError(
                 status_code=status.HTTP_403_FORBIDDEN,
                 code="key_expired",
@@ -644,7 +645,7 @@ class ApiKeyService:
         scheduler.add_job(
             cls.flush_pending_last_used_touches,
             "date",
-            run_date=datetime.now() + timedelta(seconds=cls.LAST_USED_TOUCH_DELAY_SECONDS),
+            run_date=now_beijing() + timedelta(seconds=cls.LAST_USED_TOUCH_DELAY_SECONDS),
             id="api_key_last_used_flush",
             replace_existing=True,
             misfire_grace_time=30,
@@ -660,7 +661,7 @@ class ApiKeyService:
             return
         db = SessionLocal()
         try:
-            touched_at = datetime.utcnow()
+            touched_at = now_beijing()
             api_keys = list(
                 db.scalars(select(ApiClientKey).where(ApiClientKey.id.in_(pending_ids)))
             )
@@ -699,7 +700,7 @@ class ApiKeyService:
             target.total_tokens_used += max(0, (prompt_tokens or 0) + (completion_tokens or 0))
             changed = True
         if changed:
-            target.last_used_at = datetime.utcnow()
+            target.last_used_at = now_beijing()
             if auto_commit:
                 db.commit()
 
@@ -717,7 +718,7 @@ class ApiKeyService:
         target = db.get(ApiClientKey, target_id)
         if target is None:
             return None
-        now = datetime.utcnow()
+        now = now_beijing()
         day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         route_filters = (

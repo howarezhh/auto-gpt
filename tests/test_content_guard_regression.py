@@ -1,16 +1,537 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from types import SimpleNamespace
 
 import stage33_content_guard_regression_check as stage33
 
+from app.models.provider import Provider
+from app.models.provider_model import ProviderModel
+from app.schemas.content_guard import ContentGuardRunRequest
 from app.services.content_guard_probe_service import ContentGuardProbeService
+from app.services.content_runtime_guard_service import ContentRuntimeGuardService
 from app.services.content_guard_service import ContentGuardService
+from app.services.content_trust_probe_service import ContentTrustProbeService
+from app.services.health_service import HealthService
+from app.logging.adapters.health_adapter import HealthLogRecorder
+from app.services.probe_rate_limit_service import ProbeRateLimitResult, ProbeRateLimitService
+from app.services.provider_service import ProviderService
 
 
 def test_stage33_content_guard_regression() -> None:
     stage33.main()
+
+
+def test_content_trust_probe_execution_plan_reports_combined_request_count() -> None:
+    provider_model = ProviderModel(
+        id=1,
+        provider_id=1,
+        model_name="测试模型",
+        enabled=True,
+        supports_stream=True,
+    )
+
+    plan = ContentTrustProbeService.describe_probe_execution_plan(
+        ["fixed_answer", "pollution_rules", "sse"],
+        provider_model,
+    )
+
+    assert plan["logical_probe_count"] == 3
+    assert plan["upstream_request_count"] == 2
+    assert [group["request_key"] for group in plan["request_groups"]] == ["combined_text", "sse"]
+
+
+def test_content_trust_probe_execution_plan_reports_stream_skip() -> None:
+    provider_model = ProviderModel(
+        id=1,
+        provider_id=1,
+        model_name="测试模型",
+        enabled=True,
+        supports_stream=False,
+    )
+
+    plan = ContentTrustProbeService.describe_probe_execution_plan(
+        ["fixed_answer", "pollution_rules", "sse"],
+        provider_model,
+    )
+
+    assert plan["logical_probe_count"] == 3
+    assert plan["upstream_request_count"] == 1
+    assert plan["skipped_probe_count"] == 1
+    assert plan["skipped_probes"][0]["probe_key"] == "sse"
+
+
+def test_stream_guard_buffering_defaults_on_for_buffer_mode_even_with_legacy_provider_flag() -> None:
+    setting = SimpleNamespace(content_guard_enabled=True, content_guard_stream_mode="buffer_300ms")
+    provider = SimpleNamespace(
+        content_guard_enabled=True,
+        trust_level="standard",
+        content_integrity_status="healthy",
+        health_status="healthy",
+        buffer_stream_for_guard=False,
+    )
+
+    assert ContentRuntimeGuardService.stream_should_buffer(
+        setting=setting,
+        provider=provider,
+        route_context=None,
+    )
+
+
+def test_stream_guard_buffering_respects_global_pass_through_mode() -> None:
+    setting = SimpleNamespace(content_guard_enabled=True, content_guard_stream_mode="pass_through_scan")
+    provider = SimpleNamespace(
+        content_guard_enabled=True,
+        trust_level="standard",
+        content_integrity_status="unknown",
+        health_status="unknown",
+        buffer_stream_for_guard=True,
+    )
+
+    assert not ContentRuntimeGuardService.stream_should_buffer(
+        setting=setting,
+        provider=provider,
+        route_context=None,
+    )
+
+
+def test_health_log_probe_count_flattens_child_probes_without_duplicate_model_rows() -> None:
+    flattened = HealthLogRecorder._flatten_probe_results(
+        [
+            {
+                "provider_id": 1,
+                "success": False,
+                "model_results": [
+                    {
+                        "provider_model_id": 11,
+                        "model_name": "测试模型",
+                        "success": False,
+                        "endpoint_results": [
+                            {"success": True, "capability_key": "content_fixed_answer"},
+                            {"success": False, "capability_key": "content_pollution_rules"},
+                        ],
+                    }
+                ],
+            },
+            {
+                "provider_id": 1,
+                "provider_model_id": 11,
+                "model_name": "测试模型",
+                "scope": "model",
+                "success": False,
+                "endpoint_results": [
+                    {"success": True, "capability_key": "content_fixed_answer"},
+                    {"success": False, "capability_key": "content_pollution_rules"},
+                ],
+            },
+        ]
+    )
+
+    assert len(flattened) == 2
+    assert sum(1 for item in flattened if item["success"]) == 1
+
+
+def test_content_probe_endpoint_prefers_chat_when_both_protocols_are_available(monkeypatch) -> None:
+    monkeypatch.setattr(ContentGuardProbeService, "_content_guard_probe_protocol_type", staticmethod(lambda: "chat_completions"))
+    provider = Provider(id=1, name="测试提供商", protocol_type="both", base_url="https://example.com/v1", api_key="sk-test")
+    provider_model = ProviderModel(
+        id=1,
+        provider_id=1,
+        model_name="测试模型",
+        enabled=True,
+        supports_chat_completions=True,
+        supports_responses=True,
+    )
+
+    assert ContentGuardProbeService.content_probe_endpoint_path(provider, provider_model) == "/chat/completions"
+
+
+def test_content_probe_endpoint_uses_responses_when_chat_is_unavailable(monkeypatch) -> None:
+    monkeypatch.setattr(ContentGuardProbeService, "_content_guard_probe_protocol_type", staticmethod(lambda: "chat_completions"))
+    provider = Provider(id=1, name="测试提供商", protocol_type="responses", base_url="https://example.com/v1", api_key="sk-test")
+    provider_model = ProviderModel(
+        id=1,
+        provider_id=1,
+        model_name="测试模型",
+        enabled=True,
+        supports_chat_completions=False,
+        supports_responses=True,
+    )
+
+    assert ContentGuardProbeService.content_probe_endpoint_path(provider, provider_model) == "/responses"
+
+
+def test_content_probe_endpoint_uses_configured_responses_when_supported(monkeypatch) -> None:
+    monkeypatch.setattr(ContentGuardProbeService, "_content_guard_probe_protocol_type", staticmethod(lambda: "responses"))
+    provider = Provider(id=1, name="测试提供商", protocol_type="both", base_url="https://example.com/v1", api_key="sk-test")
+    provider_model = ProviderModel(
+        id=1,
+        provider_id=1,
+        model_name="测试模型",
+        enabled=True,
+        supports_chat_completions=True,
+        supports_responses=True,
+    )
+
+    assert ContentGuardProbeService.content_probe_endpoint_path(provider, provider_model) == "/responses"
+
+
+def test_content_probe_endpoint_falls_back_to_chat_when_configured_responses_is_unavailable(monkeypatch) -> None:
+    monkeypatch.setattr(ContentGuardProbeService, "_content_guard_probe_protocol_type", staticmethod(lambda: "responses"))
+    provider = Provider(id=1, name="测试提供商", protocol_type="both", base_url="https://example.com/v1", api_key="sk-test")
+    provider_model = ProviderModel(
+        id=1,
+        provider_id=1,
+        model_name="测试模型",
+        enabled=True,
+        supports_chat_completions=True,
+        supports_responses=False,
+    )
+
+    assert ContentGuardProbeService.content_probe_endpoint_path(provider, provider_model) == "/chat/completions"
+
+
+def test_content_trust_probe_rate_limit_does_not_persist_trust_status(monkeypatch) -> None:
+    provider = Provider(
+        id=1,
+        name="测试提供商",
+        protocol_type="chat_completions",
+        base_url="https://example.com/v1",
+        api_key="sk-test",
+        enabled=True,
+        content_guard_enabled=True,
+    )
+    provider_model = ProviderModel(
+        id=11,
+        provider_id=1,
+        model_name="测试模型",
+        enabled=True,
+        supports_stream=True,
+        supports_chat_completions=True,
+        supports_responses=False,
+        content_integrity_status="unknown",
+        content_probe_failure_count=0,
+    )
+    provider.provider_models = [provider_model]
+    provider_model.provider = provider
+
+    class FakeDb:
+        def get(self, model, item_id):
+            if model is Provider and item_id == 1:
+                return provider
+            if model is ProviderModel and item_id == 11:
+                return provider_model
+            return None
+
+    async def fake_claim(provider_arg, provider_model_arg, *, probe_type, limit_per_minute=None, window_seconds=None):
+        return ProbeRateLimitResult(
+            allowed=False,
+            provider_id=provider_arg.id,
+            provider_model_id=provider_model_arg.id,
+            probe_type=probe_type,
+            limit=4,
+            window_seconds=60,
+            retry_after_seconds=20,
+            current_count=4,
+            reason="探针频率限制：测试内容防护限频",
+        )
+
+    def fail_update(*args, **kwargs):
+        raise AssertionError("限频时不应更新可信或内容完整性状态")
+
+    monkeypatch.setattr(ProbeRateLimitService, "claim", staticmethod(fake_claim))
+    monkeypatch.setattr(ContentTrustProbeService, "update_provider_model_trust_status", staticmethod(fail_update))
+
+    result = asyncio.run(
+        ContentTrustProbeService.run_trust_probe(
+            FakeDb(),
+            ContentGuardRunRequest(
+                target_type="internal",
+                provider_id=1,
+                provider_model_id=11,
+                probe_keys=list(ContentTrustProbeService.REQUIRED_TRUST_PROBE_KEYS),
+                persist_internal_result=True,
+            ),
+        )
+    )
+
+    assert result["summary"]["status"] == "rate_limited"
+    assert result["summary"]["error_code"] == "probe_rate_limited"
+    assert "测试内容防护限频" in result["summary"]["content_guard_reason"]
+    assert provider_model.content_integrity_status == "unknown"
+    assert provider_model.content_probe_failure_count == 0
+
+
+def test_content_trust_probe_transient_upstream_failure_does_not_persist_trust_status(monkeypatch) -> None:
+    provider = Provider(
+        id=2,
+        name="上游临时不可用提供商",
+        protocol_type="chat_completions",
+        base_url="https://example.com/v1",
+        api_key="sk-test",
+        enabled=True,
+        content_guard_enabled=True,
+    )
+    provider_model = ProviderModel(
+        id=22,
+        provider_id=2,
+        model_name="测试模型",
+        enabled=True,
+        supports_stream=True,
+        supports_chat_completions=True,
+        supports_responses=False,
+        content_integrity_status="unknown",
+        content_probe_failure_count=0,
+    )
+    provider.provider_models = [provider_model]
+    provider_model.provider = provider
+
+    class FakeDb:
+        def get(self, model, item_id):
+            if model is Provider and item_id == 2:
+                return provider
+            if model is ProviderModel and item_id == 22:
+                return provider_model
+            return None
+
+    def transient_result(phase_key: str) -> dict:
+        return {
+            "phase_key": phase_key,
+            "capability_key": phase_key,
+            "success": False,
+            "status_code": 503,
+            "retryable": True,
+            "message": "全部渠道不可提供当前模型，请稍后重试",
+            "content_guard_result": "review",
+            "content_guard_reason": "全部渠道不可提供当前模型，请稍后重试",
+        }
+
+    async def fake_combined(provider_arg, provider_model_arg, endpoint_path, *, order_indexes):
+        return [
+            (order_indexes["fixed_answer"], transient_result("content_fixed_answer")),
+            (order_indexes["pollution_rules"], transient_result("content_pollution_rules")),
+        ]
+
+    async def fake_single(provider_arg, provider_model_arg, endpoint_path, probe_key, *, order_index):
+        return (order_index, transient_result("content_sse"))
+
+    def fail_update(*args, **kwargs):
+        raise AssertionError("上游临时不可用时不应更新可信或内容完整性状态")
+
+    monkeypatch.setattr(ContentTrustProbeService, "run_combined_text_probe_with_boundary", staticmethod(fake_combined))
+    monkeypatch.setattr(ContentTrustProbeService, "run_single_probe_with_boundary", staticmethod(fake_single))
+    monkeypatch.setattr(ContentTrustProbeService, "update_provider_model_trust_status", staticmethod(fail_update))
+
+    result = asyncio.run(
+        ContentTrustProbeService.run_trust_probe(
+            FakeDb(),
+            ContentGuardRunRequest(
+                target_type="internal",
+                provider_id=2,
+                provider_model_id=22,
+                probe_keys=list(ContentTrustProbeService.REQUIRED_TRUST_PROBE_KEYS),
+                persist_internal_result=True,
+            ),
+        )
+    )
+
+    assert result["summary"]["status"] == "upstream_unavailable"
+    assert result["summary"]["content_guard_result"] == "upstream_unavailable"
+    assert "全部渠道不可提供当前模型" in result["summary"]["content_guard_reason"]
+    assert provider_model.content_integrity_status == "unknown"
+    assert provider_model.content_probe_failure_count == 0
+
+
+def test_stream_health_probe_decompression_error_is_not_endpoint_unsupported(monkeypatch) -> None:
+    provider = Provider(
+        id=31,
+        name="压缩头异常提供商",
+        base_url="https://example.com/v1",
+        api_key="sk-test",
+        enabled=True,
+        protocol_type="both",
+        timeout_ms=30000,
+        first_token_timeout_sec=1,
+    )
+    provider_model = ProviderModel(
+        id=311,
+        provider_id=31,
+        model_name="测试模型",
+        enabled=True,
+        supports_stream=True,
+        supports_chat_completions=True,
+        supports_responses=True,
+    )
+
+    class BadStreamResponse:
+        def aiter_bytes(self):
+            async def iterator():
+                raise RuntimeError("Error -3 while decompressing data: incorrect header check")
+                yield b""
+
+            return iterator()
+
+    class FakeStreamContext:
+        async def __aexit__(self, exc_type, exc_value, exc_traceback):
+            return None
+
+    async def fake_open_stream(provider_arg, provider_model_arg, endpoint_path, payload, **kwargs):
+        assert kwargs.get("extra_headers", {}).get("Accept-Encoding") == "identity"
+        return BadStreamResponse(), None, FakeStreamContext(), []
+
+    async def fake_setting():
+        return SimpleNamespace(stream_connect_timeout_seconds=1, stream_idle_timeout_seconds=1, stream_max_duration_seconds=1)
+
+    async def fake_claim(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(HealthService, "_claim_probe_rate_limit_result", staticmethod(fake_claim))
+    monkeypatch.setattr(HealthService, "_interactive_stream_connect_timeout_seconds", staticmethod(lambda provider_arg: 1))
+    monkeypatch.setattr(HealthService, "_interactive_stream_first_token_timeout_seconds", staticmethod(lambda provider_arg: 1))
+    monkeypatch.setattr(
+        "app.services.health_service.ProxyService._get_setting_async",
+        staticmethod(fake_setting),
+    )
+    monkeypatch.setattr(
+        "app.services.health_service.ProxyService._open_stream_with_endpoint_fallback",
+        staticmethod(fake_open_stream),
+    )
+
+    result = asyncio.run(
+        HealthService._probe_formal_stream_endpoint(
+            provider,
+            provider_model,
+            endpoint_path="/responses",
+            payload=HealthService._build_responses_probe_payload(provider_model, vision_probe=False),
+            interactive_mode=True,
+        )
+    )
+
+    assert result["support_mode"] == "unknown"
+    assert "压缩响应异常" in result["support_label"]
+    assert "incorrect header check" in result["message"]
+
+
+def test_health_probe_does_not_clear_content_integrity_state() -> None:
+    provider = Provider(
+        id=21,
+        name="健康内容隔离拆分提供商",
+        base_url="https://example.com/v1",
+        api_key="sk-test",
+        enabled=True,
+        health_status="unknown",
+        circuit_state="closed",
+        content_integrity_status="unknown",
+    )
+    provider_model = ProviderModel(
+        id=211,
+        provider_id=21,
+        model_name="健康内容隔离拆分模型",
+        enabled=True,
+        health_status="unhealthy",
+        circuit_state="open",
+        success_count=0,
+        failure_count=0,
+        content_integrity_status="blocked",
+        content_probe_failure_count=3,
+        content_probe_last_failed_at=now_beijing(),
+    )
+    provider.provider_models = [provider_model]
+    provider_model.provider = provider
+
+    class FakeDb:
+        def commit(self):
+            return None
+
+    HealthService._apply_model_health(
+        FakeDb(),
+        provider,
+        provider_model,
+        health_status="healthy",
+        latency_ms=18,
+        error_message=None,
+    )
+
+    assert provider_model.health_status == "healthy"
+    assert provider_model.circuit_state == "closed"
+    assert provider_model.content_integrity_status == "blocked"
+    assert provider_model.content_probe_failure_count == 3
+    assert provider.content_integrity_status == "blocked"
+    assert provider.circuit_state == "closed"
+
+
+def test_content_probe_isolation_does_not_modify_circuit_state() -> None:
+    provider = Provider(
+        id=22,
+        name="内容隔离不熔断提供商",
+        base_url="https://example.com/v1",
+        api_key="sk-test",
+        enabled=True,
+        health_status="healthy",
+        circuit_state="closed",
+        success_count=0,
+        failure_count=0,
+        content_integrity_status="unknown",
+        content_integrity_score=80,
+    )
+    provider_model = ProviderModel(
+        id=221,
+        provider_id=22,
+        model_name="内容隔离不熔断模型",
+        enabled=True,
+        health_status="healthy",
+        circuit_state="closed",
+        content_integrity_status="unknown",
+        content_probe_failure_count=2,
+        content_probe_last_failed_at=now_beijing(),
+    )
+    provider.provider_models = [provider_model]
+    provider_model.provider = provider
+
+    class FakeDb:
+        def commit(self):
+            return None
+
+    ContentGuardProbeService.apply_content_probe_health(
+        FakeDb(),
+        provider,
+        provider_model,
+        content_guard_result={
+            "content_guard_result": ContentGuardService.RESULT_BLOCK,
+            "content_guard_reason": "测试内容风险",
+            "content_guard_categories_json": '["content_trust_probe_incomplete"]',
+        },
+        endpoint_results=None,
+        detection_source="automatic_trust_probe",
+    )
+
+    assert provider_model.content_integrity_status == "blocked"
+    assert provider.content_integrity_status == "blocked"
+    assert provider_model.circuit_state == "closed"
+    assert provider.circuit_state == "closed"
+
+
+def test_provider_model_serialization_returns_effective_health_fields() -> None:
+    provider_model = ProviderModel(
+        id=23,
+        provider_id=2,
+        model_name="有效健康状态模型",
+        enabled=True,
+        health_status="healthy",
+        circuit_state="closed",
+        content_integrity_status="unknown",
+        created_at=now_beijing(),
+        updated_at=now_beijing(),
+    )
+
+    payload = ProviderService.provider_model_to_dict(provider_model)
+
+    assert payload["db_health"] == "healthy"
+    assert payload["runtime_health"] is None
+    assert payload["effective_health"] == "healthy"
+    assert payload["state_source"] == "db"
+    assert "health_state_updated_at" in payload
 
 
 def test_responses_success_error_null_is_not_upstream_error_payload() -> None:
@@ -262,3 +783,5 @@ def test_fixed_answer_and_pollution_rules_use_single_upstream_request() -> None:
         assert result["pollution_rules"].get("raw_provider_response")
 
     asyncio.run(run_case())
+
+from app.utils.timezone import now_beijing

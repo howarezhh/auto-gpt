@@ -1,7 +1,9 @@
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.models.provider_model import ProviderModel
 from app.schemas.model_catalog import (
     ModelCatalogBatchContextWindowUpdate,
     ModelCatalogCreate,
@@ -19,6 +21,7 @@ from app.schemas.model_mapping import (
 )
 from app.services.asset_service import AssetService
 from app.services.admin_audit_service import AdminAuditService
+from app.services.health_service import HealthService
 from app.services.model_catalog_service import ModelCatalogService
 from app.services.model_mapping_service import ModelMappingService
 from app.services.user_auth_service import require_admin_api_user, require_session_api_user
@@ -62,7 +65,7 @@ def list_model_options(db: Session = Depends(get_db)) -> list[ModelCatalogOption
 
 
 @router.post("/api/models", response_model=ModelCatalogDetailOut, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_admin_api_user)])
-def create_model(
+async def create_model(
     payload: ModelCatalogCreate,
     db: Session = Depends(get_db),
     current_user=Depends(require_admin_api_user),
@@ -150,7 +153,7 @@ def get_model_detail(model_name: str, db: Session = Depends(get_db)) -> ModelCat
 
 
 @router.put("/api/models/{model_name}", response_model=ModelCatalogDetailOut, dependencies=[Depends(require_admin_api_user)])
-def update_model(
+async def update_model(
     model_name: str,
     payload: ModelCatalogUpdate,
     db: Session = Depends(get_db),
@@ -159,10 +162,29 @@ def update_model(
     catalog = ModelCatalogService.get_catalog(db, model_name)
     if catalog is None:
         raise HTTPException(status_code=404, detail="模型不存在")
+    before_provider_ids = set(
+        db.scalars(select(ProviderModel.provider_id).where(ProviderModel.model_name == model_name))
+    )
     try:
         ModelCatalogService.update_model(db, catalog, payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    protocol_detection_result = None
+    if "provider_bindings" in payload.model_fields_set:
+        new_provider_models = [
+            item
+            for item in db.scalars(select(ProviderModel).where(ProviderModel.model_name == model_name))
+            if item.provider_id not in before_provider_ids
+        ]
+        if new_provider_models:
+            protocol_detection_result = await HealthService.detect_endpoint_protocols_for_provider_model_ids(
+                db,
+                targets=[
+                    {"provider_id": item.provider_id, "provider_model_id": item.id}
+                    for item in new_provider_models
+                ],
+                trigger_type="auto_provider_model_mounted",
+            )
     AdminAuditService.create_log(
         db,
         actor_user_id=current_user.id,
@@ -172,7 +194,10 @@ def update_model(
         entity_id=catalog.id,
         entity_name=catalog.model_name,
         summary=f"更新模型 {catalog.model_name}",
-        detail=payload.model_dump(exclude_unset=True),
+        detail={
+            **payload.model_dump(exclude_unset=True),
+            **({"endpoint_protocol_detection": protocol_detection_result} if protocol_detection_result else {}),
+        },
     )
     detail = ModelCatalogService.get_model_detail(db, model_name)
     return ModelCatalogDetailOut(**detail)
@@ -314,11 +339,18 @@ def list_user_models(current_user=Depends(require_session_api_user), db: Session
 @router.post("/api/user/assets/upload")
 def upload_user_asset(
     request: Request,
-    _current_user=Depends(require_session_api_user),
+    current_user=Depends(require_session_api_user),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ) -> dict:
-    asset = AssetService.create_uploaded_image(db, upload_file=file)
+    asset = AssetService.create_uploaded_image(
+        db,
+        upload_file=file,
+        actor_type="user",
+        actor_id=getattr(current_user, "id", None),
+        storage_scope="user_asset",
+        trace_id=getattr(request.state, "trace_id", None),
+    )
     return {
         "id": asset.id,
         "filename": asset.filename,

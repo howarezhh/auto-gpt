@@ -1,3 +1,4 @@
+from app.utils.timezone import now_beijing
 from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, Integer, Text
@@ -18,4 +19,4 @@ class UploadedAsset(Base):
     media_kind: Mapped[str] = mapped_column(Text, nullable=False, default="image")
     sha256_hex: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing)

@@ -107,6 +107,7 @@ class SystemMetricsService:
     MONITORING_ALERT_RESOLVE_MAX_BATCHES = 100
     PROJECT_PROCESS_CACHE_SECONDS = 30
     BACKGROUND_SNAPSHOT_CACHE_SECONDS = 5
+    DB_SECTION_CACHE_SECONDS = 3
     _project_process_cache: dict[str, Any] = {
         "path": None,
         "snapshot": None,
@@ -139,10 +140,11 @@ class SystemMetricsService:
         host = cls._host_snapshot()
         section_errors: dict[str, str] = {}
         traffic = (
-            cls._safe_snapshot(
+            cls._safe_cached_snapshot(
                 db,
                 section_errors,
                 "traffic",
+                f"system-metrics:traffic:{window_minutes}",
                 lambda: cls._traffic_snapshot(db, window_minutes=window_minutes),
                 cls._empty_traffic,
             )
@@ -151,10 +153,11 @@ class SystemMetricsService:
         )
         bucket_minutes = cls._bucket_minutes(window_minutes)
         timeseries = (
-            cls._safe_snapshot(
+            cls._safe_cached_snapshot(
                 db,
                 section_errors,
                 "timeseries",
+                f"system-metrics:timeseries:{window_minutes}:{bucket_minutes}",
                 lambda: LogService.metric_timeseries(db, window_minutes=window_minutes, bucket_minutes=bucket_minutes),
                 list,
             )
@@ -162,10 +165,11 @@ class SystemMetricsService:
             else []
         )
         providers = (
-            cls._safe_snapshot(
+            cls._safe_cached_snapshot(
                 db,
                 section_errors,
                 "providers",
+                f"system-metrics:providers:{window_minutes}",
                 lambda: cls._provider_snapshot(db, window_minutes=window_minutes),
                 list,
             )
@@ -173,10 +177,11 @@ class SystemMetricsService:
             else []
         )
         content_guard = (
-            cls._safe_snapshot(
+            cls._safe_cached_snapshot(
                 db,
                 section_errors,
                 "content_guard",
+                f"system-metrics:content-guard:{window_minutes}",
                 lambda: cls._content_guard_snapshot(db, window_minutes=window_minutes),
                 cls._empty_content_guard,
             )
@@ -229,7 +234,7 @@ class SystemMetricsService:
         metrics = {
             "status": status,
             "window_minutes": window_minutes,
-            "generated_at": datetime.utcnow().isoformat(),
+            "generated_at": now_beijing().isoformat(),
             "database": {**database, "pool": pool},
             "redis": redis_snapshot,
             "runtime": runtime,
@@ -865,6 +870,27 @@ class SystemMetricsService:
             section_errors[section_name] = str(exc)
             return fallback_factory()
 
+    @staticmethod
+    def _safe_cached_snapshot(
+        db: Session,
+        section_errors: dict[str, str],
+        section_name: str,
+        cache_key: str,
+        loader: Any,
+        fallback_factory: Any,
+    ) -> Any:
+        cached = CacheService.get(cache_key)
+        if cached is not None:
+            return cached
+        try:
+            value = loader()
+            return CacheService.set(cache_key, value, ttl_seconds=SystemMetricsService.DB_SECTION_CACHE_SECONDS)
+        except Exception as exc:
+            if db is not None:
+                db.rollback()
+            section_errors[section_name] = str(exc)
+            return fallback_factory()
+
     @classmethod
     def write_monitoring_alerts(cls, db: Session, metrics: dict[str, Any]) -> None:
         active_events = cls._build_monitoring_alert_events(metrics)
@@ -872,7 +898,7 @@ class SystemMetricsService:
         active_keys = set(active_events)
         existing_items = cls._load_relevant_monitoring_alerts(db, active_keys)
         existing_by_key = {item.alert_key: item for item in existing_items}
-        now = datetime.utcnow()
+        now = now_beijing()
         for alert_key, payload in active_events.items():
             item = existing_by_key.get(alert_key)
             if item is None:
@@ -975,7 +1001,7 @@ class SystemMetricsService:
         *,
         auto_commit: bool = True,
     ) -> bool:
-        changed = cls._apply_monitoring_actions(db, active_events, now=datetime.utcnow())
+        changed = cls._apply_monitoring_actions(db, active_events, now=now_beijing())
         if changed and auto_commit:
             db.commit()
         return changed
@@ -1030,16 +1056,12 @@ class SystemMetricsService:
             return False
 
         changed = False
-        is_new_isolation = (
-            provider.content_integrity_status != "blocked"
-            or provider.circuit_state != "open"
-        )
+        is_new_isolation = provider.content_integrity_status != "blocked"
         if is_new_isolation:
             payload.setdefault("pre_isolation_snapshot", cls._content_guard_isolation_snapshot(provider))
             payload.setdefault("isolated_at", now.isoformat())
         updates = {
             "content_integrity_status": "blocked",
-            "circuit_state": "open",
         }
         for field, value in updates.items():
             if getattr(provider, field, None) == value:
@@ -1054,24 +1076,15 @@ class SystemMetricsService:
         if is_new_isolation and provider.last_content_violation_at != now:
             provider.last_content_violation_at = now
             changed = True
-        if is_new_isolation and getattr(provider, "circuit_opened_at", None) != now:
-            provider.circuit_opened_at = now
-            changed = True
-
         for provider_model in provider.provider_models:
             model_updates = {
                 "content_integrity_status": "blocked",
-                "circuit_state": "open",
             }
             for field, value in model_updates.items():
                 if getattr(provider_model, field) == value:
                     continue
                 setattr(provider_model, field, value)
                 changed = True
-            if is_new_isolation and provider_model.circuit_opened_at != now:
-                provider_model.circuit_opened_at = now
-                changed = True
-
         payload["auto_isolated"] = True
         payload["isolation_status"] = "blocked" if (is_new_isolation or changed) else "already_blocked"
         event["message"] = (
@@ -1377,7 +1390,7 @@ class SystemMetricsService:
                 "fd_limit_soft": None,
                 "fd_limit_hard": None,
                 "fd_usage_ratio": None,
-                "started_at": datetime.utcfromtimestamp(PROCESS_STARTED_AT).isoformat(),
+                "started_at": timestamp_to_beijing(PROCESS_STARTED_AT).isoformat(),
                 "uptime_seconds": round(now - PROCESS_STARTED_AT, 2),
             },
             "project_process": cls._empty_project_process_snapshot(project_root, now),
@@ -1407,7 +1420,7 @@ class SystemMetricsService:
                         "connection_count": sum(connection_counts.values()) if connection_counts else 0,
                         "connection_status_counts": connection_counts,
                         **fd_info,
-                        "started_at": datetime.utcfromtimestamp(create_time).isoformat(),
+                        "started_at": timestamp_to_beijing(create_time).isoformat(),
                         "uptime_seconds": round(now - create_time, 2),
                     }
                 )
@@ -1823,7 +1836,7 @@ class SystemMetricsService:
             "uptime_seconds": None,
             "cache_seconds": SystemMetricsService.PROJECT_PROCESS_CACHE_SECONDS,
             "cache_age_seconds": 0.0,
-            "checked_at": datetime.utcfromtimestamp(now).isoformat(),
+            "checked_at": timestamp_to_beijing(now).isoformat(),
         }
 
     @classmethod
@@ -1883,7 +1896,7 @@ class SystemMetricsService:
                         "name": name,
                         "memory_rss_bytes": int(memory_info.rss),
                         "thread_count": int(thread_count),
-                        "started_at": datetime.utcfromtimestamp(create_time).isoformat(),
+                        "started_at": timestamp_to_beijing(create_time).isoformat(),
                     }
                 )
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
@@ -1917,12 +1930,12 @@ class SystemMetricsService:
             "memory_vms_bytes": total_vms,
             "memory_percent": round((total_rss / memory_total_bytes) * 100, 2) if memory_total_bytes else None,
             "thread_count": total_threads,
-            "oldest_started_at": datetime.utcfromtimestamp(oldest_create_time).isoformat() if oldest_create_time else None,
+            "oldest_started_at": timestamp_to_beijing(oldest_create_time).isoformat() if oldest_create_time else None,
             "uptime_seconds": round(now - oldest_create_time, 2) if oldest_create_time else None,
             "processes": process_items[:50],
             "cache_seconds": cls.PROJECT_PROCESS_CACHE_SECONDS,
             "cache_age_seconds": 0.0,
-            "checked_at": datetime.utcfromtimestamp(now).isoformat(),
+            "checked_at": timestamp_to_beijing(now).isoformat(),
         }
         cls._project_process_cache = {
             "path": project_root,
@@ -2020,7 +2033,7 @@ class SystemMetricsService:
             return False
     @classmethod
     def _traffic_snapshot(cls, db: Session, *, window_minutes: int) -> dict[str, Any]:
-        since = datetime.utcnow() - timedelta(minutes=window_minutes)
+        since = now_beijing() - timedelta(minutes=window_minutes)
         row = db.execute(
             select(
                 func.count(RequestLog.id).label("total_requests"),
@@ -2041,57 +2054,36 @@ class SystemMetricsService:
         status_429 = int(row.status_429 or 0)
         status_5xx = int(row.status_5xx or 0)
         window_seconds = max(1, window_minutes * 60)
-        latencies = list(
-            db.scalars(
-                select(RequestLog.latency_ms)
-                .where(
-                    RequestLog.created_at >= since,
-                    RequestLog.log_type.in_(cls.TRAFFIC_LOG_TYPES),
-                    RequestLog.latency_ms.is_not(None),
-                )
-                .order_by(RequestLog.created_at.desc(), RequestLog.id.desc())
-                .limit(cls.METRIC_PERCENTILE_SAMPLE_LIMIT)
+        latency_sample_rows = db.execute(
+            select(
+                RequestLog.latency_ms,
+                RequestLog.is_stream,
+                RequestLog.first_token_latency_ms,
             )
-        )
-        stream_latencies = list(
-            db.scalars(
-                select(RequestLog.latency_ms)
-                .where(
-                    RequestLog.created_at >= since,
-                    RequestLog.log_type.in_(cls.TRAFFIC_LOG_TYPES),
-                    RequestLog.is_stream.is_(True),
+            .where(
+                RequestLog.created_at >= since,
+                RequestLog.log_type.in_(cls.TRAFFIC_LOG_TYPES),
+                or_(
                     RequestLog.latency_ms.is_not(None),
-                )
-                .order_by(RequestLog.created_at.desc(), RequestLog.id.desc())
-                .limit(cls.METRIC_PERCENTILE_SAMPLE_LIMIT)
-            )
-        )
-        non_stream_latencies = list(
-            db.scalars(
-                select(RequestLog.latency_ms)
-                .where(
-                    RequestLog.created_at >= since,
-                    RequestLog.log_type.in_(cls.TRAFFIC_LOG_TYPES),
-                    RequestLog.is_stream.is_(False),
-                    RequestLog.latency_ms.is_not(None),
-                )
-                .order_by(RequestLog.created_at.desc(), RequestLog.id.desc())
-                .limit(cls.METRIC_PERCENTILE_SAMPLE_LIMIT)
-            )
-        )
-        stream_ttfb_latencies = list(
-            db.scalars(
-                select(RequestLog.first_token_latency_ms)
-                .where(
-                    RequestLog.created_at >= since,
-                    RequestLog.log_type.in_(cls.TRAFFIC_LOG_TYPES),
-                    RequestLog.is_stream.is_(True),
                     RequestLog.first_token_latency_ms.is_not(None),
-                )
-                .order_by(RequestLog.created_at.desc(), RequestLog.id.desc())
-                .limit(cls.METRIC_PERCENTILE_SAMPLE_LIMIT)
+                ),
             )
+            .order_by(RequestLog.created_at.desc(), RequestLog.id.desc())
+            .limit(cls.METRIC_PERCENTILE_SAMPLE_LIMIT)
         )
+        latencies: list[Any] = []
+        stream_latencies: list[Any] = []
+        non_stream_latencies: list[Any] = []
+        stream_ttfb_latencies: list[Any] = []
+        for latency_ms, is_stream, first_token_latency_ms in latency_sample_rows:
+            if latency_ms is not None:
+                latencies.append(latency_ms)
+                if is_stream is True:
+                    stream_latencies.append(latency_ms)
+                elif is_stream is False:
+                    non_stream_latencies.append(latency_ms)
+            if is_stream is True and first_token_latency_ms is not None:
+                stream_ttfb_latencies.append(first_token_latency_ms)
         terminal_rows = db.execute(
             select(RequestLog.status_code, RequestLog.error_code)
             .where(
@@ -2201,8 +2193,8 @@ class SystemMetricsService:
         setting = SettingService.get_or_create(db)
         if not bool(getattr(setting, "content_guard_enabled", True)):
             return cls._empty_content_guard(enabled=False)
-        since = datetime.utcnow() - timedelta(minutes=window_minutes)
-        high_risk_since = datetime.utcnow() - timedelta(minutes=cls.CONTENT_GUARD_HIGH_RISK_PROVIDER_WINDOW_MINUTES)
+        since = now_beijing() - timedelta(minutes=window_minutes)
+        high_risk_since = now_beijing() - timedelta(minutes=cls.CONTENT_GUARD_HIGH_RISK_PROVIDER_WINDOW_MINUTES)
         event_provider_join = RequestContentGuardEvent.__table__.outerjoin(
             RequestLog.__table__,
             RequestContentGuardEvent.request_log_id == RequestLog.id,
@@ -2344,7 +2336,7 @@ class SystemMetricsService:
 
     @classmethod
     def _provider_snapshot(cls, db: Session, *, window_minutes: int) -> list[dict[str, Any]]:
-        since = datetime.utcnow() - timedelta(minutes=window_minutes)
+        since = now_beijing() - timedelta(minutes=window_minutes)
         providers = list(
             db.scalars(
                 select(Provider)
@@ -2675,7 +2667,9 @@ class SystemMetricsService:
             )
         event_loop = runtime.get("event_loop") if isinstance(runtime.get("event_loop"), dict) else {}
         latest_loop_delay = cls._as_float(event_loop.get("latest_delay_ms"))
-        max_loop_delay = cls._as_float(event_loop.get("max_delay_ms"))
+        max_loop_delay = cls._as_float(event_loop.get("recent_max_delay_ms"))
+        if max_loop_delay is None:
+            max_loop_delay = cls._as_float(event_loop.get("max_delay_ms"))
         loop_delay = max(
             value
             for value in (latest_loop_delay, max_loop_delay, 0.0)
@@ -2693,7 +2687,7 @@ class SystemMetricsService:
                 "system",
                 level,
                 "事件循环延迟过高",
-                f"当前 worker 事件循环最大延迟 {loop_delay} ms",
+                f"当前 worker 最近 {event_loop.get('window_seconds') or 60} 秒事件循环最大延迟 {loop_delay} ms",
                 event_loop,
             )
         for provider in metrics.get("providers", []):
@@ -2918,3 +2912,5 @@ class SystemMetricsService:
         upper = min(len(ordered) - 1, lower + 1)
         fraction = rank - lower
         return round(ordered[lower] + (ordered[upper] - ordered[lower]) * fraction, 2)
+
+from app.utils.timezone import now_beijing, timestamp_to_beijing

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -8,6 +8,7 @@ from app.schemas.log import MetricTimeSeriesItem, MetricTimeSeriesResponse
 from app.schemas.setting import SettingOut, SettingUpdate
 from app.services.admin_audit_service import AdminAuditService
 from app.services.log_service import LogService
+from app.services.project_restart_service import ProjectRestartService
 from app.services.setting_service import SettingService
 from app.services.system_metrics_service import SystemMetricsService
 from app.services.user_auth_service import require_admin_api_user
@@ -130,3 +131,40 @@ def apply_system_configuration_profile(
         changed_fields=settings_patch,
     )
     return SettingOut.model_validate(updated)
+
+
+@router.post("/system/restart-project")
+def restart_project(
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_admin_api_user),
+) -> dict:
+    restart_result = ProjectRestartService.trigger()
+    AdminAuditService.create_log(
+        db,
+        actor_user_id=current_user.id,
+        actor_username=current_user.username,
+        action="restart",
+        entity_type="system",
+        entity_id="project",
+        entity_name="aotu-gpt",
+        summary="触发项目一键重启",
+        detail={
+            "project_root": restart_result.get("project_root"),
+            "restart_mode": restart_result["restart_mode"],
+            "script": restart_result.get("script"),
+            "service_name": restart_result.get("service_name"),
+            "command": restart_result["command"],
+            "launcher_pid": restart_result["launcher_pid"],
+        },
+        request_trace_id=getattr(request.state, "trace_id", None),
+        source_ip=request.client.host if request.client else None,
+        risk_level="medium",
+    )
+    return {
+        "success": True,
+        "message": "项目重启已触发，请稍后刷新页面确认服务状态",
+        "restart_mode": restart_result["restart_mode"],
+        "service_name": restart_result.get("service_name"),
+        "launcher_pid": restart_result["launcher_pid"],
+    }

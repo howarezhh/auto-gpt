@@ -5,6 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.services.proxy_request_context import clear_current_provider_candidate, set_current_provider_candidate
+from app.services.request_header_log_service import RequestHeaderLogService
 from app.services.api_key_auth_cache import ApiKeyAuthCache
 from app.services.api_key_service import ApiClientAuthError, ApiKeyService
 from app.utils.request_stream import RequestBodyReadTimeout, RequestBodyTooLarge, read_limited_request_body
@@ -89,3 +91,106 @@ def test_invalid_api_key_negative_cache_skips_database_lookup(monkeypatch) -> No
 
     assert exc_info.value.code == "invalid_api_key"
     ApiKeyAuthCache.close()
+
+
+def test_limited_v1_json_payload_stores_requested_model(monkeypatch) -> None:
+    from app.routers import proxy as proxy_router
+
+    monkeypatch.setattr(
+        proxy_router,
+        "_get_setting_with_scoped_session",
+        lambda: SimpleNamespace(
+            max_v1_request_body_bytes=1024,
+            max_v1_chat_request_body_bytes=1024,
+            max_v1_responses_request_body_bytes=1024,
+            max_logged_body_bytes=4096,
+            request_timeout_ms=60000,
+            v1_request_body_idle_timeout_seconds=15,
+        ),
+    )
+
+    async def run_case() -> None:
+        async def stream():
+            yield b'{"model":"gpt-test","messages":[]}'
+
+        request = SimpleNamespace(headers={}, stream=stream, state=SimpleNamespace())
+        payload = await proxy_router._read_limited_v1_json_payload(request, endpoint_path="/chat/completions")
+
+        assert payload["model"] == "gpt-test"
+        assert request.state.v1_requested_model == "gpt-test"
+        assert "gpt-test" in request.state.v1_request_body_structure_json
+
+    asyncio.run(run_case())
+
+
+def test_v1_fallback_log_includes_requested_model_and_last_candidate(monkeypatch) -> None:
+    import app.main as main
+
+    captured: dict = {}
+
+    class FakeDb:
+        def close(self) -> None:
+            pass
+
+    request = SimpleNamespace(
+        state=SimpleNamespace(
+            trace_id="trace-1",
+            v1_requested_model="user-model",
+            v1_request_headers_json='{"user_agent":"pytest-client","client_request_id":"req-1"}',
+        ),
+        url=SimpleNamespace(path="/v1/responses"),
+        method="POST",
+        client=SimpleNamespace(host="127.0.0.1"),
+        headers={},
+    )
+    provider = SimpleNamespace(id=12, name="测试提供商")
+    provider_model = SimpleNamespace(id=34, model_name="mounted-model")
+
+    clear_current_provider_candidate()
+    set_current_provider_candidate(provider=provider, provider_model=provider_model)
+    monkeypatch.setattr(main.RequestLogQueueService, "enqueue", lambda **_kwargs: False)
+    monkeypatch.setattr(main, "SessionLocal", lambda: FakeDb())
+    monkeypatch.setattr(main.LogService, "create_log", lambda _db, **kwargs: captured.update(kwargs))
+
+    main._log_v1_request_rejected_before_route(
+        request=request,
+        status_code=500,
+        message="boom",
+        error_code="internal_server_error",
+        retryable=True,
+        detail={"message": "boom", "code": "internal_server_error"},
+        request_body_json='{"structure":{"model":"gpt-test"}}',
+    )
+
+    assert captured["requested_model"] == "user-model"
+    assert captured["model_name"] == "mounted-model"
+    assert captured["provider_id"] == 12
+    assert captured["provider_name"] == "测试提供商"
+    assert captured["resolved_provider_model_id"] == 34
+    assert captured["request_headers_json"] == '{"user_agent":"pytest-client","client_request_id":"req-1"}'
+    assert captured["trace"][0]["requested_model"] == "user-model"
+    assert captured["trace"][0]["model_name"] == "mounted-model"
+
+
+def test_request_header_log_service_only_keeps_safe_diagnostics() -> None:
+    headers = {
+        "user-agent": "pytest-sdk/1.0",
+        "x-request-id": "req-123",
+        "idempotency-key": "idem-abc",
+        "x-stainless-retry-count": "2",
+        "x-sdk-name": "openai-python",
+        "x-sdk-version": "1.2.3",
+        "authorization": "Bearer secret",
+        "cookie": "session=secret",
+    }
+
+    summary = RequestHeaderLogService.extract(headers)
+
+    assert summary["user_agent"] == "pytest-sdk/1.0"
+    assert summary["client_request_id"] == "req-123"
+    assert summary["idempotency_key"] == "idem-abc"
+    assert summary["retry_count"] == "2"
+    assert summary["sdk_name"] == "openai-python"
+    assert summary["sdk_version"] == "1.2.3"
+    assert "authorization" not in summary
+    assert "cookie" not in summary

@@ -1292,7 +1292,7 @@ async def export_user_logs(
         exclude_health_checks=exclude_health_checks,
         limit=limit,
     )
-    filename = f"user-logs-{current_user.username}-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.csv"
+    filename = f"user-logs-{current_user.username}-{now_beijing().strftime('%Y%m%d-%H%M%S')}.csv"
     UserOperationLogRecorder.record_user_action(
         db,
         user_account_id=current_user.id,
@@ -1701,3 +1701,5 @@ async def run_user_self_test(
             },
             status_code=exc.status_code,
         )
+
+from app.utils.timezone import now_beijing

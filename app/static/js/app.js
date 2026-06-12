@@ -7,6 +7,8 @@
     };
     const PUBLIC_ROUTE_PREFIXES = ["/login", "/register", "/setup-admin"];
     const ADMIN_ROUTE_PREFIXES = ["/providers", "/provider-models", "/models", "/settings", "/content-guard", "/ip-management", "/playground", "/benchmark", "/operations", "/docs", "/api-keys", "/logs", "/alerts", "/conversations", "/users", "/audit-logs"];
+    const BEIJING_TIME_ZONE = "Asia/Shanghai";
+    const BEIJING_DATE_TIME_RE = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?)?$/;
     const LOG_TYPE_LABELS = {
         health_check: "健康检查",
         chat: "对话请求",
@@ -103,6 +105,8 @@
         review: "需复核",
         block: "已拦截",
         error: "检测异常",
+        rate_limited: "探针限频",
+        upstream_unavailable: "上游不可用",
     };
     const CONTENT_GUARD_RISK_LABELS = {
         low: "低",
@@ -147,14 +151,19 @@
     const STYLE_PRESET_MAP = new Map(STYLE_PRESETS.map((preset) => [preset.id, preset]));
     const REFERENCE_CACHE_DEFAULT_TTL_MS = 15000;
     const API_TIMEOUT_MS = 45000;
+    const PROBE_API_TIMEOUT_MS = 180000;
     const referenceCacheStore = new Map();
     let currentPageAbortController = new AbortController();
     let shellNavigationAbortController = null;
 
     const api = {
         get: async (url, options = {}) => parseResponse(await fetchWithTimeout(url, { cache: "no-store", headers: { "Cache-Control": "no-cache" }, ...options })),
-        post: async (url, data) => {
-            const result = await parseResponse(await fetchWithTimeout(url, withJson("POST", data)));
+        post: async (url, data, options = {}) => {
+            const requestOptions = {
+                ...withJson("POST", data),
+                ...options,
+            };
+            const result = await parseResponse(await fetchWithTimeout(url, requestOptions));
             invalidateReferenceCacheByMutation("POST", url);
             return result;
         },
@@ -785,7 +794,10 @@
             throw new Error("当前账号无权访问该内容");
         }
         if (!response.ok) {
-            throw new Error(extractErrorMessage(data));
+            const error = new Error(extractErrorMessage(data));
+            error.status = response.status;
+            error.payload = data;
+            throw error;
         }
         return data;
     }
@@ -1026,7 +1038,15 @@
         return result?.success === true;
     }
 
+    function isProbeRateLimitedResult(result) {
+        return result?.probe_rate_limited === true
+            || result?.error_code === "probe_rate_limited"
+            || result?.support_mode === "probe_rate_limited"
+            || result?.status === "rate_limited";
+    }
+
     function formatHealthCheckOutcomeLabel(result) {
+        if (isProbeRateLimitedResult(result)) return "已限流";
         if (result?.success) return "成功";
         return isHealthCheckUsable(result) ? "部分可用" : "失败";
     }
@@ -1055,7 +1075,7 @@
             <div class="playground-info-row">
                 <div class="playground-info-label">${escapeHtml(formatEndpointProbeLabel(item.endpoint_label || item.endpoint_path || "-"))}</div>
                 <div class="playground-info-value">
-                    ${item.success ? '<span class="playground-status-success">成功</span>' : '<span class="playground-status-danger">失败</span>'}
+                    ${isProbeRateLimitedResult(item) ? '<span class="status-badge status-degraded">已限流</span>' : (item.success ? '<span class="playground-status-success">成功</span>' : '<span class="playground-status-danger">失败</span>')}
                     · ${escapeHtml(formatEndpointProbeSupportLabel(item.support_label || formatEndpointSupportMode(item.support_mode)))}
                     · 状态码 ${escapeHtml(String(item.status_code ?? "-"))}
                     · 耗时 ${escapeHtml(String(item.latency_ms ?? "-"))} ms
@@ -1161,6 +1181,7 @@
             currentProviderName: "",
             currentStageLabel: "准备开始",
             stages: [],
+            modelResults: [],
             providerSummaries: [],
             finalResult: null,
             errorMessage: "",
@@ -1192,6 +1213,42 @@
             state.currentStageLabel = event.skipped
                 ? `${event.provider_name || state.currentProviderName || "当前提供商"} · ${event.phase_label || "检查阶段"}已跳过`
                 : `${event.provider_name || state.currentProviderName || "当前提供商"} · ${event.phase_label || "检查阶段"}已完成`;
+            return;
+        }
+        if (event.event === "model_started") {
+            state.currentProviderName = event.provider_name || state.currentProviderName;
+            state.currentStageLabel = `${event.provider_name || "当前提供商"} · ${event.model_name || "当前模型"}检测中`;
+            const key = `${event.provider_id || ""}:${event.provider_model_id || event.model_name || ""}`;
+            if (!state.modelResults.some((item) => item.key === key)) {
+                state.modelResults.push({
+                    key,
+                    providerName: event.provider_name || state.currentProviderName || "当前提供商",
+                    modelName: event.model_name || "当前模型",
+                    status: "running",
+                    message: "正在检测，完成后会立即显示结果。",
+                    latencyMs: null,
+                });
+            }
+            return;
+        }
+        if (event.event === "model_completed") {
+            const key = `${event.provider_id || ""}:${event.provider_model_id || event.model_name || ""}`;
+            const success = event.success === true || event.provider_success === true;
+            const nextItem = {
+                key,
+                providerName: event.provider_name || state.currentProviderName || "当前提供商",
+                modelName: event.model_name || event.result?.model_name || "当前模型",
+                status: isProbeRateLimitedResult(event.result || event) ? "rate_limited" : (success ? "passed" : "failed"),
+                message: event.message || event.result?.message || "",
+                latencyMs: event.latency_ms ?? event.result?.latency_ms ?? null,
+            };
+            const existingIndex = state.modelResults.findIndex((item) => item.key === key);
+            if (existingIndex >= 0) {
+                state.modelResults.splice(existingIndex, 1, nextItem);
+            } else {
+                state.modelResults.push(nextItem);
+            }
+            state.currentStageLabel = `${nextItem.providerName} · ${nextItem.modelName}检测完成`;
             return;
         }
         if (event.event === "provider_completed") {
@@ -1232,6 +1289,22 @@
                         ? "当前阶段无可执行模型，已跳过。"
                         : `共 ${formatNumber(item.modelTotal)} 个模型，成功 ${formatNumber(item.successCount)} 个，失败 ${formatNumber(item.failureCount)} 个。`}
                 </div>
+            </article>
+        `).join("");
+    }
+
+    function renderHealthCheckModelResultList(items = []) {
+        if (!items.length) {
+            return '<div class="empty-state">模型完成后会在这里逐条出现。</div>';
+        }
+        return items.map((item) => `
+            <article class="provider-test-model-item">
+                <div class="provider-test-model-top">
+                    <strong>${escapeHtml(item.modelName || "-")}</strong>
+                    <div>${renderProviderHealthBatchStatusBadge(item.status || "running")}</div>
+                </div>
+                <div class="table-muted">${escapeHtml(item.providerName || "-")}${item.latencyMs != null ? ` · ${formatNumber(item.latencyMs)} ms` : ""}</div>
+                <div class="provider-test-model-message">${escapeHtml(item.message || (item.status === "running" ? "正在检测。" : "检测已完成。"))}</div>
             </article>
         `).join("");
     }
@@ -1282,6 +1355,10 @@
                 <section class="provider-test-result-card">
                     <div class="panel-kicker">阶段反馈</div>
                     <div class="provider-test-model-list">${renderHealthCheckStageList(state.stages)}</div>
+                </section>
+                <section class="provider-test-result-card">
+                    <div class="panel-kicker">模型结果 · 完成即返回</div>
+                    <div class="provider-test-model-list">${renderHealthCheckModelResultList(state.modelResults)}</div>
                 </section>
                 ${state.scope === "all" ? `
                 <section class="provider-test-result-card">
@@ -1616,6 +1693,31 @@
 
     const CONTENT_TRUST_PROBE_KEYS = ["fixed_answer", "pollution_rules", "sse"];
 
+    function formatContentTrustExecutionPlan(plan) {
+        if (!plan || typeof plan !== "object") return "";
+        const logicalProbeCount = Number(plan.logical_probe_count || 0);
+        const upstreamRequestCount = Number(plan.upstream_request_count || 0);
+        const groups = Array.isArray(plan.request_groups) ? plan.request_groups : [];
+        const groupText = groups.map((group) => {
+            const labels = Array.isArray(group.probe_labels) ? group.probe_labels : [];
+            const labelText = labels.length ? labels.join(" + ") : (group.request_label || group.request_key || "上游请求");
+            const timeout = Number(group.timeout_seconds || 0);
+            return `${labelText}${timeout > 0 ? ` ${timeout}s` : ""}`;
+        }).filter(Boolean).join("；");
+        const skipped = Array.isArray(plan.skipped_probes) ? plan.skipped_probes : [];
+        const skippedText = skipped.map((item) => `${item.probe_label || item.probe_key || "探针"}：${item.reason || "已跳过"}`).join("；");
+        const parts = [];
+        if (logicalProbeCount > 0) parts.push(`逻辑探针 ${formatNumber(logicalProbeCount)} 个`);
+        if (upstreamRequestCount >= 0) parts.push(`实际上游请求 ${formatNumber(upstreamRequestCount)} 次`);
+        if (groupText) parts.push(`请求计划：${groupText}`);
+        if (skippedText) parts.push(`跳过：${skippedText}`);
+        return parts.join("；");
+    }
+
+    function formatContentTrustRunningMessage() {
+        return `正在执行 ${CONTENT_TRUST_PROBE_KEYS.length} 个可信探针，实际请求数按后端执行计划合并`;
+    }
+
     function buildContentTrustProbePayload(providerId, modelId) {
         return {
             target_type: "internal",
@@ -1628,6 +1730,8 @@
 
     function contentTrustBatchStatusFromGuardResult(guardResult) {
         const normalized = String(guardResult || "").toLowerCase();
+        if (normalized === "rate_limited") return "rate_limited";
+        if (normalized === "upstream_unavailable") return "review";
         if (normalized === "pass" || normalized === "passed") return "passed";
         if (normalized === "review") return "review";
         return "failed";
@@ -1636,7 +1740,7 @@
     function contentGuardResultStatusClass(value) {
         if (value === "passed" || value === "pass") return "status-healthy";
         if (value === "blocked" || value === "block") return "status-unhealthy";
-        if (value === "review" || value === "error") return "status-degraded";
+        if (value === "review" || value === "error" || value === "upstream_unavailable") return "status-degraded";
         return "status-unknown";
     }
 
@@ -1697,12 +1801,14 @@
         const guardResult = summary.content_guard_result || summary.status || "review";
         const rows = Array.isArray(result?.probe_results) ? result.probe_results : [];
         const reason = summary.content_guard_reason || "";
+        const executionPlanText = formatContentTrustExecutionPlan(result?.execution_plan);
         return `
             <div class="health-result-summary">
                 <span class="status-badge ${contentGuardResultStatusClass(guardResult)}">${escapeHtml(formatContentGuardResultLabel(guardResult))}</span>
                 <strong>${escapeHtml(title)}</strong>
                 <span>${escapeHtml(result?.target?.provider_name || result?.target?.name || "-")} / ${escapeHtml(result?.target?.model_name || "-")}</span>
                 ${reason ? `<div class="table-muted">${escapeHtml(reason)}</div>` : ""}
+                ${executionPlanText ? `<div class="table-muted">${escapeHtml(executionPlanText)}</div>` : ""}
             </div>
             <div class="table-shell">
                 <table class="data-table">
@@ -1779,7 +1885,7 @@
             ["检测对象", titleName || "模型挂载"],
             ["检测范围", "可信检测"],
             ["执行状态", statusText],
-            ["当前阶段", message || (status === "failed" ? "可信检测请求失败" : "正在执行固定答案、外链广告识别和流式污染检测")],
+            ["当前阶段", message || (status === "failed" ? "可信检测请求失败" : formatContentTrustRunningMessage())],
         ];
         const summaryHtml = summaryRows.map(([label, value]) => `
             <div class="provider-test-summary-item">
@@ -1988,15 +2094,32 @@
         `;
     }
 
+    function renderLogTooltipAttrs(label, value) {
+        const safeLabel = String(label ?? "说明") || "说明";
+        const safeValue = String(value ?? "-") || "-";
+        return `tabindex="0" aria-label="${escapeHtml(`${safeLabel}：${safeValue}`)}" data-log-tooltip-trigger="true" data-log-tooltip-label="${escapeHtml(safeLabel)}" data-log-tooltip-value="${escapeHtml(safeValue)}"`;
+    }
+
     function renderLogBillingCell(log) {
         const billing = buildBillingBreakdown(log);
+        const detail = [
+            `总 Token：${formatTokenDisplay(billing.totalTokens)}`,
+            `输入：${formatTokenDisplay(billing.regularPromptTokens)}`,
+            `输出：${formatTokenDisplay(billing.completionTokens)}`,
+            `缓存读：${formatTokenDisplay(billing.cacheReadTokens)}`,
+            `缓存写：${formatTokenDisplay(billing.cacheWriteTokens)}`,
+            `倍率：${formatMultiplier(billing.multiplier)}`,
+        ].join("\n");
+        const renderTokenChip = (icon, label, value) => `
+            <span class="log-token-tooltip-chip log-tooltip-trigger" ${renderLogTooltipAttrs(label, value)}>
+                <i class="bi ${escapeHtml(icon)}" aria-hidden="true"></i>${escapeHtml(value)}
+            </span>
+        `;
         return `
             <div class="log-billing-cell">
                 <div class="log-billing-row log-billing-row-primary">
-                    <div class="log-billing-pair">
-                        <span class="log-billing-label">总成本</span>
-                        <strong class="log-billing-total-cost">${escapeHtml(formatUsdValue(billing.totalCost))}</strong>
-                    </div>
+                    <strong class="log-billing-total-cost log-tooltip-trigger" ${renderLogTooltipAttrs("费用明细", detail)}>${escapeHtml(formatUsdValue(billing.totalCost))}</strong>
+                    <span class="log-billing-multiplier log-tooltip-trigger" ${renderLogTooltipAttrs("计费倍率", formatMultiplier(billing.multiplier))}>${escapeHtml(formatMultiplier(billing.multiplier))}</span>
                     <div class="log-billing-pair">
                         <span class="log-billing-label">总 Token</span>
                         <strong class="log-billing-total-tokens">${escapeHtml(formatTokenDisplay(billing.totalTokens))}</strong>
@@ -2010,32 +2133,73 @@
                         </div>
                     </span>
                 </div>
-                <div class="log-billing-row">
-                    <div class="log-billing-pair">
-                        <span class="log-billing-label">输入</span>
-                        <span class="log-billing-meta">${escapeHtml(formatTokenDisplay(billing.regularPromptTokens))}</span>
-                    </div>
-                    <div class="log-billing-pair">
-                        <span class="log-billing-label">输出</span>
-                        <span class="log-billing-meta">${escapeHtml(formatTokenDisplay(billing.completionTokens))}</span>
-                    </div>
+                <div class="log-billing-token-strip">
+                    ${renderTokenChip("bi-box-arrow-in-right", "输入 Token", formatTokenDisplay(billing.regularPromptTokens))}
+                    ${renderTokenChip("bi-box-arrow-up-right", "输出 Token", formatTokenDisplay(billing.completionTokens))}
+                    ${renderTokenChip("bi-lightning-charge", "缓存读 Token", formatTokenDisplay(billing.cacheReadTokens))}
+                    ${renderTokenChip("bi-save2", "缓存写 Token", formatTokenDisplay(billing.cacheWriteTokens))}
                 </div>
-                <div class="log-billing-row">
-                    <div class="log-billing-pair">
-                        <span class="log-billing-label">缓存读</span>
-                        <span class="log-billing-meta">${escapeHtml(formatTokenDisplay(billing.cacheReadTokens))}</span>
-                    </div>
-                    <div class="log-billing-pair">
-                        <span class="log-billing-label">缓存写</span>
-                        <span class="log-billing-meta">${escapeHtml(formatTokenDisplay(billing.cacheWriteTokens))}</span>
-                    </div>
-                </div>
-                <div class="log-billing-row log-billing-row-multiplier">
-                    <div class="log-billing-pair">
-                        <span class="log-billing-label">倍率</span>
-                        <span class="log-billing-multiplier">${escapeHtml(formatMultiplier(billing.multiplier))}</span>
-                    </div>
-                </div>
+            </div>
+        `;
+    }
+
+    function renderLogBadge(text, type = "neutral", title = "") {
+        const safeText = String(text ?? "-") || "-";
+        return `<span class="log-pill log-pill-${escapeHtml(type)} log-tooltip-trigger" ${renderLogTooltipAttrs(safeText, title || safeText)}>${escapeHtml(safeText)}</span>`;
+    }
+
+    function renderReasoningLevelCell(log = {}) {
+        const level = log.reasoning_level || "无";
+        const params = log.model_reasoning_effort || "-";
+        return `
+            <div class="log-compact-stack">
+                ${renderLogBadge(level, "reasoning", `思维等级：${level}\n参数：${params}`)}
+            </div>
+        `;
+    }
+
+    function renderRequestKeyCell(log = {}, { includeUser = false } = {}) {
+        const keyName = log.api_client_key_name || "-";
+        const keyValue = log.raw_api_key || log.api_client_key_value || log.api_client_key || log.api_client_key_prefix || "";
+        const keyTitle = keyValue ? `密钥标识：${keyValue}` : "当前日志没有可查看的密钥值";
+        return `
+            <div class="request-key-cell">
+                ${includeUser ? `<strong class="request-key-user log-tooltip-trigger" ${renderLogTooltipAttrs("用户", log.user_account_name || log.user_account_id || "-")}>${escapeHtml(log.user_account_name || "-")}</strong>` : ""}
+                <span class="request-key-hover" tabindex="0" aria-label="${escapeHtml(`密钥名称：${keyName}`)}" data-request-key-tooltip-trigger="true">
+                    <strong class="request-key-name">${escapeHtml(keyName)}</strong>
+                    <span class="request-key-tooltip-content hidden">
+                        <div class="help-tooltip-title">密钥</div>
+                        <div class="request-key-tooltip-row">
+                            <span>名称</span>
+                            <strong>${escapeHtml(keyName)}</strong>
+                        </div>
+                        <div class="request-key-tooltip-row">
+                            <span>密钥</span>
+                            <code>${escapeHtml(keyValue || "-")}</code>
+                        </div>
+                        ${keyValue ? `<button class="table-action-btn request-key-copy-btn" type="button" data-copy-text="${escapeHtml(keyValue)}">复制</button>` : `<span class="table-muted">${escapeHtml(keyTitle)}</span>`}
+                    </span>
+                </span>
+            </div>
+        `;
+    }
+
+    function renderRequestPathBadge(log = {}) {
+        const method = String(log.http_method || "-").toUpperCase();
+        const path = log.request_path || "-";
+        return renderLogBadge(method, "method", `请求方法：${method}\n请求路径：${path}`);
+    }
+
+    function renderLogTimingCell(log = {}) {
+        const duration = log.duration_ms ?? log.latency_ms;
+        const durationValue = formatLogCellMetricValue(duration, " ms");
+        const ttfbValue = formatLogCellMetricValue(log.ttfb_ms, " ms");
+        const tpsValue = log.tps == null ? "-" : Number(log.tps).toFixed(2);
+        return `
+            <div class="log-timing-cell">
+                <strong class="log-tooltip-trigger" ${renderLogTooltipAttrs("总耗时", durationValue)}>${escapeHtml(durationValue)}</strong>
+                <span class="log-tooltip-trigger" ${renderLogTooltipAttrs("首包耗时", ttfbValue)}><i class="bi bi-stopwatch" aria-hidden="true"></i>${escapeHtml(ttfbValue)}</span>
+                <span class="log-tooltip-trigger" ${renderLogTooltipAttrs("输出速率 TPS", tpsValue)}><i class="bi bi-speedometer2" aria-hidden="true"></i>${escapeHtml(tpsValue)}</span>
             </div>
         `;
     }
@@ -2136,12 +2300,17 @@
     function renderLogResultCell(log = {}) {
         const modeSummary = buildLogModeSummary(log);
         const contentGuardSummary = buildContentGuardSummary(log);
+        const statusCode = log.status_code ?? "-";
         return `
             <div class="log-result-cell">
                 ${renderStatusWithErrorHint(log.success ? "healthy" : "unhealthy", buildLogExceptionReason(log))}
-                <div class="table-muted">HTTP ${log.status_code ?? "-"} · 尝试 ${formatLogCellMetricValue(log.attempt_count)}</div>
-                ${modeSummary ? `<div class="table-muted">${escapeHtml(modeSummary)}</div>` : ""}
-                ${contentGuardSummary ? `<div class="table-muted">${escapeHtml(contentGuardSummary)}</div>` : ""}
+                <div class="log-result-pill-row">
+                    ${renderLogBadge(statusCode, log.success ? "status-ok" : "status-error", `HTTP 状态码：${statusCode}`)}
+                    ${renderRequestPathBadge(log)}
+                    ${renderLogBadge(`×${formatLogCellMetricValue(log.attempt_count)}`, "attempt", `尝试次数：${formatLogCellMetricValue(log.attempt_count)}`)}
+                </div>
+                ${modeSummary ? `<div class="log-inline-note log-tooltip-trigger" ${renderLogTooltipAttrs("请求形态", modeSummary)}>${escapeHtml(modeSummary)}</div>` : ""}
+                ${contentGuardSummary ? `<div class="log-inline-note log-tooltip-trigger" ${renderLogTooltipAttrs("内容防护", contentGuardSummary)}>${escapeHtml(contentGuardSummary)}</div>` : ""}
             </div>
         `;
     }
@@ -2191,6 +2360,25 @@
                 `;
             },
         },
+        {
+            name: "request-key",
+            triggerSelector: "[data-request-key-tooltip-trigger='true']",
+            wrapperSelector: ".request-key-hover",
+            contentSelector: ".request-key-tooltip-content",
+        },
+        {
+            name: "log-compact",
+            triggerSelector: "[data-log-tooltip-trigger='true']",
+            wrapperSelector: ".log-tooltip-trigger",
+            render(trigger) {
+                const label = trigger.dataset.logTooltipLabel || "说明";
+                const value = trigger.dataset.logTooltipValue || "-";
+                return `
+                    <div class="help-tooltip-title">${escapeHtml(label)}</div>
+                    <div class="help-tooltip-copy">${escapeHtml(value)}</div>
+                `;
+            },
+        },
     ];
 
     function ensureHelpTooltipLayer() {
@@ -2234,6 +2422,7 @@
         tooltip.innerHTML = "";
         delete tooltip.dataset.placement;
         delete tooltip.dataset.xPlacement;
+        delete tooltip.dataset.tooltipName;
         helpTooltipOwner = null;
         helpTooltipConfig = null;
     }
@@ -2277,6 +2466,7 @@
         helpTooltipOwner = trigger;
         helpTooltipConfig = config;
         tooltip.innerHTML = markup;
+        tooltip.dataset.tooltipName = config.name;
         tooltip.classList.remove("hidden");
         positionHelpTooltip(trigger);
     }
@@ -2306,6 +2496,7 @@
             const scope = getHelpTooltipScope(event.target);
             if (!scope) return;
             if (scope.contains(event.relatedTarget)) return;
+            if (ensureHelpTooltipLayer().contains(event.relatedTarget)) return;
             hideHelpTooltip();
         });
         document.addEventListener("focusin", (event) => {
@@ -2317,6 +2508,10 @@
             const scope = getHelpTooltipScope(event.target);
             if (!scope) return;
             if (scope.contains(event.relatedTarget)) return;
+            if (ensureHelpTooltipLayer().contains(event.relatedTarget)) return;
+            hideHelpTooltip();
+        });
+        ensureHelpTooltipLayer().addEventListener("mouseleave", () => {
             hideHelpTooltip();
         });
         window.addEventListener("scroll", () => {
@@ -2431,11 +2626,22 @@
         return `${Number(value).toFixed(2)} 分`;
     }
 
+    function formatQualityWindow(value) {
+        const minutes = Number(value || 60);
+        if (!Number.isFinite(minutes) || minutes <= 0) return "近1小时";
+        if (minutes < 60) return `近${formatNumber(minutes)}分钟`;
+        const hours = minutes / 60;
+        if (hours === 1) return "近1小时";
+        if (hours === 24) return "近1天";
+        if (hours === 168) return "近1周";
+        return `近${formatNumber(hours)}小时`;
+    }
+
     function renderQualitySummary(entity) {
         return `
             <div>成功率 ${escapeHtml(formatPercent(entity.success_rate))}</div>
-            <div class="table-muted">首 Token ${escapeHtml(formatLatencyMs(entity.avg_first_token_latency_ms))}</div>
-            <div class="table-muted">稳定性 ${escapeHtml(formatScore(entity.stability_score))} · 样本 ${escapeHtml(String(entity.recent_request_count ?? 0))}</div>
+            <div class="table-muted">平均首 Token ${escapeHtml(formatLatencyMs(entity.avg_first_token_latency_ms))}</div>
+            <div class="table-muted">样本 ${escapeHtml(String(entity.recent_request_count ?? 0))} · ${escapeHtml(formatQualityWindow(entity.quality_window_minutes))}</div>
         `;
     }
 
@@ -2565,18 +2771,78 @@
             .replaceAll("'", "&#39;");
     }
 
+    function hasExplicitTimeZone(value) {
+        return /[zZ]|[+\-]\d{2}:?\d{2}$/.test(String(value || ""));
+    }
+
+    function parseBeijingDate(value) {
+        if (!value) return null;
+        if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value;
+        if (typeof value === "number") {
+            const timestamp = Math.abs(value) < 1000000000000 ? value * 1000 : value;
+            const date = new Date(timestamp);
+            return Number.isNaN(date.getTime()) ? null : date;
+        }
+        const raw = String(value || "").trim();
+        if (!raw) return null;
+        const normalized = raw.replace(" ", "T");
+        if (hasExplicitTimeZone(normalized)) {
+            const date = new Date(normalized);
+            return Number.isNaN(date.getTime()) ? null : date;
+        }
+        const match = BEIJING_DATE_TIME_RE.exec(raw);
+        if (match) {
+            const milliseconds = String(match[7] || "0").padEnd(3, "0");
+            const date = new Date(`${match[1]}-${match[2]}-${match[3]}T${match[4] || "00"}:${match[5] || "00"}:${match[6] || "00"}.${milliseconds}+08:00`);
+            return Number.isNaN(date.getTime()) ? null : date;
+        }
+        const fallback = new Date(normalized);
+        return Number.isNaN(fallback.getTime()) ? null : fallback;
+    }
+
+    function beijingDateParts(value) {
+        const date = parseBeijingDate(value);
+        if (!date) return null;
+        return new Intl.DateTimeFormat("zh-CN", {
+            timeZone: BEIJING_TIME_ZONE,
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+            hour12: false,
+        }).formatToParts(date).reduce((acc, part) => {
+            if (part.type !== "literal") acc[part.type] = part.value;
+            return acc;
+        }, {});
+    }
+
+    function formatBeijingDateTimeForApi(value, { includeSeconds = true } = {}) {
+        const raw = String(value || "").trim().replace(" ", "T");
+        if (!raw) return "";
+        const match = BEIJING_DATE_TIME_RE.exec(raw);
+        if (match) {
+            const seconds = includeSeconds ? `:${match[6] || "00"}` : "";
+            return `${match[1]}-${match[2]}-${match[3]}T${match[4] || "00"}:${match[5] || "00"}${seconds}`;
+        }
+        const parts = beijingDateParts(value);
+        if (!parts) return "";
+        const seconds = includeSeconds ? `:${parts.second}` : "";
+        return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}${seconds}`;
+    }
+
+    function formatBeijingFileTimestamp(value = new Date()) {
+        const parts = beijingDateParts(value);
+        if (!parts) return "";
+        return `${parts.year}${parts.month}${parts.day}-${parts.hour}${parts.minute}${parts.second}`;
+    }
+
     function formatDate(value) {
         if (!value) return "-";
-        let normalized = value;
-        if (typeof value === "string") {
-            normalized = value.includes("T") ? value : value.replace(" ", "T");
-            if (!/[zZ]|[+\-]\d{2}:\d{2}$/.test(normalized)) {
-                normalized = `${normalized}Z`;
-            }
-        }
-        const date = new Date(normalized);
-        if (Number.isNaN(date.getTime())) return String(value);
-        return date.toLocaleString("zh-CN", { hour12: false });
+        const date = parseBeijingDate(value);
+        if (!date) return String(value);
+        return date.toLocaleString("zh-CN", { timeZone: BEIJING_TIME_ZONE, hour12: false });
     }
 
     function formatNumber(value) {
@@ -2632,6 +2898,20 @@
             api_client: "API Key",
             system: "系统",
             scheduler: "调度器",
+            provider_health_check: "旧版健康检查兼容入口",
+            provider_l0_health_check: "提供商 L0 连通性检查",
+            model_l1_text_health_check: "模型 L1 文本检查",
+            model_l2_capability_health_check: "模型 L2 能力检查",
+            model_l3_content_integrity_health_check: "模型 L3 内容完整性检查",
+            recent_runtime_health_state_refresh: "运行态健康刷新",
+            token_usage_backfill: "Token 用量补全",
+            data_retention_cleanup: "数据保留清理",
+            responses_chat_adapter_session_cleanup: "响应适配会话清理",
+            ip_management_event_cleanup: "IP 管理事件清理",
+            content_fixed_answer: "固定答案",
+            content_pollution_rules: "外链广告识别",
+            content_json: "JSON",
+            content_sse: "流式污染检测",
             token_finalize: "Token 回填",
             billing_process: "计费过程",
             request_log_queue: "请求日志队列",
@@ -2704,14 +2984,23 @@
 
     function buildBackgroundJobDetailGroups(item) {
         const resultSummary = normalizeTypedJsonObject(item.result_summary_json);
+        const jobDescription = {
+            provider_health_check: "旧版兼容入口；当前调度器启动时会移除此任务，不再作为新的自动健康检查计划。",
+            provider_l0_health_check: "受“自动健康检查”开关控制，只检查提供商连通性。",
+            model_l1_text_health_check: "受“自动健康检查”开关控制，检查模型基础文本响应。",
+            model_l2_capability_health_check: "受“自动健康检查”开关控制，检查工具、视觉等能力状态。",
+            model_l3_content_integrity_health_check: "受“内容防护预先防护自动检测”开关控制，检查固定答案、外链广告识别和流式污染检测。",
+        };
         return [
             {
                 title: "调度锁",
                 items: [
-                    ["任务", item.job_name],
+                    ["任务", formatTypedLogStatusLabel(item.job_name)],
+                    ["任务 ID", item.job_name],
                     ["运行 ID", item.job_run_id],
                     ["锁键", item.lock_key],
                     ["锁状态", formatTypedLogStatusLabel(item.lock_status)],
+                    ["任务说明", jobDescription[item.job_name] || "分布式锁保护的后台调度任务"],
                     ["日志范围", "仅记录分布式锁调度任务"],
                 ],
             },
@@ -2729,10 +3018,15 @@
             {
                 title: "处理数量",
                 items: [
+                    ["统计口径", item.job_name === "model_l3_content_integrity_health_check" ? "子探针结果" : "任务返回结果"],
                     ["入队数", resultSummary.enqueued_count],
                     ["处理总数", item.processed_count],
                     ["成功数", item.success_count],
                     ["失败数", item.failed_count],
+                    ["涉及提供商", resultSummary.provider_count],
+                    ["有成功探针提供商", resultSummary.provider_with_successful_probe],
+                    ["涉及模型", resultSummary.model_count],
+                    ["有成功探针模型", resultSummary.model_with_successful_probe],
                     ["结果摘要", Object.keys(resultSummary).length ? JSON.stringify(resultSummary) : "-"],
                 ],
             },
@@ -3038,6 +3332,7 @@
             "asset-events": {
                 title: "素材日志",
                 endpoint: "/api/logging/asset-events",
+                emptyText: "素材日志记录调用测试、用户端上传和外部文件接口进入系统的素材，当前筛选条件下暂无记录。",
                 keywordLabel: "关键词",
                 keywordPlaceholder: "文件名、完整哈希、Trace 或错误摘要",
                 summaryCards: (summary) => [
@@ -3067,6 +3362,7 @@
                             { value: "", label: "全部" },
                             { value: "user_asset", label: "用户素材" },
                             { value: "playground_asset", label: "调试素材" },
+                            { value: "external_v1_file", label: "外部文件" },
                             { value: "system_asset", label: "系统素材" },
                         ],
                     },
@@ -3221,17 +3517,7 @@
 
     function toDatetimeLocalInputValue(value) {
         if (!value) return "";
-        const normalized = typeof value === "string" && !/[zZ]|[+\-]\d{2}:\d{2}$/.test(value)
-            ? `${value.replace(" ", "T")}Z`
-            : value;
-        const date = new Date(normalized);
-        if (Number.isNaN(date.getTime())) return "";
-        const year = date.getFullYear();
-        const month = String(date.getMonth() + 1).padStart(2, "0");
-        const day = String(date.getDate()).padStart(2, "0");
-        const hours = String(date.getHours()).padStart(2, "0");
-        const minutes = String(date.getMinutes()).padStart(2, "0");
-        return `${year}-${month}-${day}T${hours}:${minutes}`;
+        return formatBeijingDateTimeForApi(value, { includeSeconds: false });
     }
 
     function statusBadge(value) {
@@ -3762,12 +4048,9 @@
 
     function formatTimeLabel(value) {
         if (!value) return "-";
-        const normalized = typeof value === "string" && !/[zZ]|[+\-]\d{2}:\d{2}$/.test(value)
-            ? `${value.replace(" ", "T")}Z`
-            : value;
-        const date = new Date(normalized);
-        if (Number.isNaN(date.getTime())) return "-";
-        return date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
+        const date = parseBeijingDate(value);
+        if (!date) return "-";
+        return date.toLocaleTimeString("zh-CN", { timeZone: BEIJING_TIME_ZONE, hour: "2-digit", minute: "2-digit", hour12: false });
     }
 
     const MONITOR_TIME_WINDOWS = {
@@ -3778,21 +4061,43 @@
     };
 
     function getMonitorWindowConfig(value) {
-        const windowMinutes = Number(value || 180);
-        return MONITOR_TIME_WINDOWS[windowMinutes] || MONITOR_TIME_WINDOWS[180];
+        const windowMinutes = Number(value || 1440);
+        return MONITOR_TIME_WINDOWS[windowMinutes] || MONITOR_TIME_WINDOWS[1440];
     }
 
     function formatMonitorBucketLabel(value, windowMinutes = 180) {
         if (!value) return "-";
-        const normalized = typeof value === "string" && !/[zZ]|[+\-]\d{2}:\d{2}$/.test(value)
-            ? `${value.replace(" ", "T")}Z`
-            : value;
-        const date = new Date(normalized);
-        if (Number.isNaN(date.getTime())) return "-";
+        const date = parseBeijingDate(value);
+        if (!date) return "-";
         if (Number(windowMinutes) > 1440) {
-            return date.toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" });
+            return date.toLocaleDateString("zh-CN", { timeZone: BEIJING_TIME_ZONE, month: "2-digit", day: "2-digit" });
         }
-        return date.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
+        return date.toLocaleString("zh-CN", { timeZone: BEIJING_TIME_ZONE, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
+    }
+
+    function formatMonitorAxisLabel(value, windowMinutes = 180) {
+        if (!value) return "-";
+        const date = parseBeijingDate(value);
+        if (!date) return "-";
+        if (Number(windowMinutes) > 1440) {
+            return date.toLocaleDateString("zh-CN", { timeZone: BEIJING_TIME_ZONE, month: "2-digit", day: "2-digit" });
+        }
+        return date.toLocaleTimeString("zh-CN", { timeZone: BEIJING_TIME_ZONE, hour: "2-digit", minute: "2-digit", hour12: false });
+    }
+
+    function buildSmoothSvgPath(points) {
+        if (!points.length) return "";
+        if (points.length === 1) return `M ${points[0].x.toFixed(2)} ${points[0].y.toFixed(2)}`;
+        const commands = [`M ${points[0].x.toFixed(2)} ${points[0].y.toFixed(2)}`];
+        for (let index = 1; index < points.length; index += 1) {
+            const previous = points[index - 1];
+            const current = points[index];
+            const distance = current.x - previous.x;
+            const cp1x = previous.x + distance * 0.42;
+            const cp2x = current.x - distance * 0.42;
+            commands.push(`C ${cp1x.toFixed(2)} ${previous.y.toFixed(2)}, ${cp2x.toFixed(2)} ${current.y.toFixed(2)}, ${current.x.toFixed(2)} ${current.y.toFixed(2)}`);
+        }
+        return commands.join(" ");
     }
 
     function weightedAverage(rows, fieldName, weightName = "total_requests") {
@@ -3844,46 +4149,54 @@
         }
         const width = options.width || 720;
         const height = options.height || 260;
-        const paddingX = 34;
-        const paddingTop = 22;
-        const paddingBottom = 36;
+        const paddingLeft = 54;
+        const paddingRight = 28;
+        const paddingTop = 24;
+        const paddingBottom = 42;
         const chartHeight = height - paddingTop - paddingBottom;
-        const chartWidth = width - paddingX * 2;
-        const barKey = options.barKey || "total_requests";
+        const chartWidth = width - paddingLeft - paddingRight;
         const lineKey = options.lineKey || "failed_requests";
         const lineLabel = options.lineLabel || "";
-        const barMax = Math.max(1, ...rows.map((item) => Number(item[barKey] || 0)));
         const lineMax = Math.max(1, ...rows.map((item) => Number(item[lineKey] || 0)));
         const step = rows.length > 1 ? chartWidth / (rows.length - 1) : chartWidth;
-        const barWidth = Math.max(14, Math.min(42, chartWidth / Math.max(rows.length * 1.5, 1)));
-        const bars = rows.map((item, index) => {
-            const x = paddingX + index * step - barWidth / 2;
-            const value = Number(item[barKey] || 0);
-            const barHeight = Math.max(4, (value / barMax) * chartHeight);
-            const y = paddingTop + chartHeight - barHeight;
-            return `<rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${barWidth.toFixed(2)}" height="${barHeight.toFixed(2)}" rx="9" class="monitor-chart-bar"></rect>`;
-        }).join("");
         const linePoints = rows.map((item, index) => {
-            const x = paddingX + index * step;
+            const x = paddingLeft + index * step;
             const y = paddingTop + chartHeight - (Number(item[lineKey] || 0) / lineMax) * chartHeight;
-            return `${x.toFixed(2)},${y.toFixed(2)}`;
-        }).join(" ");
-        const nodes = rows.map((item, index) => {
-            const x = paddingX + index * step;
-            const y = paddingTop + chartHeight - (Number(item[lineKey] || 0) / lineMax) * chartHeight;
-            return `<circle cx="${x.toFixed(2)}" cy="${y.toFixed(2)}" r="4" class="monitor-chart-node"><title>${escapeHtml(lineLabel)} ${escapeHtml(String(item[lineKey] ?? "-"))}</title></circle>`;
+            return { x, y, item };
+        });
+        const linePath = buildSmoothSvgPath(linePoints);
+        const areaPath = linePoints.length > 1
+            ? `${linePath} L ${linePoints[linePoints.length - 1].x.toFixed(2)} ${(paddingTop + chartHeight).toFixed(2)} L ${linePoints[0].x.toFixed(2)} ${(paddingTop + chartHeight).toFixed(2)} Z`
+            : "";
+        const nodes = linePoints.map((point) => {
+            const titleParts = [
+                formatMonitorBucketLabel(point.item.bucket_start, options.windowMinutes),
+                lineLabel ? `${lineLabel} ${formatNumber(point.item[lineKey] || 0)}` : null,
+            ].filter(Boolean);
+            return `<circle cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="3.2" class="monitor-chart-node"><title>${escapeHtml(titleParts.join(" · "))}</title></circle>`;
         }).join("");
         const labels = rows.map((item, index) => {
             if (index !== 0 && index !== rows.length - 1 && index % Math.ceil(rows.length / 4) !== 0) return "";
-            const x = paddingX + index * step;
-            return `<text x="${x.toFixed(2)}" y="${height - 12}" text-anchor="middle" class="monitor-chart-label">${escapeHtml(formatMonitorBucketLabel(item.bucket_start, options.windowMinutes))}</text>`;
+            const x = paddingLeft + index * step;
+            const anchor = index === 0 ? "start" : (index === rows.length - 1 ? "end" : "middle");
+            return `<text x="${x.toFixed(2)}" y="${height - 14}" text-anchor="${anchor}" class="monitor-chart-label">${escapeHtml(formatMonitorAxisLabel(item.bucket_start, options.windowMinutes))}</text>`;
         }).join("");
+        const gridLines = [0.25, 0.5, 0.75].map((ratio) => {
+            const y = paddingTop + chartHeight * ratio;
+            return `<line x1="${paddingLeft}" y1="${y.toFixed(2)}" x2="${width - paddingRight}" y2="${y.toFixed(2)}" class="monitor-chart-grid-line"></line>`;
+        }).join("");
+        const axisLabels = [
+            { label: formatMetricShort(lineMax), y: paddingTop + 4 },
+            { label: formatMetricShort(lineMax / 2), y: paddingTop + chartHeight * 0.5 + 4 },
+            { label: "0", y: paddingTop + chartHeight + 4 },
+        ].map((item) => `<text x="${paddingLeft - 12}" y="${item.y.toFixed(2)}" text-anchor="end" class="monitor-chart-axis-label">${escapeHtml(item.label)}</text>`).join("");
         container.innerHTML = `
             <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(options.label || "监控趋势图")}">
-                <line x1="${paddingX}" y1="${paddingTop + chartHeight}" x2="${width - paddingX}" y2="${paddingTop + chartHeight}" class="monitor-chart-axis"></line>
-                <line x1="${paddingX}" y1="${paddingTop + chartHeight * 0.5}" x2="${width - paddingX}" y2="${paddingTop + chartHeight * 0.5}" class="monitor-chart-grid-line"></line>
-                ${bars}
-                <polyline points="${linePoints}" class="monitor-chart-line"></polyline>
+                <line x1="${paddingLeft}" y1="${paddingTop + chartHeight}" x2="${width - paddingRight}" y2="${paddingTop + chartHeight}" class="monitor-chart-axis"></line>
+                ${gridLines}
+                ${axisLabels}
+                ${areaPath ? `<path d="${areaPath}" class="monitor-chart-area"></path>` : ""}
+                <path d="${linePath}" class="monitor-chart-line"></path>
                 ${nodes}
                 ${labels}
             </svg>
@@ -3940,7 +4253,7 @@
 
     function updateRefreshLabel(node, prefix = "每 30 秒刷新") {
         if (!node) return;
-        node.textContent = `${prefix} · 最近刷新 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`;
+        node.textContent = `${prefix} · 最近刷新 ${formatDate(new Date()).split(" ").pop()}`;
     }
 
     function updateLogRefreshResultLabel(node, status = "success", timestamp = new Date()) {
@@ -3948,7 +4261,7 @@
         const resolvedTime = timestamp instanceof Date ? timestamp : new Date(timestamp);
         const timeText = Number.isNaN(resolvedTime.getTime())
             ? "-"
-            : resolvedTime.toLocaleTimeString("zh-CN", { hour12: false });
+            : formatDate(resolvedTime).split(" ").pop();
         const statusText = status === "error" ? "失败" : "成功";
         node.textContent = `最近刷新：${timeText} ${statusText}`;
     }
@@ -4220,9 +4533,9 @@
 
     function formatTimestamp(value) {
         if (!value) return "-";
-        const date = typeof value === "number" ? new Date(value * 1000) : new Date(value);
-        if (Number.isNaN(date.getTime())) return String(value);
-        return date.toLocaleString("zh-CN");
+        const date = parseBeijingDate(value);
+        if (!date) return String(value);
+        return date.toLocaleString("zh-CN", { timeZone: BEIJING_TIME_ZONE, hour12: false });
     }
 
     function renderInlineRichText(text) {
@@ -4635,6 +4948,234 @@
         document.addEventListener("scroll", positionOpenMenus, { capture: true, passive: true });
     }
 
+    function getProviderOverviewItems(overview = {}) {
+        if (Array.isArray(overview)) return overview;
+        if (Array.isArray(overview.providers)) return overview.providers;
+        if (Array.isArray(overview.items)) return overview.items;
+        if (Array.isArray(overview.data)) return overview.data;
+        return [];
+    }
+
+    function providerModelConfigToBatchTarget(provider, modelConfig) {
+        const providerId = Number(provider?.id);
+        const modelId = Number(modelConfig?.id);
+        if (!Number.isFinite(providerId) || !Number.isFinite(modelId)) return null;
+        const providerName = provider?.name || `提供商 ${providerId}`;
+        const modelName = modelConfig?.model_name || `模型 ${modelId}`;
+        return {
+            key: `${providerId}:${modelId}`,
+            providerId,
+            modelId,
+            providerName,
+            modelName,
+            displayName: `${providerName} / ${modelName}`,
+            providerEnabled: provider?.enabled !== false,
+            modelEnabled: modelConfig?.enabled !== false,
+            status: "pending",
+            resultLabel: "等待中",
+            latencyMs: null,
+            message: "",
+        };
+    }
+
+    function getProviderMountedBatchTargets(providerItems, options = {}) {
+        const emptyMessage = options.emptyMessage || "该提供商当前没有可执行检测的挂载模型。";
+        const targets = [];
+        (Array.isArray(providerItems) ? providerItems : []).forEach((provider) => {
+            const modelConfigs = Array.isArray(provider?.model_configs) ? provider.model_configs : [];
+            const mountedTargets = modelConfigs
+                .map((modelConfig) => providerModelConfigToBatchTarget(provider, modelConfig))
+                .filter(Boolean);
+            if (mountedTargets.length) {
+                targets.push(...mountedTargets);
+                return;
+            }
+            const providerId = Number(provider?.id);
+            targets.push({
+                key: `${Number.isFinite(providerId) ? providerId : "unknown"}:empty`,
+                providerId,
+                modelId: null,
+                providerName: provider?.name || `提供商 ${Number.isFinite(providerId) ? providerId : "-"}`,
+                modelName: "无挂载模型",
+                displayName: `${provider?.name || `提供商 ${Number.isFinite(providerId) ? providerId : "-"}`} / 无挂载模型`,
+                providerEnabled: provider?.enabled !== false,
+                modelEnabled: false,
+                status: "skipped",
+                resultLabel: "已跳过",
+                latencyMs: null,
+                message: emptyMessage,
+            });
+        });
+        return targets;
+    }
+
+    function createProviderMountedHealthBatchState(targets) {
+        return {
+            items: targets.map((target) => ({
+                ...target,
+                status: target.status || "pending",
+                resultLabel: target.resultLabel || "等待中",
+                latencyMs: target.latencyMs ?? null,
+                message: target.message || "",
+            })),
+            startedAt: Date.now(),
+        };
+    }
+
+    function summarizeProviderMountedHealthBatchState(batchState) {
+        const items = Array.isArray(batchState?.items) ? batchState.items : [];
+        const completedStatuses = new Set(["passed", "failed", "skipped", "rate_limited"]);
+        return {
+            total: items.length,
+            completed: items.filter((item) => completedStatuses.has(item.status)).length,
+            running: items.filter((item) => item.status === "running").length,
+            passed: items.filter((item) => item.status === "passed").length,
+            failed: items.filter((item) => item.status === "failed").length,
+            skipped: items.filter((item) => item.status === "skipped").length,
+            rateLimited: items.filter((item) => item.status === "rate_limited").length,
+            providerCount: new Set(items.map((item) => item.providerId).filter(Number.isFinite)).size,
+        };
+    }
+
+    function renderProviderMountedHealthBatchStatusBadge(status) {
+        if (status === "passed") return '<span class="status-badge status-healthy">可用</span>';
+        if (status === "rate_limited") return '<span class="status-badge status-degraded">已限流</span>';
+        if (status === "failed") return '<span class="status-badge status-unhealthy">异常</span>';
+        if (status === "running") return '<span class="status-badge status-running">检测中</span>';
+        if (status === "skipped") return '<span class="status-badge status-unknown">已跳过</span>';
+        return '<span class="status-badge status-unknown">等待中</span>';
+    }
+
+    function renderProviderMountedHealthBatchProgress(batchState, options = {}) {
+        const summary = summarizeProviderMountedHealthBatchState(batchState);
+        const title = options.kicker || "批量健康检测";
+        const summaryHtml = [
+            ["提供商", formatNumber(summary.providerCount)],
+            ["挂载模型", formatNumber(summary.total)],
+            ["完成", `${formatNumber(summary.completed)}/${formatNumber(summary.total)}`],
+            ["可用", formatNumber(summary.passed)],
+            ["异常", formatNumber(summary.failed)],
+            ["已限流", formatNumber(summary.rateLimited)],
+            ["跳过", formatNumber(summary.skipped)],
+        ].map(([label, value]) => `
+            <div class="provider-test-summary-item">
+                <span>${escapeHtml(String(label))}</span>
+                <strong>${escapeHtml(String(value))}</strong>
+            </div>
+        `).join("");
+        const itemHtml = batchState.items.map((item) => {
+            const latencyText = item.latencyMs == null ? "-" : `${formatNumber(item.latencyMs)} ms`;
+            const disabledText = item.modelId && (!item.providerEnabled || !item.modelEnabled)
+                ? `<div class="table-muted">${!item.providerEnabled ? "提供商已停用" : "模型已停用"}，仍按挂载模型执行手动健康检测。</div>`
+                : "";
+            return `
+                <article class="provider-test-model-item provider-model-batch-item" data-status="${escapeHtml(item.status)}">
+                    <div class="provider-test-model-top">
+                        <strong>${escapeHtml(item.displayName)}</strong>
+                        <div>${renderProviderMountedHealthBatchStatusBadge(item.status)}</div>
+                    </div>
+                    <div class="table-muted">${escapeHtml(item.resultLabel)} · 耗时 ${escapeHtml(String(latencyText))}</div>
+                    ${disabledText}
+                    ${item.message ? `<div class="provider-test-model-message">${escapeHtml(item.message)}</div>` : ""}
+                </article>
+            `;
+        }).join("");
+        return `
+            <div class="provider-test-result-shell">
+                <section class="provider-test-result-card">
+                    <div class="panel-kicker">${escapeHtml(title)}</div>
+                    <div class="provider-test-summary-grid">${summaryHtml}</div>
+                </section>
+                <section class="provider-test-result-card">
+                    <div class="panel-kicker">${summary.completed >= summary.total ? "检测结果" : `检测进度 · ${formatNumber(summary.running)} 进行中`}</div>
+                    <div class="provider-test-model-list provider-model-batch-list">${itemHtml}</div>
+                </section>
+            </div>
+        `;
+    }
+
+    async function runProviderMountedHealthBatch(targets, trigger, features, options = {}) {
+        const title = options.title || "全部提供商健康检测";
+        if (!targets.length) {
+            showToast("当前没有可执行的挂载模型", "error");
+            return [];
+        }
+        const batchState = createProviderMountedHealthBatchState(targets);
+        const render = () => renderProviderMountedHealthBatchProgress(batchState, { kicker: options.kicker });
+        const refresh = () => refreshHealthCheckResultModal(title, render());
+        batchState.items.forEach((item) => {
+            if (item.modelId == null) return;
+            item.status = "running";
+            item.resultLabel = "检测中";
+            item.message = "正在执行健康测试";
+        });
+        setButtonLoading(trigger, true);
+        openHealthCheckResultModal(title, render(), trigger);
+        const executableItems = batchState.items.filter((item) => item.modelId != null);
+        const groups = new Map();
+        executableItems.forEach((item) => {
+            if (!groups.has(item.providerId)) groups.set(item.providerId, []);
+            groups.get(item.providerId).push(item);
+        });
+        try {
+            await Promise.all(Array.from(groups.values()).map(async (items) => {
+                for (const item of items) {
+                    item.status = "running";
+                    item.resultLabel = "检测中";
+                    item.message = "正在执行健康测试";
+                    refresh();
+                    const startedAt = Date.now();
+                    try {
+                        const result = await api.post(
+                            `/api/providers/${item.providerId}/models/${item.modelId}/test`,
+                            { features },
+                            { timeoutMs: PROBE_API_TIMEOUT_MS },
+                        );
+                        const usable = isHealthCheckUsable(result);
+                        item.status = isProbeRateLimitedResult(result) ? "rate_limited" : (usable ? "passed" : "failed");
+                        item.resultLabel = formatHealthCheckOutcomeLabel(result);
+                        item.latencyMs = result?.latency_ms ?? (Date.now() - startedAt);
+                        item.message = result?.message || "";
+                    } catch (error) {
+                        item.status = "failed";
+                        item.resultLabel = "执行失败";
+                        item.latencyMs = Date.now() - startedAt;
+                        item.message = error.message || "健康检测请求失败";
+                    }
+                    refresh();
+                }
+            }));
+            const summary = summarizeProviderMountedHealthBatchState(batchState);
+            setButtonTransientFeedback(trigger, summary.failed === 0 && summary.rateLimited === 0 ? "success" : "error", {
+                successText: "已完成",
+                errorText: "有异常",
+            });
+            showToast(
+                `${title}：可用 ${formatNumber(summary.passed)}/${formatNumber(summary.total)}，限流 ${formatNumber(summary.rateLimited)}`,
+                summary.failed === 0 && summary.rateLimited === 0 ? "success" : "error",
+            );
+            return batchState.items;
+        } finally {
+            setButtonLoading(trigger, false);
+        }
+    }
+
+    async function runDashboardAllProvidersHealthBatch(trigger, features) {
+        const overview = await api.get("/api/providers/overview");
+        let providerItems = getProviderOverviewItems(overview);
+        if (!providerItems.length && Number(overview?.summary?.provider_count || 0) > 0) {
+            const fallbackProviders = await api.get("/api/providers");
+            providerItems = Array.isArray(fallbackProviders) ? fallbackProviders : [];
+        }
+        const targets = getProviderMountedBatchTargets(providerItems, {
+            emptyMessage: "该提供商当前没有可执行健康检测的挂载模型。",
+        });
+        await runProviderMountedHealthBatch(targets, trigger, features, {
+            title: "全部提供商健康检测",
+            kicker: "批量健康检测",
+        });
+    }
+
     async function initDashboard() {
         const checkAllBtn = document.getElementById("check-all-btn");
         if (checkAllBtn) {
@@ -4642,18 +5183,8 @@
                 const features = await openTestFeaturePicker({ title: "选择全部提供商测试功能" });
                 if (!features) return;
                 try {
-                    setButtonLoading(checkAllBtn, true);
-                    await runHealthCheckStream({
-                        url: "/api/providers/test-all-stream",
-                        title: "全部提供商健康检查",
-                        scope: "all",
-                        trigger: checkAllBtn,
-                        showModal: true,
-                        data: { features },
-                    });
-                    setButtonLoading(checkAllBtn, false);
-                    setButtonTransientFeedback(checkAllBtn, "success", { successText: "已完成" });
-                    showToast("已完成全部提供商健康检查");
+                    await runDashboardAllProvidersHealthBatch(checkAllBtn, features);
+                    await wait(500);
                     await refreshDashboard();
                 } catch (error) {
                     setButtonLoading(checkAllBtn, false);
@@ -4664,15 +5195,24 @@
                 }
             });
         }
-        await refreshDashboard();
-        initDashboardLiveMonitor();
+        try {
+            await refreshDashboard();
+        } catch (error) {
+            console.error("首页概览刷新失败", error);
+            showToast(error.message || "首页概览刷新失败", "error");
+        } finally {
+            initDashboardLiveMonitor();
+        }
     }
 
     function initDashboardLiveMonitor() {
+        const monitorRoot = document.getElementById("dashboard-live-monitor");
+        if (!monitorRoot) return;
+        if (monitorRoot.dataset.initialized === "true") return;
+        monitorRoot.dataset.initialized = "true";
         const refreshBtn = document.getElementById("dashboard-monitor-refresh-btn");
         const trafficWindowSelect = document.getElementById("dashboard-monitor-traffic-window");
         const latencyWindowSelect = document.getElementById("dashboard-monitor-latency-window");
-        if (!document.getElementById("dashboard-live-monitor")) return;
         let loading = false;
         const load = async (manual = false) => {
             if (!manual && document.visibilityState === "hidden") return;
@@ -4682,6 +5222,8 @@
                 await refreshDashboardMonitor();
                 if (manual) showToast("监控数据已刷新");
             } catch (error) {
+                console.error("实时监控刷新失败", error);
+                setDashboardMonitorErrorState(error);
                 if (manual) showToast(error.message, "error");
             } finally {
                 loading = false;
@@ -4700,12 +5242,16 @@
         const latencyWindowSelect = document.getElementById("dashboard-monitor-latency-window");
         const trafficWindow = getMonitorWindowConfig(trafficWindowSelect?.value);
         const latencyWindow = getMonitorWindowConfig(latencyWindowSelect?.value);
-        const trafficWindowMinutes = Number(trafficWindowSelect?.value || 180);
-        const latencyWindowMinutes = Number(latencyWindowSelect?.value || 180);
+        const trafficWindowMinutes = Number(trafficWindowSelect?.value || 1440);
+        const latencyWindowMinutes = Number(latencyWindowSelect?.value || 1440);
+        const trafficSeriesUrl = `/api/metrics/timeseries?window_minutes=${encodeURIComponent(trafficWindowMinutes)}&bucket_minutes=${encodeURIComponent(trafficWindow.bucketMinutes)}`;
+        const latencySeriesUrl = `/api/metrics/timeseries?window_minutes=${encodeURIComponent(latencyWindowMinutes)}&bucket_minutes=${encodeURIComponent(latencyWindow.bucketMinutes)}`;
+        const trafficSeriesPromise = api.get(trafficSeriesUrl);
+        const latencySeriesPromise = latencySeriesUrl === trafficSeriesUrl ? trafficSeriesPromise : api.get(latencySeriesUrl);
         const [summary, trafficSeries, latencySeries] = await Promise.all([
             api.get(`/api/metrics/summary?window_minutes=${encodeURIComponent(trafficWindow.summaryMinutes)}`),
-            api.get(`/api/metrics/timeseries?window_minutes=${encodeURIComponent(trafficWindowMinutes)}&bucket_minutes=${encodeURIComponent(trafficWindow.bucketMinutes)}`),
-            api.get(`/api/metrics/timeseries?window_minutes=${encodeURIComponent(latencyWindowMinutes)}&bucket_minutes=${encodeURIComponent(latencyWindow.bucketMinutes)}`),
+            trafficSeriesPromise,
+            latencySeriesPromise,
         ]);
         const metricItems = Array.isArray(summary.items) ? summary.items : [];
         const trafficItems = Array.isArray(trafficSeries.items) ? trafficSeries.items : [];
@@ -4715,30 +5261,56 @@
         const requestTotal = document.getElementById("dashboard-monitor-request-total");
         if (requestTotal) requestTotal.textContent = `${formatMetricShort(trafficOverview.totalRequests)} 次`;
         const latencyValue = document.getElementById("dashboard-monitor-latency-value");
-        if (latencyValue) latencyValue.textContent = `${formatLatencyMs(latencyOverview.p95Latency)} / ${formatLatencyMs(latencyOverview.p95Ttfb)}`;
+        if (latencyValue) latencyValue.textContent = `P95 ${formatLatencyMs(latencyOverview.p95Latency)} · 首包 ${formatLatencyMs(latencyOverview.p95Ttfb)}`;
         const modelCount = document.getElementById("dashboard-monitor-model-count");
         if (modelCount) modelCount.textContent = `${new Set(metricItems.map((item) => item.requested_model).filter(Boolean)).size} 个`;
         const providerValue = document.getElementById("dashboard-monitor-provider-value");
         if (providerValue) providerValue.textContent = `失败率 ${formatPercent(trafficOverview.failureRate)}`;
         renderMonitorChart(document.getElementById("dashboard-monitor-traffic-chart"), trafficItems, {
-            barKey: "total_requests",
-            lineKey: "failed_requests",
-            lineLabel: "失败",
-            label: "请求量与失败趋势",
+            lineKey: "total_requests",
+            lineLabel: "请求",
+            label: "请求趋势",
             windowMinutes: trafficWindowMinutes,
         });
         renderMonitorChart(document.getElementById("dashboard-monitor-latency-chart"), latencyItems, {
-            barKey: "avg_ttfb_ms",
             lineKey: "p95_latency_ms",
             lineLabel: "P95 延迟",
-            label: "延迟与首包趋势",
-            width: 520,
-            height: 220,
+            label: "延迟趋势",
             windowMinutes: latencyWindowMinutes,
         });
         renderMonitorRank(document.getElementById("dashboard-monitor-model-rank"), metricItems);
         renderDashboardProviderStrip(metricItems);
         updateRefreshLabel(document.getElementById("dashboard-monitor-refresh-label"));
+    }
+
+    function setDashboardMonitorErrorState(error) {
+        const message = error?.message || "监控数据加载失败";
+        const refreshLabel = document.getElementById("dashboard-monitor-refresh-label");
+        if (refreshLabel) {
+            refreshLabel.textContent = `刷新失败 · ${formatDate(new Date()).split(" ").pop()}`;
+        }
+        [
+            ["dashboard-monitor-request-total", "加载失败"],
+            ["dashboard-monitor-latency-value", "加载失败"],
+            ["dashboard-monitor-model-count", "加载失败"],
+            ["dashboard-monitor-provider-value", "加载失败"],
+        ].forEach(([id, fallback]) => {
+            const node = document.getElementById(id);
+            if (!node) return;
+            const currentText = node.textContent.trim();
+            if (!currentText || currentText === "-") node.textContent = fallback;
+        });
+        [
+            "dashboard-monitor-traffic-chart",
+            "dashboard-monitor-latency-chart",
+            "dashboard-monitor-model-rank",
+            "dashboard-monitor-provider-strip",
+        ].forEach((id) => {
+            const node = document.getElementById(id);
+            if (node && node.textContent.trim() === "") {
+                node.innerHTML = `<div class="empty-state">${escapeHtml(message)}</div>`;
+            }
+        });
     }
 
     function renderDashboardProviderStrip(metricItems) {
@@ -4780,23 +5352,98 @@
         }).join("");
     }
 
-    function renderDashboardUsageRows(items, options = {}) {
-        const rows = Array.isArray(items) ? items : [];
+    function normalizeDashboardUsageRows(items) {
+        return Array.isArray(items) ? items.filter(Boolean) : [];
+    }
+
+    function sumDashboardUsageRows(rows) {
+        return rows.reduce((summary, item) => ({
+            requests: summary.requests + Number(item.total_requests || 0),
+            tokens: summary.tokens + Number(item.total_tokens || 0),
+            cost: summary.cost + Number(item.total_cost || 0),
+        }), { requests: 0, tokens: 0, cost: 0 });
+    }
+
+    function formatUsageMeterWidth(value) {
+        const numeric = toFiniteNumber(value);
+        if (numeric == null) return "0%";
+        return `${Math.max(0, Math.min(100, numeric)).toFixed(2)}%`;
+    }
+
+    function renderDashboardUsageKpi(rows, options = {}) {
+        const totals = sumDashboardUsageRows(rows);
+        const extraMetric = options.extraMetric;
+        return `
+            <div><span>请求</span><strong>${formatNumber(totals.requests)}</strong></div>
+            <div><span>Token</span><strong>${formatTokenDisplay(totals.tokens)}</strong></div>
+            <div><span>成本</span><strong>${formatMoney(totals.cost)}</strong></div>
+            ${extraMetric ? `<div><span>${escapeHtml(extraMetric.label)}</span><strong>${escapeHtml(extraMetric.value)}</strong></div>` : ""}
+        `;
+    }
+
+    function renderDashboardUsageRankList(items, options = {}) {
+        const rows = normalizeDashboardUsageRows(items)
+            .slice()
+            .sort((first, second) => Number(second.total_cost || 0) - Number(first.total_cost || 0));
         const showProvider = options.showProvider === true;
         const showModel = options.showModel === true;
-        const colspan = Number(options.colspan || 4);
         if (!rows.length) {
-            return `<tr><td colspan="${colspan}"><div class="empty-state">${escapeHtml(options.emptyText || "暂无累计统计数据")}</div></td></tr>`;
+            return `<div class="empty-state">${escapeHtml(options.emptyText || "暂无累计统计数据")}</div>`;
         }
-        return rows.map((item) => `
-            <tr>
-                ${showProvider ? `<td>${escapeHtml(item.provider_name || "-")}</td>` : ""}
-                ${showModel ? `<td>${escapeHtml(item.model_name || "-")}</td>` : ""}
-                <td>${formatNumber(item.total_requests || 0)}</td>
-                <td>${formatTokenDisplay(item.total_tokens || 0)}</td>
-                <td>${formatMoney(item.total_cost || 0)}</td>
-            </tr>
-        `).join("");
+        const maxCost = rows.reduce((maxValue, item) => Math.max(maxValue, Number(item.total_cost || 0)), 0);
+        return rows.map((item, index) => {
+            const providerName = item.provider_name || "-";
+            const modelName = item.model_name || "-";
+            const label = showProvider && showModel
+                ? `${providerName} → ${modelName}`
+                    : showProvider
+                    ? providerName
+                    : modelName;
+            const cost = Number(item.total_cost || 0);
+            const meterWidth = maxCost > 0 ? (cost / maxCost) * 100 : 0;
+            return `
+                <article class="usage-rank-item">
+                    <div class="usage-rank-main">
+                        <span class="usage-rank-index">${index + 1}</span>
+                        <div class="usage-rank-label">
+                            <strong>${escapeHtml(label)}</strong>
+                            <span>${formatNumber(item.total_requests || 0)} 次请求 · ${formatTokenDisplay(item.total_tokens || 0)}</span>
+                        </div>
+                        <div class="usage-rank-value">
+                            <strong>${formatMoney(cost)}</strong>
+                        </div>
+                    </div>
+                    <div class="usage-rank-meter" aria-hidden="true"><span style="--usage-rank-width: ${formatUsageMeterWidth(meterWidth)}"></span></div>
+                    <div class="usage-rank-detail">
+                        ${showProvider ? `<span>提供商：${escapeHtml(providerName)}</span>` : ""}
+                        ${showModel ? `<span>模型：${escapeHtml(modelName)}</span>` : ""}
+                        <span>请求：${formatNumber(item.total_requests || 0)}</span>
+                        <span>Token：${formatTokenDisplay(item.total_tokens || 0)}</span>
+                        <span>成本：${formatMoney(cost)}</span>
+                    </div>
+                </article>
+            `;
+        }).join("");
+    }
+
+    function updateDashboardUsageCard(cardType, rows, options = {}) {
+        const card = document.querySelector(`[data-usage-card="${cardType}"]`);
+        if (!card) return;
+        const normalizedRows = normalizeDashboardUsageRows(rows)
+            .slice()
+            .sort((first, second) => Number(second.total_cost || 0) - Number(first.total_cost || 0));
+        const countNode = card.querySelector(".usage-card-count");
+        const kpiNode = card.querySelector(".usage-kpi-strip");
+        const listNode = document.getElementById(options.listId);
+        if (countNode) {
+            countNode.textContent = `${formatNumber(normalizedRows.length)} 项`;
+        }
+        if (kpiNode) {
+            kpiNode.innerHTML = renderDashboardUsageKpi(normalizedRows, options);
+        }
+        if (listNode) {
+            listNode.innerHTML = renderDashboardUsageRankList(normalizedRows, options);
+        }
     }
 
     function renderDashboardUsageOverview(usageOverview = {}) {
@@ -4810,31 +5457,26 @@
                 <div><span>总价格成本</span><strong>${formatMoney(summary.total_cost || 0)}</strong></div>
             `;
         }
-        const modelBody = document.getElementById("dashboard-usage-model-body");
-        if (modelBody) {
-            modelBody.innerHTML = renderDashboardUsageRows(usageOverview.top_models, {
-                showModel: true,
-                colspan: 4,
-                emptyText: "暂无模型成本数据",
-            });
-        }
-        const providerBody = document.getElementById("dashboard-usage-provider-body");
-        if (providerBody) {
-            providerBody.innerHTML = renderDashboardUsageRows(usageOverview.top_providers, {
-                showProvider: true,
-                colspan: 4,
-                emptyText: "暂无提供商成本数据",
-            });
-        }
-        const providerModelBody = document.getElementById("dashboard-usage-provider-model-body");
-        if (providerModelBody) {
-            providerModelBody.innerHTML = renderDashboardUsageRows(usageOverview.top_provider_models, {
-                showProvider: true,
-                showModel: true,
-                colspan: 5,
-                emptyText: "暂无提供商模型成本数据",
-            });
-        }
+        updateDashboardUsageCard("model", usageOverview.top_models, {
+            listId: "dashboard-usage-model-list",
+            showModel: true,
+            emptyText: "暂无模型成本数据",
+        });
+        updateDashboardUsageCard("provider", usageOverview.top_providers, {
+            listId: "dashboard-usage-provider-list",
+            showProvider: true,
+            emptyText: "暂无提供商成本数据",
+        });
+        updateDashboardUsageCard("provider-model", usageOverview.top_provider_models, {
+            listId: "dashboard-usage-provider-model-list",
+            showProvider: true,
+            showModel: true,
+            emptyText: "暂无提供商模型成本数据",
+            extraMetric: {
+                label: "组合数",
+                value: formatNumber(normalizeDashboardUsageRows(usageOverview.top_provider_models).length),
+            },
+        });
         const cacheNote = document.getElementById("dashboard-usage-cache-note");
         if (cacheNote) {
             cacheNote.textContent = `精确聚合，${formatNumber(usageOverview.cache_ttl_seconds || 30)} 秒短缓存`;
@@ -4842,12 +5484,8 @@
     }
 
     async function refreshDashboard() {
-        const [stats, providers, settings, metrics, timeSeries] = await Promise.all([
+        const [stats] = await Promise.all([
             api.get("/api/dashboard"),
-            getProviderSummary(),
-            api.get("/api/settings"),
-            api.get("/api/metrics/summary?window_minutes=60"),
-            api.get("/api/metrics/timeseries?window_minutes=180&bucket_minutes=15"),
         ]);
         document.querySelector('[data-stat="provider_count"]').textContent = stats.provider_count;
         document.querySelector('[data-stat="healthy_count"]').textContent = stats.healthy_count;
@@ -4861,40 +5499,9 @@
         document.querySelector('[data-stat="total_cost"]').textContent = formatMoney(stats.total_cost || 0);
         document.querySelector('[data-stat="conversation_count"]').textContent = stats.conversation_count;
         document.querySelector('[data-stat="api_key_total"]').textContent = stats.api_key_total;
-        document.querySelector('[data-stat="api_key_enabled"]').textContent = stats.api_key_enabled;
-        document.querySelector('[data-stat="api_key_disabled"]').textContent = stats.api_key_disabled;
-        document.querySelector('[data-stat="api_key_total_requests"]').textContent = stats.api_key_total_requests;
-        document.querySelector('[data-stat="api_key_total_prompt_tokens"]').textContent = formatTokenDisplay(stats.api_key_total_prompt_tokens || 0);
-        document.querySelector('[data-stat="api_key_total_completion_tokens"]').textContent = formatTokenDisplay(stats.api_key_total_completion_tokens || 0);
-        document.querySelector('[data-stat="api_key_total_tokens"]').textContent = formatTokenDisplay(stats.api_key_total_tokens || 0);
         document.querySelector('[data-stat="recent_failure_rate"]').textContent = `${stats.recent_failure_rate}%`;
         document.querySelector('[data-stat="total_failures"]').textContent = stats.total_failures;
         renderDashboardUsageOverview(stats.usage_overview || {});
-
-        const grid = document.getElementById("dashboard-provider-grid");
-        grid.innerHTML = providers.map((provider) => `
-            <article class="provider-card">
-                <div class="provider-card-top">
-                    <h4>${escapeHtml(provider.name)}</h4>
-                    ${providerAvailabilityBadge(provider.health_status)}
-                </div>
-                <div class="provider-meta">优先级 ${provider.priority}</div>
-                <div class="provider-models">${escapeHtml(provider.models.join(", ") || "-")}</div>
-                <div class="provider-foot">
-                    <span>延迟 ${provider.last_latency_ms ?? "-"} ms</span>
-                    <span>${escapeHtml(formatCircuitStateLabel(provider.circuit_state))}</span>
-                </div>
-            </article>
-        `).join("") || '<div class="empty-state">暂无提供商数据</div>';
-
-        document.getElementById("dashboard-route-meta").innerHTML = `
-            <div><span>策略</span><strong>健康优先</strong></div>
-            <div><span>自动巡检</span><strong>${formatSwitchText(settings.auto_health_check)}</strong></div>
-            <div><span>检查间隔</span><strong>${settings.health_check_interval_sec} 秒</strong></div>
-            <div><span>模型健康</span><strong>${formatHealthOverview(stats.healthy_model_count, stats.degraded_model_count, stats.unhealthy_model_count)}</strong></div>
-            <div><span>Token 记录</span><strong>${formatSwitchText(settings.enable_token_logging)}</strong></div>
-            <div><span>正文记录</span><strong>${formatSwitchText(settings.enable_payload_logging)}</strong></div>
-        `;
 
         const healthRatio = stats.provider_count ? Math.round((stats.healthy_count / stats.provider_count) * 100) : 0;
         document.getElementById("dashboard-signal-card").innerHTML = `
@@ -4907,53 +5514,6 @@
                 <span>${stats.healthy_count}/${stats.provider_count} 全部可用</span>
             </div>
         `;
-
-        document.getElementById("dashboard-health-distribution").innerHTML = `
-            <div><span>全部可用</span><strong>${stats.healthy_count}</strong></div>
-            <div><span>部分可用</span><strong>${stats.degraded_count}</strong></div>
-            <div><span>全部不可用</span><strong>${stats.unhealthy_count}</strong></div>
-            <div><span>模型数</span><strong>${stats.model_count}</strong></div>
-        `;
-
-        document.getElementById("dashboard-logging-profile").innerHTML = `
-            <div><span>Token 统计</span><strong>${formatSwitchText(settings.enable_token_logging)}</strong></div>
-            <div><span>正文保存</span><strong>${formatSwitchText(settings.enable_payload_logging)}</strong></div>
-            <div><span>流式留存</span><strong>${formatSwitchText(settings.enable_stream_response_persist)}</strong></div>
-            <div><span>日志大小上限</span><strong>${settings.max_logged_body_bytes} B</strong></div>
-        `;
-
-        const metricsBody = document.getElementById("dashboard-metrics-table-body");
-        const metricItems = Array.isArray(metrics.items) ? metrics.items : [];
-        metricsBody.innerHTML = metricItems.length ? metricItems.slice(0, 12).map((item) => `
-            <tr>
-                <td>${escapeHtml(item.provider_name || "-")}</td>
-                <td>${escapeHtml(item.requested_model || "-")}</td>
-                <td>${formatNumber(item.total_requests)}</td>
-                <td>${formatNumber(item.success_requests)}</td>
-                <td>${item.failure_rate}%</td>
-                <td>${item.avg_latency_ms ?? "-"} ms</td>
-                <td>${item.avg_ttfb_ms ?? "-"} ms</td>
-                <td>${formatNumber(item.stream_requests || 0)}</td>
-                <td>${formatNumber(item.image_requests || 0)}</td>
-                <td>${formatNumber(item.unique_users || 0)}</td>
-            </tr>
-        `).join("") : '<tr><td colspan="10" class="text-muted">最近 60 分钟暂无可展示流量</td></tr>';
-
-        const timeSeriesBody = document.getElementById("dashboard-timeseries-table-body");
-        const timeSeriesItems = Array.isArray(timeSeries.items) ? timeSeries.items : [];
-        timeSeriesBody.innerHTML = timeSeriesItems.length ? timeSeriesItems.slice(-12).reverse().map((item) => `
-            <tr>
-                <td>${formatDate(item.bucket_start)}</td>
-                <td>${formatNumber(item.total_requests)}</td>
-                <td>${formatNumber(item.success_requests)}</td>
-                <td>${formatNumber(item.failed_requests)}</td>
-                <td>${formatNumber(item.stream_requests || 0)}</td>
-                <td>${formatNumber(item.image_requests || 0)}</td>
-                <td>${formatLatencyMs(item.avg_latency_ms)}</td>
-                <td>${formatLatencyMs(item.avg_ttfb_ms)}</td>
-                <td>${formatTokenDisplay(item.total_tokens || 0)}</td>
-            </tr>
-        `).join("") : '<tr><td colspan="9" class="text-muted">最近 3 小时暂无时间序列数据</td></tr>';
     }
 
     async function initProviders() {
@@ -4985,6 +5545,8 @@
         const providerModelPrevPageBtn = document.getElementById("provider-model-prev-page-btn");
         const providerModelNextPageBtn = document.getElementById("provider-model-next-page-btn");
         const checkAllBtn = document.getElementById("providers-check-all-btn");
+        const providersHealthSelectedBtn = document.getElementById("providers-health-selected-btn");
+        const providersProtocolDetectSelectedBtn = document.getElementById("providers-protocol-detect-selected-btn");
         const providersTrustSelectedBtn = document.getElementById("providers-trust-selected-btn");
         const providersSelectAll = document.getElementById("providers-select-all");
         const batchImportOpenBtn = document.getElementById("provider-batch-import-open-btn");
@@ -5023,12 +5585,18 @@
         const providerMaxQpsInput = document.getElementById("provider-max-qps");
         const providerMaxRpmInput = document.getElementById("provider-max-rpm");
         const providerFirstTokenTimeoutSecInput = document.getElementById("provider-first-token-timeout-sec");
-        const providerTrustLevelInput = document.getElementById("provider-trust-level");
-        const providerContentIntegrityStatusInput = document.getElementById("provider-content-integrity-status");
-        const providerContentIntegrityScoreInput = document.getElementById("provider-content-integrity-score");
         const providerContentGuardEnabledInput = document.getElementById("provider-content-guard-enabled");
         const providerBufferStreamForGuardInput = document.getElementById("provider-buffer-stream-for-guard");
         const providerMaintenanceWindowInput = document.getElementById("provider-maintenance-window");
+        const providerMaintenanceWindowTypeInput = document.getElementById("provider-maintenance-window-type");
+        const providerMaintenanceWindowTimezoneInput = document.getElementById("provider-maintenance-window-timezone");
+        const providerMaintenanceWindowWeekdayInput = document.getElementById("provider-maintenance-window-weekday");
+        const providerMaintenanceWindowStartInput = document.getElementById("provider-maintenance-window-start");
+        const providerMaintenanceWindowEndInput = document.getElementById("provider-maintenance-window-end");
+        const providerMaintenanceWindowOnceStartInput = document.getElementById("provider-maintenance-window-once-start");
+        const providerMaintenanceWindowOnceEndInput = document.getElementById("provider-maintenance-window-once-end");
+        const providerMaintenanceWindowFeedback = document.getElementById("provider-maintenance-window-feedback");
+        const providerMaintenanceWindowPreview = document.getElementById("provider-maintenance-window-preview");
         const providerMaintenanceModeEnabledInput = document.getElementById("provider-maintenance-mode-enabled");
         const providerAutoCircuitBreakEnabledInput = document.getElementById("provider-auto-circuit-break-enabled");
         const providerAutoRecoverEnabledInput = document.getElementById("provider-auto-recover-enabled");
@@ -5079,7 +5647,9 @@
         let providerPresetModels = loadProviderPresetModels();
         let providerBatchImportTemplate = "";
         let providerBatchImportPreview = null;
-        let providerGlobalMaxRetries = 2;
+        let providerMaintenanceWindowLegacyValue = "";
+        let providerMaintenanceWindowControlsTouched = false;
+        let editingProviderApiKey = "";
         const selectedProviderIds = new Set();
 
         if (!tableBody || !modal || !providerForm || !providerModelConfigList) return;
@@ -5127,6 +5697,158 @@
             if (protocolType === "chat_completions") return "Chat Completions API";
             if (protocolType === "both") return "双协议";
             return "Responses API";
+        }
+
+        function isValidMaintenanceTime(value) {
+            return /^([01]\d|2[0-3]):[0-5]\d$/.test(String(value || "").trim());
+        }
+
+        function normalizeMaintenanceTimezone(value) {
+            return "Asia/Shanghai";
+        }
+
+        function normalizeMaintenanceDateTime(value) {
+            return String(value || "").trim().replace("T", " ");
+        }
+
+        function parseProviderMaintenanceWindow(value) {
+            const text = String(value || "").trim();
+            if (!text) return { type: "none" };
+            const daily = text.match(/^每日\s+(\d{2}:\d{2})-(\d{2}:\d{2})\s+Asia\/Shanghai$/);
+            if (daily && isValidMaintenanceTime(daily[1]) && isValidMaintenanceTime(daily[2])) {
+                return { type: "daily", start: daily[1], end: daily[2], timezone: "Asia/Shanghai" };
+            }
+            const weekly = text.match(/^每周([一二三四五六日])\s+(\d{2}:\d{2})-(\d{2}:\d{2})\s+Asia\/Shanghai$/);
+            if (weekly && isValidMaintenanceTime(weekly[2]) && isValidMaintenanceTime(weekly[3])) {
+                return { type: "weekly", weekday: weekly[1], start: weekly[2], end: weekly[3], timezone: "Asia/Shanghai" };
+            }
+            const once = text.match(/^单次\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})-(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})\s+Asia\/Shanghai$/);
+            if (once) {
+                const start = once[1].replace(" ", "T");
+                const end = once[2].replace(" ", "T");
+                const startDate = parseBeijingDate(start);
+                const endDate = parseBeijingDate(end);
+                if (startDate && endDate && endDate.getTime() > startDate.getTime()) {
+                    return { type: "once", onceStart: start, onceEnd: end, timezone: "Asia/Shanghai" };
+                }
+            }
+            return null;
+        }
+
+        function setProviderMaintenanceFeedback(message, tone = "neutral") {
+            if (!providerMaintenanceWindowFeedback) return;
+            providerMaintenanceWindowFeedback.textContent = message;
+            providerMaintenanceWindowFeedback.classList.remove("is-neutral", "is-valid", "is-invalid");
+            providerMaintenanceWindowFeedback.classList.add(`is-${tone}`);
+        }
+
+        function setProviderMaintenancePreview(value) {
+            if (providerMaintenanceWindowPreview) {
+                providerMaintenanceWindowPreview.textContent = value || "未设置维护窗口";
+            }
+        }
+
+        function updateProviderMaintenanceVisibility() {
+            const type = providerMaintenanceWindowTypeInput?.value || "none";
+            const isWeekly = type === "weekly";
+            const isOnce = type === "once";
+            const isTimed = type === "daily" || type === "weekly";
+            providerMaintenanceWindowTimezoneInput?.closest("label")?.classList.toggle("hidden", type === "none");
+            providerMaintenanceWindowWeekdayInput?.closest("label")?.classList.toggle("hidden", !isWeekly);
+            document.querySelectorAll(".maintenance-window-range").forEach((node) => node.classList.toggle("hidden", !isTimed));
+            document.querySelectorAll(".maintenance-window-once").forEach((node) => node.classList.toggle("hidden", !isOnce));
+        }
+
+        function applyProviderMaintenanceWindowValue(value) {
+            const text = String(value || "").trim();
+            providerMaintenanceWindowLegacyValue = "";
+            providerMaintenanceWindowControlsTouched = false;
+            if (providerMaintenanceWindowTypeInput) providerMaintenanceWindowTypeInput.value = "none";
+            if (providerMaintenanceWindowTimezoneInput) providerMaintenanceWindowTimezoneInput.value = "Asia/Shanghai";
+            if (providerMaintenanceWindowWeekdayInput) providerMaintenanceWindowWeekdayInput.value = "日";
+            if (providerMaintenanceWindowStartInput) providerMaintenanceWindowStartInput.value = "";
+            if (providerMaintenanceWindowEndInput) providerMaintenanceWindowEndInput.value = "";
+            if (providerMaintenanceWindowOnceStartInput) providerMaintenanceWindowOnceStartInput.value = "";
+            if (providerMaintenanceWindowOnceEndInput) providerMaintenanceWindowOnceEndInput.value = "";
+            if (providerMaintenanceWindowInput) providerMaintenanceWindowInput.value = text;
+            const parsed = parseProviderMaintenanceWindow(text);
+            if (parsed) {
+                if (providerMaintenanceWindowTypeInput) providerMaintenanceWindowTypeInput.value = parsed.type;
+                if (providerMaintenanceWindowTimezoneInput) providerMaintenanceWindowTimezoneInput.value = "Asia/Shanghai";
+                if (providerMaintenanceWindowWeekdayInput && parsed.weekday) providerMaintenanceWindowWeekdayInput.value = parsed.weekday;
+                if (providerMaintenanceWindowStartInput && parsed.start) providerMaintenanceWindowStartInput.value = parsed.start;
+                if (providerMaintenanceWindowEndInput && parsed.end) providerMaintenanceWindowEndInput.value = parsed.end;
+                if (providerMaintenanceWindowOnceStartInput && parsed.onceStart) providerMaintenanceWindowOnceStartInput.value = parsed.onceStart;
+                if (providerMaintenanceWindowOnceEndInput && parsed.onceEnd) providerMaintenanceWindowOnceEndInput.value = parsed.onceEnd;
+                updateProviderMaintenanceVisibility();
+                validateProviderMaintenanceWindow();
+                providerMaintenanceWindowControlsTouched = false;
+                return;
+            }
+            updateProviderMaintenanceVisibility();
+            if (text) {
+                if (providerMaintenanceWindowInput) providerMaintenanceWindowInput.value = "";
+                setProviderMaintenancePreview("");
+                setProviderMaintenanceFeedback("维护窗口旧格式已停用，请重新选择北京时间维护窗口。", "invalid");
+                return;
+            }
+            setProviderMaintenancePreview("");
+            setProviderMaintenanceFeedback("仅保存固定格式的维护时间段。", "neutral");
+        }
+
+        function validateProviderMaintenanceWindow(options = {}) {
+            const focusOnError = options.focus === true;
+            const type = providerMaintenanceWindowTypeInput?.value || "none";
+            const timezone = normalizeMaintenanceTimezone(providerMaintenanceWindowTimezoneInput?.value);
+            const invalid = (message, field) => {
+                setProviderMaintenanceFeedback(message, "invalid");
+                setProviderMaintenancePreview(providerMaintenanceWindowInput?.value || "");
+                if (focusOnError) field?.focus();
+                return { valid: false, message };
+            };
+
+            updateProviderMaintenanceVisibility();
+            if (type === "none") {
+                if (providerMaintenanceWindowInput) providerMaintenanceWindowInput.value = "";
+                setProviderMaintenancePreview("");
+                setProviderMaintenanceFeedback("未设置维护窗口。", "neutral");
+                return { valid: true, value: null, omit: false };
+            }
+            if (type === "daily" || type === "weekly") {
+                const start = providerMaintenanceWindowStartInput?.value || "";
+                const end = providerMaintenanceWindowEndInput?.value || "";
+                if (!isValidMaintenanceTime(start)) return invalid("请选择维护开始时间。", providerMaintenanceWindowStartInput);
+                if (!isValidMaintenanceTime(end)) return invalid("请选择维护结束时间。", providerMaintenanceWindowEndInput);
+                if (start === end) return invalid("维护开始时间和结束时间不能相同。", providerMaintenanceWindowEndInput);
+                const weekday = providerMaintenanceWindowWeekdayInput?.value || "日";
+                const value = type === "weekly"
+                    ? `每周${weekday} ${start}-${end} ${timezone}`
+                    : `每日 ${start}-${end} ${timezone}`;
+                if (providerMaintenanceWindowInput) providerMaintenanceWindowInput.value = value;
+                setProviderMaintenancePreview(value);
+                setProviderMaintenanceFeedback("维护窗口格式有效。", "valid");
+                return { valid: true, value, omit: false };
+            }
+            const onceStart = providerMaintenanceWindowOnceStartInput?.value || "";
+            const onceEnd = providerMaintenanceWindowOnceEndInput?.value || "";
+            if (!onceStart) return invalid("请选择单次维护开始时间。", providerMaintenanceWindowOnceStartInput);
+            if (!onceEnd) return invalid("请选择单次维护结束时间。", providerMaintenanceWindowOnceEndInput);
+            const onceStartDate = parseBeijingDate(onceStart);
+            const onceEndDate = parseBeijingDate(onceEnd);
+            if (!onceStartDate) return invalid("单次维护开始时间无效。", providerMaintenanceWindowOnceStartInput);
+            if (!onceEndDate) return invalid("单次维护结束时间无效。", providerMaintenanceWindowOnceEndInput);
+            if (onceEndDate.getTime() <= onceStartDate.getTime()) return invalid("单次维护结束时间必须晚于开始时间。", providerMaintenanceWindowOnceEndInput);
+            const value = `单次 ${normalizeMaintenanceDateTime(onceStart)}-${normalizeMaintenanceDateTime(onceEnd)} ${timezone}`;
+            if (providerMaintenanceWindowInput) providerMaintenanceWindowInput.value = value;
+            setProviderMaintenancePreview(value);
+            setProviderMaintenanceFeedback("维护窗口格式有效。", "valid");
+            return { valid: true, value, omit: false };
+        }
+
+        function syncProviderMaintenanceWindowControls() {
+            providerMaintenanceWindowControlsTouched = true;
+            validateProviderMaintenanceWindow();
+            updateProviderFormDirtyState();
         }
 
         function normalizeProviderModelConfig(config = {}) {
@@ -5301,6 +6023,116 @@
                 });
             }
             return configs;
+        }
+
+        function providerFieldLabelFromInput(input) {
+            const explicitLabels = {
+                "provider-name": "名称",
+                "provider-base-url": "Base URL",
+                "provider-api-key": "API 密钥",
+                "provider-type": "类型",
+                "provider-priority": "优先级",
+                "provider-timeout-ms": "提供商请求超时 ms",
+                "provider-max-retries": "提供商最大重试次数",
+                "provider-max-active-requests": "最大活跃请求",
+                "provider-max-active-streams": "最大流式请求",
+                "provider-max-qps": "最大 QPS",
+                "provider-max-rpm": "每分钟最多请求",
+                "provider-first-token-timeout-sec": "提供商首 Token 超时 s",
+                "provider-circuit-breaker-threshold-override": "熔断阈值覆盖",
+                "provider-recovery-probe-interval-override": "恢复探测间隔覆盖",
+            };
+            if (explicitLabels[input?.id]) return explicitLabels[input.id];
+            return input?.closest("label")?.querySelector("span")?.textContent?.trim() || "当前字段";
+        }
+
+        function providerInvalidControlMessage(input) {
+            const label = providerFieldLabelFromInput(input);
+            const validity = input?.validity;
+            if (!validity) return `${label}填写不符合要求，请检查后重试。`;
+            if (validity.valueMissing) return label === "名称" ? "请填写提供商名称。" : `请填写${label}。`;
+            if (validity.typeMismatch && input?.id === "provider-base-url") return "Base URL 必须是合法 URL，例如 https://example.com/v1。";
+            if (validity.badInput) return `${label}必须填写数字。`;
+            if (validity.rangeUnderflow) return `${label}不能小于 ${input.min}。`;
+            if (validity.rangeOverflow) return `${label}不能大于 ${input.max}。`;
+            if (validity.tooShort) return `${label}长度不能少于 ${input.minLength} 个字符。`;
+            if (validity.tooLong) return `${label}长度不能超过 ${input.maxLength} 个字符。`;
+            if (validity.stepMismatch) return `${label}必须符合步进要求。`;
+            return `${label}填写不符合要求，请检查后重试。`;
+        }
+
+        function firstProviderValidationError(payload) {
+            const detail = payload?.detail;
+            if (!Array.isArray(detail)) return "";
+            const fieldLabels = {
+                name: "名称",
+                base_url: "Base URL",
+                api_key: "API 密钥",
+                provider_type: "类型",
+                protocol_type: "协议",
+                group_name: "渠道分组",
+                region_tag: "地区标签",
+                priority: "优先级",
+                timeout_ms: "提供商请求超时 ms",
+                max_retries: "提供商最大重试次数",
+                max_active_requests: "最大活跃请求",
+                max_active_streams: "最大流式请求",
+                max_qps: "最大 QPS",
+                max_rpm: "每分钟最多请求",
+                first_token_timeout_sec: "提供商首 Token 超时 s",
+                maintenance_window: "维护窗口",
+                circuit_breaker_threshold_override: "熔断阈值覆盖",
+                recovery_probe_interval_sec_override: "恢复探测间隔覆盖",
+                trust_level: "信任等级",
+                content_integrity_status: "内容完整性状态",
+                content_integrity_score: "内容完整性分数",
+                model_configs: "模型挂载",
+                model_name: "模型名称",
+                price_multiplier: "模型倍率",
+                context_window_tokens: "上下文窗口 token",
+                max_input_tokens: "最大输入 token",
+                max_output_tokens: "最大输出 token",
+                input_price_per_1k: "输入单价",
+                output_price_per_1k: "输出单价",
+                cache_price_per_1k: "缓存读单价",
+                cache_write_price_per_1k: "缓存写单价",
+            };
+            const first = detail[0];
+            if (!first || typeof first !== "object") return "";
+            const loc = Array.isArray(first.loc) ? first.loc : [];
+            const field = [...loc].reverse().find((item) => typeof item === "string" && item !== "body") || "";
+            const parent = loc.includes("model_configs") ? "模型挂载" : "";
+            const index = loc.find((item) => Number.isInteger(item));
+            const label = `${parent && field !== "model_configs" ? `${parent}${Number.isInteger(index) ? `第 ${index + 1} 行` : ""}的` : ""}${fieldLabels[field] || fieldLabels[parent] || "字段"}`;
+            const type = String(first.type || "");
+            const ctx = first.ctx || {};
+            const rawMessage = String(first.msg || "").replace(/^Value error,\s*/i, "").trim();
+            if (type === "missing") return `${label}为必填项，请补齐后重试。`;
+            if (type.includes("string_too_short")) return `${label}不能为空，请补齐后重试。`;
+            if (type.includes("string_too_long")) return `${label}不能超过 ${ctx.max_length || "限制"} 个字符。`;
+            if (type.includes("greater_than_equal")) return `${label}不能小于 ${ctx.ge}。`;
+            if (type.includes("greater_than")) return `${label}必须大于 ${ctx.gt}。`;
+            if (type.includes("less_than_equal")) return `${label}不能大于 ${ctx.le}。`;
+            if (type.includes("int_") || type.includes("float_") || type.includes("decimal_")) return `${label}必须填写有效数字。`;
+            if (type.includes("bool_")) return `${label}必须为启用或停用。`;
+            if (rawMessage) return rawMessage.endsWith("。") ? rawMessage : `${rawMessage}。`;
+            return `${label}填写不符合要求，请检查后重试。`;
+        }
+
+        function providerSaveFailureMessage(error, isEditing) {
+            const actionLabel = isEditing ? "更新提供商" : "新增提供商";
+            const payloadMessage = firstProviderValidationError(error?.payload);
+            if (payloadMessage) return `${actionLabel}失败：${payloadMessage}`;
+            const message = String(error?.message || "").trim();
+            if (message.includes("登录状态已失效")) return "登录状态已失效，已跳转登录页，请重新登录后再新增提供商。";
+            if (message.includes("无权访问")) return "当前账号没有提供商管理权限，无法新增提供商。";
+            if (message.includes("请求超时") || error?.name === "AbortError") return `${actionLabel}失败：请求超时或页面已切换，请确认网络后重试。`;
+            if (message.includes("Failed to fetch") || message.includes("NetworkError")) return `${actionLabel}失败：无法连接到服务器，请检查网络或后端服务状态。`;
+            if (message.includes("提供商名称已存在") || message.includes("UNIQUE constraint") || message.includes("duplicate key")) {
+                return "新增提供商失败：提供商名称已存在，请换一个名称。";
+            }
+            if (message.includes("Request validation failed")) return `${actionLabel}失败：表单参数校验未通过，请检查必填项、数字范围和维护窗口。`;
+            return `${actionLabel}失败：${message || "服务器未返回具体原因，请稍后重试。"}`;
         }
 
         function loadProviderPresetModels() {
@@ -5592,25 +6424,14 @@
         catalogModelsBody?.addEventListener("change", () => {
             syncCatalogCheckAllState();
         });
+        providerForm.addEventListener("invalid", (event) => {
+            const input = event.target;
+            if (!(input instanceof HTMLInputElement || input instanceof HTMLSelectElement || input instanceof HTMLTextAreaElement)) return;
+            showToast(providerInvalidControlMessage(input), "error");
+        }, true);
         checkAllBtn.addEventListener("click", async () => {
-            const features = await openTestFeaturePicker({ title: "选择全部提供商测试功能" });
-            if (!features) return;
             try {
-                setButtonLoading(checkAllBtn, true);
-                const results = await runHealthCheckStream({
-                    url: "/api/providers/test-all-stream",
-                    title: "全部提供商健康检查",
-                    scope: "all",
-                    trigger: checkAllBtn,
-                    showModal: true,
-                    data: { features },
-                });
-                const providerResults = results.filter((item) => item.scope === "provider");
-                const successCount = providerResults.filter((item) => item.success).length;
-                setButtonLoading(checkAllBtn, false);
-                setButtonTransientFeedback(checkAllBtn, "success", { successText: "已完成" });
-                showToast(`已完成全部健康检查：${successCount}/${providerResults.length} 个提供商通过`);
-                await loadProviders();
+                await runAllProvidersHealthBatch(checkAllBtn);
             } catch (error) {
                 setButtonLoading(checkAllBtn, false);
                 setButtonTransientFeedback(checkAllBtn, "error", { errorText: "失败" });
@@ -5626,16 +6447,19 @@
             const apiKey = providerApiKeyInput.value.trim();
             if (!id && !apiKey) {
                 showToast("新增提供商时必须填写 API Key", "error");
+                providerApiKeyInput.focus();
+                return;
+            }
+            if (id && !apiKey) {
+                showToast("编辑提供商时 API Key 不能为空；如需保持不变请保留当前密钥", "error");
+                providerApiKeyInput.focus();
                 return;
             }
             const maxRetries = Number(providerMaxRetriesInput.value || 0);
-            if (maxRetries > providerGlobalMaxRetries) {
-                providerMaxRetriesInput.focus();
-                showToast(`提供商最大重试次数不能大于全局最大重试次数 ${providerGlobalMaxRetries}`, "error");
-                return;
-            }
             const modelConfigs = collectProviderModelConfigs();
             if (modelConfigs === null) return;
+            const maintenanceWindowResult = validateProviderMaintenanceWindow({ focus: true });
+            if (!maintenanceWindowResult.valid) return;
             const payload = {
                 name: providerNameInput.value.trim(),
                 base_url: providerBaseUrlInput.value.trim(),
@@ -5651,12 +6475,8 @@
                 max_qps: providerMaxQpsInput.value === "" ? null : Number(providerMaxQpsInput.value),
                 max_rpm: providerMaxRpmInput.value === "" ? null : Number(providerMaxRpmInput.value),
                 first_token_timeout_sec: providerFirstTokenTimeoutSecInput.value === "" ? null : Number(providerFirstTokenTimeoutSecInput.value),
-                trust_level: providerTrustLevelInput.value || "standard",
-                content_integrity_status: providerContentIntegrityStatusInput.value || "unknown",
-                content_integrity_score: Number(providerContentIntegrityScoreInput.value || 80),
                 content_guard_enabled: providerContentGuardEnabledInput.checked,
                 buffer_stream_for_guard: providerBufferStreamForGuardInput.checked,
-                maintenance_window: providerMaintenanceWindowInput.value.trim() || null,
                 maintenance_mode_enabled: providerMaintenanceModeEnabledInput.checked,
                 auto_circuit_break_enabled: providerAutoCircuitBreakEnabledInput.checked,
                 auto_recover_enabled: providerAutoRecoverEnabledInput.checked,
@@ -5665,24 +6485,31 @@
                 model_configs: modelConfigs,
                 remark: providerRemarkInput.value.trim(),
             };
+            if (!maintenanceWindowResult.omit) {
+                payload.maintenance_window = maintenanceWindowResult.value;
+            }
             if (id) {
-                if (apiKey) payload.api_key = apiKey;
+                if (apiKey !== editingProviderApiKey) payload.api_key = apiKey;
             } else {
                 payload.api_key = apiKey;
             }
             try {
                 setButtonLoading(submitBtn, true);
+                showToast(id ? "正在更新提供商..." : "正在保存提供商...");
                 if (id) {
                     await api.put(`/api/providers/${id}`, payload);
+                    setButtonTransientFeedback(submitBtn, "success", { successText: "已更新" });
                     showToast("提供商已更新");
                 } else {
                     await api.post("/api/providers", payload);
-                    showToast("提供商已创建");
+                    setButtonTransientFeedback(submitBtn, "success", { successText: "已创建" });
+                    showToast("提供商已创建，协议检测已在后台执行");
                 }
                 closeProviderModal({ force: true, reason: "submit" });
                 await loadProviders();
             } catch (error) {
-                showToast(error.message, "error");
+                setButtonTransientFeedback(submitBtn, "error", { errorText: id ? "更新失败" : "创建失败" });
+                showToast(providerSaveFailureMessage(error, Boolean(id)), "error");
             } finally {
                 setButtonLoading(submitBtn, false);
                 refreshRawApiKeyInputState();
@@ -5720,6 +6547,18 @@
                 });
                 renderProviders(searchInput.value);
             });
+        });
+        [
+            providerMaintenanceWindowTypeInput,
+            providerMaintenanceWindowTimezoneInput,
+            providerMaintenanceWindowWeekdayInput,
+            providerMaintenanceWindowStartInput,
+            providerMaintenanceWindowEndInput,
+            providerMaintenanceWindowOnceStartInput,
+            providerMaintenanceWindowOnceEndInput,
+        ].forEach((field) => {
+            field?.addEventListener("input", syncProviderMaintenanceWindowControls);
+            field?.addEventListener("change", syncProviderMaintenanceWindowControls);
         });
         providerForm.addEventListener("input", updateProviderFormDirtyState);
         providerForm.addEventListener("change", updateProviderFormDirtyState);
@@ -5768,7 +6607,6 @@
         availabilityRefreshBtn?.addEventListener("click", async () => {
             await loadAvailability({ manual: true });
         });
-
         function normalizeProviderOverviewItems(overview = {}) {
             if (Array.isArray(overview)) return overview;
             if (Array.isArray(overview.providers)) return overview.providers;
@@ -5790,12 +6628,10 @@
             }
             renderProviderTelemetry(overview.summary || {});
             renderProviders(searchInput.value);
-            populateAvailabilityProviderOptions();
             if (modelTableBody) {
                 renderProviderModelFilterOptions();
                 await loadProviderModels({ silent: true });
             }
-            await loadAvailability({ manual: false });
             syncOpenModelsDetailModal();
         }
 
@@ -5880,7 +6716,7 @@
             return `
                 <div class="provider-compact-metrics">
                     <span>成功率 <strong>${escapeHtml(formatPercent(provider.success_rate))}</strong></span>
-                    <span>首 Token <strong>${escapeHtml(formatLatencyMs(provider.avg_first_token_latency_ms))}</strong></span>
+                    <span>平均首 Token <strong>${escapeHtml(formatLatencyMs(provider.avg_first_token_latency_ms))}</strong></span>
                     <span>样本 <strong>${formatNumber(provider.recent_request_count || 0)}</strong></span>
                 </div>
             `;
@@ -5899,9 +6735,8 @@
                 ? `维护中 · ${provider.maintenance_window || "未填写维护窗口"}`
                 : (provider.maintenance_window || "未设置维护窗口");
             const trustText = [
-                `信任 ${provider.trust_level_label || formatProviderTrustLevelLabel(provider.trust_level)}`,
+                `可信状态 ${provider.computed_trust_status_label || formatProviderTrustStatusLabel(provider.computed_trust_status)}`,
                 `完整性 ${provider.content_integrity_status_label || formatContentIntegrityStatusLabel(provider.content_integrity_status)}`,
-                `评分 ${provider.content_integrity_score ?? "-"}`,
             ].join(" · ");
             const guardText = [
                 `检测 ${formatSwitchText(provider.content_guard_enabled)}`,
@@ -5946,9 +6781,8 @@
                 ? `维护中 · ${provider.maintenance_window || "未填写维护窗口"}`
                 : (provider.maintenance_window || "未设置维护窗口");
             const trustText = [
-                `信任 ${provider.trust_level_label || formatProviderTrustLevelLabel(provider.trust_level)}`,
+                `可信状态 ${provider.computed_trust_status_label || formatProviderTrustStatusLabel(provider.computed_trust_status)}`,
                 `完整性 ${provider.content_integrity_status_label || formatContentIntegrityStatusLabel(provider.content_integrity_status)}`,
-                `评分 ${provider.content_integrity_score ?? "-"}`,
             ].join(" · ");
             const guardText = [
                 `检测 ${formatSwitchText(provider.content_guard_enabled)}`,
@@ -5963,7 +6797,7 @@
                         ${renderProviderDetailItem("Base URL", escapeHtml(provider.base_url || "-"))}
                         ${renderProviderDetailItem("模型能力", renderProviderModelHealth(provider.model_configs, provider.id))}
                         ${renderProviderDetailItem("维护策略", escapeHtml(maintenanceText))}
-                        ${renderProviderDetailItem("信任与完整性", escapeHtml(trustText))}
+                        ${renderProviderDetailItem("系统治理状态", escapeHtml(trustText))}
                         ${renderProviderDetailItem("检测策略", escapeHtml(guardText))}
                         ${renderProviderDetailItem("容量明细", renderProviderCapacity(provider))}
                         ${renderProviderDetailItem("质量明细", renderQualitySummary(provider))}
@@ -6522,11 +7356,23 @@
                 providersSelectAll.indeterminate = selectedVisibleCount > 0 && selectedVisibleCount < visibleIds.length;
                 providersSelectAll.disabled = visibleIds.length === 0;
             }
+            if (providersHealthSelectedBtn) {
+                providersHealthSelectedBtn.disabled = selectedProviderIds.size === 0;
+                providersHealthSelectedBtn.textContent = selectedProviderIds.size
+                    ? `健康检测选中 ${formatNumber(selectedProviderIds.size)}`
+                    : "健康检测选中";
+            }
             if (providersTrustSelectedBtn) {
                 providersTrustSelectedBtn.disabled = selectedProviderIds.size === 0;
                 providersTrustSelectedBtn.textContent = selectedProviderIds.size
                     ? `可信检测选中 ${formatNumber(selectedProviderIds.size)}`
                     : "可信检测选中";
+            }
+            if (providersProtocolDetectSelectedBtn) {
+                providersProtocolDetectSelectedBtn.disabled = selectedProviderIds.size === 0;
+                providersProtocolDetectSelectedBtn.textContent = selectedProviderIds.size
+                    ? `协议检测选中 ${formatNumber(selectedProviderIds.size)}`
+                    : "协议检测选中";
             }
         }
 
@@ -6548,10 +7394,10 @@
             };
         }
 
-        function getSelectedProviderTrustTargets() {
-            const selectedProviders = providers.filter((provider) => selectedProviderIds.has(Number(provider.id)));
+        function getProviderBatchTargets(providerItems, options = {}) {
+            const emptyMessage = options.emptyMessage || "该提供商当前没有可执行可信检测的挂载模型。";
             const targets = [];
-            selectedProviders.forEach((provider) => {
+            (Array.isArray(providerItems) ? providerItems : []).forEach((provider) => {
                 const modelConfigs = Array.isArray(provider.model_configs) ? provider.model_configs : [];
                 const mountedTargets = modelConfigs
                     .map((modelConfig) => providerModelConfigToTrustTarget(provider, modelConfig))
@@ -6570,10 +7416,193 @@
                     status: "skipped",
                     resultLabel: "已跳过",
                     latencyMs: null,
-                    message: "该提供商当前没有可执行可信检测的挂载模型。",
+                    message: emptyMessage,
                 });
             });
             return targets;
+        }
+
+        function getSelectedProviderBatchTargets(options = {}) {
+            const selectedProviders = providers.filter((provider) => selectedProviderIds.has(Number(provider.id)));
+            return getProviderBatchTargets(selectedProviders, options);
+        }
+
+        function getAllProviderBatchTargets(options = {}) {
+            return getProviderBatchTargets(providers, options);
+        }
+
+        function createProviderHealthBatchState(targets) {
+            return {
+                items: targets.map((target) => ({
+                    ...target,
+                    status: target.status || "pending",
+                    resultLabel: target.resultLabel || "等待中",
+                    latencyMs: target.latencyMs ?? null,
+                    message: target.message || "",
+                })),
+                startedAt: Date.now(),
+            };
+        }
+
+        function summarizeProviderHealthBatchState(batchState) {
+            const items = Array.isArray(batchState?.items) ? batchState.items : [];
+            const completedStatuses = new Set(["passed", "failed", "skipped", "rate_limited"]);
+            return {
+                total: items.length,
+                completed: items.filter((item) => completedStatuses.has(item.status)).length,
+                running: items.filter((item) => item.status === "running").length,
+                passed: items.filter((item) => item.status === "passed").length,
+                failed: items.filter((item) => item.status === "failed").length,
+                skipped: items.filter((item) => item.status === "skipped").length,
+                rateLimited: items.filter((item) => item.status === "rate_limited").length,
+                providerCount: new Set(items.map((item) => item.providerId).filter(Number.isFinite)).size,
+            };
+        }
+
+        function renderProviderHealthBatchStatusBadge(status) {
+            if (status === "passed") return '<span class="status-badge status-healthy">可用</span>';
+            if (status === "rate_limited") return '<span class="status-badge status-degraded">已限流</span>';
+            if (status === "failed") return '<span class="status-badge status-unhealthy">异常</span>';
+            if (status === "running") return '<span class="status-badge status-running">检测中</span>';
+            if (status === "skipped") return '<span class="status-badge status-unknown">已跳过</span>';
+            return '<span class="status-badge status-unknown">等待中</span>';
+        }
+
+        function renderProviderHealthBatchProgress(batchState) {
+            const summary = summarizeProviderHealthBatchState(batchState);
+            const summaryHtml = [
+                ["提供商", formatNumber(summary.providerCount)],
+                ["挂载模型", formatNumber(summary.total)],
+                ["完成", `${formatNumber(summary.completed)}/${formatNumber(summary.total)}`],
+                ["可用", formatNumber(summary.passed)],
+                ["异常", formatNumber(summary.failed)],
+                ["已限流", formatNumber(summary.rateLimited)],
+                ["跳过", formatNumber(summary.skipped)],
+            ].map(([label, value]) => `
+                <div class="provider-test-summary-item">
+                    <span>${escapeHtml(String(label))}</span>
+                    <strong>${escapeHtml(String(value))}</strong>
+                </div>
+            `).join("");
+            const itemHtml = batchState.items.map((item) => {
+                const latencyText = item.latencyMs == null ? "-" : `${formatNumber(item.latencyMs)} ms`;
+                const disabledText = item.modelId && (!item.providerEnabled || !item.modelEnabled)
+                    ? `<div class="table-muted">${!item.providerEnabled ? "提供商已停用" : "模型已停用"}，仍按挂载模型执行手动健康检测。</div>`
+                    : "";
+                return `
+                    <article class="provider-test-model-item provider-model-batch-item" data-status="${escapeHtml(item.status)}">
+                        <div class="provider-test-model-top">
+                            <strong>${escapeHtml(item.displayName)}</strong>
+                            <div>${renderProviderHealthBatchStatusBadge(item.status)}</div>
+                        </div>
+                        <div class="table-muted">${escapeHtml(item.resultLabel)} · 耗时 ${escapeHtml(String(latencyText))}</div>
+                        ${disabledText}
+                        ${item.message ? `<div class="provider-test-model-message">${escapeHtml(item.message)}</div>` : ""}
+                    </article>
+                `;
+            }).join("");
+            return `
+                <div class="provider-test-result-shell">
+                    <section class="provider-test-result-card">
+                        <div class="panel-kicker">批量健康检测</div>
+                        <div class="provider-test-summary-grid">${summaryHtml}</div>
+                    </section>
+                    <section class="provider-test-result-card">
+                        <div class="panel-kicker">${summary.completed >= summary.total ? "检测结果" : `检测进度 · ${formatNumber(summary.running)} 进行中`}</div>
+                        <div class="provider-test-model-list provider-model-batch-list">${itemHtml}</div>
+                    </section>
+                </div>
+            `;
+        }
+
+        async function runProviderHealthBatch(targets, trigger, features, options = {}) {
+            const title = options.title || "提供商批量健康检测";
+            if (!targets.length) {
+                showToast("当前没有可执行的挂载模型", "error");
+                return [];
+            }
+            const batchState = createProviderHealthBatchState(targets);
+            const refresh = () => refreshHealthCheckResultModal(title, renderProviderHealthBatchProgress(batchState));
+            batchState.items.forEach((item) => {
+                if (item.modelId == null) return;
+                item.status = "running";
+                item.resultLabel = "检测中";
+                item.message = "正在执行健康测试";
+            });
+            setButtonLoading(trigger, true);
+            openHealthCheckResultModal(title, renderProviderHealthBatchProgress(batchState), trigger);
+            const executableItems = batchState.items.filter((item) => item.modelId != null);
+            const groups = new Map();
+            executableItems.forEach((item) => {
+                if (!groups.has(item.providerId)) groups.set(item.providerId, []);
+                groups.get(item.providerId).push(item);
+            });
+            try {
+                await Promise.all(Array.from(groups.values()).map(async (items) => {
+                    for (const item of items) {
+                        item.status = "running";
+                        item.resultLabel = "检测中";
+                        item.message = "正在执行健康测试";
+                        refresh();
+                        const startedAt = Date.now();
+                        try {
+                            const result = await api.post(
+                                `/api/providers/${item.providerId}/models/${item.modelId}/test`,
+                                { features },
+                                { timeoutMs: PROBE_API_TIMEOUT_MS },
+                            );
+                            const usable = isHealthCheckUsable(result);
+                            item.status = isProbeRateLimitedResult(result) ? "rate_limited" : (usable ? "passed" : "failed");
+                            item.resultLabel = formatHealthCheckOutcomeLabel(result);
+                            item.latencyMs = result?.latency_ms ?? (Date.now() - startedAt);
+                            item.message = result?.message || "";
+                        } catch (error) {
+                            item.status = "failed";
+                            item.resultLabel = "执行失败";
+                            item.latencyMs = Date.now() - startedAt;
+                            item.message = error.message || "健康检测请求失败";
+                        }
+                        refresh();
+                    }
+                }));
+                const summary = summarizeProviderHealthBatchState(batchState);
+                setButtonTransientFeedback(trigger, summary.failed === 0 && summary.rateLimited === 0 ? "success" : "error", {
+                    successText: "已完成",
+                    errorText: "有异常",
+                });
+                showToast(
+                    `${title}：可用 ${formatNumber(summary.passed)}/${formatNumber(summary.total)}，限流 ${formatNumber(summary.rateLimited)}`,
+                    summary.failed === 0 && summary.rateLimited === 0 ? "success" : "error",
+                );
+                await wait(500);
+                await loadProviders();
+                refreshHealthCheckResultModal(title, renderProviderHealthBatchProgress(batchState));
+                return batchState.items;
+            } finally {
+                setButtonLoading(trigger, false);
+            }
+        }
+
+        async function runSelectedProvidersHealthBatch(trigger) {
+            if (!selectedProviderIds.size) {
+                showToast("请先选择提供商", "error");
+                return;
+            }
+            const features = await openTestFeaturePicker({ title: "选择选中提供商健康检测功能" });
+            if (!features) return;
+            const targets = getSelectedProviderBatchTargets({
+                emptyMessage: "该提供商当前没有可执行健康检测的挂载模型。",
+            });
+            await runProviderHealthBatch(targets, trigger, features, { title: "提供商批量健康检测" });
+        }
+
+        async function runAllProvidersHealthBatch(trigger) {
+            const features = await openTestFeaturePicker({ title: "选择全部提供商健康检测功能" });
+            if (!features) return;
+            const targets = getAllProviderBatchTargets({
+                emptyMessage: "该提供商当前没有可执行健康检测的挂载模型。",
+            });
+            await runProviderHealthBatch(targets, trigger, features, { title: "全部提供商健康检测" });
         }
 
         function createProviderTrustBatchState(targets) {
@@ -6591,7 +7620,7 @@
 
         function summarizeProviderTrustBatchState(batchState) {
             const items = Array.isArray(batchState?.items) ? batchState.items : [];
-            const completedStatuses = new Set(["passed", "review", "failed", "skipped"]);
+            const completedStatuses = new Set(["passed", "review", "failed", "skipped", "rate_limited"]);
             return {
                 total: items.length,
                 completed: items.filter((item) => completedStatuses.has(item.status)).length,
@@ -6600,6 +7629,7 @@
                 review: items.filter((item) => item.status === "review").length,
                 failed: items.filter((item) => item.status === "failed").length,
                 skipped: items.filter((item) => item.status === "skipped").length,
+                rateLimited: items.filter((item) => item.status === "rate_limited").length,
                 providerCount: new Set(items.map((item) => item.providerId).filter(Number.isFinite)).size,
             };
         }
@@ -6607,6 +7637,7 @@
         function renderProviderTrustBatchStatusBadge(status) {
             if (status === "passed") return '<span class="status-badge status-healthy">可信</span>';
             if (status === "review") return '<span class="status-badge status-degraded">需复核</span>';
+            if (status === "rate_limited") return '<span class="status-badge status-degraded">已限流</span>';
             if (status === "failed") return '<span class="status-badge status-unhealthy">异常</span>';
             if (status === "running") return '<span class="status-badge status-running">检测中</span>';
             if (status === "skipped") return '<span class="status-badge status-unknown">已跳过</span>';
@@ -6621,6 +7652,7 @@
                 ["完成", `${formatNumber(summary.completed)}/${formatNumber(summary.total)}`],
                 ["可信", formatNumber(summary.passed)],
                 ["需复核", formatNumber(summary.review)],
+                ["已限流", formatNumber(summary.rateLimited)],
                 ["异常", formatNumber(summary.failed)],
                 ["跳过", formatNumber(summary.skipped)],
             ].map(([label, value]) => `
@@ -6661,7 +7693,7 @@
         }
 
         async function runSelectedProvidersTrustBatch(trigger) {
-            const targets = getSelectedProviderTrustTargets();
+            const targets = getSelectedProviderBatchTargets();
             if (!selectedProviderIds.size) {
                 showToast("请先选择提供商", "error");
                 return;
@@ -6686,19 +7718,23 @@
                     for (const item of items) {
                         item.status = "running";
                         item.resultLabel = "执行中";
-                        item.message = `正在执行 ${CONTENT_TRUST_PROBE_KEYS.length} 个可信探针`;
+                        item.message = formatContentTrustRunningMessage();
                         refresh();
                         try {
                             const startedAt = Date.now();
                             const result = await api.post(
                                 "/api/content-guard/trust-probe",
                                 buildContentTrustProbePayload(item.providerId, item.modelId),
+                                { timeoutMs: PROBE_API_TIMEOUT_MS },
                             );
                             const guardResult = result?.summary?.content_guard_result || result?.summary?.status;
-                            item.status = contentTrustBatchStatusFromGuardResult(guardResult);
+                            item.status = isProbeRateLimitedResult(result?.summary) ? "rate_limited" : contentTrustBatchStatusFromGuardResult(guardResult);
                             item.resultLabel = formatContentGuardResultLabel(guardResult);
                             item.latencyMs = result?.summary?.latency_ms ?? result?.latency_ms ?? (Date.now() - startedAt);
-                            item.message = result?.summary?.content_guard_reason || result?.message || "";
+                            item.message = [
+                                result?.summary?.content_guard_reason || result?.message || "",
+                                formatContentTrustExecutionPlan(result?.execution_plan),
+                            ].filter(Boolean).join("；");
                         } catch (error) {
                             item.status = "failed";
                             item.resultLabel = "执行失败";
@@ -6709,18 +7745,199 @@
                     }
                 }));
                 const summary = summarizeProviderTrustBatchState(batchState);
-                setButtonTransientFeedback(trigger, summary.failed === 0 ? (summary.review ? "review" : "success") : "error", {
+                setButtonTransientFeedback(trigger, summary.failed === 0 && summary.rateLimited === 0 ? (summary.review ? "review" : "success") : "error", {
                     successText: "已完成",
                     reviewText: "需复核",
                     errorText: "有异常",
                 });
                 showToast(
-                    `可信检测完成：可信 ${formatNumber(summary.passed)}，需复核 ${formatNumber(summary.review)}，异常 ${formatNumber(summary.failed)}`,
-                    summary.failed === 0 ? (summary.review ? "warning" : "success") : "error",
+                    `可信检测完成：可信 ${formatNumber(summary.passed)}，需复核 ${formatNumber(summary.review)}，限流 ${formatNumber(summary.rateLimited)}，异常 ${formatNumber(summary.failed)}`,
+                    summary.failed === 0 && summary.rateLimited === 0 ? (summary.review ? "warning" : "success") : "error",
                 );
                 await wait(500);
                 await loadProviders();
                 refreshHealthCheckResultModal(title, renderProviderTrustBatchProgress(batchState));
+            } finally {
+                setButtonLoading(trigger, false);
+            }
+        }
+
+        function createProviderProtocolBatchState(targets) {
+            return {
+                items: targets.map((target) => ({
+                    ...target,
+                    status: target.status || "pending",
+                    resultLabel: target.resultLabel || "等待中",
+                    latencyMs: target.latencyMs ?? null,
+                    message: target.message || "",
+                    endpointSummary: "",
+                })),
+                startedAt: Date.now(),
+            };
+        }
+
+        function summarizeProviderProtocolBatchState(batchState) {
+            const items = Array.isArray(batchState?.items) ? batchState.items : [];
+            const completedStatuses = new Set(["passed", "failed", "skipped", "rate_limited"]);
+            return {
+                total: items.length,
+                completed: items.filter((item) => completedStatuses.has(item.status)).length,
+                running: items.filter((item) => item.status === "running").length,
+                passed: items.filter((item) => item.status === "passed").length,
+                failed: items.filter((item) => item.status === "failed").length,
+                skipped: items.filter((item) => item.status === "skipped").length,
+                rateLimited: items.filter((item) => item.status === "rate_limited").length,
+                providerCount: new Set(items.map((item) => item.providerId).filter(Number.isFinite)).size,
+            };
+        }
+
+        function renderProviderProtocolBatchStatusBadge(status) {
+            if (status === "passed") return '<span class="status-badge status-healthy">已更新</span>';
+            if (status === "failed") return '<span class="status-badge status-unhealthy">未通过</span>';
+            if (status === "rate_limited") return '<span class="status-badge status-degraded">已限流</span>';
+            if (status === "running") return '<span class="status-badge status-running">检测中</span>';
+            if (status === "skipped") return '<span class="status-badge status-unknown">已跳过</span>';
+            return '<span class="status-badge status-unknown">等待中</span>';
+        }
+
+        function formatEndpointProtocolDetectionEndpointSummary(result = {}) {
+            const endpoints = Array.isArray(result.endpoint_results) ? result.endpoint_results : [];
+            if (!endpoints.length) return "";
+            return endpoints.map((item) => {
+                const label = item.protocol_type === "chat_completions" ? "Chat" : "Responses";
+                const status = item.success ? "通过" : "失败";
+                const statusCode = item.status_code == null ? "-" : item.status_code;
+                return `${label} ${status}（${statusCode}）`;
+            }).join("；");
+        }
+
+        function applyEndpointProtocolDetectionResultToBatchItem(item, result = {}) {
+            item.status = isProbeRateLimitedResult(result) ? "rate_limited" : (result.update_allowed ? "passed" : "failed");
+            item.resultLabel = isProbeRateLimitedResult(result) ? "已限流" : (result.protocol_label || formatProviderModelProtocolLabel(result));
+            item.latencyMs = result.latency_ms ?? item.latencyMs;
+            item.message = result.message || "";
+            item.endpointSummary = formatEndpointProtocolDetectionEndpointSummary(result);
+        }
+
+        function renderProviderProtocolBatchProgress(batchState) {
+            const summary = summarizeProviderProtocolBatchState(batchState);
+            const summaryHtml = [
+                ["提供商", formatNumber(summary.providerCount)],
+                ["挂载模型", formatNumber(summary.total)],
+                ["完成", `${formatNumber(summary.completed)}/${formatNumber(summary.total)}`],
+                ["已更新", formatNumber(summary.passed)],
+                ["未通过", formatNumber(summary.failed)],
+                ["已限流", formatNumber(summary.rateLimited)],
+                ["跳过", formatNumber(summary.skipped)],
+            ].map(([label, value]) => `
+                <div class="provider-test-summary-item">
+                    <span>${escapeHtml(String(label))}</span>
+                    <strong>${escapeHtml(String(value))}</strong>
+                </div>
+            `).join("");
+            const itemHtml = batchState.items.map((item) => {
+                const latencyText = item.latencyMs == null ? "-" : `${formatNumber(item.latencyMs)} ms`;
+                return `
+                    <article class="provider-test-model-item provider-model-batch-item" data-status="${escapeHtml(item.status)}">
+                        <div class="provider-test-model-top">
+                            <strong>${escapeHtml(item.displayName)}</strong>
+                            <div>${renderProviderProtocolBatchStatusBadge(item.status)}</div>
+                        </div>
+                        <div class="table-muted">${escapeHtml(item.resultLabel)} · 耗时 ${escapeHtml(String(latencyText))}</div>
+                        ${item.endpointSummary ? `<div class="table-muted">${escapeHtml(item.endpointSummary)}</div>` : ""}
+                        ${item.message ? `<div class="provider-test-model-message">${escapeHtml(item.message)}</div>` : ""}
+                    </article>
+                `;
+            }).join("");
+            return `
+                <div class="provider-test-result-shell">
+                    <section class="provider-test-result-card">
+                        <div class="panel-kicker">端点协议检测</div>
+                        <div class="provider-test-summary-grid">${summaryHtml}</div>
+                    </section>
+                    <section class="provider-test-result-card">
+                        <div class="panel-kicker">${summary.completed >= summary.total ? "检测结果" : `检测进度 · ${formatNumber(summary.running)} 进行中`}</div>
+                        <div class="provider-test-model-list provider-model-batch-list">${itemHtml}</div>
+                    </section>
+                </div>
+            `;
+        }
+
+        async function runSelectedProvidersProtocolDetection(trigger) {
+            if (!selectedProviderIds.size) {
+                showToast("请先选择提供商", "error");
+                return;
+            }
+            const targets = getSelectedProviderBatchTargets();
+            const batchState = createProviderProtocolBatchState(targets);
+            const title = "提供商批量协议检测";
+            const refresh = () => refreshHealthCheckResultModal(title, renderProviderProtocolBatchProgress(batchState));
+            batchState.items.forEach((item) => {
+                if (item.modelId == null) {
+                    item.status = "skipped";
+                    item.resultLabel = "已跳过";
+                    item.message = "该提供商没有可检测的挂载模型";
+                    return;
+                }
+                item.status = "running";
+                item.resultLabel = "检测中";
+                item.message = "正在分别请求 Chat Completions 与 Responses 端点";
+            });
+            setButtonLoading(trigger, true);
+            openHealthCheckResultModal(title, renderProviderProtocolBatchProgress(batchState), trigger);
+            const executableItems = batchState.items.filter((item) => item.modelId != null);
+            const groups = new Map();
+            executableItems.forEach((item) => {
+                if (!groups.has(item.providerId)) groups.set(item.providerId, []);
+                groups.get(item.providerId).push(item);
+            });
+            try {
+                await Promise.all(Array.from(groups.values()).map(async (items) => {
+                    for (const item of items) {
+                        item.status = "running";
+                        item.resultLabel = "检测中";
+                        item.message = "正在分别请求 Chat Completions 与 Responses 端点";
+                        refresh();
+                        try {
+                            const result = await api.post(
+                                "/api/providers/models/protocol-detection",
+                                {
+                                    targets: [{
+                                        provider_id: item.providerId,
+                                        provider_model_id: item.modelId,
+                                    }],
+                                },
+                                { timeoutMs: PROBE_API_TIMEOUT_MS },
+                            );
+                            const detectionResult = (result.model_results || [])[0];
+                            if (!detectionResult) {
+                                item.status = "skipped";
+                                item.resultLabel = "未返回";
+                                item.message = "接口未返回该挂载模型的检测结果";
+                            } else {
+                                applyEndpointProtocolDetectionResultToBatchItem(item, detectionResult);
+                            }
+                        } catch (error) {
+                            item.status = "failed";
+                            item.resultLabel = "执行失败";
+                            item.latencyMs = null;
+                            item.message = error.message || "协议检测请求失败";
+                        }
+                        refresh();
+                    }
+                }));
+                const summary = summarizeProviderProtocolBatchState(batchState);
+                setButtonTransientFeedback(trigger, summary.failed === 0 && summary.rateLimited === 0 ? "success" : "error", {
+                    successText: "已完成",
+                    errorText: "有异常",
+                });
+                showToast(
+                    `协议检测完成：更新 ${formatNumber(summary.passed)}，未通过 ${formatNumber(summary.failed)}，限流 ${formatNumber(summary.rateLimited)}`,
+                    summary.failed === 0 && summary.rateLimited === 0 ? "success" : "error",
+                );
+                await wait(500);
+                await loadProviders();
+                refresh();
             } finally {
                 setButtonLoading(trigger, false);
             }
@@ -6893,7 +8110,11 @@
                 trigger,
             );
             try {
-                const result = await api.post(`/api/providers/${providerId}/models/${modelId}/test`, { features });
+                const result = await api.post(
+                    `/api/providers/${providerId}/models/${modelId}/test`,
+                    { features },
+                    { timeoutMs: PROBE_API_TIMEOUT_MS },
+                );
                 const resultUsable = isHealthCheckUsable(result);
                 applyProviderModelHealthSnapshot(providerId, modelId, {
                     success: result.success === true,
@@ -6949,7 +8170,11 @@
                 trigger,
             );
             try {
-                const result = await api.post("/api/content-guard/trust-probe", buildContentTrustProbePayload(providerId, modelId));
+                const result = await api.post(
+                    "/api/content-guard/trust-probe",
+                    buildContentTrustProbePayload(providerId, modelId),
+                    { timeoutMs: PROBE_API_TIMEOUT_MS },
+                );
                 const guardResult = result?.summary?.content_guard_result || result?.summary?.status;
                 if (options.closeModelsDetail) {
                     closeModelsDetailModal({ force: true, reason: "trust-test-model" });
@@ -7089,8 +8314,14 @@
             syncProviderSelectionUi(visibleProviders);
         });
 
+        providersHealthSelectedBtn?.addEventListener("click", async () => {
+            await runSelectedProvidersHealthBatch(providersHealthSelectedBtn);
+        });
         providersTrustSelectedBtn?.addEventListener("click", async () => {
             await runSelectedProvidersTrustBatch(providersTrustSelectedBtn);
+        });
+        providersProtocolDetectSelectedBtn?.addEventListener("click", async () => {
+            await runSelectedProvidersProtocolDetection(providersProtocolDetectSelectedBtn);
         });
 
         modelTableBody?.addEventListener("click", async (event) => {
@@ -7185,25 +8416,22 @@
             providerIdInput.value = provider?.id ?? "";
             providerNameInput.value = provider?.name ?? "";
             providerBaseUrlInput.value = provider?.base_url ?? "";
-            providerApiKeyInput.value = "";
+            editingProviderApiKey = provider?.api_key ?? "";
+            providerApiKeyInput.value = editingProviderApiKey;
             providerTypeInput.value = provider?.provider_type ?? "openai_compatible";
             providerGroupNameInput.value = provider?.group_name ?? "";
             providerRegionTagInput.value = provider?.region_tag ?? "";
             providerPriorityInput.value = provider?.priority ?? 100;
             providerTimeoutMsInput.value = provider?.timeout_ms ?? 30000;
-            providerMaxRetriesInput.max = String(providerGlobalMaxRetries);
-            providerMaxRetriesInput.value = provider?.max_retries ?? Math.min(2, providerGlobalMaxRetries);
+            providerMaxRetriesInput.value = provider?.max_retries ?? 2;
             providerMaxActiveRequestsInput.value = provider?.max_active_requests ?? 20;
             providerMaxActiveStreamsInput.value = provider?.max_active_streams ?? 10;
             providerMaxQpsInput.value = provider?.max_qps ?? 20;
             providerMaxRpmInput.value = provider?.max_rpm ?? 20;
             providerFirstTokenTimeoutSecInput.value = provider?.first_token_timeout_sec ?? 60;
-            providerTrustLevelInput.value = provider?.trust_level ?? "standard";
-            providerContentIntegrityStatusInput.value = provider?.content_integrity_status ?? "unknown";
-            providerContentIntegrityScoreInput.value = provider?.content_integrity_score ?? 80;
             providerContentGuardEnabledInput.checked = provider?.content_guard_enabled ?? true;
             providerBufferStreamForGuardInput.checked = provider?.buffer_stream_for_guard ?? true;
-            providerMaintenanceWindowInput.value = provider?.maintenance_window ?? "";
+            applyProviderMaintenanceWindowValue(provider?.maintenance_window ?? "");
             providerMaintenanceModeEnabledInput.checked = provider?.maintenance_mode_enabled ?? false;
             providerAutoCircuitBreakEnabledInput.checked = provider?.auto_circuit_break_enabled ?? true;
             providerAutoRecoverEnabledInput.checked = provider?.auto_recover_enabled ?? true;
@@ -7396,12 +8624,6 @@
         }, 30000);
         registerPageCleanup(() => window.clearInterval(providerPageTimer));
 
-        try {
-            const settings = await api.get("/api/settings");
-            providerGlobalMaxRetries = Math.max(2, Number(settings.global_max_retries ?? 2));
-        } catch (error) {
-            providerGlobalMaxRetries = 2;
-        }
         await loadProviders();
     }
 
@@ -7412,6 +8634,7 @@
         const providerModelEnabledSelect = document.getElementById("provider-model-enabled");
         const providerModelHealthSelect = document.getElementById("provider-model-health");
         const providerModelTrustSelect = document.getElementById("provider-model-trust");
+        const providerModelQualityWindowSelect = document.getElementById("provider-model-quality-window");
         const providerModelPageSizeSelect = document.getElementById("provider-model-page-size");
         const providerModelPageMeta = document.getElementById("provider-model-page-meta");
         const providerModelPrevPageBtn = document.getElementById("provider-model-prev-page-btn");
@@ -7423,6 +8646,7 @@
         const providerModelSelectVisibleBtn = document.getElementById("provider-model-select-visible-btn");
         const providerModelClearSelectionBtn = document.getElementById("provider-model-clear-selection-btn");
         const providerModelTestSelectedBtn = document.getElementById("provider-model-test-selected-btn");
+        const providerModelProtocolDetectSelectedBtn = document.getElementById("provider-model-protocol-detect-selected-btn");
         const providerModelTrustSelectedBtn = document.getElementById("provider-model-trust-selected-btn");
         const providerModelTestPageBtn = document.getElementById("provider-model-test-page-btn");
         const providerModelTrustPageBtn = document.getElementById("provider-model-trust-page-btn");
@@ -7510,6 +8734,7 @@
             if (providerModelEnabledSelect?.value) params.set("enabled", providerModelEnabledSelect.value);
             if (providerModelHealthSelect?.value) params.set("health_status", providerModelHealthSelect.value);
             if (providerModelTrustSelect?.value) params.set("trust_status", providerModelTrustSelect.value);
+            if (providerModelQualityWindowSelect?.value) params.set("quality_window_hours", providerModelQualityWindowSelect.value);
             return params;
         }
 
@@ -7593,7 +8818,7 @@
                     ? `当前页已选 ${formatNumber(selectedVisibleCount)} 个`
                     : "当前选择可跨页保留";
             }
-            [providerModelClearSelectionBtn, providerModelTestSelectedBtn, providerModelTrustSelectedBtn].forEach((button) => {
+            [providerModelClearSelectionBtn, providerModelTestSelectedBtn, providerModelProtocolDetectSelectedBtn, providerModelTrustSelectedBtn].forEach((button) => {
                 if (button) button.disabled = selectedCount === 0;
             });
             [providerModelTestPageBtn, providerModelTrustPageBtn, providerModelSelectVisibleBtn].forEach((button) => {
@@ -7735,6 +8960,9 @@
             state.pageSize = Number(result.page_size || state.pageSize || 20);
             state.totalPages = Number(result.total_pages || 1);
             if (providerModelPageSizeSelect) providerModelPageSizeSelect.value = String(state.pageSize);
+            if (providerModelQualityWindowSelect && result.quality_window_hours) {
+                providerModelQualityWindowSelect.value = String(result.quality_window_hours);
+            }
             renderProviderModels(state.items);
             renderProviderModelPagination();
             if (!silent) showToast("模型挂载矩阵已刷新");
@@ -7758,7 +8986,11 @@
                 trigger,
             );
             try {
-                const result = await api.post(`/api/providers/${providerId}/models/${modelId}/test`, { features });
+                const result = await api.post(
+                    `/api/providers/${providerId}/models/${modelId}/test`,
+                    { features },
+                    { timeoutMs: PROBE_API_TIMEOUT_MS },
+                );
                 const resultUsable = isHealthCheckUsable(result);
                 setButtonLoading(trigger, false);
                 setButtonTransientFeedback(trigger, resultUsable ? "success" : "error", {
@@ -7804,7 +9036,11 @@
                 trigger,
             );
             try {
-                const result = await api.post("/api/content-guard/trust-probe", buildContentTrustProbePayload(providerId, modelId));
+                const result = await api.post(
+                    "/api/content-guard/trust-probe",
+                    buildContentTrustProbePayload(providerId, modelId),
+                    { timeoutMs: PROBE_API_TIMEOUT_MS },
+                );
                 const guardResult = result?.summary?.content_guard_result || result?.summary?.status;
                 setButtonLoading(trigger, false);
                 setButtonTransientFeedback(trigger, guardResult === "pass" ? "success" : "error", {
@@ -7852,17 +9088,19 @@
             const items = Array.isArray(batchState?.items) ? batchState.items : [];
             return {
                 total: items.length,
-                completed: items.filter((item) => ["passed", "review", "failed"].includes(item.status)).length,
+                completed: items.filter((item) => ["passed", "review", "failed", "rate_limited"].includes(item.status)).length,
                 running: items.filter((item) => item.status === "running").length,
                 passed: items.filter((item) => item.status === "passed").length,
                 review: items.filter((item) => item.status === "review").length,
                 failed: items.filter((item) => item.status === "failed").length,
+                rateLimited: items.filter((item) => item.status === "rate_limited").length,
             };
         }
 
         function renderProviderModelBatchStatusBadge(status, kind) {
             if (status === "passed") return `<span class="status-badge status-healthy">${kind === "trust" ? "可信" : "可用"}</span>`;
             if (status === "review") return '<span class="status-badge status-degraded">需复核</span>';
+            if (status === "rate_limited") return '<span class="status-badge status-degraded">已限流</span>';
             if (status === "failed") return '<span class="status-badge status-unhealthy">异常</span>';
             if (status === "running") return '<span class="status-badge status-running">进行中</span>';
             return '<span class="status-badge status-unknown">等待中</span>';
@@ -7877,6 +9115,7 @@
                 ["完成", `${formatNumber(summary.completed)}/${formatNumber(summary.total)}`],
                 [isTrust ? "可信" : "可用", formatNumber(summary.passed)],
                 ...(isTrust ? [["需复核", formatNumber(summary.review)]] : []),
+                ["已限流", formatNumber(summary.rateLimited)],
                 ["异常", formatNumber(summary.failed)],
             ].map(([label, value]) => `
                 <div class="provider-test-summary-item">
@@ -7911,6 +9150,173 @@
             `;
         }
 
+        function formatProviderModelProtocolDetectionEndpointSummary(result = {}) {
+            const endpoints = Array.isArray(result.endpoint_results) ? result.endpoint_results : [];
+            if (!endpoints.length) return "";
+            return endpoints.map((item) => {
+                const label = item.protocol_type === "chat_completions" ? "Chat" : "Responses";
+                const status = item.success ? "通过" : "失败";
+                const statusCode = item.status_code == null ? "-" : item.status_code;
+                return `${label} ${status}（${statusCode}）`;
+            }).join("；");
+        }
+
+        function createProviderModelProtocolBatchState(targets) {
+            return {
+                kind: "protocol",
+                items: targets.map((target) => ({
+                    ...target,
+                    status: "pending",
+                    resultLabel: "等待中",
+                    latencyMs: null,
+                    message: "",
+                    endpointSummary: "",
+                })),
+            };
+        }
+
+        function summarizeProviderModelProtocolBatchState(batchState) {
+            const items = Array.isArray(batchState?.items) ? batchState.items : [];
+            return {
+                total: items.length,
+                completed: items.filter((item) => ["passed", "failed", "skipped", "rate_limited"].includes(item.status)).length,
+                running: items.filter((item) => item.status === "running").length,
+                passed: items.filter((item) => item.status === "passed").length,
+                failed: items.filter((item) => item.status === "failed").length,
+                skipped: items.filter((item) => item.status === "skipped").length,
+                rateLimited: items.filter((item) => item.status === "rate_limited").length,
+            };
+        }
+
+        function renderProviderModelProtocolBatchStatusBadge(status) {
+            if (status === "passed") return '<span class="status-badge status-healthy">已更新</span>';
+            if (status === "failed") return '<span class="status-badge status-unhealthy">未通过</span>';
+            if (status === "rate_limited") return '<span class="status-badge status-degraded">已限流</span>';
+            if (status === "running") return '<span class="status-badge status-running">检测中</span>';
+            if (status === "skipped") return '<span class="status-badge status-unknown">已跳过</span>';
+            return '<span class="status-badge status-unknown">等待中</span>';
+        }
+
+        function renderProviderModelProtocolBatchProgress(batchState) {
+            const summary = summarizeProviderModelProtocolBatchState(batchState);
+            const summaryHtml = [
+                ["总数", formatNumber(summary.total)],
+                ["完成", `${formatNumber(summary.completed)}/${formatNumber(summary.total)}`],
+                ["已更新", formatNumber(summary.passed)],
+                ["未通过", formatNumber(summary.failed)],
+                ["已限流", formatNumber(summary.rateLimited)],
+                ["跳过", formatNumber(summary.skipped)],
+            ].map(([label, value]) => `
+                <div class="provider-test-summary-item">
+                    <span>${escapeHtml(String(label))}</span>
+                    <strong>${escapeHtml(String(value))}</strong>
+                </div>
+            `).join("");
+            const itemHtml = batchState.items.map((item) => {
+                const latencyText = item.latencyMs == null ? "-" : `${item.latencyMs} ms`;
+                return `
+                    <article class="provider-test-model-item provider-model-batch-item" data-status="${escapeHtml(item.status)}">
+                        <div class="provider-test-model-top">
+                            <strong>${escapeHtml(item.displayName)}</strong>
+                            <div>${renderProviderModelProtocolBatchStatusBadge(item.status)}</div>
+                        </div>
+                        <div class="table-muted">${escapeHtml(item.resultLabel)} · 耗时 ${escapeHtml(String(latencyText))}</div>
+                        ${item.endpointSummary ? `<div class="table-muted">${escapeHtml(item.endpointSummary)}</div>` : ""}
+                        ${item.message ? `<div class="provider-test-model-message">${escapeHtml(item.message)}</div>` : ""}
+                    </article>
+                `;
+            }).join("");
+            return `
+                <div class="provider-test-result-shell">
+                    <section class="provider-test-result-card">
+                        <div class="panel-kicker">端点协议检测</div>
+                        <div class="provider-test-summary-grid">${summaryHtml}</div>
+                    </section>
+                    <section class="provider-test-result-card">
+                        <div class="panel-kicker">${summary.completed >= summary.total ? "挂载明细" : `检测进度 · ${formatNumber(summary.running)} 进行中`}</div>
+                        <div class="provider-test-model-list provider-model-batch-list">${itemHtml}</div>
+                    </section>
+                </div>
+            `;
+        }
+
+        async function runProviderModelProtocolBatch(targets, trigger) {
+            if (!targets.length) {
+                showToast("请先选择模型挂载", "error");
+                return;
+            }
+            const batchState = createProviderModelProtocolBatchState(targets);
+            const title = "批量协议检测结果";
+            const refresh = () => refreshHealthCheckResultModal(title, renderProviderModelProtocolBatchProgress(batchState));
+            batchState.items.forEach((item) => {
+                item.status = "running";
+                item.resultLabel = "检测中";
+                item.message = "正在分别请求 Chat Completions 与 Responses 端点";
+            });
+            setButtonLoading(trigger, true);
+            openHealthCheckResultModal(title, renderProviderModelProtocolBatchProgress(batchState), trigger);
+            const providerGroups = new Map();
+            batchState.items.forEach((item) => {
+                const groupKey = Number.isFinite(Number(item.providerId)) ? Number(item.providerId) : item.key;
+                if (!providerGroups.has(groupKey)) providerGroups.set(groupKey, []);
+                providerGroups.get(groupKey).push(item);
+            });
+            try {
+                await Promise.all(Array.from(providerGroups.values()).map(async (items) => {
+                    await Promise.all(items.map(async (item) => {
+                        item.status = "running";
+                        item.resultLabel = "检测中";
+                        item.message = "正在分别请求 Chat Completions 与 Responses 端点";
+                        refresh();
+                        try {
+                            const result = await api.post(
+                                "/api/providers/models/protocol-detection",
+                                {
+                                    targets: [{
+                                        provider_id: item.providerId,
+                                        provider_model_id: item.modelId,
+                                    }],
+                                },
+                                { timeoutMs: PROBE_API_TIMEOUT_MS },
+                            );
+                            const detectionResult = (result.model_results || [])[0];
+                            if (!detectionResult) {
+                                item.status = "skipped";
+                                item.resultLabel = "未返回";
+                                item.message = "接口未返回该挂载模型的检测结果";
+                            } else {
+                                item.status = isProbeRateLimitedResult(detectionResult) ? "rate_limited" : (detectionResult.update_allowed ? "passed" : "failed");
+                                item.resultLabel = isProbeRateLimitedResult(detectionResult) ? "已限流" : (detectionResult.protocol_label || formatProviderModelProtocolLabel(detectionResult));
+                                item.latencyMs = detectionResult.latency_ms ?? null;
+                                item.message = detectionResult.message || "";
+                                item.endpointSummary = formatProviderModelProtocolDetectionEndpointSummary(detectionResult);
+                            }
+                        } catch (error) {
+                            item.status = "failed";
+                            item.resultLabel = "执行失败";
+                            item.latencyMs = null;
+                            item.message = error.message || "协议检测请求失败";
+                        }
+                        refresh();
+                    }));
+                }));
+                const summary = summarizeProviderModelProtocolBatchState(batchState);
+                setButtonTransientFeedback(trigger, summary.failed === 0 && summary.rateLimited === 0 ? "success" : "error", {
+                    successText: "已完成",
+                    errorText: "有异常",
+                });
+                showToast(
+                    `协议检测完成：更新 ${formatNumber(summary.passed)}/${formatNumber(summary.total)}，限流 ${formatNumber(summary.rateLimited)}`,
+                    summary.failed === 0 && summary.rateLimited === 0 ? "success" : "error",
+                );
+                await wait(500);
+                await loadProviderModels({ silent: true });
+                refreshHealthCheckResultModal(title, renderProviderModelProtocolBatchProgress(batchState));
+            } finally {
+                setButtonLoading(trigger, false);
+            }
+        }
+
         async function runProviderModelBatch(kind, targets, trigger, features = null) {
             if (!targets.length) {
                 showToast("当前没有可执行的模型挂载", "error");
@@ -7923,22 +9329,33 @@
                 item.status = "running";
                 item.resultLabel = "执行中";
                 item.message = kind === "trust"
-                    ? `正在执行 ${CONTENT_TRUST_PROBE_KEYS.length} 个可信探针`
+                    ? formatContentTrustRunningMessage()
                     : "正在执行健康测试";
                 refresh();
                 const startedAt = Date.now();
                 try {
                     if (kind === "trust") {
-                        const result = await api.post("/api/content-guard/trust-probe", buildContentTrustProbePayload(item.providerId, item.modelId));
+                        const result = await api.post(
+                            "/api/content-guard/trust-probe",
+                            buildContentTrustProbePayload(item.providerId, item.modelId),
+                            { timeoutMs: PROBE_API_TIMEOUT_MS },
+                        );
                         const guardResult = result?.summary?.content_guard_result || result?.summary?.status;
-                        item.status = contentTrustBatchStatusFromGuardResult(guardResult);
+                        item.status = isProbeRateLimitedResult(result?.summary) ? "rate_limited" : contentTrustBatchStatusFromGuardResult(guardResult);
                         item.resultLabel = formatContentGuardResultLabel(guardResult);
                         item.latencyMs = result?.summary?.latency_ms ?? result?.latency_ms ?? (Date.now() - startedAt);
-                        item.message = result?.summary?.content_guard_reason || result?.message || "";
+                        item.message = [
+                            result?.summary?.content_guard_reason || result?.message || "",
+                            formatContentTrustExecutionPlan(result?.execution_plan),
+                        ].filter(Boolean).join("；");
                     } else {
-                        const result = await api.post(`/api/providers/${item.providerId}/models/${item.modelId}/test`, { features });
+                        const result = await api.post(
+                            `/api/providers/${item.providerId}/models/${item.modelId}/test`,
+                            { features },
+                            { timeoutMs: PROBE_API_TIMEOUT_MS },
+                        );
                         const usable = isHealthCheckUsable(result);
-                        item.status = usable ? "passed" : "failed";
+                        item.status = isProbeRateLimitedResult(result) ? "rate_limited" : (usable ? "passed" : "failed");
                         item.resultLabel = formatHealthCheckOutcomeLabel(result);
                         item.latencyMs = result?.latency_ms ?? (Date.now() - startedAt);
                         item.message = result?.message || "";
@@ -7966,13 +9383,13 @@
                     }
                 }));
                 const summary = summarizeProviderModelBatchState(batchState);
-                setButtonTransientFeedback(trigger, summary.failed === 0 ? "success" : "error", {
+                setButtonTransientFeedback(trigger, summary.failed === 0 && summary.rateLimited === 0 ? "success" : "error", {
                     successText: "已完成",
                     errorText: "有异常",
                 });
                 showToast(
-                    `${title}：通过 ${formatNumber(summary.passed)}/${formatNumber(summary.total)}`,
-                    summary.failed === 0 ? "success" : "error",
+                    `${title}：通过 ${formatNumber(summary.passed)}/${formatNumber(summary.total)}，限流 ${formatNumber(summary.rateLimited)}`,
+                    summary.failed === 0 && summary.rateLimited === 0 ? "success" : "error",
                 );
                 await wait(500);
                 await loadProviderModels({ silent: true });
@@ -8100,7 +9517,7 @@
             window.clearTimeout(searchTimer);
             searchTimer = window.setTimeout(() => reloadFirstPage().catch((error) => showToast(error.message, "error")), 250);
         });
-        [providerModelProviderSelect, providerModelEnabledSelect, providerModelHealthSelect, providerModelTrustSelect].forEach((field) => {
+        [providerModelProviderSelect, providerModelEnabledSelect, providerModelHealthSelect, providerModelTrustSelect, providerModelQualityWindowSelect].forEach((field) => {
             field?.addEventListener("change", () => reloadFirstPage().catch((error) => showToast(error.message, "error")));
         });
         providerModelSelectPageInput?.addEventListener("change", () => {
@@ -8119,6 +9536,9 @@
         });
         providerModelTestSelectedBtn?.addEventListener("click", async () => {
             await runProviderModelBatchFromScope("test", "selected", providerModelTestSelectedBtn);
+        });
+        providerModelProtocolDetectSelectedBtn?.addEventListener("click", async () => {
+            await runProviderModelProtocolBatch(getSelectedProviderModelTargets(), providerModelProtocolDetectSelectedBtn);
         });
         providerModelTrustSelectedBtn?.addEventListener("click", async () => {
             await runProviderModelBatchFromScope("trust", "selected", providerModelTrustSelectedBtn);
@@ -9157,7 +10577,11 @@
             if (!features) return;
             try {
                 setButtonLoading(trigger, true);
-                const result = await api.post(`/api/models/${encodeURIComponent(modelName)}/test`, { features });
+                const result = await api.post(
+                    `/api/models/${encodeURIComponent(modelName)}/test`,
+                    { features },
+                    { timeoutMs: PROBE_API_TIMEOUT_MS },
+                );
                 setButtonTransientFeedback(trigger, result.health_status === "healthy" ? "success" : "error", {
                     successText: "健康",
                     errorText: "异常",
@@ -9214,7 +10638,11 @@
                 );
                 await Promise.allSettled(modelOptions.map(async (item) => {
                     try {
-                        const result = await api.post(`/api/models/${encodeURIComponent(item.model_name)}/test`, { features });
+                        const result = await api.post(
+                            `/api/models/${encodeURIComponent(item.model_name)}/test`,
+                            { features },
+                            { timeoutMs: PROBE_API_TIMEOUT_MS },
+                        );
                         applyModelBatchTestSuccess(batchState, result);
                     } catch (error) {
                         applyModelBatchTestError(batchState, item.model_name, error);
@@ -9250,6 +10678,7 @@
                 const result = await api.post(
                     "/api/content-guard/trust-probe",
                     buildContentTrustProbePayload(providerId, providerModelId),
+                    { timeoutMs: PROBE_API_TIMEOUT_MS },
                 );
                 const guardResult = result?.summary?.content_guard_result || result?.summary?.status || "review";
                 setButtonTransientFeedback(trigger, guardResult === "pass" ? "success" : "error", {
@@ -9680,6 +11109,9 @@
         const providerModelSelect = document.getElementById("content-guard-provider-model-id");
         const internalFields = document.getElementById("content-guard-internal-fields");
         const externalFields = document.getElementById("content-guard-external-fields");
+        const externalBaseUrlInput = document.getElementById("content-guard-external-base-url");
+        const externalModelNameInput = document.getElementById("content-guard-external-model-name");
+        const externalEndpointPathSelect = document.getElementById("content-guard-external-endpoint-path");
         const probeOptionsNode = document.getElementById("content-guard-probe-options");
         const manualNotice = document.getElementById("content-guard-manual-notice");
         const pageError = document.getElementById("content-guard-page-error");
@@ -10419,6 +11851,7 @@
             document.getElementById("content-guard-high-risk-strategy").value = settings.content_guard_high_risk_strategy || "switch_provider";
             document.getElementById("content-guard-max-detection-delay-ms").value = Math.max(0, Math.min(500, Number(settings.content_guard_max_detection_delay_ms ?? 300)));
             document.getElementById("content-guard-stream-mode").value = settings.content_guard_stream_mode || "buffer_300ms";
+            document.getElementById("content-guard-probe-protocol-type").value = settings.content_guard_probe_protocol_type || "chat_completions";
             document.getElementById("content-guard-probe-interval-sec").value = settings.content_guard_probe_interval_sec ?? 3600;
             document.getElementById("content-guard-max-scan-bytes").value = Math.max(1024, Math.min(262144, Number(settings.content_guard_max_scan_bytes ?? 16384)));
             document.getElementById("content-guard-stream-buffer-max-bytes").value = Math.max(1024, Math.min(262144, Number(settings.content_guard_stream_buffer_max_bytes ?? 16384)));
@@ -10601,6 +12034,7 @@
             content_guard_high_risk_strategy: document.getElementById("content-guard-high-risk-strategy").value,
             content_guard_max_detection_delay_ms: readNumberField(document.getElementById("content-guard-max-detection-delay-ms"), 300, { min: 0, max: 500, label: "最大检测等待 ms" }),
             content_guard_stream_mode: document.getElementById("content-guard-stream-mode").value,
+            content_guard_probe_protocol_type: document.getElementById("content-guard-probe-protocol-type").value || "chat_completions",
             content_guard_probe_interval_sec: readNumberField(document.getElementById("content-guard-probe-interval-sec"), 3600, { min: 300, label: "自动预检间隔 s" }),
             content_guard_max_scan_bytes: readNumberField(document.getElementById("content-guard-max-scan-bytes"), 16384, { min: 1024, max: 262144, label: "最大扫描字节 B" }),
             content_guard_stream_buffer_max_bytes: readNumberField(document.getElementById("content-guard-stream-buffer-max-bytes"), 16384, { min: 1024, max: 262144, label: "流式缓冲上限 B" }),
@@ -10618,7 +12052,11 @@
                 throw new Error("请至少选择一个探针");
             }
             if (selectedTargetType() === "external") {
-                throw new Error("浏览器不接收外部 API Key；请先在后端托管提供商配置中维护外部服务，再选择本项目提供商执行能力探针");
+                const baseUrl = String(externalBaseUrlInput?.value || "").trim();
+                const modelName = String(externalModelNameInput?.value || "").trim();
+                if (!baseUrl) throw new Error("请填写外部提供商接口地址");
+                if (!modelName) throw new Error("请填写外部提供商模型名");
+                throw new Error("浏览器不接收外部 API Key，外部提供商只能通过后端托管配置检测");
             }
             if (!providerSelect.value || !providerModelSelect.value) {
                 throw new Error("请选择提供商和模型");
@@ -10635,6 +12073,7 @@
         const resultStatusClass = (statusValue) => {
             if (statusValue === "passed" || statusValue === "pass") return "status-healthy";
             if (statusValue === "blocked" || statusValue === "block") return "status-unhealthy";
+            if (statusValue === "rate_limited") return "status-degraded";
             if (statusValue === "review" || statusValue === "error") return "status-degraded";
             return "status-unknown";
         };
@@ -10652,7 +12091,7 @@
             const rows = Array.isArray(result?.probe_results) ? result.probe_results : [];
             document.getElementById("content-guard-result-body").innerHTML = rows.length ? rows.map((item) => {
                 const guard = item.content_guard || {};
-                const guardResult = guard.content_guard_result || (item.success ? "pass" : "review");
+                const guardResult = isProbeRateLimitedResult(item) ? "rate_limited" : (guard.content_guard_result || (item.success ? "pass" : "review"));
                 const reason = guard.content_guard_reason || item.message || item.support_label || "-";
                 const endpointPath = item.endpoint_path || item.endpoint || item.endpoint_label || "-";
                 const statusCode = item.status_code == null ? "-" : String(item.status_code);
@@ -10681,7 +12120,7 @@
                 const confidence = guard.content_guard_confidence ?? guard.confidence;
                 const scoreDelta = guard.content_guard_score_delta ?? guard.score_delta;
                 const finalStrategy = guard.content_guard_final_strategy || guard.final_strategy || guard.content_guard_action || "-";
-                const persisted = result?.target?.type === "internal" && result?.summary?.content_guard_result
+                const persisted = result?.target?.type === "internal" && result?.summary?.content_guard_result && result?.summary?.content_guard_result !== "rate_limited"
                     ? "已写入"
                     : (result?.target?.type === "internal" ? "未写入" : "外部不写入");
                 return `
@@ -10854,10 +12293,6 @@
 
         document.querySelectorAll("[data-content-guard-target-type]").forEach((button) => {
             button.addEventListener("click", () => {
-                if (button.disabled) {
-                    showToast("外部提供商请先纳入后端托管配置，再以本项目提供商执行能力探针", "error");
-                    return;
-                }
                 document.querySelectorAll("[data-content-guard-target-type]").forEach((item) => {
                     const active = item === button;
                     item.classList.toggle("is-active", active);
@@ -10867,12 +12302,17 @@
                 internalFields.classList.toggle("hidden", external);
                 externalFields.classList.toggle("hidden", !external);
                 externalFields.hidden = !external;
+                refreshProbeAvailability();
             });
         });
         tabButtons.forEach((button) => {
             button.addEventListener("click", () => activateContentGuardTab(button.dataset.contentGuardTab || "settings"));
         });
         providerSelect.addEventListener("change", renderProviderModelOptions);
+        [externalBaseUrlInput, externalModelNameInput, externalEndpointPathSelect].forEach((node) => {
+            node?.addEventListener("input", refreshProbeAvailability);
+            node?.addEventListener("change", refreshProbeAvailability);
+        });
         refreshBtn?.addEventListener("click", () => loadOverview({ manual: true }));
         pageRetryBtn?.addEventListener("click", () => loadOverview({ manual: true }));
         [ruleSearchInput, ruleCategoryFilter, ruleEnabledFilter].forEach((node) => {
@@ -11275,7 +12715,11 @@
                 renderProbeProgress(selectedProbeKeys);
                 activateContentGuardTab("results");
                 setButtonLoading(probeSubmitBtn, true);
-                const result = await api.post("/api/content-guard/precheck/trust-probe", buildProbePayload(selectedProbeKeys));
+                const result = await api.post(
+                    "/api/content-guard/precheck/trust-probe",
+                    buildProbePayload(selectedProbeKeys),
+                    { timeoutMs: PROBE_API_TIMEOUT_MS },
+                );
                 const selectedProviderId = providerSelect.value;
                 const selectedModelId = providerModelSelect.value;
                 renderProbeResult(result);
@@ -11319,8 +12763,6 @@
         const submitBtn = document.getElementById("settings-submit-btn");
         const healthCheckIntervalInput = document.getElementById("setting-health-check-interval-sec");
         const settingsHelpCopy = {
-            "setting-global-timeout-ms": ["全局超时说明", "单次非流式上游请求的默认等待时间。推荐 30000 ms；上游慢或长任务较多可适当增大。"],
-            "setting-global-max-retries": ["全局最大重试次数说明", "可恢复错误下最多换候选重试几次。推荐 2；过大可能放大延迟和上游消耗。"],
             "setting-global-max-request-tokens": ["全局最大请求说明", "进入上游前允许的最大请求 token 估算值。0 表示不限制；生产环境建议结合模型上下文设置。"],
             "setting-long-output-stream-threshold-tokens": ["长输出非流式阈值说明", "当预期输出超过该阈值时可引导使用流式链路。0 表示不强制；推荐 8.19k。"],
             "setting-max-v1-request-body-bytes": ["/v1 请求体最大字节数说明", "所有 /v1 入口请求体的全局上限。0 表示不限制；推荐保持默认 20971520 B。"],
@@ -11396,8 +12838,6 @@
         ensureSettingsHelp();
         initSettingsTooltipLayer();
         const settings = await api.get("/api/settings");
-        document.getElementById("setting-global-timeout-ms").value = settings.global_timeout_ms;
-        document.getElementById("setting-global-max-retries").value = settings.global_max_retries;
         document.getElementById("setting-route-exhausted-retry-max-wait-seconds").value = settings.route_exhausted_retry_max_wait_seconds ?? 600;
         document.getElementById("setting-route-exhausted-retry-infinite-enabled").checked = settings.route_exhausted_retry_infinite_enabled ?? false;
         document.getElementById("setting-trusted-providers-only").checked = settings.trusted_providers_only ?? false;
@@ -11474,8 +12914,6 @@
             event.preventDefault();
             try {
                 const payload = {
-                    global_timeout_ms: Number(document.getElementById("setting-global-timeout-ms").value),
-                    global_max_retries: Number(document.getElementById("setting-global-max-retries").value),
                     route_exhausted_retry_max_wait_seconds: Math.min(600, Math.max(0, Number(document.getElementById("setting-route-exhausted-retry-max-wait-seconds").value || 600))),
                     route_exhausted_retry_infinite_enabled: document.getElementById("setting-route-exhausted-retry-infinite-enabled").checked,
                     trusted_providers_only: document.getElementById("setting-trusted-providers-only").checked,
@@ -12280,12 +13718,14 @@
         renderMonitorChart(document.getElementById("user-monitor-traffic-chart"), timeSeriesItems, {
             barKey: "total_requests",
             lineKey: "failed_requests",
+            barLabel: "请求",
             lineLabel: "失败",
             label: "我的请求量与失败趋势",
         });
         renderMonitorChart(document.getElementById("user-monitor-cost-chart"), timeSeriesItems, {
             barKey: "total_tokens",
             lineKey: "total_cost",
+            barLabel: "Token",
             lineLabel: "费用",
             label: "我的 Token 与费用趋势",
             width: 520,
@@ -12683,19 +14123,24 @@
         }
 
         function renderDetailCards(groups, timelineItems = []) {
-            detailCards.innerHTML = groups.map((group) => `
-                <article class="log-detail-card">
-                    <h4>${escapeHtml(group.title)}</h4>
-                    ${group.html || `
-                        <dl>
-                            ${(group.items || []).map(([label, value]) => `
-                                <dt>${escapeHtml(label)}</dt>
-                                <dd>${escapeHtml(formatLogDetailValue(value))}</dd>
-                            `).join("")}
-                        </dl>
-                    `}
-                </article>
-            `).join("");
+            detailCards.innerHTML = groups.map((group) => {
+                if (group.summary) {
+                    return `<article class="log-detail-summary-card">${group.html || ""}</article>`;
+                }
+                return `
+                    <article class="log-detail-card">
+                        <h4>${escapeHtml(group.title)}</h4>
+                        ${group.html || `
+                            <dl>
+                                ${(group.items || []).map(([label, value]) => `
+                                    <dt>${escapeHtml(label)}</dt>
+                                    <dd>${escapeHtml(formatLogDetailValue(value))}</dd>
+                                `).join("")}
+                            </dl>
+                        `}
+                    </article>
+                `;
+            }).join("");
             if (timelineItems.length) {
                 detailCards.insertAdjacentHTML("beforeend", `
                     <article class="log-detail-card log-detail-timeline">
@@ -12738,6 +14183,40 @@
             if (typeof value === "boolean") return value ? "是" : "否";
             if (typeof value === "object") return JSON.stringify(value);
             return String(value);
+        }
+
+        function renderLogTraceSummary(log, requestHeaders = {}) {
+            const successKnown = log.success !== null && log.success !== undefined;
+            const success = log.success === true;
+            const statusText = successKnown ? (success ? "成功" : "失败") : "未知";
+            const statusTone = success ? "success" : (successKnown ? "danger" : "neutral");
+            const duration = log.duration_ms == null && log.latency_ms == null ? "-" : `${log.duration_ms ?? log.latency_ms} ms`;
+            const ttfb = log.ttfb_ms == null ? "-" : `${log.ttfb_ms} ms`;
+            const tps = log.tps == null ? "-" : Number(log.tps).toFixed(2);
+            const title = log.display_model || log.model_name || log.requested_model || "-";
+            const route = [log.provider_name || log.provider_id, log.resolved_provider_model_id ? `挂载 ${log.resolved_provider_model_id}` : ""].filter(Boolean).join(" · ") || "-";
+            const traceId = log.trace_id || "-";
+            const clientRequestId = requestHeaders.client_request_id || "-";
+            return `
+                <div class="log-detail-summary-main">
+                    <span class="log-detail-status is-${statusTone}">${escapeHtml(statusText)}</span>
+                    <div>
+                        <strong>${escapeHtml(title)}</strong>
+                        <span>${escapeHtml(route)}</span>
+                    </div>
+                </div>
+                <div class="log-detail-summary-metrics">
+                    <div><span>状态码</span><strong>${escapeHtml(formatLogDetailValue(log.status_code ?? "-"))}</strong></div>
+                    <div><span>总耗时</span><strong>${escapeHtml(duration)}</strong></div>
+                    <div><span>首包</span><strong>${escapeHtml(ttfb)}</strong></div>
+                    <div><span>速率</span><strong>${escapeHtml(tps)}</strong></div>
+                </div>
+                <div class="log-detail-summary-trace">
+                    <span>Trace <code>${escapeHtml(traceId)}</code></span>
+                    <span>请求 <code>${escapeHtml(log.request_id || "-")}</code></span>
+                    <span>客户端 <code>${escapeHtml(clientRequestId)}</code></span>
+                </div>
+            `;
         }
 
         async function loadLogs({ manual = false, feedbackSource = "auto" } = {}) {
@@ -12807,17 +14286,9 @@
                     <tr>
                         <td>
                             <strong>${formatDate(log.created_at)}</strong>
-                            <div class="table-muted">${escapeHtml(log.http_method || "-")}</div>
-                            <div class="table-muted">${escapeHtml(buildSessionValue(log))}</div>
                         </td>
-                        <td>
-                            <strong>${escapeHtml(formatLogTypeLabel(log.log_type))}</strong>
-                            <div class="table-muted">思维等级 ${escapeHtml(log.reasoning_level || "无")}${log.model_reasoning_effort ? ` · 参数 ${escapeHtml(log.model_reasoning_effort)}` : ""}</div>
-                        </td>
-                        <td>
-                            <strong>${escapeHtml(log.api_client_key_name || "-")}</strong>
-                            <div class="table-muted">${escapeHtml(log.api_client_key_prefix || "-")}</div>
-                        </td>
+                        <td>${renderReasoningLevelCell(log)}</td>
+                        <td>${renderRequestKeyCell(log)}</td>
                         <td>
                             ${renderLogModelCell(log)}
                             <div class="table-muted">${escapeHtml(log.provider_name || "-")}</div>
@@ -12825,8 +14296,7 @@
                         <td>${renderLogResultCell(log)}</td>
                         <td>
                             ${renderLogBillingCell(log)}
-                            <strong>${formatMetricValue(log.duration_ms ?? log.latency_ms, " ms")}</strong>
-                            <div class="table-muted">首包 ${formatMetricValue(log.ttfb_ms, " ms")} · 速率 ${formatRateValue(log.tps)}</div>
+                            ${renderLogTimingCell(log)}
                         </td>
                         <td>
                             <div class="table-actions">
@@ -12949,15 +14419,22 @@
                 request_body_json: safeJsonParse(log.request_body_json || "") ?? log.request_body_json,
                 response_body_json: safeJsonParse(log.response_body_json || "") ?? log.response_body_json,
                 response_text: log.response_text,
+                request_headers_json: safeJsonParse(log.request_headers_json || "") ?? log.request_headers_json,
                 trace: safeJsonParse(log.trace_json || "") ?? log.trace_json,
                 created_at: log.created_at,
             };
+            const requestHeaders = parseRequestHeadersForLog(log);
             renderDetailCards([
+                {
+                    summary: true,
+                    html: renderLogTraceSummary(log, requestHeaders),
+                },
                 {
                     title: "鉴权",
                     items: [
                         ["结果", log.api_client_auth_result || (log.api_client_key_id ? "authenticated" : "-")],
-                        ["API Key", log.api_client_key_name || log.api_client_key_prefix || "-"],
+                        ["API Key 名称", log.api_client_key_name || "-"],
+                        ["API Key 标识", log.api_client_key_prefix || "-"],
                         ["用户", log.user_account_name || log.user_account_id || "-"],
                     ],
                 },
@@ -12967,6 +14444,7 @@
                         ["方法", log.http_method || "-"],
                         ["路径", log.request_path || "-"],
                         ["状态码", log.status_code ?? "-"],
+                        ["日志类型", formatLogTypeLabel(log.log_type)],
                         ["请求形态", log.request_modality || (log.has_image ? "多模态" : "文本")],
                     ],
                 },
@@ -12976,6 +14454,7 @@
                         ["请求模型", log.requested_model || "-"],
                         ["实际模型", log.model_name || "-"],
                         ["思维等级", log.reasoning_level || "无"],
+                        ["参数", log.model_reasoning_effort || "-"],
                         ["图片输入", log.has_image_input ? "是" : "否"],
                     ],
                 },
@@ -12987,6 +14466,10 @@
                         ["尝试次数", log.attempt_count ?? "-"],
                         ["上游请求", log.upstream_request_id || "-"],
                     ],
+                },
+                {
+                    title: "客户端请求头",
+                    items: buildRequestHeaderDetailItems(requestHeaders),
                 },
                 {
                     title: "流式",
@@ -13035,19 +14518,25 @@
                 const timeline = await api.get(`/api/user/logs/${encodeURIComponent(log.id)}/timeline?_ts=${Date.now()}`);
                 renderDetailCards([
                     {
-                        title: "鉴权",
-                        items: [
-                            ["结果", log.api_client_auth_result || (log.api_client_key_id ? "authenticated" : "-")],
-                            ["API Key", log.api_client_key_name || log.api_client_key_prefix || "-"],
-                            ["用户", log.user_account_name || log.user_account_id || "-"],
-                        ],
+                        summary: true,
+                        html: renderLogTraceSummary(log, requestHeaders),
                     },
+                    {
+                        title: "鉴权",
+                    items: [
+                        ["结果", log.api_client_auth_result || (log.api_client_key_id ? "authenticated" : "-")],
+                            ["API Key 名称", log.api_client_key_name || "-"],
+                            ["API Key 标识", log.api_client_key_prefix || "-"],
+                        ["用户", log.user_account_name || log.user_account_id || "-"],
+                    ],
+                },
                     {
                         title: "校验",
                         items: [
                             ["方法", log.http_method || "-"],
                             ["路径", log.request_path || "-"],
                             ["状态码", log.status_code ?? "-"],
+                            ["日志类型", formatLogTypeLabel(log.log_type)],
                             ["请求形态", log.request_modality || (log.has_image ? "多模态" : "文本")],
                         ],
                     },
@@ -13057,6 +14546,7 @@
                             ["请求模型", log.requested_model || "-"],
                             ["实际模型", log.model_name || "-"],
                             ["思维等级", log.reasoning_level || "无"],
+                            ["参数", log.model_reasoning_effort || "-"],
                             ["图片输入", log.has_image_input ? "是" : "否"],
                         ],
                     },
@@ -13592,7 +15082,7 @@
         const lines = [
             "# aotu-gpt 接入自检报告",
             "",
-            `- 生成时间：${formatDate(new Date().toISOString())}`,
+            `- 生成时间：${formatDate(new Date())}`,
             `- API Key：${options.apiKeyLabel || "-"}`,
             `- 模型：${options.modelName || data.model_name || "-"}`,
             `- 自检模式：${getUserSelfTestImageModeLabel(summary.imageMode)}`,
@@ -13689,7 +15179,7 @@
             const url = URL.createObjectURL(blob);
             const link = document.createElement("a");
             link.href = url;
-            link.download = `user-self-test-${modelSelect.value || "model"}-${new Date().toISOString().replace(/[:.]/g, "-")}.md`;
+            link.download = `user-self-test-${modelSelect.value || "model"}-${formatBeijingFileTimestamp()}.md`;
             document.body.appendChild(link);
             link.click();
             link.remove();
@@ -14715,7 +16205,7 @@
             const template = state.templates.find((item) => String(item.id) === String(templateId));
             if (!template) return;
             enabledInput.checked = template.enabled ?? true;
-            expiresAtInput.value = template.expires_in_days ? toDatetimeLocalInputValue(new Date(Date.now() + (Number(template.expires_in_days) * 86400000)).toISOString()) : "";
+            expiresAtInput.value = template.expires_in_days ? toDatetimeLocalInputValue(new Date(Date.now() + (Number(template.expires_in_days) * 86400000))) : "";
             renderApiKeyProviderSelector(providerSelector, state.providers, getProviderSelectionForTemplate(template));
             renderApiKeyModelSelector(modelSelector, state.models, template.allowed_model_names || []);
             refreshRoutePreview();
@@ -15043,7 +16533,7 @@
                 name: nameInput.value.trim(),
                 remark: remarkInput.value.trim() || null,
                 enabled: enabledInput.checked,
-                expires_at: expiresAtInput.value ? new Date(expiresAtInput.value).toISOString() : null,
+                expires_at: expiresAtInput.value ? formatBeijingDateTimeForApi(expiresAtInput.value) : null,
                 qps_limit: qpsLimitInput.value === "" ? null : Number(qpsLimitInput.value),
                 rpm_limit: rpmLimitInput.value === "" ? null : Number(rpmLimitInput.value),
                 owner_user_id: ownerUserSelect.value === "" ? null : Number(ownerUserSelect.value),
@@ -16473,7 +17963,7 @@
                         ${config.columns.map(([, render]) => `<td>${render(item)}</td>`).join("")}
                         <td><button class="table-action-btn" data-action="show-typed-log" data-index="${index}">详情</button></td>
                     </tr>
-                `).join("") || `<tr><td colspan="${config.columns.length + 1}"><div class="empty-state">没有匹配的日志</div></td></tr>`;
+                `).join("") || `<tr><td colspan="${config.columns.length + 1}"><div class="empty-state">${escapeHtml(config.emptyText || "没有匹配的日志")}</div></td></tr>`;
                 renderTypedPagination(data.total ?? 0);
                 snapshotCurrentTypedPagination();
                 updateLogRefreshResultLabel(typedLogsLastRefresh, "success", new Date());
@@ -16508,25 +17998,100 @@
         }
 
         function renderDetailCards(groups) {
-            detailCards.innerHTML = groups.map((group) => `
-                <article class="log-detail-card">
-                    <h4>${escapeHtml(group.title)}</h4>
-                    ${group.html || `
-                        <dl>
-                            ${(group.items || []).map(([label, value]) => `
-                                <dt>${escapeHtml(label)}</dt>
-                                <dd>${escapeHtml(formatLogDetailValue(value))}</dd>
-                            `).join("")}
-                        </dl>
-                    `}
-                </article>
-            `).join("");
+            detailCards.innerHTML = groups.map((group) => {
+                if (group.summary) {
+                    return `<article class="log-detail-summary-card">${group.html || ""}</article>`;
+                }
+                const extraClass = group.wide ? " log-detail-card-wide" : "";
+                return `
+                    <article class="log-detail-card${extraClass}">
+                        <h4>${escapeHtml(group.title)}</h4>
+                        ${group.html || `
+                            <dl>
+                                ${(group.items || []).map(([label, value]) => `
+                                    <dt>${escapeHtml(label)}</dt>
+                                    <dd>${escapeHtml(formatLogDetailValue(value))}</dd>
+                                `).join("")}
+                            </dl>
+                        `}
+                    </article>
+                `;
+            }).join("");
+        }
+
+        function renderLogTraceSummary(log, requestHeaders = {}) {
+            const successKnown = log.success !== null && log.success !== undefined;
+            const success = log.success === true;
+            const statusText = successKnown ? (success ? "成功" : "失败") : "未知";
+            const statusTone = success ? "success" : (successKnown ? "danger" : "neutral");
+            const duration = log.duration_ms == null && log.latency_ms == null ? "-" : `${log.duration_ms ?? log.latency_ms} ms`;
+            const ttfb = log.ttfb_ms == null ? "-" : `${log.ttfb_ms} ms`;
+            const tps = log.tps == null ? "-" : Number(log.tps).toFixed(2);
+            const title = log.display_model || log.model_name || log.requested_model || "-";
+            const route = [log.provider_name || log.provider_id, log.resolved_provider_model_id ? `挂载 ${log.resolved_provider_model_id}` : ""].filter(Boolean).join(" · ") || "-";
+            const traceId = log.trace_id || "-";
+            const clientRequestId = requestHeaders.client_request_id || "-";
+            return `
+                <div class="log-detail-summary-main">
+                    <span class="log-detail-status is-${statusTone}">${escapeHtml(statusText)}</span>
+                    <div>
+                        <strong>${escapeHtml(title)}</strong>
+                        <span>${escapeHtml(route)}</span>
+                    </div>
+                </div>
+                <div class="log-detail-summary-metrics">
+                    <div><span>状态码</span><strong>${escapeHtml(formatLogDetailValue(log.status_code ?? "-"))}</strong></div>
+                    <div><span>总耗时</span><strong>${escapeHtml(duration)}</strong></div>
+                    <div><span>首包</span><strong>${escapeHtml(ttfb)}</strong></div>
+                    <div><span>速率</span><strong>${escapeHtml(tps)}</strong></div>
+                </div>
+                <div class="log-detail-summary-trace">
+                    <span>Trace <code>${escapeHtml(traceId)}</code></span>
+                    <span>请求 <code>${escapeHtml(log.request_id || "-")}</code></span>
+                    <span>客户端 <code>${escapeHtml(clientRequestId)}</code></span>
+                </div>
+            `;
         }
 
         function normalizeJsonObject(value) {
             if (!value) return {};
             if (typeof value === "object") return value;
             return safeJsonParse(String(value)) || {};
+        }
+
+        function formatJsonDetailValue(value) {
+            const parsed = normalizeJsonObject(value);
+            if (Array.isArray(parsed)) return parsed.length ? JSON.stringify(parsed) : "-";
+            if (parsed && typeof parsed === "object" && Object.keys(parsed).length) return JSON.stringify(parsed);
+            return formatLogDetailValue(value);
+        }
+
+        function formatCategoryList(value) {
+            const parsed = normalizeJsonObject(value);
+            if (Array.isArray(parsed)) return parsed.length ? parsed.join("、") : "-";
+            if (parsed && typeof parsed === "object" && Object.keys(parsed).length) return JSON.stringify(parsed);
+            return formatLogDetailValue(value);
+        }
+
+        function parseRequestHeadersForLog(log) {
+            return normalizeJsonObject(log.request_headers_json);
+        }
+
+        function buildRequestHeaderDetailItems(headers) {
+            return [
+                ["User-Agent", headers.user_agent],
+                ["客户端请求 ID", headers.client_request_id],
+                ["幂等键", headers.idempotency_key],
+                ["重试次数头", headers.retry_count],
+                ["SDK 名称", headers.sdk_name],
+                ["SDK 版本", headers.sdk_version],
+                ["SDK 语言", headers.sdk_language],
+                ["SDK 运行时", headers.sdk_runtime],
+                ["SDK 运行时版本", headers.sdk_runtime_version],
+                ["SDK 系统", headers.sdk_os],
+                ["SDK 架构", headers.sdk_arch],
+                ["OpenAI 客户端 UA", headers.openai_client_user_agent],
+            ];
         }
 
         function renderMiniTable(headers, rows) {
@@ -16541,6 +18106,47 @@
                     </table>
                 </div>
             `;
+        }
+
+        function buildProbeSummaryFromRows(probes) {
+            const providerIds = new Set();
+            const modelKeys = new Set();
+            probes.forEach((probe) => {
+                if (probe.provider_id !== null && probe.provider_id !== undefined) {
+                    providerIds.add(String(probe.provider_id));
+                }
+                const modelKey = probe.provider_model_id !== null && probe.provider_model_id !== undefined
+                    ? `id:${probe.provider_model_id}`
+                    : (probe.model_name ? `name:${probe.model_name}` : "");
+                if (modelKey) modelKeys.add(modelKey);
+            });
+            const probeSuccess = probes.filter((probe) => Boolean(probe.success)).length;
+            return {
+                probe_total: probes.length,
+                probe_success: probeSuccess,
+                probe_failed: Math.max(0, probes.length - probeSuccess),
+                provider_count: providerIds.size,
+                provider_success_count: new Set(probes
+                    .filter((probe) => Boolean(probe.success) && probe.provider_id !== null && probe.provider_id !== undefined)
+                    .map((probe) => String(probe.provider_id))).size,
+                model_count: modelKeys.size,
+                model_success_count: new Set(probes
+                    .filter((probe) => Boolean(probe.success))
+                    .map((probe) => probe.provider_model_id !== null && probe.provider_model_id !== undefined
+                        ? `id:${probe.provider_model_id}`
+                        : (probe.model_name ? `name:${probe.model_name}` : ""))
+                    .filter(Boolean)).size,
+            };
+        }
+
+        function resolveHealthProbeSummary(detail, probes) {
+            const summary = normalizeJsonObject(detail.probe_summary);
+            if (Object.keys(summary).length) return summary;
+            return buildProbeSummaryFromRows(probes);
+        }
+
+        function formatHealthProbeType(value) {
+            return CONTENT_PROBE_PHASE_LABELS[value] || ENDPOINT_PROBE_LABELS[value] || formatTypedLogStatusLabel(value);
         }
 
         async function renderTypedLogDetail(item) {
@@ -16582,6 +18188,7 @@
                     : { run: item, probes: [] };
                 const run = detail.run || item;
                 const probes = detail.probes || [];
+                const probeSummary = resolveHealthProbeSummary(detail, probes);
                 renderDetailCards([
                     {
                         title: "检查批次",
@@ -16595,12 +18202,26 @@
                         ],
                     },
                     {
-                        title: "探针汇总",
+                        title: "子探针汇总",
                         items: [
-                            ["总数", run.total_probes],
-                            ["成功", run.success_probes],
-                            ["失败", run.failed_probes],
-                            ["耗时", run.duration_ms == null ? "-" : `${formatNumber(run.duration_ms)} ms`],
+                            ["子探针总数", probeSummary.probe_total],
+                            ["子探针成功", probeSummary.probe_success],
+                            ["子探针失败", probeSummary.probe_failed],
+                            ["涉及提供商", probeSummary.provider_count],
+                            ["成功提供商", probeSummary.provider_success_count],
+                            ["涉及模型", probeSummary.model_count],
+                            ["成功模型", probeSummary.model_success_count],
+                            ["明细截断", detail.probes_truncated ? `是，仅展示前 ${formatNumber(detail.probe_limit || probes.length)} 条` : "否"],
+                        ],
+                    },
+                    {
+                        title: "批次存档口径",
+                        items: [
+                            ["记录总数", run.total_probes],
+                            ["记录成功", run.success_probes],
+                            ["记录失败", run.failed_probes],
+                            ["批次耗时", run.duration_ms == null ? "-" : `${formatNumber(run.duration_ms)} ms`],
+                            ["口径说明", "旧日志可能按提供商或模型聚合；子探针汇总以明细事件为准"],
                         ],
                     },
                     {
@@ -16614,13 +18235,14 @@
                     },
                     {
                         title: "探针明细",
+                        wide: true,
                         html: renderMiniTable(
                             ["时间", "提供商", "模型", "探针", "协议", "结果", "耗时", "错误"],
                             probes.map((probe) => [
                                 formatDate(probe.created_at),
                                 probe.provider_id || "-",
                                 probe.model_name || probe.provider_model_id || "-",
-                                probe.probe_type,
+                                formatHealthProbeType(probe.probe_type),
                                 probe.protocol_type || probe.endpoint_path,
                                 probe.success ? "成功" : "失败",
                                 probe.latency_ms == null ? "-" : `${probe.latency_ms} ms`,
@@ -16668,7 +18290,6 @@
                 ]);
             } else if (tab === "content-guard-events") {
                 const matchedRules = normalizeJsonObject(item.matched_rules_json);
-                const matchedCategories = normalizeJsonObject(item.matched_categories_json);
                 const ruleRows = Array.isArray(matchedRules)
                     ? matchedRules.map((rule) => [
                         rule.id || rule.rule_id || "-",
@@ -16707,12 +18328,13 @@
                         items: [
                             ["原因", item.reason],
                             ["片段", item.excerpt],
-                            ["分类", Array.isArray(matchedCategories) ? matchedCategories.join("、") : JSON.stringify(matchedCategories || {})],
-                            ["诊断", item.diagnostics_json],
+                            ["分类", formatCategoryList(item.matched_categories_json || item.categories_json)],
+                            ["诊断", formatJsonDetailValue(item.diagnostics_json)],
                         ],
                     },
                     {
                         title: "规则明细",
+                        wide: true,
                         html: renderMiniTable(
                             ["规则 ID", "规则名", "风险", "动作"],
                             ruleRows
@@ -16929,18 +18551,9 @@
                     <tr>
                         <td>
                             <strong>${formatDate(log.created_at)}</strong>
-                            <div class="table-muted">${escapeHtml(log.http_method || "-")}</div>
-                            <div class="table-muted">${escapeHtml(buildSessionValue(log))}</div>
                         </td>
-                        <td>
-                            <strong>${escapeHtml(formatLogTypeLabel(log.log_type))}</strong>
-                            <div class="table-muted">思维等级 ${escapeHtml(log.reasoning_level || "无")}${log.model_reasoning_effort ? ` · 参数 ${escapeHtml(log.model_reasoning_effort)}` : ""}</div>
-                        </td>
-                        <td>
-                            <strong>${escapeHtml(log.user_account_name || "-")}</strong>
-                            <div class="table-muted">${escapeHtml(log.api_client_key_name || "-")}</div>
-                            <div class="table-muted">${escapeHtml(log.api_client_key_prefix || "-")}</div>
-                        </td>
+                        <td>${renderReasoningLevelCell(log)}</td>
+                        <td>${renderRequestKeyCell(log, { includeUser: true })}</td>
                         <td>
                             ${renderLogModelCell(log)}
                             <div class="table-muted">${escapeHtml(log.provider_name || "-")}</div>
@@ -16948,8 +18561,7 @@
                         <td>${renderLogResultCell(log)}</td>
                         <td>
                             ${renderLogBillingCell(log)}
-                            <strong>${formatMetricValue(log.duration_ms ?? log.latency_ms, " ms")}</strong>
-                            <div class="table-muted">首包 ${formatMetricValue(log.ttfb_ms, " ms")} · 速率 ${formatRateValue(log.tps)}</div>
+                            ${renderLogTimingCell(log)}
                         </td>
                         <td>
                             <div class="table-actions">
@@ -17067,9 +18679,53 @@
                     request_body_json: safeJsonParse(log.request_body_json || "") ?? log.request_body_json,
                     response_body_json: safeJsonParse(log.response_body_json || "") ?? log.response_body_json,
                     response_text: log.response_text,
+                    request_headers_json: safeJsonParse(log.request_headers_json || "") ?? log.request_headers_json,
                     trace: safeJsonParse(log.trace_json || "") ?? log.trace_json,
                     created_at: log.created_at,
                 };
+                const requestHeaders = parseRequestHeadersForLog(log);
+                renderDetailCards([
+                    {
+                        summary: true,
+                        html: renderLogTraceSummary(log, requestHeaders),
+                    },
+                    {
+                        title: "请求上下文",
+                    items: [
+                        ["链路 ID", log.trace_id],
+                        ["客户端请求 ID", requestHeaders.client_request_id],
+                        ["请求 ID", log.request_id],
+                        ["会话", log.session_id || log.conversation_key],
+                        ["日志类型", formatLogTypeLabel(log.log_type)],
+                        ["API Key 名称", log.api_client_key_name || "-"],
+                        ["API Key 标识", log.api_client_key_prefix || "-"],
+                    ],
+                },
+                    {
+                        title: "客户端请求头",
+                        items: buildRequestHeaderDetailItems(requestHeaders),
+                    },
+                    {
+                        title: "路由结果",
+                        items: [
+                            ["请求模型", log.requested_model || "-"],
+                            ["实际模型", log.model_name || "-"],
+                            ["提供商", log.provider_name || log.provider_id || "-"],
+                            ["挂载 ID", log.resolved_provider_model_id || "-"],
+                            ["思维等级", log.reasoning_level || "无"],
+                            ["参数", log.model_reasoning_effort || "-"],
+                        ],
+                    },
+                    {
+                        title: "错误与耗时",
+                        items: [
+                            ["成功", log.success ? "是" : "否"],
+                            ["状态码", log.status_code ?? "-"],
+                            ["错误码", log.error_code || "-"],
+                            ["耗时", log.duration_ms == null && log.latency_ms == null ? "-" : `${log.duration_ms ?? log.latency_ms} ms`],
+                        ],
+                    },
+                ]);
                 traceContent.textContent = formatLogRawJson(detail);
                 traceModalController.open(button);
             });
@@ -17923,39 +19579,6 @@
             </div>
         `;
 
-        function renderProviders(providers) {
-            const body = document.getElementById("operations-provider-table-body");
-            if (!body) return;
-            const rows = Array.isArray(providers) ? providers : [];
-            if (!rows.length) {
-                body.innerHTML = '<tr><td colspan="8"><div class="empty-state">暂无提供商数据</div></td></tr>';
-                return;
-            }
-            body.innerHTML = rows.map((item) => {
-                const requestPercent = capacityPercent(item.active_requests, item.max_active_requests);
-                const streamPercent = capacityPercent(item.active_streams, item.max_active_streams);
-                const qpsPercent = capacityPercent(item.current_qps, item.max_qps);
-                const rpmPercent = capacityPercent(item.current_rpm, item.max_rpm);
-                const failureRate = Number(item.failure_rate || 0);
-                const tone = failureRate >= 20 ? "danger" : failureRate >= 5 ? "warn" : "ok";
-                return `
-                    <tr>
-                        <td><strong>${escapeHtml(item.provider_name || "-")}</strong></td>
-                        <td>${providerAvailabilityBadge(item.health_status || "unknown")}</td>
-                        <td>${renderMiniBar(capacityLabel(item.active_requests, item.max_active_requests), "", requestPercent, requestPercent >= 90 ? "danger" : requestPercent >= 75 ? "warn" : "ok")}</td>
-                        <td>${renderMiniBar(capacityLabel(item.active_streams, item.max_active_streams), "", streamPercent, streamPercent >= 90 ? "danger" : streamPercent >= 75 ? "warn" : "ok")}</td>
-                        <td>
-                            ${renderMiniBar(`QPS ${capacityLabel(Number(item.current_qps || 0).toFixed(2), item.max_qps)}`, "", qpsPercent, qpsPercent >= 90 ? "danger" : qpsPercent >= 75 ? "warn" : "ok")}
-                            ${renderMiniBar(`RPM ${capacityLabel(Number(item.current_rpm || 0).toFixed(0), item.max_rpm)}`, "", rpmPercent, rpmPercent >= 90 ? "danger" : rpmPercent >= 75 ? "warn" : "ok")}
-                        </td>
-                        <td>${formatNumber(item.total_requests || 0)}</td>
-                        <td><span class="operations-rate" data-tone="${tone}">${formatPercent(failureRate)}</span></td>
-                        <td>${formatLatencyMs(item.avg_first_token_latency_ms)}</td>
-                    </tr>
-                `;
-            }).join("");
-        }
-
         const CONFIG_SETTING_LABELS = {
             global_qps_limit: "全局 QPS",
             global_rpm_limit: "全局 RPM",
@@ -18173,6 +19796,7 @@
                     <div class="operations-config-diff">${diffRows}</div>
                     <div class="operations-profile-actions">
                         <button class="table-action-btn interactive-btn" type="button" data-action="apply-operations-profile" data-profile-id="${escapeHtml(profile.id || "")}">套用</button>
+                        <button class="table-action-btn interactive-btn danger" type="button" data-action="restart-project">重启项目</button>
                     </div>
                 </article>
             `;
@@ -18202,6 +19826,27 @@
                 setButtonTransientFeedback(button, "success", { successText: "已套用" });
                 showToast("宿主推荐配置已套用");
                 await loadOperationsMetrics(false);
+            } catch (error) {
+                setButtonTransientFeedback(button, "error", { errorText: "失败" });
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(button, false);
+            }
+        }
+
+        async function restartProject(button) {
+            if (!button) return;
+            const confirmed = await confirmDangerAction({
+                title: "重启项目",
+                message: "将按当前宿主系统触发项目重启，Windows 本地使用 run.ps1，Linux 生产环境使用 aotu-gpt.service，页面会短暂断开连接。确认现在重启？",
+                confirmText: "重启",
+            });
+            if (!confirmed) return;
+            try {
+                setButtonLoading(button, true);
+                const result = await api.post("/api/metrics/system/restart-project", {});
+                setButtonTransientFeedback(button, "success", { successText: "已触发", duration: 2200 });
+                showToast(result?.message || "项目重启已触发，请稍后刷新页面确认服务状态");
             } catch (error) {
                 setButtonTransientFeedback(button, "error", { errorText: "失败" });
                 showToast(error.message, "error");
@@ -18315,7 +19960,6 @@
                     renderMiniBar("计费锁", formatNumber(tokenBacklog), Math.min(100, (tokenBacklog / 1000) * 100), tokenBacklog >= 1000 ? "warn" : "ok"),
                 ].join("");
             }
-            renderOperationsFailedJobs(background.recent_failed_jobs || []);
             const latencyBars = document.getElementById("operations-latency-bars");
             if (latencyBars) {
                 latencyBars.innerHTML = [
@@ -18328,6 +19972,7 @@
                 label: "请求与失败趋势",
                 barKey: "total_requests",
                 lineKey: "failed_requests",
+                barLabel: "请求",
                 lineLabel: "失败",
                 windowMinutes: metrics.window_minutes,
                 maxPoints: 72,
@@ -18336,46 +19981,12 @@
                 label: "QPS 与 P95 趋势",
                 barKey: "qps",
                 lineKey: "p95_latency_ms",
+                barLabel: "QPS",
                 lineLabel: "P95",
                 windowMinutes: metrics.window_minutes,
                 maxPoints: 72,
             });
-            renderProviders(metrics.providers || []);
             renderConfigurationRecommendations(metrics.configuration_recommendations);
-        }
-
-        function formatOperationsStatusLabel(value) {
-            const labels = {
-                success: "成功",
-                failed: "失败",
-                cancelled: "已取消",
-                skipped: "跳过",
-                skipped_locked: "锁定跳过",
-                skipped_lock_unavailable: "锁不可用跳过",
-                acquired: "已获取",
-                unavailable: "不可用",
-                unavailable_skipped: "锁不可用跳过",
-                running: "运行中",
-            };
-            return labels[value] || value || "-";
-        }
-
-        function renderOperationsFailedJobs(items) {
-            const body = document.getElementById("operations-failed-jobs-body");
-            if (!body) return;
-            body.innerHTML = (items || []).map((item) => `
-                <tr>
-                    <td>${formatDate(item.created_at)}</td>
-                    <td>
-                        <strong>${escapeHtml(item.job_name || "-")}</strong>
-                        <div class="table-muted">${escapeHtml(item.job_run_id || "-")}</div>
-                    </td>
-                    <td>${escapeHtml(formatOperationsStatusLabel(item.status || "-"))}</td>
-                    <td>${escapeHtml(formatOperationsStatusLabel(item.lock_status || "-"))}</td>
-                    <td>${item.duration_ms == null ? "-" : `${formatNumber(item.duration_ms)} ms`}</td>
-                    <td>${escapeHtml(item.error || "-")}</td>
-                </tr>
-            `).join("") || '<tr><td colspan="6"><div class="empty-state">没有失败任务</div></td></tr>';
         }
 
         async function loadOperationsMetrics(manual = false) {
@@ -18422,13 +20033,18 @@
             loadOperationsMetrics(true);
         });
         document.getElementById("operations-config-profile-list")?.addEventListener("click", (event) => {
+            const restartButton = event.target.closest('[data-action="restart-project"]');
+            if (restartButton) {
+                restartProject(restartButton);
+                return;
+            }
             const button = event.target.closest('[data-action="apply-operations-profile"]');
             if (!button) return;
             applyConfigurationProfile(button.dataset.profileId || "", button);
         });
         await loadOperationsMetrics(false);
-        // 性能优化：从5秒改为15秒轮询，减少66%的请求
-        const timer = window.setInterval(() => loadOperationsMetrics(false), 15000);
+        // 自动轮询保持低频，手动刷新仍即时触发。
+        const timer = window.setInterval(() => loadOperationsMetrics(false), 30000);
         registerPageCleanup(() => window.clearInterval(timer));
     }
 
@@ -18522,8 +20138,7 @@
         const toIsoOrEmpty = (value) => {
             const raw = String(value || "").trim();
             if (!raw) return "";
-            const date = new Date(raw);
-            return Number.isNaN(date.getTime()) ? "" : date.toISOString();
+            return formatBeijingDateTimeForApi(raw);
         };
         const buildQuery = (params) => {
             const query = new URLSearchParams();
@@ -19016,12 +20631,19 @@
             currentPageAbortController.abort();
             currentPageAbortController = new AbortController();
             page = document.body.dataset.page;
+            const pageScope = document.getElementById("app-content") || document;
             initBillingTooltipLayer();
             initProviderStatusTooltipLayer();
-            enhanceInteractiveButtons(document);
-            initActionMenus();
-            initRawApiKeyValidationControls(document);
-            scheduleResponsiveTableSync(document);
+            if (document.body.dataset.globalUiEnhancementsBound !== "true") {
+                document.body.dataset.globalUiEnhancementsBound = "true";
+                enhanceInteractiveButtons(document);
+                initActionMenus();
+                initRawApiKeyValidationControls(document);
+            } else {
+                enhanceInteractiveButtons(pageScope);
+                initRawApiKeyValidationControls(pageScope);
+            }
+            scheduleResponsiveTableSync(pageScope);
             if (page === "dashboard") await initDashboard();
             if (page === "providers") await initProviders();
             if (page === "provider-models") await initProviderModelsPage();

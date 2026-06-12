@@ -14,6 +14,46 @@ from app.models.logging_events import HealthCheckRun
 
 class HealthLogRecorder:
     @staticmethod
+    def _flatten_probe_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        flattened: list[dict[str, Any]] = []
+        nested_model_keys: set[tuple[str, str]] = set()
+        for item in results:
+            model_results = item.get("model_results")
+            if not isinstance(model_results, list):
+                continue
+            for model_result in model_results:
+                key = HealthLogRecorder._probe_result_identity(model_result)
+                if key is not None:
+                    nested_model_keys.add(key)
+        for item in results:
+            model_results = item.get("model_results")
+            if isinstance(model_results, list):
+                for model_result in model_results:
+                    flattened.extend(HealthLogRecorder._flatten_single_probe_result(model_result))
+                continue
+            item_key = HealthLogRecorder._probe_result_identity(item)
+            if item.get("scope") == "model" and item_key in nested_model_keys:
+                continue
+            flattened.extend(HealthLogRecorder._flatten_single_probe_result(item))
+        return flattened
+
+    @staticmethod
+    def _probe_result_identity(item: dict[str, Any]) -> tuple[str, str] | None:
+        provider_model_id = item.get("provider_model_id")
+        if provider_model_id is not None:
+            return ("provider_model_id", str(provider_model_id))
+        model_name = item.get("model_name")
+        if model_name:
+            return ("model_name", str(model_name))
+        return None
+
+    @staticmethod
+    def _flatten_single_probe_result(item: dict[str, Any]) -> list[dict[str, Any]]:
+        endpoint_results = list(item.get("endpoint_results") or [])
+        endpoint_results.extend(list(item.get("content_probe_results") or []))
+        return endpoint_results or [item]
+
+    @staticmethod
     def start_run(db: Session, *, trigger_type: str, scope_type: str, scope_id: str | int | None = None, phase_keys: list[str] | set[str] | None = None, auto_commit: bool = True) -> HealthCheckRun:
         run_id = uuid4().hex
         event = LoggingDispatcher.build_event(
@@ -28,7 +68,7 @@ class HealthLogRecorder:
                 "scope_type": scope_type,
                 "scope_id": str(scope_id) if scope_id is not None else None,
                 "phase_keys_json": dumps_sanitized(sorted(phase_keys or [])),
-                "started_at": datetime.utcnow(),
+                "started_at": now_beijing(),
                 "overall_result": "running",
             },
         )
@@ -39,9 +79,10 @@ class HealthLogRecorder:
         run = db.scalar(select(HealthCheckRun).where(HealthCheckRun.run_id == run_id))
         if run is None:
             return
-        finished_at = datetime.utcnow()
-        success_count = sum(1 for item in results if bool(item.get("success")))
-        total = len(results)
+        finished_at = now_beijing()
+        probe_results = HealthLogRecorder._flatten_probe_results(results)
+        success_count = sum(1 for item in probe_results if bool(item.get("success")))
+        total = len(probe_results)
         run.finished_at = finished_at
         run.duration_ms = int((finished_at - run.started_at).total_seconds() * 1000)
         run.total_probes = total
@@ -83,3 +124,5 @@ class HealthLogRecorder:
             },
         )
         return LoggingDispatcher.record(event, db=db, auto_commit=auto_commit)
+
+from app.utils.timezone import now_beijing

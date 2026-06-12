@@ -91,7 +91,7 @@ CREATE TABLE IF NOT EXISTS request_content_guard_events (
     excerpt TEXT,
     provider_status_after TEXT,
     diagnostics_json TEXT,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Shanghai')
 );
 
 ALTER TABLE request_content_guard_events
@@ -137,7 +137,7 @@ CREATE TABLE IF NOT EXISTS health_probe_events (
     error_code TEXT,
     capability_result_json TEXT,
     content_guard_result_json TEXT,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Shanghai')
 );
 
 ALTER TABLE health_probe_events

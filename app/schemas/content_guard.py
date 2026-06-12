@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from app.utils.content_guard_config import (
     CONTENT_GUARD_MAX_SCAN_BYTES_LIMIT,
     CONTENT_GUARD_PROBE_INTERVAL_MAX_SECONDS,
+    CONTENT_GUARD_PROBE_PROTOCOL_TYPES,
     CONTENT_GUARD_RULE_ACTIONS,
     CONTENT_GUARD_RULE_MATCH_TYPES,
     CONTENT_GUARD_RULE_RISK_LEVELS,
@@ -21,6 +22,7 @@ from app.utils.content_guard_config import (
 
 ContentGuardProbeKey = Literal["fixed_answer", "pollution_rules", "json", "sse"]
 ContentGuardEndpointPath = Literal["/chat/completions", "/responses"]
+ContentGuardProbeProtocolType = Literal["chat_completions", "responses"]
 ContentGuardRuleMatchType = Literal["keyword_any", "regex", "unexpected_url"]
 ContentGuardRuleRiskLevel = Literal["low", "medium", "high"]
 ContentGuardRuleAction = Literal["allow", "record", "block"]
@@ -33,6 +35,7 @@ class ContentGuardSettingsUpdate(BaseModel):
     content_guard_precheck_auto_enabled: bool = content_guard_default("content_guard_precheck_auto_enabled")
     content_guard_block_on_high_risk: bool = content_guard_default("content_guard_block_on_high_risk")
     content_guard_json_probe_enabled: bool = content_guard_default("content_guard_json_probe_enabled")
+    content_guard_probe_protocol_type: ContentGuardProbeProtocolType = content_guard_default("content_guard_probe_protocol_type")
     content_guard_probe_interval_sec: int = Field(
         default=content_guard_default("content_guard_probe_interval_sec"),
         ge=300,
@@ -72,6 +75,13 @@ class ContentGuardSettingsUpdate(BaseModel):
     def validate_cross_fields(self) -> "ContentGuardSettingsUpdate":
         validate_content_guard_settings(self.model_dump())
         return self
+
+    @field_validator("content_guard_probe_protocol_type")
+    @classmethod
+    def validate_probe_protocol_type(cls, value: str) -> str:
+        if value not in CONTENT_GUARD_PROBE_PROTOCOL_TYPES:
+            raise ValueError("探针协议无效")
+        return value
 
     @field_validator("content_guard_url_allowlist_json")
     @classmethod
@@ -234,7 +244,7 @@ class ContentGuardExternalTarget(BaseModel):
     base_url: str = Field(..., min_length=1, max_length=512)
     api_key: str = Field(..., min_length=1, max_length=4096)
     model_name: str = Field(..., min_length=1, max_length=256)
-    endpoint_path: ContentGuardEndpointPath = "/responses"
+    endpoint_path: ContentGuardEndpointPath = "/chat/completions"
 
     @field_validator("base_url")
     @classmethod

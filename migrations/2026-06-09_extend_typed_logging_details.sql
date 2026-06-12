@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS request_auth_events (
     remaining_cost_daily DOUBLE PRECISION,
     policy_snapshot_json TEXT,
     error_code TEXT,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Shanghai')
 );
 
 CREATE TABLE IF NOT EXISTS request_validation_events (
@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS request_validation_events (
     request_body_summary_json TEXT,
     error_code TEXT,
     safe_detail_json TEXT,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Shanghai')
 );
 
 CREATE TABLE IF NOT EXISTS request_model_permission_events (
@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS request_model_permission_events (
     required_capabilities_json TEXT,
     permission_result TEXT NOT NULL,
     reason_details_json TEXT,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Shanghai')
 );
 
 CREATE TABLE IF NOT EXISTS request_route_decision_events (
@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS request_route_decision_events (
     excluded_summary_json TEXT,
     diagnostics_json TEXT,
     retry_wait_ms INTEGER,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Shanghai')
 );
 
 CREATE TABLE IF NOT EXISTS request_provider_attempt_events (
@@ -81,7 +81,7 @@ CREATE TABLE IF NOT EXISTS request_provider_attempt_events (
     upstream_request_id TEXT,
     error_code TEXT,
     retryable BOOLEAN,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Shanghai')
 );
 
 CREATE TABLE IF NOT EXISTS request_upstream_response_events (
@@ -96,7 +96,7 @@ CREATE TABLE IF NOT EXISTS request_upstream_response_events (
     response_summary_json TEXT,
     response_text_excerpt TEXT,
     response_body_truncated BOOLEAN,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Shanghai')
 );
 
 CREATE TABLE IF NOT EXISTS request_stream_events (
@@ -112,7 +112,7 @@ CREATE TABLE IF NOT EXISTS request_stream_events (
     sse_error_sent BOOLEAN,
     done_sent BOOLEAN,
     disconnect_status_code INTEGER,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Shanghai')
 );
 
 CREATE TABLE IF NOT EXISTS request_error_response_events (
@@ -129,7 +129,7 @@ CREATE TABLE IF NOT EXISTS request_error_response_events (
     required_endpoint TEXT,
     missing_capability TEXT,
     diagnostic_sample_json TEXT,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Shanghai')
 );
 
 CREATE TABLE IF NOT EXISTS request_content_guard_events (
@@ -155,7 +155,7 @@ CREATE TABLE IF NOT EXISTS request_content_guard_events (
     confidence DOUBLE PRECISION,
     score_delta INTEGER,
     diagnostics_json TEXT,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Shanghai')
 );
 
 ALTER TABLE request_content_guard_events
@@ -188,7 +188,7 @@ CREATE TABLE IF NOT EXISTS request_billing_events (
     balance_after DOUBLE PRECISION,
     attempt_count INTEGER,
     error TEXT,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Shanghai')
 );
 
 CREATE TABLE IF NOT EXISTS exception_events (
@@ -215,8 +215,8 @@ CREATE TABLE IF NOT EXISTS exception_events (
     stack_hash TEXT,
     stack_excerpt TEXT,
     detail_json TEXT,
-    occurred_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    occurred_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Shanghai'),
+    created_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Shanghai')
 );
 
 CREATE TABLE IF NOT EXISTS health_check_runs (
@@ -226,14 +226,14 @@ CREATE TABLE IF NOT EXISTS health_check_runs (
     scope_type TEXT NOT NULL,
     scope_id TEXT,
     phase_keys_json TEXT,
-    started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    started_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Shanghai'),
     finished_at TIMESTAMP,
     duration_ms INTEGER,
     total_probes INTEGER NOT NULL DEFAULT 0,
     success_probes INTEGER NOT NULL DEFAULT 0,
     failed_probes INTEGER NOT NULL DEFAULT 0,
     overall_result TEXT,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Shanghai')
 );
 
 CREATE TABLE IF NOT EXISTS health_probe_events (
@@ -252,7 +252,7 @@ CREATE TABLE IF NOT EXISTS health_probe_events (
     error_code TEXT,
     capability_result_json TEXT,
     content_guard_result_json TEXT,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Shanghai')
 );
 
 ALTER TABLE health_probe_events
@@ -269,7 +269,7 @@ CREATE TABLE IF NOT EXISTS token_finalize_events (
     enable_usage_fill BOOLEAN,
     result TEXT NOT NULL,
     error TEXT,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Shanghai')
 );
 
 CREATE TABLE IF NOT EXISTS billing_process_events (
@@ -285,7 +285,7 @@ CREATE TABLE IF NOT EXISTS billing_process_events (
     billing_status TEXT NOT NULL,
     billing_record_id INTEGER,
     error TEXT,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Shanghai')
 );
 
 CREATE TABLE IF NOT EXISTS background_job_events (
@@ -304,7 +304,7 @@ CREATE TABLE IF NOT EXISTS background_job_events (
     failed_count INTEGER,
     result_summary_json TEXT,
     error TEXT,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Shanghai')
 );
 
 CREATE TABLE IF NOT EXISTS user_operation_audit_logs (
@@ -320,7 +320,7 @@ CREATE TABLE IF NOT EXISTS user_operation_audit_logs (
     source_ip TEXT,
     trace_id TEXT,
     result TEXT NOT NULL DEFAULT 'success',
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Shanghai')
 );
 
 CREATE TABLE IF NOT EXISTS asset_events (
@@ -339,7 +339,7 @@ CREATE TABLE IF NOT EXISTS asset_events (
     error TEXT,
     trace_id TEXT,
     request_log_id INTEGER,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Shanghai')
 );
 
 ALTER TABLE asset_events

@@ -21,7 +21,9 @@ class ContentGuardRuleService:
     RESULT_ERROR = ContentGuardService.RESULT_ERROR
 
     _REGEX_CACHE: dict[str, re.Pattern[str]] = {}
+    _RULES_JSON_CACHE: dict[str, list[ContentGuardRule]] = {}
     _MAX_REGEX_CACHE_SIZE = 512
+    _MAX_RULES_JSON_CACHE_SIZE = 64
     _MAX_REGEX_PATTERN_CHARS = 500
     _MAX_REGEX_QUANTIFIER_COUNT = 24
     _MAX_AUTOMATON_CACHE_SIZE = 128
@@ -180,11 +182,18 @@ class ContentGuardRuleService:
     def parse_rules_json(cls, rules_json: str | None) -> list[ContentGuardRule]:
         if not rules_json:
             return cls.normalize_rules(None)
+        cached = cls._RULES_JSON_CACHE.get(rules_json)
+        if cached is not None:
+            return list(cached)
         try:
             parsed = json.loads(rules_json)
         except Exception as exc:
             return [cls.configuration_error_rule("invalid_rules_json", "规则配置损坏", f"内容防护规则 JSON 配置损坏：{exc}")]
-        return cls.normalize_rules(parsed)
+        normalized = cls.normalize_rules(parsed)
+        if len(cls._RULES_JSON_CACHE) >= cls._MAX_RULES_JSON_CACHE_SIZE:
+            cls._RULES_JSON_CACHE.clear()
+        cls._RULES_JSON_CACHE[rules_json] = list(normalized)
+        return normalized
 
     @classmethod
     def serialize_rules_json(cls, rules: list[ContentGuardRule | dict[str, Any]] | None) -> str:

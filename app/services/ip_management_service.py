@@ -389,7 +389,7 @@ class IpManagementService:
     @staticmethod
     def build_overview(db: Session) -> dict[str, Any]:
         setting = IpManagementService.get_or_create_setting(db)
-        since = datetime.utcnow() - timedelta(hours=1)
+        since = now_beijing() - timedelta(hours=1)
         event_row = db.execute(
             select(
                 func.count(IpManagementEvent.id).label("total_events"),
@@ -455,3 +455,5 @@ class IpManagementService:
                 "recent_invalid_header_ignored_count": int(event_row.invalid_ignored or 0),
             },
         }
+
+from app.utils.timezone import now_beijing

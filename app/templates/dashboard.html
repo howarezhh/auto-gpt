@@ -6,7 +6,7 @@
     <div class="cockpit-hero-copy">
         <div class="eyebrow">运行总览</div>
         <h1>概览</h1>
-        <p>统一查看提供商状态、路由配置、健康巡检与最近代理使用概况。</p>
+        <p>统一查看提供商状态、健康巡检与最近代理使用概况。</p>
         <div class="hero-actions">
             <a class="btn btn-accent interactive-btn" href="/providers">管理提供商</a>
             <button class="btn btn-ghost interactive-btn" id="check-all-btn" type="button">检查全部提供商</button>
@@ -49,91 +49,151 @@
         <div><span>输入 / 输出 Token</span><strong>{{ (stats.usage_overview.summary.prompt_tokens or 0)|display_tokens }} / {{ (stats.usage_overview.summary.completion_tokens or 0)|display_tokens }}</strong></div>
         <div><span>总价格成本</span><strong>{{ (stats.usage_overview.summary.total_cost or 0)|display_money }}</strong></div>
     </div>
+    {% set model_rows = stats.usage_overview.top_models|sort(attribute='total_cost', reverse=true) %}
+    {% set provider_rows = stats.usage_overview.top_providers|sort(attribute='total_cost', reverse=true) %}
+    {% set provider_model_rows = stats.usage_overview.top_provider_models|sort(attribute='total_cost', reverse=true) %}
+    {% set model_max_cost = (model_rows[0].total_cost or 0) if model_rows else 0 %}
+    {% set provider_max_cost = (provider_rows[0].total_cost or 0) if provider_rows else 0 %}
+    {% set provider_model_max_cost = (provider_model_rows[0].total_cost or 0) if provider_model_rows else 0 %}
+    {% set model_usage = namespace(requests=0, tokens=0, cost=0) %}
+    {% for item in model_rows %}
+        {% set model_usage.requests = model_usage.requests + (item.total_requests or 0) %}
+        {% set model_usage.tokens = model_usage.tokens + (item.total_tokens or 0) %}
+        {% set model_usage.cost = model_usage.cost + (item.total_cost or 0) %}
+    {% endfor %}
+    {% set provider_usage = namespace(requests=0, tokens=0, cost=0) %}
+    {% for item in provider_rows %}
+        {% set provider_usage.requests = provider_usage.requests + (item.total_requests or 0) %}
+        {% set provider_usage.tokens = provider_usage.tokens + (item.total_tokens or 0) %}
+        {% set provider_usage.cost = provider_usage.cost + (item.total_cost or 0) %}
+    {% endfor %}
+    {% set provider_model_usage = namespace(requests=0, tokens=0, cost=0) %}
+    {% for item in provider_model_rows %}
+        {% set provider_model_usage.requests = provider_model_usage.requests + (item.total_requests or 0) %}
+        {% set provider_model_usage.tokens = provider_model_usage.tokens + (item.total_tokens or 0) %}
+        {% set provider_model_usage.cost = provider_model_usage.cost + (item.total_cost or 0) %}
+    {% endfor %}
     <div class="dashboard-usage-grid">
-        <article class="summary-list-card">
-            <div class="panel-kicker">模型</div>
-            <h3>每个模型总 Token / 成本</h3>
-            <div class="table-responsive">
-                <table class="table align-middle">
-                    <thead>
-                        <tr>
-                            <th>模型</th>
-                            <th>请求</th>
-                            <th>Token</th>
-                            <th>成本</th>
-                        </tr>
-                    </thead>
-                    <tbody id="dashboard-usage-model-body">
-                        {% for item in stats.usage_overview.top_models %}
-                        <tr>
-                            <td>{{ item.model_name }}</td>
-                            <td>{{ item.total_requests }}</td>
-                            <td>{{ item.total_tokens|display_tokens }}</td>
-                            <td>{{ (item.total_cost or 0)|display_money }}</td>
-                        </tr>
-                        {% else %}
-                        <tr><td colspan="4"><div class="empty-state">暂无模型成本数据</div></td></tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
+        <article class="summary-list-card usage-visual-card" data-usage-card="model">
+            <div class="usage-card-head">
+                <div>
+                    <div class="panel-kicker">模型</div>
+                    <h3>模型 Token / 成本排行</h3>
+                </div>
+                <span class="usage-card-count">{{ model_rows|length }} 项</span>
+            </div>
+            <div class="usage-kpi-strip">
+                <div><span>请求</span><strong>{{ model_usage.requests }}</strong></div>
+                <div><span>Token</span><strong>{{ model_usage.tokens|display_tokens }}</strong></div>
+                <div><span>成本</span><strong>{{ model_usage.cost|display_money }}</strong></div>
+            </div>
+            <div class="usage-rank-list" id="dashboard-usage-model-list">
+                {% for item in model_rows %}
+                {% set usage_width = (((item.total_cost or 0) / model_max_cost) * 100) if model_max_cost else 0 %}
+                <article class="usage-rank-item">
+                    <div class="usage-rank-main">
+                        <span class="usage-rank-index">{{ loop.index }}</span>
+                        <div class="usage-rank-label">
+                            <strong>{{ item.model_name }}</strong>
+                            <span>{{ item.total_requests }} 次请求 · {{ item.total_tokens|display_tokens }}</span>
+                        </div>
+                        <div class="usage-rank-value">
+                            <strong>{{ (item.total_cost or 0)|display_money }}</strong>
+                        </div>
+                    </div>
+                    <div class="usage-rank-meter" aria-hidden="true"><span style="--usage-rank-width: {{ usage_width }}%"></span></div>
+                    <div class="usage-rank-detail">
+                        <span>模型：{{ item.model_name }}</span>
+                        <span>请求：{{ item.total_requests }}</span>
+                        <span>Token：{{ item.total_tokens|display_tokens }}</span>
+                        <span>成本：{{ (item.total_cost or 0)|display_money }}</span>
+                    </div>
+                </article>
+                {% else %}
+                <div class="empty-state">暂无模型成本数据</div>
+                {% endfor %}
             </div>
         </article>
-        <article class="summary-list-card">
-            <div class="panel-kicker">提供商</div>
-            <h3>每个提供商总成本</h3>
-            <div class="table-responsive">
-                <table class="table align-middle">
-                    <thead>
-                        <tr>
-                            <th>提供商</th>
-                            <th>请求</th>
-                            <th>Token</th>
-                            <th>成本</th>
-                        </tr>
-                    </thead>
-                    <tbody id="dashboard-usage-provider-body">
-                        {% for item in stats.usage_overview.top_providers %}
-                        <tr>
-                            <td>{{ item.provider_name }}</td>
-                            <td>{{ item.total_requests }}</td>
-                            <td>{{ item.total_tokens|display_tokens }}</td>
-                            <td>{{ (item.total_cost or 0)|display_money }}</td>
-                        </tr>
-                        {% else %}
-                        <tr><td colspan="4"><div class="empty-state">暂无提供商成本数据</div></td></tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
+        <article class="summary-list-card usage-visual-card" data-usage-card="provider">
+            <div class="usage-card-head">
+                <div>
+                    <div class="panel-kicker">提供商</div>
+                    <h3>提供商成本排行</h3>
+                </div>
+                <span class="usage-card-count">{{ provider_rows|length }} 项</span>
+            </div>
+            <div class="usage-kpi-strip">
+                <div><span>请求</span><strong>{{ provider_usage.requests }}</strong></div>
+                <div><span>Token</span><strong>{{ provider_usage.tokens|display_tokens }}</strong></div>
+                <div><span>成本</span><strong>{{ provider_usage.cost|display_money }}</strong></div>
+            </div>
+            <div class="usage-rank-list" id="dashboard-usage-provider-list">
+                {% for item in provider_rows %}
+                {% set usage_width = (((item.total_cost or 0) / provider_max_cost) * 100) if provider_max_cost else 0 %}
+                <article class="usage-rank-item">
+                    <div class="usage-rank-main">
+                        <span class="usage-rank-index">{{ loop.index }}</span>
+                        <div class="usage-rank-label">
+                            <strong>{{ item.provider_name }}</strong>
+                            <span>{{ item.total_requests }} 次请求 · {{ item.total_tokens|display_tokens }}</span>
+                        </div>
+                        <div class="usage-rank-value">
+                            <strong>{{ (item.total_cost or 0)|display_money }}</strong>
+                        </div>
+                    </div>
+                    <div class="usage-rank-meter" aria-hidden="true"><span style="--usage-rank-width: {{ usage_width }}%"></span></div>
+                    <div class="usage-rank-detail">
+                        <span>提供商：{{ item.provider_name }}</span>
+                        <span>请求：{{ item.total_requests }}</span>
+                        <span>Token：{{ item.total_tokens|display_tokens }}</span>
+                        <span>成本：{{ (item.total_cost or 0)|display_money }}</span>
+                    </div>
+                </article>
+                {% else %}
+                <div class="empty-state">暂无提供商成本数据</div>
+                {% endfor %}
             </div>
         </article>
-        <article class="summary-list-card dashboard-usage-wide">
-            <div class="panel-kicker">提供商 × 模型</div>
-            <h3>每个提供商的每个模型总成本</h3>
-            <div class="table-responsive">
-                <table class="table align-middle">
-                    <thead>
-                        <tr>
-                            <th>提供商</th>
-                            <th>模型</th>
-                            <th>请求</th>
-                            <th>Token</th>
-                            <th>成本</th>
-                        </tr>
-                    </thead>
-                    <tbody id="dashboard-usage-provider-model-body">
-                        {% for item in stats.usage_overview.top_provider_models %}
-                        <tr>
-                            <td>{{ item.provider_name }}</td>
-                            <td>{{ item.model_name }}</td>
-                            <td>{{ item.total_requests }}</td>
-                            <td>{{ item.total_tokens|display_tokens }}</td>
-                            <td>{{ (item.total_cost or 0)|display_money }}</td>
-                        </tr>
-                        {% else %}
-                        <tr><td colspan="5"><div class="empty-state">暂无提供商模型成本数据</div></td></tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
+        <article class="summary-list-card dashboard-usage-wide usage-visual-card" data-usage-card="provider-model">
+            <div class="usage-card-head">
+                <div>
+                    <div class="panel-kicker">提供商 × 模型</div>
+                    <h3>提供商模型组合成本</h3>
+                </div>
+                <span class="usage-card-count">{{ provider_model_rows|length }} 项</span>
+            </div>
+            <div class="usage-kpi-strip usage-kpi-strip-wide">
+                <div><span>请求</span><strong>{{ provider_model_usage.requests }}</strong></div>
+                <div><span>Token</span><strong>{{ provider_model_usage.tokens|display_tokens }}</strong></div>
+                <div><span>成本</span><strong>{{ provider_model_usage.cost|display_money }}</strong></div>
+                <div><span>组合数</span><strong>{{ provider_model_rows|length }}</strong></div>
+            </div>
+            <div class="usage-rank-list usage-rank-list-grid" id="dashboard-usage-provider-model-list">
+                {% for item in provider_model_rows %}
+                {% set usage_width = (((item.total_cost or 0) / provider_model_max_cost) * 100) if provider_model_max_cost else 0 %}
+                <article class="usage-rank-item">
+                    <div class="usage-rank-main">
+                        <span class="usage-rank-index">{{ loop.index }}</span>
+                        <div class="usage-rank-label">
+                            <strong>{{ item.provider_name }} → {{ item.model_name }}</strong>
+                            <span>{{ item.total_requests }} 次请求 · {{ item.total_tokens|display_tokens }}</span>
+                        </div>
+                        <div class="usage-rank-value">
+                            <strong>{{ (item.total_cost or 0)|display_money }}</strong>
+                        </div>
+                    </div>
+                    <div class="usage-rank-meter" aria-hidden="true"><span style="--usage-rank-width: {{ usage_width }}%"></span></div>
+                    <div class="usage-rank-detail">
+                        <span>提供商：{{ item.provider_name }}</span>
+                        <span>模型：{{ item.model_name }}</span>
+                        <span>请求：{{ item.total_requests }}</span>
+                        <span>Token：{{ item.total_tokens|display_tokens }}</span>
+                        <span>成本：{{ (item.total_cost or 0)|display_money }}</span>
+                    </div>
+                </article>
+                {% else %}
+                <div class="empty-state">暂无提供商模型成本数据</div>
+                {% endfor %}
             </div>
         </article>
     </div>
@@ -151,7 +211,7 @@
         </div>
     </div>
     <div class="monitor-grid monitor-grid-admin">
-        <article class="monitor-card monitor-card-wide">
+        <article class="monitor-card monitor-chart-card">
             <div class="monitor-card-head">
                 <div>
                     <span>请求趋势</span>
@@ -160,8 +220,8 @@
                 <label class="monitor-card-tools" for="dashboard-monitor-traffic-window">
                     <span class="visually-hidden">选择请求趋势时间范围</span>
                     <select class="field-input monitor-window-select" id="dashboard-monitor-traffic-window">
-                        <option value="180" selected>最近 3 小时</option>
-                        <option value="1440">最近 1 天</option>
+                        <option value="180">最近 3 小时</option>
+                        <option value="1440" selected>最近 1 天</option>
                         <option value="10080">最近 1 周</option>
                         <option value="43200">最近 1 个月</option>
                     </select>
@@ -169,7 +229,7 @@
             </div>
             <div class="monitor-chart" id="dashboard-monitor-traffic-chart"></div>
         </article>
-        <article class="monitor-card">
+        <article class="monitor-card monitor-chart-card">
             <div class="monitor-card-head">
                 <div>
                     <span>延迟与首包</span>
@@ -178,14 +238,14 @@
                 <label class="monitor-card-tools" for="dashboard-monitor-latency-window">
                     <span class="visually-hidden">选择延迟与首包时间范围</span>
                     <select class="field-input monitor-window-select" id="dashboard-monitor-latency-window">
-                        <option value="180" selected>最近 3 小时</option>
-                        <option value="1440">最近 1 天</option>
+                        <option value="180">最近 3 小时</option>
+                        <option value="1440" selected>最近 1 天</option>
                         <option value="10080">最近 1 周</option>
                         <option value="43200">最近 1 个月</option>
                     </select>
                 </label>
             </div>
-            <div class="monitor-chart monitor-chart-compact" id="dashboard-monitor-latency-chart"></div>
+            <div class="monitor-chart" id="dashboard-monitor-latency-chart"></div>
         </article>
         <article class="monitor-card">
             <div class="monitor-card-head">
@@ -197,7 +257,7 @@
             </div>
             <div class="monitor-rank-list" id="dashboard-monitor-model-rank"></div>
         </article>
-        <article class="monitor-card monitor-card-wide">
+        <article class="monitor-card">
             <div class="monitor-card-head">
                 <div>
                     <span>提供商健康</span>
@@ -207,192 +267,6 @@
             </div>
             <div class="monitor-provider-strip" id="dashboard-monitor-provider-strip"></div>
         </article>
-    </div>
-</section>
-
-<section class="panel-card section-shell">
-    <div class="section-subhead">
-        <div>
-            <div class="panel-kicker">二级指标</div>
-            <h2>密钥口径与稳定性补充</h2>
-        </div>
-    </div>
-    <div class="section-split-2">
-        <div class="summary-list-card">
-            <div class="panel-kicker">密钥运行</div>
-            <h3>API 密钥运行口径</h3>
-            <div class="detail-list">
-                <div><span>启用中</span><strong data-stat="api_key_enabled">{{ stats.api_key_enabled or 0 }}</strong></div>
-                <div><span>禁用中</span><strong data-stat="api_key_disabled">{{ stats.api_key_disabled or 0 }}</strong></div>
-                <div><span>总请求量</span><strong data-stat="api_key_total_requests">{{ stats.api_key_total_requests or 0 }}</strong></div>
-                <div><span>输入 Token</span><strong data-stat="api_key_total_prompt_tokens">{{ (stats.api_key_total_prompt_tokens or 0)|display_tokens }}</strong></div>
-                <div><span>输出 Token</span><strong data-stat="api_key_total_completion_tokens">{{ (stats.api_key_total_completion_tokens or 0)|display_tokens }}</strong></div>
-                <div><span>总 Token</span><strong data-stat="api_key_total_tokens">{{ (stats.api_key_total_tokens or 0)|display_tokens }}</strong></div>
-            </div>
-        </div>
-        <div class="summary-list-card">
-            <div class="panel-kicker">稳定性补充</div>
-            <h3>健康与退化补充</h3>
-            <div class="detail-list">
-                <div><span>降级提供商</span><strong data-stat="degraded_count">{{ stats.degraded_count or 0 }}</strong></div>
-                <div><span>健康模型</span><strong>{{ stats.healthy_model_count or 0 }}</strong></div>
-                <div><span>降级模型</span><strong>{{ stats.degraded_model_count or 0 }}</strong></div>
-                <div><span>异常模型</span><strong>{{ stats.unhealthy_model_count or 0 }}</strong></div>
-            </div>
-        </div>
-    </div>
-</section>
-
-<section class="dashboard-command-grid">
-    <div class="panel-card dashboard-command-main">
-        <div class="panel-head">
-            <div>
-                <div class="panel-kicker">提供商概览</div>
-                <h2>提供商状态矩阵</h2>
-            </div>
-            <a class="btn btn-ghost btn-sm interactive-btn" href="/providers">查看全部</a>
-        </div>
-        <div class="dashboard-radar-meta" id="dashboard-health-distribution">
-            <div><span>健康</span><strong>{{ stats.healthy_count }}</strong></div>
-            <div><span>降级</span><strong>{{ stats.degraded_count or 0 }}</strong></div>
-            <div><span>异常</span><strong>{{ stats.unhealthy_count or 0 }}</strong></div>
-            <div><span>模型数</span><strong>{{ stats.model_count or 0 }}</strong></div>
-        </div>
-        <div class="provider-grid" id="dashboard-provider-grid">
-            {% for provider in providers %}
-            <article class="provider-card">
-                <div class="provider-card-top">
-                    <h4>{{ provider.name }}</h4>
-                    <span class="status-badge status-{{ provider.health_status }}">{{ health_labels.get(provider.health_status, provider.health_status) }}</span>
-                </div>
-                <div class="provider-meta">优先级 {{ provider.priority }}</div>
-                <div class="provider-models">{{ provider.models|join(', ') or '-' }}</div>
-                <div class="provider-foot">
-                    <span>延迟 {{ provider.last_latency_ms or '-' }} ms</span>
-                    <span>{{ circuit_labels.get(provider.circuit_state, provider.circuit_state) }}</span>
-                </div>
-            </article>
-            {% endfor %}
-        </div>
-    </div>
-
-    <div class="dashboard-command-side">
-        <div class="panel-card">
-            <div class="panel-head">
-                <div>
-                    <div class="panel-kicker">路由配置</div>
-                    <h3>当前路由配置</h3>
-                </div>
-            </div>
-            <div class="detail-list" id="dashboard-route-meta">
-                <div><span>策略</span><strong>健康优先</strong></div>
-                <div><span>自动巡检</span><strong>{{ '开启' if settings.auto_health_check else '关闭' }}</strong></div>
-                <div><span>检查间隔</span><strong>{{ settings.health_check_interval_sec }} 秒</strong></div>
-                <div><span>模型健康</span><strong>健康 {{ stats.healthy_model_count or 0 }} / 降级 {{ stats.degraded_model_count or 0 }} / 异常 {{ stats.unhealthy_model_count or 0 }}</strong></div>
-                <div><span>Token 记录</span><strong>{{ '开启' if settings.enable_token_logging else '关闭' }}</strong></div>
-                <div><span>正文记录</span><strong>{{ '开启' if settings.enable_payload_logging else '关闭' }}</strong></div>
-            </div>
-        </div>
-
-        <div class="panel-card">
-            <div class="panel-head">
-                <div>
-                    <div class="panel-kicker">留痕策略</div>
-                    <h3>采集与留痕</h3>
-                </div>
-            </div>
-            <div class="dashboard-signal-list" id="dashboard-logging-profile">
-                <div><span>Token 统计</span><strong>{{ '开启' if settings.enable_token_logging else '关闭' }}</strong></div>
-                <div><span>正文保存</span><strong>{{ '开启' if settings.enable_payload_logging else '关闭' }}</strong></div>
-                <div><span>流式留存</span><strong>{{ '开启' if settings.enable_stream_response_persist else '关闭' }}</strong></div>
-                <div><span>日志大小上限</span><strong>{{ settings.max_logged_body_bytes }} B</strong></div>
-            </div>
-        </div>
-
-    </div>
-</section>
-
-<section class="panel-card section-shell">
-    <div class="panel-head">
-        <div>
-            <div class="panel-kicker">流量指标</div>
-            <h2>最近 60 分钟模型流量统计</h2>
-        </div>
-    </div>
-    <div class="table-responsive">
-        <table class="table align-middle">
-            <thead>
-                <tr>
-                    <th>提供商</th>
-                    <th>模型</th>
-                    <th>请求</th>
-                    <th>成功</th>
-                    <th>失败率</th>
-                    <th>平均延迟</th>
-                    <th>平均首包</th>
-                    <th>流式</th>
-                    <th>图片</th>
-                    <th>用户数</th>
-                </tr>
-            </thead>
-            <tbody id="dashboard-metrics-table-body">
-                {% for _ in range(4) %}
-                <tr class="skeleton-table-row" aria-hidden="true">
-                    <td><span class="skeleton-line skeleton-line-medium"></span></td>
-                    <td><span class="skeleton-line skeleton-line-wide"></span></td>
-                    <td><span class="skeleton-line skeleton-line-short"></span></td>
-                    <td><span class="skeleton-line skeleton-line-short"></span></td>
-                    <td><span class="skeleton-line skeleton-line-short"></span></td>
-                    <td><span class="skeleton-line skeleton-line-medium"></span></td>
-                    <td><span class="skeleton-line skeleton-line-medium"></span></td>
-                    <td><span class="skeleton-line skeleton-line-short"></span></td>
-                    <td><span class="skeleton-line skeleton-line-short"></span></td>
-                    <td><span class="skeleton-line skeleton-line-short"></span></td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-    </div>
-</section>
-
-<section class="panel-card section-shell">
-    <div class="panel-head">
-        <div>
-            <div class="panel-kicker">时间序列</div>
-            <h2>最近 3 小时流量时间序列</h2>
-        </div>
-    </div>
-    <div class="table-responsive">
-        <table class="table align-middle">
-            <thead>
-                <tr>
-                    <th>时间桶</th>
-                    <th>请求</th>
-                    <th>成功</th>
-                    <th>失败</th>
-                    <th>流式</th>
-                    <th>图片</th>
-                    <th>平均延迟</th>
-                    <th>平均首包</th>
-                    <th>Token</th>
-                </tr>
-            </thead>
-            <tbody id="dashboard-timeseries-table-body">
-                {% for _ in range(4) %}
-                <tr class="skeleton-table-row" aria-hidden="true">
-                    <td><span class="skeleton-line skeleton-line-wide"></span></td>
-                    <td><span class="skeleton-line skeleton-line-short"></span></td>
-                    <td><span class="skeleton-line skeleton-line-short"></span></td>
-                    <td><span class="skeleton-line skeleton-line-short"></span></td>
-                    <td><span class="skeleton-line skeleton-line-short"></span></td>
-                    <td><span class="skeleton-line skeleton-line-short"></span></td>
-                    <td><span class="skeleton-line skeleton-line-medium"></span></td>
-                    <td><span class="skeleton-line skeleton-line-medium"></span></td>
-                    <td><span class="skeleton-line skeleton-line-medium"></span></td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
     </div>
 </section>
 

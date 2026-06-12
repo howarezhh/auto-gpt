@@ -5,7 +5,7 @@ import logging
 import time
 import threading
 import hashlib
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
 from redis.exceptions import RedisError
@@ -14,6 +14,7 @@ from sqlalchemy.orm import load_only
 
 from app.config import get_settings
 from app.database import SessionLocal
+from app.services.proxy_request_context import get_current_request_headers_json
 from app.services.redis_service import RedisService
 from app.utils.json_utils import dumps_json, loads_json
 
@@ -56,6 +57,7 @@ class RequestLogQueueService:
         if not cls.enabled():
             return False
         kwargs = cls._with_dedupe_key(dict(kwargs))
+        kwargs.setdefault("request_headers_json", get_current_request_headers_json())
         kwargs.setdefault("_queue_enqueued_at", time.time())
         loop = RedisService.event_loop()
         if loop is not None:
@@ -306,7 +308,7 @@ class RequestLogQueueService:
         attempts = cls._coerce_attempt_count(payload.get("_queue_attempts")) + 1
         payload["_queue_attempts"] = attempts
         payload["_last_queue_error"] = error_message
-        payload["_last_queue_failed_at"] = datetime.now(UTC).isoformat()
+        payload["_last_queue_failed_at"] = now_beijing_aware().isoformat()
         if attempts >= cls.MAX_PROCESSING_ATTEMPTS:
             return None, cls._dead_letter_payload(raw_item=dumps_json(payload), attempts=attempts, error=error_message)
         return dumps_json(payload), None
@@ -323,7 +325,7 @@ class RequestLogQueueService:
         clipped_item = raw_item[: cls.DEAD_LETTER_ITEM_MAX_CHARS]
         return dumps_json(
             {
-                "failed_at": datetime.now(UTC).isoformat(),
+                "failed_at": now_beijing_aware().isoformat(),
                 "attempts": attempts,
                 "error": error,
                 "truncated": len(raw_item) > len(clipped_item),
@@ -584,3 +586,5 @@ class RequestLogQueueService:
         except (RedisError, RuntimeError, TypeError, ValueError) as exc:
             logger.warning("Failed to discard pending request log queue before clearing logs: %s", exc)
         return discarded
+
+from app.utils.timezone import now_beijing_aware

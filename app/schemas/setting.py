@@ -13,8 +13,6 @@ from app.utils.content_guard_config import (
 
 
 class SettingUpdate(BaseModel):
-    global_timeout_ms: int = Field(default=30000, ge=0)
-    global_max_retries: int = Field(default=2, ge=2)
     route_exhausted_retry_max_wait_seconds: int = Field(default=600, ge=0, le=600)
     route_exhausted_retry_infinite_enabled: bool = False
     trusted_providers_only: bool = False
@@ -31,6 +29,7 @@ class SettingUpdate(BaseModel):
     content_guard_enabled: bool = content_guard_default("content_guard_enabled")
     content_guard_precheck_auto_enabled: bool = content_guard_default("content_guard_precheck_auto_enabled")
     content_guard_block_on_high_risk: bool = content_guard_default("content_guard_block_on_high_risk")
+    content_guard_probe_protocol_type: Literal["chat_completions", "responses"] = content_guard_default("content_guard_probe_protocol_type")
     content_guard_probe_interval_sec: int = Field(
         default=content_guard_default("content_guard_probe_interval_sec"),
         ge=300,

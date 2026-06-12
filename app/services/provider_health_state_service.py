@@ -43,6 +43,25 @@ class ProviderHealthStateService:
         return cls._get_json(cls.capability_key(provider_id, provider_model_id))
 
     @classmethod
+    def effective_provider_health(cls, provider: Provider) -> dict[str, Any]:
+        state = cls.get_provider_state(provider.id) or {}
+        return cls._effective_health_payload(
+            db_health=getattr(provider, "health_status", None),
+            db_updated_at=getattr(provider, "updated_at", None) or getattr(provider, "last_check_at", None),
+            runtime_state=state,
+        )
+
+    @classmethod
+    def effective_model_health(cls, provider_model: ProviderModel) -> dict[str, Any]:
+        provider_id = int(getattr(provider_model, "provider_id", 0) or 0)
+        state = cls.get_model_state(provider_id, provider_model.id) if provider_id else None
+        return cls._effective_health_payload(
+            db_health=getattr(provider_model, "health_status", None),
+            db_updated_at=getattr(provider_model, "updated_at", None) or getattr(provider_model, "last_check_at", None),
+            runtime_state=state or {},
+        )
+
+    @classmethod
     def record_provider_probe(
         cls,
         provider: Provider,
@@ -321,11 +340,48 @@ class ProviderHealthStateService:
 
     @staticmethod
     def _minute_bucket(*, offset: int = 0) -> int:
-        return int(datetime.utcnow().timestamp() // 60) + offset
+        return int(now_beijing().timestamp() // 60) + offset
 
     @staticmethod
     def _now() -> str:
-        return datetime.utcnow().isoformat()
+        return now_beijing().isoformat()
+
+    @staticmethod
+    def _effective_health_payload(
+        *,
+        db_health: Any,
+        db_updated_at: Any,
+        runtime_state: dict[str, Any],
+    ) -> dict[str, Any]:
+        db_value = str(db_health or "unknown")
+        runtime_value = runtime_state.get("runtime_health_status") or runtime_state.get("health_status")
+        runtime_health = str(runtime_value) if runtime_value else None
+        effective_health = runtime_health or db_value
+        runtime_updated_at = (
+            runtime_state.get("last_runtime_state_update_at")
+            or runtime_state.get("updated_at")
+            or runtime_state.get("last_probe_ok_at")
+            or runtime_state.get("last_probe_failed_at")
+        )
+        updated_at = ProviderHealthStateService._serialize_updated_at(
+            runtime_updated_at if runtime_health else db_updated_at
+        )
+        return {
+            "db_health": db_value,
+            "runtime_health": runtime_health,
+            "effective_health": effective_health,
+            "state_source": "runtime" if runtime_health else "db",
+            "updated_at": updated_at,
+            "health_state_updated_at": updated_at,
+        }
+
+    @staticmethod
+    def _serialize_updated_at(value: Any) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value.isoformat()
+        return str(value)
 
     @classmethod
     def _get_json(cls, key: str) -> dict[str, Any] | None:
@@ -369,3 +425,5 @@ class ProviderHealthStateService:
         failure_penalty = min(50.0, failure_rate * 100.0)
         latency_penalty = min(20.0, latency / 200.0)
         return round(max(0.0, min(100.0, base - failure_penalty - latency_penalty)), 2)
+
+from app.utils.timezone import now_beijing

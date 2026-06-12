@@ -7,10 +7,12 @@ from types import SimpleNamespace
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from app.models.app_setting import AppSetting
 from app.models.logging_events import RequestContentGuardEvent
 from app.models.provider import Provider
 from app.models.request_log import RequestLog
 from app.routers.content_guard import content_guard_runtime_events
+from app.routers.logging_api import list_content_guard_events
 from app.services.log_service import LogService
 from app.services.token_usage_service import TokenUsageService
 
@@ -39,7 +41,7 @@ def test_token_backfill_skips_finalized_logs_with_missing_token_fields(monkeypat
                     success=True,
                     api_client_key_id=1,
                     billing_status="billed",
-                    billing_finalized_at=datetime.utcnow(),
+                    billing_finalized_at=now_beijing(),
                     prompt_tokens=12,
                     completion_tokens=None,
                     total_tokens=12,
@@ -110,6 +112,49 @@ def test_content_guard_runtime_events_use_event_provider_and_model_without_reque
     assert event["request_path"] == "/v1/responses"
 
 
+def test_typed_content_guard_events_fallback_to_request_log_context() -> None:
+    session_factory = _make_session(Provider, AppSetting, RequestLog, RequestContentGuardEvent)
+    with session_factory() as db:
+        request_log = RequestLog(
+            log_type="chat",
+            trace_id="trace-content-guard-fallback",
+            provider_id=11,
+            provider_name="回填提供商",
+            resolved_provider_model_id=22,
+            model_name="实际模型",
+            requested_model="请求模型",
+            request_path="/v1/chat/completions",
+            is_stream=True,
+            success=True,
+        )
+        db.add(request_log)
+        db.flush()
+        db.add(
+            RequestContentGuardEvent(
+                request_log_id=request_log.id,
+                trace_id="trace-content-guard-fallback",
+                guard_stage="stream_buffer",
+                guard_result="pass",
+                risk_level="low",
+                reason="测试回填",
+                action="allow",
+            )
+        )
+        db.commit()
+
+        result = list_content_guard_events(page=1, page_size=20, db=db)
+
+    assert result["total"] == 1
+    event = result["items"][0]
+    assert event["provider_id"] == 11
+    assert event["provider_name"] == "回填提供商"
+    assert event["provider_model_id"] == 22
+    assert event["model_name"] == "实际模型"
+    assert event["requested_model"] == "请求模型"
+    assert event["request_path"] == "/v1/chat/completions"
+    assert event["is_stream"] is True
+
+
 def test_configure_scheduler_removes_health_jobs_when_auto_health_check_disabled(monkeypatch) -> None:
     import app.tasks as tasks
 
@@ -156,3 +201,79 @@ def test_configure_scheduler_removes_health_jobs_when_auto_health_check_disabled
     assert "model_l2_capability_health_check" in fake_scheduler.removed
     assert "provider_l0_health_check" not in fake_scheduler.added
     assert "model_l1_text_health_check" not in fake_scheduler.added
+
+
+def test_token_backfill_empty_result_can_suppress_success_log() -> None:
+    import app.tasks as tasks
+
+    assert tasks._should_suppress_empty_success_log(
+        {
+            "processed_count": 0,
+            "success_count": 0,
+            "failed_count": 0,
+            "enqueued_count": 0,
+            "suppress_empty_success_log": True,
+        },
+        processed_count=0,
+        success_count=0,
+        failed_count=0,
+    )
+
+
+def test_content_integrity_job_summary_counts_child_probes() -> None:
+    import app.tasks as tasks
+
+    summary = tasks._content_integrity_job_summary(
+        [
+            {
+                "provider_id": 1,
+                "success": False,
+                "model_results": [
+                    {
+                        "provider_model_id": 11,
+                        "success": False,
+                        "endpoint_results": [
+                            {"success": True, "capability_key": "content_fixed_answer"},
+                            {"success": False, "capability_key": "content_pollution_rules"},
+                        ],
+                    }
+                ],
+            },
+            {
+                "provider_id": 2,
+                "success": True,
+                "model_results": [
+                    {
+                        "provider_model_id": 22,
+                        "success": True,
+                        "endpoint_results": [
+                            {"success": True, "capability_key": "content_fixed_answer"},
+                        ],
+                    }
+                ],
+            },
+        ]
+    )
+
+    assert summary["processed_count"] == 3
+    assert summary["success_count"] == 2
+    assert summary["failed_count"] == 1
+    assert summary["provider_count"] == 2
+    assert summary["provider_success"] == 1
+    assert summary["provider_with_successful_probe"] == 2
+    assert summary["model_count"] == 2
+    assert summary["model_with_successful_probe"] == 2
+    assert not tasks._should_suppress_empty_success_log(
+        {
+            "processed_count": 1,
+            "success_count": 0,
+            "failed_count": 0,
+            "enqueued_count": 1,
+            "suppress_empty_success_log": True,
+        },
+        processed_count=1,
+        success_count=0,
+        failed_count=0,
+    )
+
+from app.utils.timezone import now_beijing

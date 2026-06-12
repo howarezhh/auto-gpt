@@ -1,3 +1,4 @@
+from app.utils.timezone import now_beijing
 from datetime import datetime
 
 from sqlalchemy import DateTime, Integer, Text
@@ -17,10 +18,10 @@ class AlertEvent(Base):
     message: Mapped[str] = mapped_column(Text, nullable=False)
     payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(Text, nullable=False, default="active")
-    first_seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
-    last_seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing)
     last_notified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing, onupdate=now_beijing)

@@ -3,9 +3,10 @@ import contextlib
 import json
 from collections.abc import Awaitable, Callable
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal, get_db
@@ -18,6 +19,8 @@ from app.schemas.provider import (
     ProviderCreate,
     ProviderDiscoverModelsIn,
     ProviderDiscoverModelsResponse,
+    ProviderEndpointProtocolDetectionRequest,
+    ProviderModelEndpointProtocolDetectionRequest,
     ProviderModelMountListResponse,
     ProviderModelConfigOut,
     ProviderPageContentOut,
@@ -83,6 +86,56 @@ def _record_provider_audit(
         source_ip=request.client.host if request.client else None,
         risk_level=risk_level,
     )
+
+
+async def _detect_created_provider_protocols_background(
+    *,
+    provider_id: int,
+    provider_name: str,
+    actor_user_id: int | None,
+    actor_username: str | None,
+    request_trace_id: str | None,
+    source_ip: str | None,
+) -> None:
+    db = SessionLocal()
+    try:
+        result = await HealthService.detect_endpoint_protocols_for_provider_ids(
+            db,
+            provider_ids=[provider_id],
+            trigger_type="auto_provider_created",
+        )
+        AdminAuditService.create_log(
+            db,
+            actor_user_id=actor_user_id,
+            actor_username=actor_username,
+            action="detect_endpoint_protocols_auto_provider_created",
+            entity_type="provider",
+            entity_id=provider_id,
+            entity_name=provider_name,
+            summary=f"新增提供商后检测端点协议：{provider_name}",
+            detail=result,
+            request_trace_id=request_trace_id,
+            source_ip=source_ip,
+            risk_level="medium",
+        )
+    except Exception as exc:
+        db.rollback()
+        AdminAuditService.create_log(
+            db,
+            actor_user_id=actor_user_id,
+            actor_username=actor_username,
+            action="detect_endpoint_protocols_auto_provider_created_failed",
+            entity_type="provider",
+            entity_id=provider_id,
+            entity_name=provider_name,
+            summary=f"新增提供商后端点协议检测失败：{provider_name}",
+            detail={"error": str(exc)},
+            request_trace_id=request_trace_id,
+            source_ip=source_ip,
+            risk_level="medium",
+        )
+    finally:
+        db.close()
 
 
 async def _stream_health_check_events(
@@ -202,6 +255,7 @@ def list_provider_model_mounts(
     enabled: bool | None = Query(default=None),
     health_status: str | None = Query(default=None),
     trust_status: str | None = Query(default=None),
+    quality_window_hours: int = Query(default=1, ge=1),
     db: Session = Depends(get_db),
 ) -> ProviderModelMountListResponse:
     return ProviderModelMountListResponse(
@@ -214,14 +268,87 @@ def list_provider_model_mounts(
             enabled=enabled,
             health_status=health_status,
             trust_status=trust_status,
+            quality_window_hours=quality_window_hours,
         )
     )
 
 
+@router.post("/protocol-detection")
+async def detect_selected_provider_endpoint_protocols(
+    payload: ProviderEndpointProtocolDetectionRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    provider_ids = list(dict.fromkeys(int(item) for item in payload.provider_ids if int(item) > 0))
+    if not provider_ids:
+        raise HTTPException(status_code=400, detail="请先选择要检测的提供商")
+    existing_ids = set(db.scalars(select(Provider.id).where(Provider.id.in_(provider_ids))))
+    missing_ids = [provider_id for provider_id in provider_ids if provider_id not in existing_ids]
+    if missing_ids:
+        raise HTTPException(status_code=404, detail=f"Provider not found: {', '.join(str(item) for item in missing_ids)}")
+    result = await HealthService.detect_endpoint_protocols_for_provider_ids(
+        db,
+        provider_ids=provider_ids,
+        trigger_type="manual_provider_management",
+    )
+    _record_provider_audit(
+        db,
+        request=request,
+        action="detect_endpoint_protocols_selected_providers",
+        entity_id="selected",
+        entity_name="选中提供商",
+        summary=f"手动检测选中提供商端点协议：{len(provider_ids)} 个",
+        detail=result,
+        risk_level="medium",
+    )
+    return result
+
+
+@router.post("/models/protocol-detection")
+async def detect_selected_provider_model_endpoint_protocols(
+    payload: ProviderModelEndpointProtocolDetectionRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    targets = [
+        item.model_dump()
+        for item in payload.targets
+    ]
+    if not targets:
+        raise HTTPException(status_code=400, detail="请先选择要检测的模型挂载")
+    result = await HealthService.detect_endpoint_protocols_for_provider_model_ids(
+        db,
+        targets=targets,
+        trigger_type="manual_mount_matrix",
+    )
+    _record_provider_audit(
+        db,
+        request=request,
+        action="detect_endpoint_protocols_selected_provider_models",
+        entity_id="selected",
+        entity_name="选中模型挂载",
+        summary=f"手动检测选中模型挂载端点协议：{len(targets)} 个",
+        detail=result,
+        risk_level="medium",
+    )
+    return result
+
+
 @router.post("", response_model=ProviderOut, status_code=status.HTTP_201_CREATED)
-def create_provider(payload: ProviderCreate, request: Request, db: Session = Depends(get_db)) -> ProviderOut:
-    provider = ProviderService.create_provider(db, payload)
-    provider_dict = ProviderService.provider_to_dict(provider, metrics=ProviderService._build_quality_metrics(db, [provider]))
+async def create_provider(
+    payload: ProviderCreate,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> ProviderOut:
+    try:
+        provider = ProviderService.create_provider(db, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="提供商名称已存在，请使用其他名称") from exc
+    current_user = UserAuthService.get_current_user(request, db)
     _record_provider_audit(
         db,
         request=request,
@@ -229,20 +356,59 @@ def create_provider(payload: ProviderCreate, request: Request, db: Session = Dep
         entity_id=provider.id,
         entity_name=provider.name,
         summary=f"创建提供商 {provider.name}",
-        after=provider_dict,
         risk_level="medium",
     )
+    background_tasks.add_task(
+        _detect_created_provider_protocols_background,
+        provider_id=provider.id,
+        provider_name=provider.name,
+        actor_user_id=getattr(current_user, "id", None),
+        actor_username=getattr(current_user, "username", None),
+        request_trace_id=getattr(request.state, "trace_id", None),
+        source_ip=request.client.host if request.client else None,
+    )
+    provider_dict = ProviderService.provider_to_dict(provider, metrics=ProviderService._build_quality_metrics(db, [provider]))
     return ProviderOut(**provider_dict)
 
 
 @router.put("/{provider_id}", response_model=ProviderOut)
-def update_provider(provider_id: int, payload: ProviderUpdate, request: Request, db: Session = Depends(get_db)) -> ProviderOut:
+async def update_provider(provider_id: int, payload: ProviderUpdate, request: Request, db: Session = Depends(get_db)) -> ProviderOut:
     provider = ProviderService.get_provider(db, provider_id)
     if not provider:
         raise HTTPException(status_code=404, detail="Provider not found")
+    before_model_names = {item.model_name for item in provider.provider_models}
     before = ProviderService.provider_to_dict(provider, metrics=ProviderService._build_quality_metrics(db, [provider]))
     provider = ProviderService.update_provider(db, provider, payload)
+    added_provider_models = [
+        item
+        for item in provider.provider_models
+        if item.model_name not in before_model_names
+    ]
+    protocol_detection_result = None
+    if added_provider_models and ("models" in payload.model_fields_set or "model_configs" in payload.model_fields_set):
+        protocol_detection_result = await HealthService.detect_endpoint_protocols_for_provider_model_ids(
+            db,
+            targets=[
+                {"provider_id": provider.id, "provider_model_id": item.id}
+                for item in added_provider_models
+            ],
+            trigger_type="auto_provider_model_mounted",
+        )
+        _record_provider_audit(
+            db,
+            request=request,
+            action="detect_endpoint_protocols_auto_provider_model_mounted",
+            entity_id=provider.id,
+            entity_name=provider.name,
+            summary=f"新增模型挂载后检测端点协议：{provider.name}",
+            detail=protocol_detection_result,
+            risk_level="medium",
+        )
+        db.refresh(provider)
     after = ProviderService.provider_to_dict(provider, metrics=ProviderService._build_quality_metrics(db, [provider]))
+    changed_fields = payload.model_dump(exclude_unset=True)
+    if "api_key" in changed_fields and changed_fields["api_key"] is not None:
+        changed_fields["api_key"] = ProviderService.mask_api_key(str(changed_fields["api_key"]))
     _record_provider_audit(
         db,
         request=request,
@@ -252,7 +418,10 @@ def update_provider(provider_id: int, payload: ProviderUpdate, request: Request,
         summary=f"更新提供商 {provider.name}",
         before=before,
         after=after,
-        changed_fields=payload.model_dump(exclude_unset=True),
+        changed_fields={
+            **changed_fields,
+            **({"endpoint_protocol_detection": protocol_detection_result} if protocol_detection_result else {}),
+        },
         risk_level="medium",
     )
     return ProviderOut(**after)

@@ -93,7 +93,7 @@ class ApiKeyPolicyTemplateService:
         owner_user_id: int | None,
     ) -> ApiKeyCreate:
         expires_at = (
-            datetime.utcnow() + timedelta(days=template.expires_in_days)
+            now_beijing() + timedelta(days=template.expires_in_days)
             if template.expires_in_days and template.expires_in_days > 0
             else None
         )
@@ -116,7 +116,7 @@ class ApiKeyPolicyTemplateService:
         enabled: bool | None = None,
     ) -> ApiKeyUpdate:
         expires_at = (
-            datetime.utcnow() + timedelta(days=template.expires_in_days)
+            now_beijing() + timedelta(days=template.expires_in_days)
             if template.expires_in_days and template.expires_in_days > 0
             else None
         )
@@ -138,3 +138,5 @@ class ApiKeyPolicyTemplateService:
         missing_names = [model_name for model_name in allowed_model_names if model_name not in existing_names]
         if missing_names:
             raise ValueError(f"模型不存在: {', '.join(missing_names)}")
+
+from app.utils.timezone import now_beijing

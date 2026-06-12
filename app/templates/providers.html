@@ -22,11 +22,6 @@
     </section>
 </section>
 
-<nav class="page-anchor-bar provider-anchor-bar" aria-label="提供商页面导航">
-    <a class="page-anchor-link" href="#provider-registry-section">对象目录</a>
-    <a class="page-anchor-link" href="#provider-availability-section">可用率曲线</a>
-</nav>
-
 <section class="panel-card section-shell provider-registry-panel anchor-section-offset" id="provider-registry-section">
     <div class="section-subhead">
         <div>
@@ -34,6 +29,8 @@
             <h2>提供商对象目录</h2>
         </div>
         <div class="provider-model-page-actions">
+            <button class="btn btn-ghost interactive-btn" id="providers-health-selected-btn" type="button" disabled>健康检测选中</button>
+            <button class="btn btn-ghost interactive-btn" id="providers-protocol-detect-selected-btn" type="button" disabled>协议检测选中</button>
             <button class="btn btn-ghost interactive-btn" id="providers-trust-selected-btn" type="button" disabled>可信检测选中</button>
         </div>
     </div>
@@ -71,57 +68,6 @@
     </div>
 </section>
 
-<section class="panel-card section-shell provider-availability-panel anchor-section-offset" id="provider-availability-section">
-    <div class="section-subhead">
-        <div>
-            <div class="panel-kicker">历史可用率</div>
-            <h2>对象可用率曲线</h2>
-        </div>
-    </div>
-    <div class="table-toolbar filter-toolbar provider-availability-toolbar">
-        <div class="field-stack">
-            <label class="visually-hidden" for="provider-availability-provider">选择提供商</label>
-            <select class="field-input" id="provider-availability-provider">
-                <option value="">请选择一个提供商</option>
-            </select>
-        </div>
-        <div class="field-stack">
-            <label class="visually-hidden" for="provider-availability-window">选择时间窗口</label>
-            <select class="field-input" id="provider-availability-window">
-                <option value="24">最近 24 小时</option>
-                <option value="72">最近 72 小时</option>
-                <option value="168">最近 7 天</option>
-            </select>
-        </div>
-        <div class="field-stack">
-            <label class="visually-hidden" for="provider-availability-bucket">选择时间粒度</label>
-            <select class="field-input" id="provider-availability-bucket">
-                <option value="30">30 分钟粒度</option>
-                <option value="60" selected>1 小时粒度</option>
-                <option value="180">3 小时粒度</option>
-            </select>
-        </div>
-        <button class="btn btn-ghost interactive-btn" id="provider-availability-refresh-btn" type="button">刷新曲线</button>
-    </div>
-    <div class="table-shell provider-table-shell">
-        <table class="data-table provider-data-table">
-            <thead>
-                <tr>
-                    <th>时间桶</th>
-                    <th>请求数</th>
-                    <th>成功数</th>
-                    <th>失败数</th>
-                    <th>成功率</th>
-                    <th>平均延迟</th>
-                </tr>
-            </thead>
-            <tbody id="provider-availability-table-body">
-                <tr><td colspan="6"><div class="empty-state">请选择提供商后查看历史可用率。</div></td></tr>
-            </tbody>
-        </table>
-    </div>
-</section>
-
 <div class="modal-shell hidden" id="provider-modal" aria-hidden="true">
     <div class="modal-card modal-lg provider-modal-card" role="dialog" aria-modal="true" aria-labelledby="provider-modal-title" tabindex="-1">
         <div class="modal-head">
@@ -135,7 +81,7 @@
             <input id="provider-id" type="hidden">
             <label for="provider-name">
                 <span>名称</span>
-                <input class="field-input" id="provider-name" required>
+                <input class="field-input" id="provider-name" maxlength="100" required>
             </label>
             <label for="provider-base-url">
                 <span>Base URL</span>
@@ -143,7 +89,7 @@
             </label>
             <label for="provider-api-key">
                 <span>API 密钥</span>
-                <input class="field-input" id="provider-api-key" placeholder="新增时必填；编辑时会完整回显当前 API Key">
+                <input class="field-input" id="provider-api-key" placeholder="当前 API Key；编辑时可直接修改">
             </label>
             <label for="provider-type">
                 <span>类型</span>
@@ -227,11 +173,11 @@
                 <input class="field-input" id="provider-priority" type="number" inputmode="numeric" value="100">
             </label>
             <label for="provider-timeout-ms">
-                <span>超时毫秒</span>
+                <span>提供商请求超时 ms</span>
                 <input class="field-input" id="provider-timeout-ms" type="number" inputmode="numeric" value="30000">
             </label>
             <label for="provider-max-retries">
-                <span>最大重试次数</span>
+                <span>提供商最大重试次数</span>
                 <input class="field-input" id="provider-max-retries" type="number" inputmode="numeric" min="0" value="2">
             </label>
             <label for="provider-max-active-requests">
@@ -251,38 +197,13 @@
                 <input class="field-input" id="provider-max-rpm" type="number" inputmode="numeric" min="0" placeholder="0 或留空表示不限" value="20">
             </label>
             <label for="provider-first-token-timeout-sec">
-                <span>首 Token 超时秒</span>
+                <span>提供商首 Token 超时 s</span>
                 <input class="field-input" id="provider-first-token-timeout-sec" type="number" inputmode="numeric" min="1" value="60">
             </label>
             <div class="form-span-2 settings-group" aria-labelledby="provider-content-integrity-title">
                 <div class="settings-group-head">
                     <div class="panel-kicker">内容治理</div>
-                    <h4 id="provider-content-integrity-title">信任等级与内容完整性</h4>
-                </div>
-                <div class="form-grid settings-subgrid">
-                    <label for="provider-trust-level">
-                        <span>信任等级</span>
-                        <select class="field-input" id="provider-trust-level">
-                            <option value="official">官方</option>
-                            <option value="trusted">可信</option>
-                            <option value="standard" selected>标准</option>
-                            <option value="low">低信任</option>
-                            <option value="blocked">已隔离</option>
-                        </select>
-                    </label>
-                    <label for="provider-content-integrity-status">
-                        <span>完整性状态</span>
-                        <select class="field-input" id="provider-content-integrity-status">
-                            <option value="unknown">未探测</option>
-                            <option value="passed">通过</option>
-                            <option value="degraded">降级</option>
-                            <option value="blocked">已隔离</option>
-                        </select>
-                    </label>
-                    <label for="provider-content-integrity-score">
-                        <span>完整性评分</span>
-                        <input class="field-input" id="provider-content-integrity-score" type="number" inputmode="numeric" min="0" max="100" value="80">
-                    </label>
+                    <h4 id="provider-content-integrity-title">内容检测策略</h4>
                 </div>
                 <div class="settings-switch-grid">
                     <label class="settings-switch-card" for="provider-content-guard-enabled">
@@ -303,7 +224,7 @@
                         <span class="settings-switch-copy">
                             <span class="settings-switch-title-row">
                                 <strong>流式先缓冲检测</strong>
-                                <button class="settings-help-btn" type="button" title="与模块低信任缓冲同时开启时，低信任流式响应会先扫描首段内容。" aria-label="流式先缓冲检测说明">
+                                <button class="settings-help-btn" type="button" title="默认由内容防护页的流式模式控制；300ms 缓冲和上限缓冲会在首段下发前先审核，只有全局选择首段透传时才跳过。" aria-label="流式先缓冲检测说明">
                                     <i class="bi bi-question-circle" aria-hidden="true"></i>
                                 </button>
                             </span>
@@ -315,10 +236,54 @@
                     </label>
                 </div>
             </div>
-            <label class="form-span-2" for="provider-maintenance-window">
-                <span>维护窗口</span>
-                <input class="field-input" id="provider-maintenance-window" placeholder="例如：每周日 02:00-04:00 UTC，或按需维护说明">
-            </label>
+            <div class="form-span-2 maintenance-window-field" aria-labelledby="provider-maintenance-window-title">
+                <input id="provider-maintenance-window" type="hidden">
+                <div class="maintenance-window-head">
+                    <span id="provider-maintenance-window-title">维护窗口</span>
+                    <span class="maintenance-window-summary" id="provider-maintenance-window-preview">未设置维护窗口</span>
+                </div>
+                <div class="maintenance-window-grid">
+                    <label for="provider-maintenance-window-type">
+                        <span>频率</span>
+                        <select class="field-input" id="provider-maintenance-window-type">
+                            <option value="none">不设置</option>
+                            <option value="daily">每日</option>
+                            <option value="weekly">每周</option>
+                            <option value="once">单次</option>
+                        </select>
+                    </label>
+                    <input id="provider-maintenance-window-timezone" type="hidden" value="Asia/Shanghai">
+                    <label class="maintenance-window-weekly" for="provider-maintenance-window-weekday">
+                        <span>星期</span>
+                        <select class="field-input" id="provider-maintenance-window-weekday">
+                            <option value="一">周一</option>
+                            <option value="二">周二</option>
+                            <option value="三">周三</option>
+                            <option value="四">周四</option>
+                            <option value="五">周五</option>
+                            <option value="六">周六</option>
+                            <option value="日">周日</option>
+                        </select>
+                    </label>
+                    <label class="maintenance-window-range" for="provider-maintenance-window-start">
+                        <span>开始</span>
+                        <input class="field-input" id="provider-maintenance-window-start" type="time" step="60">
+                    </label>
+                    <label class="maintenance-window-range" for="provider-maintenance-window-end">
+                        <span>结束</span>
+                        <input class="field-input" id="provider-maintenance-window-end" type="time" step="60">
+                    </label>
+                    <label class="maintenance-window-once hidden" for="provider-maintenance-window-once-start">
+                        <span>开始</span>
+                        <input class="field-input" id="provider-maintenance-window-once-start" type="datetime-local" step="60">
+                    </label>
+                    <label class="maintenance-window-once hidden" for="provider-maintenance-window-once-end">
+                        <span>结束</span>
+                        <input class="field-input" id="provider-maintenance-window-once-end" type="datetime-local" step="60">
+                    </label>
+                </div>
+                <div class="field-feedback is-neutral" id="provider-maintenance-window-feedback" role="status" aria-live="polite">仅保存固定格式的维护时间段。</div>
+            </div>
             <div class="form-span-2 provider-model-editor" id="provider-model-editor">
                 <span>模型挂载</span>
                 <div class="provider-model-discover-actions">

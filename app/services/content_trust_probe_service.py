@@ -14,6 +14,7 @@ from app.models.provider_model import ProviderModel
 from app.schemas.content_guard import ContentGuardRunRequest
 from app.services.content_guard_probe_service import ContentGuardProbeService
 from app.services.content_guard_rule_service import ContentGuardRuleService
+from app.services.probe_rate_limit_service import ProbeRateLimitService
 from app.services.setting_service import SettingService
 from app.utils.json_utils import loads_json
 
@@ -39,6 +40,19 @@ class ContentTrustProbeService:
         "pollution_rules": ContentGuardProbeService.POLLUTION_PROBE_TIMEOUT_SECONDS + 2,
     }
     COMBINABLE_TEXT_PROBE_KEYS = ("fixed_answer", "pollution_rules")
+
+    @staticmethod
+    def _probe_timeout_seconds(provider: Provider, probe_key: str, fallback_seconds: float) -> float:
+        timeout_seconds = ContentGuardProbeService.provider_probe_timeout_seconds(provider, fallback_seconds)
+        if probe_key == "sse":
+            stream_timeout_seconds = (
+                ContentGuardProbeService.provider_stream_connect_timeout_seconds(provider)
+                + ContentGuardProbeService.provider_stream_first_token_timeout_seconds(provider)
+                + ContentGuardProbeService.SSE_PROBE_MAX_DURATION_SECONDS
+                + 2
+            )
+            return max(timeout_seconds, float(stream_timeout_seconds))
+        return timeout_seconds
 
     @staticmethod
     def _required_probe_phase_keys() -> set[str]:
@@ -104,6 +118,78 @@ class ContentTrustProbeService:
         return merged
 
     @staticmethod
+    def describe_probe_execution_plan(probe_keys: list[str], provider_model: ProviderModel) -> dict[str, Any]:
+        ordered_keys: list[str] = []
+        for probe_key in probe_keys or []:
+            key = str(probe_key or "").strip()
+            if key and key not in ordered_keys:
+                ordered_keys.append(key)
+
+        skipped: list[dict[str, str]] = []
+        runnable: list[str] = []
+        json_enabled = ContentTrustProbeService.json_probe_enabled()
+        supports_stream = bool(getattr(provider_model, "supports_stream", True))
+        for key in ordered_keys:
+            if key == "json" and not json_enabled:
+                skipped.append({
+                    "probe_key": key,
+                    "probe_label": ContentTrustProbeService.PROBE_LABELS.get(key, key),
+                    "reason": "严格 JSON 探针未启用",
+                })
+                continue
+            if key == "sse" and not supports_stream:
+                skipped.append({
+                    "probe_key": key,
+                    "probe_label": ContentTrustProbeService.PROBE_LABELS.get(key, key),
+                    "reason": "模型未启用流式能力",
+                })
+                continue
+            if key not in ContentTrustProbeService.PROBE_LABELS:
+                skipped.append({
+                    "probe_key": key,
+                    "probe_label": key,
+                    "reason": "未知探针不会发起上游请求",
+                })
+                continue
+            runnable.append(key)
+
+        request_groups: list[dict[str, Any]] = []
+        remaining = list(runnable)
+        if all(key in remaining for key in ContentTrustProbeService.COMBINABLE_TEXT_PROBE_KEYS):
+            group_keys = list(ContentTrustProbeService.COMBINABLE_TEXT_PROBE_KEYS)
+            request_groups.append({
+                "request_key": "combined_text",
+                "request_label": "文本内容完整性组合请求",
+                "probe_keys": group_keys,
+                "probe_labels": [ContentTrustProbeService.PROBE_LABELS.get(key, key) for key in group_keys],
+                "stream": False,
+                "timeout_seconds": ContentGuardProbeService.COMBINED_TEXT_PROBE_TIMEOUT_SECONDS,
+            })
+            remaining = [key for key in remaining if key not in group_keys]
+
+        for key in remaining:
+            timeout_seconds = ContentTrustProbeService.PROBE_TIMEOUT_SECONDS.get(key, 12)
+            request_groups.append({
+                "request_key": key,
+                "request_label": ContentTrustProbeService.PROBE_LABELS.get(key, key),
+                "probe_keys": [key],
+                "probe_labels": [ContentTrustProbeService.PROBE_LABELS.get(key, key)],
+                "stream": key == "sse",
+                "timeout_seconds": timeout_seconds,
+            })
+
+        return {
+            "logical_probe_count": len(ordered_keys),
+            "runnable_probe_count": len(runnable),
+            "skipped_probe_count": len(skipped),
+            "upstream_request_count": len(request_groups),
+            "probe_keys": ordered_keys,
+            "required_probe_keys": list(ContentTrustProbeService.REQUIRED_TRUST_PROBE_KEYS),
+            "request_groups": request_groups,
+            "skipped_probes": skipped,
+        }
+
+    @staticmethod
     async def run_capability_probe(
         db: Session,
         payload: ContentGuardRunRequest,
@@ -112,6 +198,35 @@ class ContentTrustProbeService:
     ) -> dict[str, Any]:
         provider, provider_model, target = ContentTrustProbeService._resolve_probe_target(db, payload)
         endpoint_path = ContentTrustProbeService._resolve_endpoint_path(provider, provider_model, payload)
+        execution_plan = ContentTrustProbeService.describe_probe_execution_plan(payload.probe_keys, provider_model)
+        if (
+            payload.target_type == "internal"
+            and ContentTrustProbeService._automatic_detection_source(detection_source)
+            and bool(getattr(provider, "maintenance_mode_enabled", False))
+        ):
+            probe_results = [
+                ContentTrustProbeService.maintenance_probe(
+                    probe_key=probe_key,
+                    endpoint_path=endpoint_path,
+                    provider=provider,
+                )
+                for probe_key in payload.probe_keys
+            ]
+            message = ContentTrustProbeService._provider_maintenance_message(provider)
+            return {
+                "target": target,
+                "endpoint_path": endpoint_path,
+                "execution_plan": execution_plan,
+                "summary": {
+                    "status": "skipped",
+                    "content_guard_result": "maintenance",
+                    "content_guard_reason": message,
+                    "error_code": "provider_maintenance_mode",
+                    "provider_maintenance_mode": True,
+                },
+                "probe_results": probe_results,
+                "checked_at": now_beijing(),
+            }
         ordered_probe_slots: list[tuple[int, dict[str, Any] | None]] = []
         runnable_probes: list[tuple[int, str]] = []
         for index, probe_key in enumerate(payload.probe_keys):
@@ -180,9 +295,43 @@ class ContentTrustProbeService:
             if result is not None
         ]
         summary = ContentTrustProbeService.summarize_probe_results(probe_results)
+        has_rate_limited_probe = ProbeRateLimitService.contains_rate_limited_result(probe_results)
+        has_transient_probe_failure = ContentTrustProbeService._has_transient_probe_failure(probe_results)
+        if has_rate_limited_probe:
+            limited_result = next(item for item in probe_results if ProbeRateLimitService.is_rate_limited_result(item))
+            summary = {
+                **summary,
+                "status": "rate_limited",
+                "content_guard_result": "rate_limited",
+                "content_guard_reason": limited_result.get("message") or "探针频率限制，未更新可信状态",
+                "error_code": ProbeRateLimitService.ERROR_CODE,
+                "probe_rate_limited": True,
+                "rate_limit": limited_result.get("rate_limit"),
+            }
+        elif has_transient_probe_failure:
+            transient_result = ContentTrustProbeService._first_transient_probe_failure(probe_results) or {}
+            reason = (
+                transient_result.get("content_guard_reason")
+                or transient_result.get("message")
+                or transient_result.get("support_label")
+                or "上游当前不可用或传输异常，未更新可信状态"
+            )
+            summary = {
+                **summary,
+                "status": "upstream_unavailable",
+                "content_guard_result": "upstream_unavailable",
+                "content_guard_reason": str(reason),
+                "probe_transient_failure": True,
+            }
         selected_probe_keys = {str(item) for item in payload.probe_keys or []}
         can_persist_trust_status = set(ContentTrustProbeService.REQUIRED_TRUST_PROBE_KEYS).issubset(selected_probe_keys)
-        if payload.target_type == "internal" and payload.persist_internal_result and can_persist_trust_status:
+        if (
+            payload.target_type == "internal"
+            and payload.persist_internal_result
+            and can_persist_trust_status
+            and not has_rate_limited_probe
+            and not has_transient_probe_failure
+        ):
             aggregate_guard = ContentTrustProbeService.aggregate_content_guard_result(probe_results)
             if aggregate_guard is not None:
                 ContentTrustProbeService.update_provider_model_trust_status(
@@ -196,10 +345,63 @@ class ContentTrustProbeService:
         return {
             "target": target,
             "endpoint_path": endpoint_path,
+            "execution_plan": execution_plan,
             "summary": summary,
             "probe_results": probe_results,
-            "checked_at": datetime.utcnow(),
+            "checked_at": now_beijing(),
         }
+
+    @staticmethod
+    def _automatic_detection_source(detection_source: str | None) -> bool:
+        normalized = str(detection_source or "").strip().lower()
+        return normalized.startswith("automatic") or normalized.startswith("scheduled")
+
+    @staticmethod
+    def _provider_maintenance_message(provider: Provider | Any) -> str:
+        maintenance_window = str(getattr(provider, "maintenance_window", "") or "").strip()
+        if maintenance_window:
+            return f"提供商当前处于维护模式（{maintenance_window}），自动可信检测不执行；请在维护结束后重试，或由用户手动检测。"
+        return "提供商当前处于维护模式，自动可信检测不执行；请在维护结束后重试，或由用户手动检测。"
+
+    @staticmethod
+    def _has_transient_probe_failure(probe_results: list[dict[str, Any]]) -> bool:
+        return ContentTrustProbeService._first_transient_probe_failure(probe_results) is not None
+
+    @staticmethod
+    def _first_transient_probe_failure(probe_results: list[dict[str, Any]]) -> dict[str, Any] | None:
+        transient_status_codes = {408, 429, 500, 502, 503, 504}
+        for item in probe_results:
+            if ProbeRateLimitService.is_rate_limited_result(item):
+                continue
+            if item.get("success") is True:
+                continue
+            if item.get("retryable") is True:
+                return item
+            try:
+                status_code = int(item.get("status_code")) if item.get("status_code") is not None else None
+            except (TypeError, ValueError):
+                status_code = None
+            if status_code in transient_status_codes:
+                return item
+            text = " ".join(
+                str(item.get(key) or "")
+                for key in ("message", "content_guard_reason", "support_label", "error_code")
+            ).lower()
+            if any(
+                marker in text
+                for marker in (
+                    "incorrect header check",
+                    "decompress",
+                    "service_unavailable",
+                    "insufficient_quota",
+                    "额度不足",
+                    "全部渠道不可提供",
+                    "temporarily",
+                    "timeout",
+                )
+            ):
+                return item
+        return None
 
     @staticmethod
     def update_provider_model_trust_status(
@@ -396,9 +598,13 @@ class ContentTrustProbeService:
         endpoint_path: str,
         *,
         order_indexes: dict[str, int],
-    ) -> list[tuple[int, dict[str, Any]]]:
+        ) -> list[tuple[int, dict[str, Any]]]:
         started = time.perf_counter()
-        timeout_seconds = ContentGuardProbeService.COMBINED_TEXT_PROBE_TIMEOUT_SECONDS
+        timeout_seconds = ContentTrustProbeService._probe_timeout_seconds(
+            provider,
+            "combined_text",
+            ContentGuardProbeService.COMBINED_TEXT_PROBE_TIMEOUT_SECONDS,
+        )
         try:
             result_map = await asyncio.wait_for(
                 ContentGuardProbeService.probe_fixed_answer_and_pollution_rules(
@@ -451,7 +657,11 @@ class ContentTrustProbeService:
         order_index: int,
     ) -> tuple[int, dict[str, Any]]:
         started = time.perf_counter()
-        timeout_seconds = ContentTrustProbeService.PROBE_TIMEOUT_SECONDS.get(str(probe_key), 12)
+        timeout_seconds = ContentTrustProbeService._probe_timeout_seconds(
+            provider,
+            str(probe_key),
+            ContentTrustProbeService.PROBE_TIMEOUT_SECONDS.get(str(probe_key), 12),
+        )
         try:
             result = await asyncio.wait_for(
                 ContentTrustProbeService.run_single_probe(provider, provider_model, endpoint_path, probe_key),
@@ -525,6 +735,37 @@ class ContentTrustProbeService:
         })
 
     @staticmethod
+    def maintenance_probe(*, probe_key: str, endpoint_path: str, provider: Provider | Any) -> dict[str, Any]:
+        message = ContentTrustProbeService._provider_maintenance_message(provider)
+        return ContentGuardProbeService.mark_detection_result({
+            "capability_key": f"content_{probe_key}",
+            "probe_key": probe_key,
+            "probe_label": ContentTrustProbeService.PROBE_LABELS.get(probe_key, probe_key),
+            "endpoint_path": endpoint_path,
+            "endpoint_label": ContentTrustProbeService.PROBE_LABELS.get(probe_key, probe_key),
+            "success": False,
+            "native_success": False,
+            "adapted_success": False,
+            "support_mode": "provider_maintenance_mode",
+            "support_label": "提供商维护中",
+            "latency_ms": 0,
+            "status_code": 503,
+            "message": message,
+            "trace": [],
+            "retryable": True,
+            "required_probe": probe_key in ContentTrustProbeService.REQUIRED_TRUST_PROBE_KEYS,
+            "provider_maintenance_mode": True,
+            "error_code": "provider_maintenance_mode",
+            "content_guard": {
+                "content_guard_result": "maintenance",
+                "content_guard_risk_level": "none",
+                "content_guard_categories_json": '["provider_maintenance_mode"]',
+                "content_guard_reason": message,
+                "content_guard_action": "skip",
+            },
+        })
+
+    @staticmethod
     def invalid_probe(*, probe_key: str, endpoint_path: str, message: str) -> dict[str, Any]:
         return ContentGuardProbeService.mark_detection_result({
             "capability_key": f"content_{probe_key}",
@@ -565,3 +806,5 @@ class ContentTrustProbeService:
     @staticmethod
     def aggregate_content_guard_result(results: list[dict[str, Any]]) -> dict[str, Any] | None:
         return ContentGuardRuleService.aggregate_probe_guard_result(results)
+
+from app.utils.timezone import now_beijing

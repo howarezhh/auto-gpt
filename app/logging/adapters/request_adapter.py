@@ -36,6 +36,25 @@ class RequestLogRecorder:
         "request_content_guard": RequestContentGuardEvent,
         "request_billing": RequestBillingEvent,
     }
+    PROVIDER_ATTEMPT_RESULTS = {
+        "success",
+        "stream_opened",
+        "http_error",
+        "exception",
+        "model_not_found",
+        "rate_limited",
+        "request_rejected",
+        "upstream_auth_error",
+        "capacity_limited",
+        "capacity_unavailable",
+        "interrupted",
+        "client_cancelled",
+        "empty_stream",
+        "stream_error",
+        "timeout",
+        "content_integrity_violation",
+        "insufficient_balance_precheck",
+    }
 
     @staticmethod
     def record_summary(db: Session, **kwargs: Any) -> RequestLog:
@@ -179,6 +198,18 @@ class RequestLogRecorder:
         route_items = [item for item in trace_items if isinstance(item, dict) and item.get("result") in {"route_candidates_exhausted", "route_exhausted_wait_retry", "model_mapping", "stateful_responses_routing"}]
         if "request_route_decision" not in native_event_names and (route_items or log.provider_id):
             diagnostics = next((item.get("diagnostic") for item in route_items if isinstance(item.get("diagnostic"), dict)), None)
+            exhausted_item = next(
+                (
+                    item for item in reversed(route_items)
+                    if isinstance(item, dict) and item.get("result") == "route_candidates_exhausted"
+                ),
+                None,
+            )
+            candidate_count = None
+            if isinstance(exhausted_item, dict) and "candidate_count_after_failed_exclusion" in exhausted_item:
+                candidate_count = exhausted_item.get("candidate_count_after_failed_exclusion")
+            elif isinstance(diagnostics, dict):
+                candidate_count = diagnostics.get("final_candidate_count")
             events.append(LoggingDispatcher.build_event(
                 event_type="external_request",
                 event_name="request_route_decision",
@@ -191,7 +222,7 @@ class RequestLogRecorder:
                     "trace_id": trace_id,
                     "route_round": 1,
                     "route_policy": "健康优先",
-                    "candidate_count": diagnostics.get("final_candidate_count") if isinstance(diagnostics, dict) else None,
+                    "candidate_count": candidate_count,
                     "selected_provider_id": log.provider_id,
                     "selected_provider_model_id": log.resolved_provider_model_id,
                     "sticky_hit": any(item.get("sticky_hit") for item in trace_items if isinstance(item, dict)),
@@ -205,6 +236,8 @@ class RequestLogRecorder:
             if "request_provider_attempt" in native_event_names:
                 break
             if not isinstance(item, dict) or "provider_id" not in item:
+                continue
+            if item.get("result") not in RequestLogRecorder.PROVIDER_ATTEMPT_RESULTS:
                 continue
             attempt_index += 1
             event = LoggingDispatcher.build_event(

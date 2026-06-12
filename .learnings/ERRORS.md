@@ -641,3 +641,317 @@ Static governance checks should assert the current failure-handling semantics an
 ### Resolution
 - **Resolved**: 2026-06-10T00:00:00+08:00
 - **Notes**: Updated the stage33 assertion to check the current dead-letter preparation and payload helpers.
+
+---
+
+## [ERR-20260610-004] powershell-inline-variable-expanded
+
+**Logged**: 2026-06-10T00:00:00+08:00
+**Priority**: low
+**Status**: pending
+**Area**: tooling
+
+### Summary
+Inline `pwsh -Command` commands failed because the outer PowerShell parsed `$i` before PowerShell 7 received the script.
+
+### Error
+```text
+ParserError: Missing expression after unary operator '++'.
+```
+
+### Context
+- Attempted to run line-number printing commands containing `$i++` inside a double-quoted `pwsh -Command` string.
+- The project requires PowerShell 7 and warns that complex commands containing `$` must be shortened, escaped, or moved into a script block.
+
+### Suggested Fix
+Wrap PowerShell 7 command bodies in single quotes or escape `$` variables when invoking `pwsh -NoLogo -NoProfile -Command` from an outer PowerShell shell.
+
+### Metadata
+- Reproducible: yes
+- Related Files: 项目全局规范.md
+
+---
+
+## [ERR-20260610-005] ripgrep-windows-glob-not-expanded
+
+**Logged**: 2026-06-10T00:00:00+08:00
+**Priority**: low
+**Status**: pending
+**Area**: tooling
+
+### Summary
+`rg` failed on `app/templates/*.html` because the Windows shell did not expand the glob as expected.
+
+### Error
+```text
+rg: app/templates/*.html: IO error for operation on app/templates/*.html: 文件名、目录名或卷标语法不正确。 (os error 123)
+```
+
+### Context
+- The command tried to search HTML templates with a Bash-style path glob.
+- Searching the directory directly (`rg ... app/templates`) worked.
+
+### Suggested Fix
+On Windows PowerShell, prefer passing directories to `rg` or use `Get-ChildItem` to enumerate files when a tool does not support the intended glob form.
+
+### Metadata
+- Reproducible: yes
+- Related Files: app/templates
+
+---
+
+## [ERR-20260610-006] powershell-json-quotes-stripped
+
+**Logged**: 2026-06-10T00:00:00+08:00
+**Priority**: low
+**Status**: pending
+**Area**: tooling
+
+### Summary
+Inline Python cache checks failed because JSON double quotes were stripped by the outer PowerShell command string.
+
+### Error
+```text
+JSONDecodeError: Expecting property name enclosed in double quotes
+AssertionError: ('invalid_rules_json', 'invalid_rules_json')
+```
+
+### Context
+- A Python here-string was embedded inside a double-quoted `pwsh -Command` argument.
+- The JSON literal arrived in Python as `{ id:r1,... }` instead of valid JSON with quoted keys.
+
+### Suggested Fix
+For inline Python under PowerShell, build JSON inside Python with `json.dumps(...)` or avoid nesting raw JSON in an outer double-quoted command.
+
+### Metadata
+- Reproducible: yes
+- Related Files: app/services/content_guard_rule_service.py
+
+---
+
+## [ERR-20260610-007] powershell-regex-backtick-parsing
+
+**Logged**: 2026-06-10T00:00:00+08:00
+**Priority**: low
+**Status**: pending
+**Area**: tooling
+
+### Summary
+An `rg` search command failed because a complex regex containing PowerShell backticks was embedded in an outer double-quoted `pwsh -Command` string.
+
+### Error
+```text
+ParserError: Unexpected token ')' in expression or statement.
+```
+
+### Context
+- The command attempted to search JavaScript `api.post(...)` patterns containing template-literal backticks.
+- The outer PowerShell parser consumed the backtick semantics before `rg` received the regex.
+
+### Suggested Fix
+Use shorter searches for literal substrings first, or put complex regex patterns in single-quoted PowerShell command bodies/script blocks so template-literal backticks are not interpreted by the outer shell.
+
+### Metadata
+- Reproducible: yes
+- Related Files: app/static/js/app.js
+
+---
+
+## [ERR-20260610-008] powershell-variable-expanded-before-pwsh
+
+**Logged**: 2026-06-10T23:25:00+08:00
+**Priority**: low
+**Status**: pending
+**Area**: tooling
+
+### Summary
+A nested `pwsh -Command` check failed because `$files` and `$f` were expanded by the outer PowerShell command string before PowerShell 7 received the script.
+
+### Error
+```text
+ParserError: Missing variable name after foreach. The correct form is: foreach ($a in $b) {...}
+```
+
+### Context
+- The command embedded a `foreach ($f in $files)` script inside an outer double-quoted command string.
+- The outer shell stripped the variable names, so the inner command became `foreach ( in )`.
+
+### Suggested Fix
+Wrap nested PowerShell 7 script bodies in a single-quoted command body or script block, or move complex checks into a `.ps1` file before execution.
+
+### Metadata
+- Reproducible: yes
+- Related Files: scripts/build_tencent_package.ps1
+## [ERR-20260611-001] js_patch_parenthesis
+
+**Logged**: 2026-06-11T00:00:00+08:00
+**Priority**: medium
+**Status**: resolved
+**Area**: frontend
+
+### Summary
+手工把 `Promise.all(items.map(...))` 改成 `for...of` 时留下多余闭合括号，导致 `node --check` 失败。
+
+### Error
+```text
+SyntaxError: Unexpected token ')'
+```
+
+### Context
+- Command: `node --check app/static/js/app.js`
+- Related change: 同提供商模型批量测试由并发改串行。
+
+### Suggested Fix
+改复杂异步循环时分段替换，并立即运行 `node --check` 定位闭合结构问题。
+
+### Metadata
+- Reproducible: yes
+- Related Files: app/static/js/app.js
+
+### Resolution
+- **Resolved**: 2026-06-11T00:00:00+08:00
+- **Notes**: 后续补丁修正多余闭合括号并重新执行语法检查。
+
+---
+
+## [ERR-20260611-003] pwsh_rg_pattern_pipe_parsing
+
+**Logged**: 2026-06-11T23:58:00+08:00
+**Priority**: low
+**Status**: pending
+**Area**: tooling
+
+### Summary
+An `rg` verification command failed because a complex pattern containing `|` and escaped quotes was not isolated enough from PowerShell parsing.
+
+### Error
+```text
+The module 'data-tooltip-name=' could not be loaded.
+```
+
+### Context
+- Command attempted to search multiple tooltip-related patterns in one `rg -n` invocation.
+- The pattern mixed alternation, quotes, and backslashes inside nested `pwsh -Command`.
+
+### Suggested Fix
+Use single-quoted PowerShell script blocks with simpler fixed-string `rg -F` searches, or split each suspicious pattern into a separate command.
+
+### Metadata
+- Reproducible: yes
+- Related Files: app/static/js/app.js, app/static/css/app.css
+- See Also: ERR-20260611-002
+
+---
+
+## [ERR-20260611-004] isolated_router_service_import_cycle
+
+**Logged**: 2026-06-11T23:40:00+08:00
+**Priority**: low
+**Status**: pending
+**Area**: tooling
+
+### Summary
+Running a standalone Python snippet that imports `RouterService` directly can hit a circular import through `LogService -> ApiKeyService -> BillingService -> LogService`.
+
+### Error
+```text
+ImportError: cannot import name 'LogService' from partially initialized module 'app.services.log_service'
+```
+
+### Suggested Fix
+For ad hoc route investigations, prefer querying persisted `request_logs` diagnostics first, or import through an application-initialized path instead of isolated service imports.
+
+### Metadata
+- Reproducible: yes
+- Related Files: app/services/router_service.py, app/services/log_service.py, app/services/billing_service.py
+
+---
+
+## [ERR-20260611-004] pwsh_here_string_nested_command
+
+**Logged**: 2026-06-11T23:20:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tooling
+
+### Summary
+PowerShell here-string piped to Python failed when embedded directly in a nested `pwsh -Command` string; the outer shell parsed Python lines as PowerShell.
+
+### Error
+```text
+ParserError: The 'from' keyword is not supported in this version of the language.
+```
+
+### Context
+- Attempted to run a temporary Python Jinja template parser.
+- The command used a here-string inside a nested quoted `pwsh -Command`.
+
+### Suggested Fix
+Wrap the here-string pipeline in a PowerShell script block (`& { @' ... '@ | .\.venv\Scripts\python.exe - }`) when using nested `pwsh -Command`.
+
+### Metadata
+- Reproducible: yes
+- Related Files: app/templates/dashboard.html
+
+### Resolution
+- **Resolved**: 2026-06-11T23:20:00+08:00
+- **Notes**: Re-ran the parser through a script block and confirmed `dashboard.html` and `base.html` parse successfully.
+
+---
+
+## [ERR-20260611-003] browser_use_cli_missing
+
+**Logged**: 2026-06-11T22:00:00+08:00
+**Priority**: low
+**Status**: pending
+**Area**: tooling
+
+### Summary
+Visual verification could not run because the `browser-use` CLI is not installed or not on PATH in the current PowerShell environment.
+
+### Error
+```text
+browser-use: The term 'browser-use' is not recognized as a name of a cmdlet, function, script file, or executable program.
+```
+
+### Context
+- Attempted command: `browser-use open http://127.0.0.1:8000/logs`
+- Local app was listening on `127.0.0.1:8000`, but browser automation was unavailable.
+
+### Suggested Fix
+Run `browser-use doctor` only after confirming the CLI is installed and on PATH, or use an available Playwright/browser tool for local visual verification.
+
+### Metadata
+- Reproducible: yes
+- Related Files: app/templates/logs.html, app/static/css/app.css, app/static/js/app.js
+
+---
+
+## [ERR-20260611-002] rg_regex_escaped_in_pwsh
+
+**Logged**: 2026-06-11T22:00:00+08:00
+**Priority**: low
+**Status**: pending
+**Area**: tooling
+
+### Summary
+An `rg` search failed because a complex alternation regex with escaped quotes was embedded in a PowerShell command string and reached `rg` with invalid escapes.
+
+### Error
+```text
+rg: regex parse error:
+error: unrecognized escape sequence
+```
+
+### Context
+- Command attempted to search several JavaScript literals in one `rg -n` regex.
+- The query mixed regex alternation, escaped parentheses, escaped quotes, and Chinese text inside a nested `pwsh -Command`.
+
+### Suggested Fix
+Use multiple `rg -F` fixed-string searches or split complex searches into shorter commands before reaching for a combined regex in PowerShell.
+
+### Metadata
+- Reproducible: yes
+- Related Files: app/static/js/app.js
+
+---

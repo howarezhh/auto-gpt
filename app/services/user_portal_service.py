@@ -168,12 +168,14 @@ class UserPortalService:
             exclude_health_checks=exclude_health_checks,
             api_client_key_ids=key_ids,
         )
+        raw_api_key_by_id = LogService.load_raw_api_keys_for_logs(db, items)
         return total, [
             RequestLogOut.model_validate(item)
             for item in LogService.serialize_logs(
                 items,
                 include_payload_fields=False,
                 derive_image_observability=False,
+                raw_api_key_by_id=raw_api_key_by_id,
             )
         ], summary, api_key_options
 
@@ -253,7 +255,7 @@ class UserPortalService:
         key_ids = [item.id for item in owned_keys]
         quota_snapshot = UserQuotaService.get_usage_snapshot(db, user=user)
         account_summary = UserQuotaService.serialize_policy(user=user, snapshot=quota_snapshot)
-        recent_since = datetime.utcnow() - timedelta(hours=24)
+        recent_since = now_beijing() - timedelta(hours=24)
         summary_row = db.execute(
             select(
                 func.count(UserAccountBillingRecord.id).label("total_billing_records"),
@@ -386,6 +388,7 @@ class UserPortalService:
                     recent_logs,
                     include_payload_fields=False,
                     derive_image_observability=False,
+                    raw_api_key_by_id=LogService.load_raw_api_keys_for_logs(db, recent_logs),
                 )
             ],
             "recent_billing": [BillingService.serialize_user_billing_record(item) for item in recent_billing],
@@ -495,6 +498,7 @@ class UserPortalService:
                 .limit(max(1, log_limit))
             )
         )
+        raw_api_key_by_id = LogService.load_raw_api_keys_for_logs(db, recent_logs)
         return {
             "api_key": detail,
             "analytics": analytics,
@@ -505,6 +509,7 @@ class UserPortalService:
                     recent_logs,
                     include_payload_fields=False,
                     derive_image_observability=False,
+                    raw_api_key_by_id=raw_api_key_by_id,
                 )
             ],
         }
@@ -525,7 +530,8 @@ class UserPortalService:
         log = UserPortalService.get_owned_request_log(db, user=user, log_id=log_id)
         if log is None:
             return None
-        return RequestLogOut.model_validate(LogService.serialize_log(log))
+        raw_api_key_by_id = LogService.load_raw_api_keys_for_logs(db, [log])
+        return RequestLogOut.model_validate(LogService.serialize_log(log, raw_api_key_by_id=raw_api_key_by_id))
 
     @staticmethod
     def export_billing_csv(
@@ -598,7 +604,7 @@ class UserPortalService:
         normalized_days = max(1, min(days, 30))
         day_map: dict[str, dict] = {}
         for offset in range(normalized_days - 1, -1, -1):
-            current = datetime.utcnow() - timedelta(days=offset)
+            current = now_beijing() - timedelta(days=offset)
             label = current.strftime("%m-%d")
             day_map[label] = {
                 "label": label,
@@ -609,7 +615,7 @@ class UserPortalService:
         if not key_ids:
             return list(day_map.values())
 
-        since = (datetime.utcnow() - timedelta(days=normalized_days - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        since = (now_beijing() - timedelta(days=normalized_days - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
         rows = db.execute(
             select(
                 func.date(RequestLog.created_at).label("day"),
@@ -782,3 +788,5 @@ class UserPortalService:
         if abnormal_keys:
             warnings.append({"level": "warning", "message": f"当前有 {len(abnormal_keys)} 个 API Key 处于非正常状态，建议及时处理。"})
         return warnings
+
+from app.utils.timezone import now_beijing

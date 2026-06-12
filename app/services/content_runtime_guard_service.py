@@ -427,11 +427,13 @@ class ContentRuntimeGuardService:
             return False
         trust_level = str(getattr(provider, "trust_level", "standard") or "standard")
         stream_mode = ContentRuntimeGuardService.stream_mode(setting)
+        if stream_mode == "pass_through_scan":
+            return False
+        if stream_mode in {"buffer_300ms", "full_buffer"}:
+            return True
         content_status = str(getattr(provider, "content_integrity_status", "unknown") or "unknown")
         health_status = str(getattr(provider, "health_status", "unknown") or "unknown")
-        if stream_mode in {"buffer_300ms", "full_buffer"} and (
-            content_status in {"unknown", "degraded"} or health_status in {"unknown", "degraded"}
-        ):
+        if content_status in {"unknown", "degraded"} or health_status in {"unknown", "degraded"}:
             return True
         buffer_stream_for_guard = getattr(provider, "buffer_stream_for_guard", True)
         buffer_stream_enabled = True if buffer_stream_for_guard is None else bool(buffer_stream_for_guard)

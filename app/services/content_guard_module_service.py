@@ -19,6 +19,7 @@ from app.services.provider_service import (
     PROVIDER_TRUST_LEVEL_LABELS,
     ProviderService,
 )
+from app.services.provider_health_state_service import ProviderHealthStateService
 from app.services.cache_service import CacheService
 from app.services.setting_service import SettingService
 from app.utils.json_utils import loads_json
@@ -100,7 +101,7 @@ class ContentGuardModuleService:
                 .limit(safe_page_size)
             )
         )
-        since = datetime.utcnow() - timedelta(hours=1)
+        since = now_beijing() - timedelta(hours=1)
         guard_latencies = [
             int(item or 0)
             for item in db.scalars(
@@ -231,6 +232,7 @@ class ContentGuardModuleService:
             "content_guard_precheck_auto_enabled": bool(getattr(setting, "content_guard_precheck_auto_enabled", False)),
             "content_guard_block_on_high_risk": bool(getattr(setting, "content_guard_block_on_high_risk", True)),
             "content_guard_json_probe_enabled": bool(getattr(setting, "content_guard_json_probe_enabled", False)),
+            "content_guard_probe_protocol_type": str(getattr(setting, "content_guard_probe_protocol_type", "chat_completions") or "chat_completions"),
             "content_guard_probe_interval_sec": int(getattr(setting, "content_guard_probe_interval_sec", 3600) or 3600),
             "content_guard_max_scan_bytes": int(getattr(setting, "content_guard_max_scan_bytes", 16384) or 16384),
             "content_guard_stream_buffer_max_bytes": int(getattr(setting, "content_guard_stream_buffer_max_bytes", 16384) or 16384),
@@ -397,6 +399,7 @@ class ContentGuardModuleService:
         safe_model_limit = max(1, int(model_limit or len(enabled_models) or 1))
         models = enabled_models[:safe_model_limit]
         trust_summary = ProviderService.provider_trust_summary(provider)
+        effective_health = ProviderHealthStateService.effective_provider_health(provider)
         return {
             "id": provider.id,
             "name": provider.name,
@@ -420,6 +423,7 @@ class ContentGuardModuleService:
             "trust_status": trust_summary.get("status"),
             "trust_status_label": trust_summary.get("label"),
             "trust_status_reason": trust_summary.get("reason"),
+            **effective_health,
             "recent_events": list(recent_events or []),
             "models": models,
             "model_count": len(enabled_models),
@@ -455,7 +459,7 @@ class ContentGuardModuleService:
         for provider_model in enabled_models:
             provider_model.content_integrity_status = status
             ProviderService._ensure_manual_content_probe_reason(provider_model)
-        ProviderService.refresh_provider_state(provider)
+        ProviderService.refresh_provider_content_integrity_state(provider)
         db.commit()
         db.refresh(provider)
         ProviderService.invalidate_provider_runtime_cache()
@@ -465,6 +469,7 @@ class ContentGuardModuleService:
     def serialize_provider_model(provider_model: ProviderModel) -> dict[str, Any]:
         trust_status = ProviderService.provider_model_trust_status(provider_model)
         trust_reason = ProviderService._content_probe_reason(provider_model)
+        effective_health = ProviderHealthStateService.effective_model_health(provider_model)
         return {
             "id": provider_model.id,
             "model_name": provider_model.model_name,
@@ -485,6 +490,7 @@ class ContentGuardModuleService:
             "trust_status": trust_status,
             "trust_status_label": MODEL_TRUST_STATUS_LABELS.get(trust_status, trust_status),
             "trust_status_reason": trust_reason,
+            **effective_health,
         }
 
     @staticmethod
@@ -502,3 +508,5 @@ class ContentGuardModuleService:
             payload,
             detection_source="manual_trust_probe",
         )
+
+from app.utils.timezone import now_beijing

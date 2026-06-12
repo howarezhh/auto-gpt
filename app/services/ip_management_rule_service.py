@@ -57,7 +57,7 @@ class IpManagementRuleService:
             ip_obj = ipaddress.ip_address(ip_value)
         except ValueError:
             return IpRuleMatch(None, "allow", "invalid_resolved_ip")
-        current = now or datetime.utcnow()
+        current = now or now_beijing()
         candidates = [
             rule
             for rule in rules
@@ -98,3 +98,5 @@ class IpManagementRuleService:
         except ValueError:
             return False
         return False
+
+from app.utils.timezone import now_beijing

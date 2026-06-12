@@ -281,6 +281,18 @@
             </label>
             <label>
                 <span class="content-guard-label">
+                    <span>探针协议</span>
+                    <button class="settings-help-btn" type="button" aria-label="探针协议说明" data-settings-tooltip-trigger="true" data-settings-tooltip-title="探针协议说明" data-settings-tooltip-copy="可信检测和内容预检探针默认优先使用 Chat Completions；仅在需要验证 Responses 兼容性时切换。若所选协议不受当前模型支持，会回退到另一个可用协议。">
+                        <i class="bi bi-question-circle" aria-hidden="true"></i>
+                    </button>
+                </span>
+                <select class="field-input" id="content-guard-probe-protocol-type">
+                    <option value="chat_completions">Chat Completions</option>
+                    <option value="responses">Responses</option>
+                </select>
+            </label>
+            <label>
+                <span class="content-guard-label">
                     <span>自动预检间隔（s）</span>
                     <button class="settings-help-btn" type="button" aria-label="自动预检间隔说明" data-settings-tooltip-trigger="true" data-settings-tooltip-title="自动预检间隔说明" data-settings-tooltip-copy="内容防护自动预检的运行间隔，下限 300 s；保存设置后会重新配置调度器，但不会中断已在运行的单次任务。">
                         <i class="bi bi-question-circle" aria-hidden="true"></i>
@@ -361,7 +373,7 @@
         </div>
         <div class="content-guard-segment" role="group" aria-label="检测目标">
             <button class="content-guard-segment-option is-active" type="button" data-content-guard-target-type="internal" aria-pressed="true">本项目</button>
-            <button class="content-guard-segment-option" type="button" data-content-guard-target-type="external" aria-pressed="false" disabled>外部提供商托管配置</button>
+            <button class="content-guard-segment-option" type="button" data-content-guard-target-type="external" aria-pressed="false">外部提供商托管配置</button>
         </div>
         <div class="content-guard-target-stack">
             <div class="content-guard-target-group" id="content-guard-internal-fields">
@@ -377,22 +389,22 @@
             <div class="content-guard-target-group hidden" id="content-guard-external-fields" hidden>
                 <label>
                     <span>接口地址</span>
-                    <input class="field-input" id="content-guard-external-base-url" type="url" placeholder="通过后端托管提供商配置维护" disabled>
+                    <input class="field-input" id="content-guard-external-base-url" type="url" placeholder="https://api.example.com/v1" autocomplete="off">
                 </label>
                 <label>
                     <span>模型名</span>
-                    <input class="field-input" id="content-guard-external-model-name" type="text" disabled>
+                    <input class="field-input" id="content-guard-external-model-name" type="text" placeholder="例如 gpt-4.1-mini" autocomplete="off">
                 </label>
                 <label>
                     <span class="content-guard-label">
                         <span>端点</span>
-                        <button class="settings-help-btn" type="button" aria-label="外部端点拼接说明" data-settings-tooltip-trigger="true" data-settings-tooltip-title="外部端点拼接说明" data-settings-tooltip-copy="接口地址不含 /responses 或 /chat/completions；端点由下方选项单独选择。浏览器不接收外部 API Key，请先在后端托管提供商配置中维护接口地址和密钥。">
+                        <button class="settings-help-btn" type="button" aria-label="外部端点拼接说明" data-settings-tooltip-trigger="true" data-settings-tooltip-title="外部端点拼接说明" data-settings-tooltip-copy="接口地址不含 /responses 或 /chat/completions；端点由下方选项单独选择。浏览器不接收外部 API Key，外部提供商只能通过后端托管配置检测。">
                             <i class="bi bi-question-circle" aria-hidden="true"></i>
                         </button>
                     </span>
-                    <select class="field-input" id="content-guard-external-endpoint-path" disabled>
-                        <option value="/responses">/responses</option>
+                    <select class="field-input" id="content-guard-external-endpoint-path">
                         <option value="/chat/completions">/chat/completions</option>
+                        <option value="/responses">/responses</option>
                     </select>
                 </label>
             </div>

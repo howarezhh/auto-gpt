@@ -1,3 +1,4 @@
+from app.utils.timezone import now_beijing
 import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -244,7 +245,7 @@ class RouterService:
         except Exception as exc:
             raise ProviderCapacityUnavailableError(str(exc)) from exc
         hydrated: list[RouteCandidate] = []
-        now = datetime.utcnow()
+        now = now_beijing()
         allowed_provider_ids = set(route_context.allowed_provider_ids) if route_context and route_context.allowed_provider_ids is not None else None
         for entry in entries:
             provider_id = RouterService._parse_int(entry.get("provider_id"))
@@ -325,7 +326,7 @@ class RouterService:
         require_responses: bool = False,
     ) -> list[RouteCandidate]:
         providers = ProviderService.list_runtime_providers(db)
-        now = datetime.utcnow()
+        now = now_beijing()
         metrics = LogService.route_metric_summary(db, window_minutes=RouterService.RECENT_WINDOW_MINUTES, requested_model=model_name)
         allowed_provider_ids = set(route_context.allowed_provider_ids) if route_context and route_context.allowed_provider_ids is not None else None
         enabled_model_names = ModelCatalogService.enabled_model_name_set(db)
@@ -739,7 +740,7 @@ class RouterService:
         providers = ProviderService.list_providers(db)
         enabled_model_names = ModelCatalogService.enabled_model_name_set(db)
         metrics = LogService.route_metric_summary(db, window_minutes=RouterService.RECENT_WINDOW_MINUTES, requested_model=model_name)
-        now = datetime.utcnow()
+        now = now_beijing()
         effective_forced_provider_id = route_context.forced_provider_id if route_context and route_context.forced_provider_id is not None else forced_provider_id
         allowed_provider_ids = set(route_context.allowed_provider_ids) if route_context and route_context.allowed_provider_ids is not None else None
         diagnostics: dict[str, Any] = {

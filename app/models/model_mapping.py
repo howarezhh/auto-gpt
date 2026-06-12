@@ -1,3 +1,4 @@
+from app.utils.timezone import now_beijing
 from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, Integer, Text
@@ -14,10 +15,10 @@ class ModelMapping(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     targets_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     remark: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
         nullable=False,
-        default=datetime.utcnow,
-        onupdate=datetime.utcnow,
+        default=now_beijing,
+        onupdate=now_beijing,
     )

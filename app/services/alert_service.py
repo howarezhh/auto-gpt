@@ -135,7 +135,7 @@ class AlertService:
         ][:AlertService.ALERT_PROVIDER_EVENT_LIMIT]
         abnormal_api_keys = AlertService.list_abnormal_api_keys(db, limit=100)
         alert_users = AlertService.list_alert_users(db, limit=100)
-        recent_since = datetime.utcnow() - timedelta(hours=24)
+        recent_since = now_beijing() - timedelta(hours=24)
         failure_count = int(
             db.scalar(
                 select(func.count()).select_from(RequestLog).where(
@@ -218,7 +218,7 @@ class AlertService:
 
     @staticmethod
     def list_abnormal_api_keys(db: Session, *, limit: int = 100) -> list[dict]:
-        now = datetime.utcnow()
+        now = now_beijing()
         status_expr = ApiKeyAdminService._api_key_status_expr(now)
         rows = db.execute(
             select(
@@ -276,7 +276,7 @@ class AlertService:
             return []
 
         user_ids = [item.id for item in users]
-        now = datetime.utcnow()
+        now = now_beijing()
         day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         usage_rows = db.execute(
@@ -390,7 +390,7 @@ class AlertService:
         status: str = "active",
         auto_commit: bool = True,
     ) -> AlertEvent:
-        now = datetime.utcnow()
+        now = now_beijing()
         item = db.scalar(select(AlertEvent).where(AlertEvent.alert_key == alert_key))
         safe_payload = AlertService._json_safe(payload or {})
         if item is None:
@@ -427,7 +427,7 @@ class AlertService:
         active_keys = set(active_events.keys())
         existing_items = AlertService._load_active_alert_events(db, active_keys)
         existing_by_key = {item.alert_key: item for item in existing_items}
-        now = datetime.utcnow()
+        now = now_beijing()
         changed = False
         for alert_key, payload in active_events.items():
             safe_payload = AlertService._json_safe(payload["payload"])
@@ -622,7 +622,7 @@ class AlertService:
         item = db.get(AlertEvent, event_id)
         if item is None:
             return None
-        item.acknowledged_at = datetime.utcnow()
+        item.acknowledged_at = now_beijing()
         db.commit()
         db.refresh(item)
         AlertService.invalidate_dashboard_cache()
@@ -645,3 +645,5 @@ class AlertService:
             "acknowledged_at": item.acknowledged_at.isoformat() if item.acknowledged_at else None,
             "resolved_at": item.resolved_at.isoformat() if item.resolved_at else None,
         }
+
+from app.utils.timezone import now_beijing

@@ -113,8 +113,8 @@ return {'ok', '', max_current}
     ) -> None:
         try:
             client = RedisService.get_sync_client()
-            day_key = datetime.utcnow().strftime("%Y%m%d")
-            month_key = datetime.utcnow().strftime("%Y%m")
+            day_key = now_beijing().strftime("%Y%m%d")
+            month_key = now_beijing().strftime("%Y%m")
             pipe = client.pipeline(transaction=True)
             if api_key_total_tokens_used is not None:
                 pipe.set(f"quota:api_key:{api_key_id}:tokens:total", max(0, int(api_key_total_tokens_used)))
@@ -176,7 +176,7 @@ return {'ok', '', max_current}
     ) -> None:
         try:
             current_second = int(time.time())
-            minute_key = datetime.utcnow().strftime("%Y%m%d%H%M")
+            minute_key = now_beijing().strftime("%Y%m%d%H%M")
             qps_entries: list[tuple[str, int, str, str]] = []
             rpm_entries: list[tuple[str, int, str, str]] = []
             if global_qps_limit and global_qps_limit > 0:
@@ -271,8 +271,8 @@ return {'ok', '', max_current}
     ) -> None:
         try:
             client = RedisService.get_client()
-            day_key = datetime.utcnow().strftime("%Y%m%d")
-            minute_key = datetime.utcnow().strftime("%Y%m%d%H%M")
+            day_key = now_beijing().strftime("%Y%m%d")
+            minute_key = now_beijing().strftime("%Y%m%d%H%M")
             async with client.pipeline(transaction=True) as pipe:
                 if total_tokens is not None and total_tokens > 0:
                     pipe.incrby(f"quota:api_key:{api_key_id}:tokens:{day_key}", int(total_tokens))
@@ -350,3 +350,5 @@ return {'ok', '', max_current}
     @staticmethod
     def _allow_local_fallback() -> bool:
         return not get_settings().is_production()
+
+from app.utils.timezone import now_beijing

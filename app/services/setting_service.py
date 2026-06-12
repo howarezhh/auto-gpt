@@ -6,7 +6,6 @@ from types import SimpleNamespace
 from app.config import get_settings
 from app.database import SessionLocal
 from app.models.app_setting import AppSetting
-from app.models.provider import Provider
 from app.schemas.setting import SettingUpdate
 from app.services.cache_service import CacheService
 
@@ -15,8 +14,6 @@ _settings = get_settings()
 
 DEFAULT_SETTING = {
     "id": 1,
-    "global_timeout_ms": 30000,
-    "global_max_retries": 2,
     "route_exhausted_retry_max_wait_seconds": 600,
     "route_exhausted_retry_infinite_enabled": False,
     "trusted_providers_only": False,
@@ -35,6 +32,7 @@ DEFAULT_SETTING = {
     "content_guard_block_on_high_risk": True,
     "content_guard_probe_interval_sec": 3600,
     "content_guard_json_probe_enabled": False,
+    "content_guard_probe_protocol_type": "chat_completions",
     "content_guard_max_scan_bytes": 16384,
     "content_guard_stream_buffer_max_bytes": 16384,
     "content_guard_low_trust_requires_buffer": True,
@@ -126,9 +124,6 @@ class SettingService:
             if setting.health_check_interval_sec < 300:
                 setting.health_check_interval_sec = 300
                 changed = True
-            if int(setting.global_max_retries or 0) < 2:
-                setting.global_max_retries = 2
-                changed = True
             normalized_guard_delay_ms = min(500, max(0, int(setting.content_guard_max_detection_delay_ms or 300)))
             if setting.content_guard_max_detection_delay_ms != normalized_guard_delay_ms:
                 setting.content_guard_max_detection_delay_ms = normalized_guard_delay_ms
@@ -182,7 +177,6 @@ class SettingService:
             if field.startswith("content_guard_") and field not in explicit_fields:
                 continue
             setattr(setting, field, value)
-        SettingService._clamp_provider_retry_limits(db, max_retries=setting.global_max_retries)
         db.commit()
         db.refresh(setting)
         SettingService.invalidate_runtime_cache()
@@ -262,12 +256,3 @@ class SettingService:
                 raise ValueError(f"{field_name} must be valid JSON") from exc
             if not isinstance(parsed, expected_types):
                 raise ValueError(f"{field_name} must be a JSON object" if expected_types == (dict,) else f"{field_name} must be a JSON object or array")
-
-    @staticmethod
-    def _clamp_provider_retry_limits(db: Session, *, max_retries: int) -> None:
-        """提供商重试次数不得超过全局最大重试次数。"""
-        normalized_max = max(0, int(max_retries or 0))
-        db.query(Provider).filter(Provider.max_retries > normalized_max).update(
-            {Provider.max_retries: normalized_max},
-            synchronize_session=False,
-        )

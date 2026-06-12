@@ -1,3 +1,4 @@
+from app.utils.timezone import now_beijing
 from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, Integer, Text
@@ -103,7 +104,7 @@ class AppSetting(Base):
     responses_chat_adapter_context_window_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=128000)
     responses_chat_adapter_snapshot_max_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=1048576)
     responses_chat_adapter_db_cleanup_interval_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=21600)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+        DateTime, nullable=False, default=now_beijing, onupdate=now_beijing
     )

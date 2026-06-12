@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 
+from app.services.runtime_state_service import RuntimeStateService
 from app.services.system_metrics_service import SystemMetricsService
 from app.utils.json_utils import dumps_json
 
@@ -118,6 +119,39 @@ def test_monitoring_alerts_cover_event_loop_queue_wait_and_client_cancellation()
     assert "monitoring:client_cancelled_spike" in events
     assert "monitoring:queue_wait_high" in events
     assert "monitoring:event_loop_delay_high" in events
+
+
+def test_event_loop_delay_alert_uses_recent_window_not_lifetime_peak() -> None:
+    now = time.monotonic()
+    with RuntimeStateService._lock:
+        RuntimeStateService._event_loop_latest_delay_ms = None
+        RuntimeStateService._event_loop_max_delay_ms = None
+        RuntimeStateService._event_loop_lifetime_max_delay_ms = None
+        RuntimeStateService._event_loop_avg_delay_ms = None
+        RuntimeStateService._event_loop_sample_count = 0
+        RuntimeStateService._event_loop_recent_samples.clear()
+
+    RuntimeStateService._record_event_loop_delay(1500.0, sampled_at=now - RuntimeStateService._event_loop_window_seconds - 5)
+    RuntimeStateService._record_event_loop_delay(25.0, sampled_at=now)
+    snapshot = RuntimeStateService.event_loop_snapshot()
+
+    assert snapshot["max_delay_ms"] == 25.0
+    assert snapshot["recent_max_delay_ms"] == 25.0
+    assert snapshot["lifetime_max_delay_ms"] == 1500.0
+
+    metrics = {
+        "window_minutes": 5,
+        "redis": {"ok": True, "active_requests": 0, "active_streams": 0},
+        "database": {"ok": True},
+        "traffic": {"total_requests": 0, "status_5xx_rate": 0.0, "status_429": 0, "status_429_rate": 0.0},
+        "content_guard": {"enabled": False},
+        "background": {"pending_finalize_logs": 0, "billing_failed_logs": 0, "token_failed_logs": 0},
+        "runtime": {"event_loop": snapshot},
+        "host": {},
+        "providers": [],
+    }
+
+    assert "monitoring:event_loop_delay_high" not in SystemMetricsService._build_monitoring_alert_events(metrics)
 
 
 def test_tcp_status_counts_from_proc_maps_time_wait(monkeypatch) -> None:

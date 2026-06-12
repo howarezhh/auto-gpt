@@ -22,6 +22,7 @@ POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-zhh123456}"
 POSTGRES_HOST="${POSTGRES_HOST:-127.0.0.1}"
 POSTGRES_PORT="${POSTGRES_PORT:-5432}"
 DEFAULT_DATABASE_URL="postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}"
+DEFAULT_TZ="${DEFAULT_TZ:-Asia/Shanghai}"
 DEFAULT_REDIS_URL="${DEFAULT_REDIS_URL:-redis://127.0.0.1:6379/0}"
 DEFAULT_DB_POOL_SIZE="${DEFAULT_DB_POOL_SIZE:-0}"
 DEFAULT_DB_CONNECTIONS_PER_WORKER="${DEFAULT_DB_CONNECTIONS_PER_WORKER:-10}"
@@ -279,6 +280,7 @@ ensure_database_url() {
   set_env_default "DB_MAX_OVERFLOW" "$DEFAULT_DB_MAX_OVERFLOW"
   set_env_default "DB_POOL_TIMEOUT" "$DEFAULT_DB_POOL_TIMEOUT"
   set_env_default "DB_POOL_RECYCLE" "$DEFAULT_DB_POOL_RECYCLE"
+  set_env_default "TZ" "$DEFAULT_TZ"
   set_env_default "ENABLE_BACKGROUND_WORKERS" "$DEFAULT_ENABLE_BACKGROUND_WORKERS"
   set_env_default "TOKEN_FINALIZE_WORKER_COUNT" "$DEFAULT_TOKEN_FINALIZE_WORKER_COUNT"
   set_env_default "TOKEN_FINALIZE_QUEUE_SIZE" "$DEFAULT_TOKEN_FINALIZE_QUEUE_SIZE"
@@ -516,6 +518,7 @@ ensure_postgresql_database() {
   fi
 
   runuser -u postgres -- psql -v ON_ERROR_STOP=1 -d "$POSTGRES_DB" -c "ALTER DATABASE ${POSTGRES_DB} OWNER TO ${POSTGRES_USER};"
+  runuser -u postgres -- psql -v ON_ERROR_STOP=1 -d "$POSTGRES_DB" -c "ALTER DATABASE ${POSTGRES_DB} SET timezone TO 'Asia/Shanghai';"
 }
 
 ensure_redis_service() {
@@ -581,6 +584,7 @@ User=root
 Group=root
 WorkingDirectory=${PROJECT_ROOT}
 EnvironmentFile=${ENV_FILE}
+Environment=TZ=Asia/Shanghai
 ExecStart=/bin/bash -lc 'exec ${PYTHON_BIN} -m gunicorn app.main:app -k uvicorn.workers.UvicornWorker -w \${WEB_CONCURRENCY:-4} -b ${APP_HOST}:${APP_PORT} --timeout \${GUNICORN_TIMEOUT:-120} --keep-alive \${GUNICORN_KEEPALIVE:-75} --graceful-timeout \${GUNICORN_GRACEFUL_TIMEOUT:-30}'
 Restart=always
 RestartSec=5
@@ -610,6 +614,7 @@ User=root
 Group=root
 WorkingDirectory=${PROJECT_ROOT}
 EnvironmentFile=${ENV_FILE}
+Environment=TZ=Asia/Shanghai
 ExecStart=/bin/bash -lc 'exec ${PYTHON_BIN} -m scripts.run_background_workers'
 Restart=always
 RestartSec=5

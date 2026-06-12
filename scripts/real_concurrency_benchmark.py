@@ -16,6 +16,7 @@ from typing import Any
 
 import httpx
 
+from app.utils.timezone import now_beijing
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PROXY_BASE_URL = "http://127.0.0.1:8000"
@@ -1084,7 +1085,7 @@ def build_html_report(report: BenchmarkReport) -> str:
 
 def save_report_files(report_dir: Path, report_prefix: str, report: BenchmarkReport) -> tuple[Path, Path]:
     report_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    timestamp = now_beijing().strftime("%Y%m%d-%H%M%S")
     base_name = f"{report_prefix}-{timestamp}"
     json_path = report_dir / f"{base_name}.json"
     html_path = report_dir / f"{base_name}.html"
@@ -1106,7 +1107,7 @@ async def main_async(args: argparse.Namespace) -> int:
     print(f"concurrency_plan={json.dumps(concurrency_plan, ensure_ascii=False)}")
     print("mode=stream-only")
 
-    started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    started_at = now_beijing().strftime("%Y-%m-%d %H:%M:%S")
     model_reports: list[ModelReport] = []
     for model_name in model_names:
         model_report = await run_model_probe(
@@ -1134,7 +1135,7 @@ async def main_async(args: argparse.Namespace) -> int:
 
     report = BenchmarkReport(
         started_at=started_at,
-        finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        finished_at=now_beijing().strftime("%Y-%m-%d %H:%M:%S"),
         proxy_base_url=args.proxy_base_url.strip().rstrip("/"),
         endpoint=args.endpoint,
         model_names=model_names,

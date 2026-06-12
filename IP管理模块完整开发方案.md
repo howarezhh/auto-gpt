@@ -1011,7 +1011,7 @@ Forwarded: for="203.0.113.9";proto=https;host=example.com
 首期固定窗口：
 
 - QPS：按 Unix 秒计数。
-- RPM：按 UTC 分钟计数。
+- RPM：按北京时间自然分钟计数。
 
 后续升级：
 

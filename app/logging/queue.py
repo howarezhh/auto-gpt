@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
 from redis.exceptions import RedisError
@@ -195,7 +195,7 @@ class LoggingQueue:
         attempts = cls._coerce_attempt_count(payload.get("_queue_attempts")) + 1
         payload["_queue_attempts"] = attempts
         payload["_last_queue_error"] = error_message
-        payload["_last_queue_failed_at"] = datetime.now(UTC).isoformat()
+        payload["_last_queue_failed_at"] = now_beijing_aware().isoformat()
         if attempts >= cls.MAX_PROCESSING_ATTEMPTS:
             return None, cls._dead_letter_payload(raw_item=dumps_json(payload), attempts=attempts, error=error_message)
         return dumps_json(payload), None
@@ -212,7 +212,7 @@ class LoggingQueue:
         clipped_item = raw_item[: cls.DEAD_LETTER_ITEM_MAX_CHARS]
         return dumps_json(
             {
-                "failed_at": datetime.now(UTC).isoformat(),
+                "failed_at": now_beijing_aware().isoformat(),
                 "attempts": attempts,
                 "error": error,
                 "truncated": len(raw_item) > len(clipped_item),
@@ -302,3 +302,5 @@ class LoggingQueue:
             if time.monotonic() >= deadline:
                 return {"idle": False, "timed_out": True, **lengths}
             await asyncio.sleep(max(0.01, poll_interval_seconds))
+
+from app.utils.timezone import now_beijing_aware

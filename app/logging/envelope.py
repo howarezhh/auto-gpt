@@ -5,6 +5,8 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
+from app.utils.timezone import now_beijing
+
 
 @dataclass(slots=True)
 class LogEnvelope:
@@ -18,7 +20,7 @@ class LogEnvelope:
     actor_id: str | None = None
     source_ip: str | None = None
     result: str = "success"
-    occurred_at: datetime = field(default_factory=datetime.utcnow)
+    occurred_at: datetime = field(default_factory=now_beijing)
     event_id: str = field(default_factory=lambda: uuid4().hex)
 
     def to_dict(self) -> dict[str, Any]:

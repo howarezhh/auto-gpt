@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import asyncio
 import logging
 from uuid import uuid4
 
@@ -51,7 +52,13 @@ from app.services.model_catalog_service import ModelCatalogService
 from app.services.model_mapping_service import ModelMappingService
 from app.services.openai_error_service import OpenAIErrorService
 from app.services.provider_service import ProviderService
+from app.services.proxy_request_context import (
+    clear_current_provider_candidate,
+    clear_current_request_headers_json,
+    get_current_provider_candidate,
+)
 from app.services.redis_service import RedisService
+from app.services.request_header_log_service import RequestHeaderLogService
 from app.services.request_log_queue_service import RequestLogQueueService
 from app.services.responses_chat_adapter_service import ResponsesChatAdapterService
 from app.services.runtime_state_service import RuntimeStateService
@@ -76,6 +83,70 @@ from app.utils.request_stream import RequestBodyReadTimeout, RequestBodyTooLarge
 settings = get_settings()
 settings.validate_runtime_settings()
 logger = logging.getLogger(__name__)
+SCHEDULER_OWNER_LOCK_KEY = "scheduler:owner:web"
+SCHEDULER_OWNER_LOCK_TTL_SECONDS = 120
+_RELEASE_SCHEDULER_OWNER_LUA = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
+_RENEW_SCHEDULER_OWNER_LUA = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('EXPIRE', KEYS[1], ARGV[2])
+end
+return 0
+"""
+
+
+async def _try_acquire_scheduler_owner(token: str) -> bool:
+    if not settings.redis_url.strip():
+        logger.warning("ENABLE_SCHEDULER=true but REDIS_URL is empty; skip scheduler owner acquisition")
+        return False
+    try:
+        acquired = await RedisService.get_client().set(
+            SCHEDULER_OWNER_LOCK_KEY,
+            token,
+            nx=True,
+            ex=SCHEDULER_OWNER_LOCK_TTL_SECONDS,
+        )
+        return bool(acquired)
+    except Exception as exc:
+        logger.warning("Skip scheduler startup because scheduler owner lock is unavailable: %s", exc)
+        return False
+
+
+async def _release_scheduler_owner(token: str | None) -> None:
+    if not token:
+        return
+    try:
+        await RedisService.get_client().eval(_RELEASE_SCHEDULER_OWNER_LUA, 1, SCHEDULER_OWNER_LOCK_KEY, token)
+    except Exception as exc:
+        logger.warning("Failed to release scheduler owner lock: %s", exc)
+
+
+async def _renew_scheduler_owner(token: str) -> None:
+    interval = max(10, SCHEDULER_OWNER_LOCK_TTL_SECONDS // 3)
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            renewed = await RedisService.get_client().eval(
+                _RENEW_SCHEDULER_OWNER_LUA,
+                1,
+                SCHEDULER_OWNER_LOCK_KEY,
+                token,
+                SCHEDULER_OWNER_LOCK_TTL_SECONDS,
+            )
+        except Exception as exc:
+            logger.warning("Scheduler owner lock renewal failed; shutdown local scheduler: %s", exc)
+            if scheduler.running:
+                scheduler.shutdown(wait=False)
+            return
+        if int(renewed or 0) != 1:
+            logger.warning("Scheduler owner lock lost; shutdown local scheduler")
+            if scheduler.running:
+                scheduler.shutdown(wait=False)
+            return
 
 
 def init_database(*, allow_production_ddl: bool = False) -> None:
@@ -190,6 +261,7 @@ def CONTENT_GUARD_COMPAT_COLUMNS(
             "content_guard_block_on_high_risk": f"ALTER TABLE app_settings ADD COLUMN content_guard_block_on_high_risk BOOLEAN NOT NULL DEFAULT {true_default}",
             "content_guard_probe_interval_sec": "ALTER TABLE app_settings ADD COLUMN content_guard_probe_interval_sec INTEGER NOT NULL DEFAULT 3600",
             "content_guard_json_probe_enabled": f"ALTER TABLE app_settings ADD COLUMN content_guard_json_probe_enabled BOOLEAN NOT NULL DEFAULT {false_default}",
+            "content_guard_probe_protocol_type": "ALTER TABLE app_settings ADD COLUMN content_guard_probe_protocol_type TEXT NOT NULL DEFAULT 'chat_completions'",
             "content_guard_max_scan_bytes": "ALTER TABLE app_settings ADD COLUMN content_guard_max_scan_bytes INTEGER NOT NULL DEFAULT 16384",
             "content_guard_stream_buffer_max_bytes": "ALTER TABLE app_settings ADD COLUMN content_guard_stream_buffer_max_bytes INTEGER NOT NULL DEFAULT 16384",
             "content_guard_low_trust_requires_buffer": f"ALTER TABLE app_settings ADD COLUMN content_guard_low_trust_requires_buffer BOOLEAN NOT NULL DEFAULT {true_default}",
@@ -267,22 +339,17 @@ def _migrate_provider_model_capacity_columns(db) -> None:
 
 
 def _backfill_provider_max_retries(db) -> None:
-    """统一提供商最大重试次数默认值，并保持不超过全局最大重试次数。"""
+    """仅为缺失值补齐提供商默认最大重试次数。"""
     existing_columns = _get_table_columns(db, "providers")
     if "max_retries" not in existing_columns:
         return
-    setting = db.get(AppSetting, 1)
-    if setting is not None and int(setting.global_max_retries or 0) < 2:
-        setting.global_max_retries = 2
-        db.commit()
-    global_max_retries = int(getattr(db.get(AppSetting, 1), "global_max_retries", 2) or 2)
     target = 2
     db.execute(
         text(
             "UPDATE providers SET max_retries = :target "
-            "WHERE max_retries IS NULL OR max_retries != :target OR max_retries > :global_max_retries"
+            "WHERE max_retries IS NULL"
         ),
-        {"target": target, "global_max_retries": global_max_retries},
+        {"target": target},
     )
     db.commit()
 
@@ -572,6 +639,7 @@ def _migrate_cache_price_columns(db) -> None:
             "token_source": "ALTER TABLE request_logs ADD COLUMN token_source TEXT",
             "upstream_usage_missing": "ALTER TABLE request_logs ADD COLUMN upstream_usage_missing BOOLEAN",
             "usage_details_json": "ALTER TABLE request_logs ADD COLUMN usage_details_json TEXT",
+            "request_headers_json": "ALTER TABLE request_logs ADD COLUMN request_headers_json TEXT",
             **content_guard_compat["request_logs"],
         },
         "api_client_billing_records": {
@@ -887,6 +955,8 @@ async def lifespan(_: FastAPI):
     request_log_started = False
     token_usage_started = False
     scheduler_started = False
+    scheduler_owner_token: str | None = None
+    scheduler_owner_renew_task: asyncio.Task | None = None
     if _should_run_startup_database_init():
         init_database()
     try:
@@ -902,13 +972,23 @@ async def lifespan(_: FastAPI):
             await TokenUsageService.start_background_workers()
             token_usage_started = True
         if settings.enable_scheduler and not scheduler.running:
-            configure_scheduler()
-            scheduler.start()
-            scheduler_started = True
+            scheduler_owner_token = uuid4().hex
+            if await _try_acquire_scheduler_owner(scheduler_owner_token):
+                configure_scheduler()
+                scheduler.start()
+                scheduler_started = True
+                scheduler_owner_renew_task = asyncio.create_task(
+                    _renew_scheduler_owner(scheduler_owner_token),
+                    name="scheduler-owner-renew",
+                )
         yield
     finally:
+        if scheduler_owner_renew_task is not None:
+            scheduler_owner_renew_task.cancel()
+            await asyncio.gather(scheduler_owner_renew_task, return_exceptions=True)
         if scheduler_started and scheduler.running:
             scheduler.shutdown(wait=False)
+        await _release_scheduler_owner(scheduler_owner_token if scheduler_started else None)
         if request_log_started:
             await RequestLogQueueService.stop_background_workers()
         if token_usage_started:
@@ -940,6 +1020,10 @@ app.mount("/uploaded-assets", StaticFiles(directory=settings.uploads_dir), name=
 async def trace_and_runtime_middleware(request: Request, call_next):
     trace_id = getattr(request.state, "trace_id", None) or request.headers.get("x-trace-id") or request.headers.get("x-request-id") or uuid4().hex
     request.state.trace_id = trace_id
+    clear_current_provider_candidate()
+    clear_current_request_headers_json()
+    if _is_external_v1_path(request.url.path):
+        RequestHeaderLogService.capture_request(request)
     RuntimeStateService.enter_request()
     ingress_lease = None
     try:
@@ -1369,6 +1453,14 @@ def _log_v1_request_rejected_before_route(
         return
     try:
         trace_id = getattr(request.state, "trace_id", None)
+        requested_model = getattr(request.state, "v1_requested_model", None)
+        requested_model = requested_model if isinstance(requested_model, str) else None
+        candidate_context = get_current_provider_candidate() or {}
+        provider_id = candidate_context.get("provider_id")
+        provider_name = candidate_context.get("provider_name")
+        resolved_provider_model_id = candidate_context.get("resolved_provider_model_id")
+        candidate_model_name = candidate_context.get("model_name")
+        model_name = candidate_model_name if isinstance(candidate_model_name, str) else requested_model
         log_context = ErrorCatalogService.build_log_context(
             status_code=status_code,
             detail=detail if detail is not None else {"message": message, "code": error_code},
@@ -1386,6 +1478,11 @@ def _log_v1_request_rejected_before_route(
                 "result": "request_rejected_before_route",
                 "error": error_code,
                 "latency_ms": 0,
+                "requested_model": requested_model,
+                "provider_id": provider_id,
+                "provider_name": provider_name,
+                "resolved_provider_model_id": resolved_provider_model_id,
+                "model_name": model_name,
             },
             {
                 "typed_event": "request_validation",
@@ -1396,6 +1493,8 @@ def _log_v1_request_rejected_before_route(
                     "validation_stage": "body_read" if error_code == "request_body_too_large" else "json_parse",
                     "passed": False,
                     "request_body_summary_json": request_body_json,
+                    "requested_model": requested_model,
+                    "last_candidate_json": dumps_json(candidate_context) if candidate_context else None,
                     "error_code": error_code,
                     "safe_detail_json": dumps_json(detail if detail is not None else {"message": message, "code": error_code}),
                 },
@@ -1414,17 +1513,25 @@ def _log_v1_request_rejected_before_route(
                     "retryable": bool(log_context.get("retryable", retryable)),
                     "recoverable": bool(classified["recoverable"]),
                     "diagnostic_sample_json": dumps_json(detail if detail is not None else {"message": message, "code": error_code}),
+                    "requested_model": requested_model,
+                    "last_candidate_json": dumps_json(candidate_context) if candidate_context else None,
                 },
             },
         ]
         log_kwargs = {
             "log_type": "proxy",
+            "provider_id": provider_id,
+            "provider_name": provider_name,
             "trace_id": trace_id,
+            "model_name": model_name,
+            "requested_model": requested_model,
+            "resolved_provider_model_id": resolved_provider_model_id,
             "request_path": request.url.path,
             "source_ip": ProxySafeHelpers.extract_source_ip(request),
             "http_method": request.method.upper(),
             "success": False,
             "status_code": status_code,
+            "request_headers_json": getattr(request.state, "v1_request_headers_json", None),
             "request_body_json": request_body_json,
             "response_body_json": ProxySafeHelpers.truncate_json(
                 {
@@ -1497,6 +1604,7 @@ async def _log_api_client_auth_failure(request: Request, exc: ApiClientAuthError
     requested_model = None
     if isinstance(parsed_body, dict):
         requested_model = parsed_body.get("model") if isinstance(parsed_body.get("model"), str) else None
+    request.state.v1_requested_model = requested_model
     classified = OpenAIErrorService.classify_error(
         status_code=exc.status_code,
         detail={"message": exc.message, "code": exc.code},
@@ -1558,6 +1666,7 @@ async def _log_api_client_auth_failure(request: Request, exc: ApiClientAuthError
         "has_image": ProxySafeHelpers.payload_has_image(parsed_body if isinstance(parsed_body, dict) else None),
         "success": False,
         "status_code": exc.status_code,
+        "request_headers_json": getattr(request.state, "v1_request_headers_json", None),
         "reasoning_level": LogService.extract_reasoning_level(parsed_body if isinstance(parsed_body, dict) else None),
         "model_reasoning_effort": LogService.extract_model_reasoning_effort(parsed_body if isinstance(parsed_body, dict) else None),
         "request_body_json": request_body_json,

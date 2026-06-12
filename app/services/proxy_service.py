@@ -1,3 +1,4 @@
+from app.utils.timezone import BEIJING_TZ, now_beijing, now_beijing_aware
 import asyncio
 import base64
 import hashlib
@@ -8,7 +9,7 @@ import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal
 from email.utils import parsedate_to_datetime
 from typing import Any
@@ -47,6 +48,7 @@ from app.services.provider_capacity_service import (
     ProviderCapacityUnavailableError,
 )
 from app.services.provider_service import ProviderService
+from app.services.proxy_request_context import set_current_provider_candidate
 from app.services.request_log_queue_service import RequestLogQueueService
 from app.services.router_service import RoutePolicyContext, RouterService
 from app.services.setting_service import SettingService
@@ -2106,6 +2108,7 @@ class ProxyService:
                 route_round=route_retry_round + 1,
                 candidate_count=0,
                 diagnostics=route_diagnostics,
+                failed_candidate_keys=failed_candidate_keys,
             )
             if model_mapping_unavailable:
                 route_message, error_code = ProxyService._build_model_mapping_unavailable_error(route_diagnostics)
@@ -2208,7 +2211,13 @@ class ProxyService:
                     model_name=model_name,
                     endpoint_path=endpoint_path,
                     log_type=log_type,
-                    trace=trace + [{"result": "route_candidates_exhausted", "diagnostic": route_diagnostics}],
+                    trace=[
+                        *trace,
+                        ProxyService._route_candidates_exhausted_trace_item(
+                            route_diagnostics,
+                            failed_candidate_keys=failed_candidate_keys,
+                        ),
+                    ],
                     upstream_error=ProxyService._build_route_exhausted_retry_upstream_error(
                         setting,
                         started_at=route_retry_started_at,
@@ -2276,6 +2285,7 @@ class ProxyService:
         for candidate in candidates:
             provider = candidate.provider
             provider_model = candidate.provider_model
+            set_current_provider_candidate(provider=provider, provider_model=provider_model)
             balance_rejection = await ProxyService._precheck_owner_balance_for_candidate(
                 db,
                 api_client_auth=api_client_auth,
@@ -3230,6 +3240,7 @@ class ProxyService:
                 route_round=route_retry_round + 1,
                 candidate_count=0,
                 diagnostics=route_diagnostics,
+                failed_candidate_keys=failed_candidate_keys,
             )
             if model_mapping_unavailable:
                 route_message, error_code = ProxyService._build_model_mapping_unavailable_error(route_diagnostics)
@@ -3330,7 +3341,13 @@ class ProxyService:
                     model_name=model_name,
                     endpoint_path=endpoint_path,
                     log_type=log_type,
-                    trace=trace + [{"result": "route_candidates_exhausted", "diagnostic": route_diagnostics}],
+                    trace=[
+                        *trace,
+                        ProxyService._route_candidates_exhausted_trace_item(
+                            route_diagnostics,
+                            failed_candidate_keys=failed_candidate_keys,
+                        ),
+                    ],
                     upstream_error=ProxyService._build_route_exhausted_retry_upstream_error(
                         setting,
                         started_at=route_retry_started_at,
@@ -3398,6 +3415,7 @@ class ProxyService:
         for candidate in candidates:
             provider = candidate.provider
             provider_model = candidate.provider_model
+            set_current_provider_candidate(provider=provider, provider_model=provider_model)
             balance_rejection = await ProxyService._precheck_owner_balance_for_candidate(
                 db,
                 api_client_auth=api_client_auth,
@@ -5811,8 +5829,8 @@ class ProxyService:
         try:
             retry_at = parsedate_to_datetime(text)
             if retry_at.tzinfo is None:
-                retry_at = retry_at.replace(tzinfo=timezone.utc)
-            seconds = (retry_at - datetime.now(timezone.utc)).total_seconds()
+                retry_at = retry_at.replace(tzinfo=BEIJING_TZ)
+            seconds = (retry_at.astimezone(BEIJING_TZ) - now_beijing_aware()).total_seconds()
             return max(0.0, min(seconds, 300.0))
         except Exception:
             return None
@@ -5944,7 +5962,7 @@ class ProxyService:
     ) -> dict[str, Any]:
         elapsed_seconds = int(round(ProxyService._route_exhausted_retry_elapsed_seconds(started_at=started_at)))
         max_wait_seconds = ProxyService._route_exhausted_retry_max_wait_seconds(setting)
-        effective_attempt_count = max(int(attempt_count or 0), LogService.derive_attempt_count(trace))
+        effective_attempt_count = LogService.resolve_attempt_count(attempt_count=attempt_count, trace=trace)
         detail: dict[str, Any] = {
             "message": f"所有可用提供商在 {max_wait_seconds} 秒等待重试窗口内均不可用或请求失败，已停止内部重试。",
             "code": "all_providers_unavailable_after_retry",
@@ -6284,6 +6302,12 @@ class ProxyService:
     def _append_auth_trace_event(trace: list[dict], api_client_auth: ApiClientAuthContext | None) -> None:
         if api_client_auth is None:
             return
+        if ProxyService._has_typed_trace_event(
+            trace,
+            "request_auth",
+            lambda payload: payload.get("auth_result") == "authenticated",
+        ):
+            return
         trace.append(
             {
                 "typed_event": "request_auth",
@@ -6313,6 +6337,12 @@ class ProxyService:
         error_code: str | None = None,
         safe_detail: dict[str, Any] | None = None,
     ) -> None:
+        if passed and ProxyService._has_typed_trace_event(
+            trace,
+            "request_validation",
+            lambda payload: payload.get("passed") is True and payload.get("validation_stage") == stage,
+        ):
+            return
         ProxyService._append_typed_request_event(
             trace,
             "request_validation",
@@ -6340,13 +6370,25 @@ class ProxyService:
         required_capabilities_json: str,
         reason_details: dict[str, Any] | None = None,
     ) -> None:
+        normalized_endpoint = f"/v1{endpoint_path}" if not str(endpoint_path).startswith("/v1") else endpoint_path
+        if permission_result == "allowed" and ProxyService._has_typed_trace_event(
+            trace,
+            "request_model_permission",
+            lambda payload: (
+                payload.get("permission_result") == "allowed"
+                and payload.get("requested_model") == (requested_model if isinstance(requested_model, str) else None)
+                and payload.get("resolved_model") == (resolved_model if isinstance(resolved_model, str) else None)
+                and payload.get("endpoint_path") == normalized_endpoint
+            ),
+        ):
+            return
         ProxyService._append_typed_request_event(
             trace,
             "request_model_permission",
             {
                 "requested_model": requested_model if isinstance(requested_model, str) else None,
                 "resolved_model": resolved_model if isinstance(resolved_model, str) else None,
-                "endpoint_path": f"/v1{endpoint_path}" if not str(endpoint_path).startswith("/v1") else endpoint_path,
+                "endpoint_path": normalized_endpoint,
                 "required_capabilities_json": required_capabilities_json,
                 "permission_result": permission_result,
                 "reason_details_json": dumps_json(reason_details or {}),
@@ -6354,6 +6396,20 @@ class ProxyService:
             result="success" if permission_result == "allowed" else "failed",
             severity="info" if permission_result == "allowed" else "warning",
         )
+
+    @staticmethod
+    def _has_typed_trace_event(
+        trace: list[dict],
+        event_name: str,
+        payload_matches: Callable[[dict[str, Any]], bool],
+    ) -> bool:
+        for item in trace:
+            if not isinstance(item, dict) or item.get("typed_event") != event_name:
+                continue
+            payload = item.get("payload")
+            if isinstance(payload, dict) and payload_matches(payload):
+                return True
+        return False
 
     @staticmethod
     def _append_route_decision_trace_event(
@@ -6371,6 +6427,10 @@ class ProxyService:
         retry_wait_ms: int | None = None,
         retry_wait_plan: dict[str, Any] | None = None,
     ) -> None:
+        serialized_failed_candidates = ProxyService._serialize_failed_candidate_keys(failed_candidate_keys or set())
+        hard_filter_final_candidate_count = (
+            diagnostics.get("final_candidate_count") if isinstance(diagnostics, dict) else None
+        )
         ProxyService._append_typed_request_event(
             trace,
             "request_route_decision",
@@ -6378,6 +6438,8 @@ class ProxyService:
                 "route_round": route_round,
                 "route_policy": "健康优先",
                 "candidate_count": candidate_count,
+                "hard_filter_final_candidate_count": hard_filter_final_candidate_count,
+                "candidate_count_after_failed_exclusion": candidate_count,
                 "base_candidate_count": ProxyService._effective_route_base_candidate_count(),
                 "candidate_expand_count": ProxyService._effective_route_candidate_expand_count(),
                 "candidate_window_count": ProxyService._effective_route_candidate_attempt_count(),
@@ -6386,7 +6448,8 @@ class ProxyService:
                 "selected_reason": selected_reason,
                 "sticky_hit": sticky_hit,
                 "top_candidates_json": dumps_json(top_candidates or []),
-                "failed_candidate_keys_json": dumps_json(ProxyService._serialize_failed_candidate_keys(failed_candidate_keys or set())),
+                "failed_candidate_keys_json": dumps_json(serialized_failed_candidates),
+                "failed_candidate_count": len(serialized_failed_candidates),
                 "excluded_summary_json": dumps_json((diagnostics or {}).get("reason_counts")) if diagnostics else None,
                 "hard_filter_reason_counts_json": dumps_json((diagnostics or {}).get("reason_counts") or {}),
                 "diagnostics_json": dumps_json(diagnostics) if diagnostics is not None else None,
@@ -6419,6 +6482,22 @@ class ProxyService:
             {"provider_id": provider_id, "provider_model_id": provider_model_id}
             for provider_id, provider_model_id in sorted(keys)
         ]
+
+    @staticmethod
+    def _route_candidates_exhausted_trace_item(
+        diagnostics: dict[str, Any],
+        *,
+        failed_candidate_keys: set[tuple[int, int]] | None = None,
+    ) -> dict[str, Any]:
+        serialized_failed = ProxyService._serialize_failed_candidate_keys(failed_candidate_keys or set())
+        return {
+            "result": "route_candidates_exhausted",
+            "diagnostic": diagnostics,
+            "hard_filter_final_candidate_count": diagnostics.get("final_candidate_count"),
+            "failed_candidate_count": len(serialized_failed),
+            "failed_candidate_keys": serialized_failed,
+            "candidate_count_after_failed_exclusion": 0 if serialized_failed else diagnostics.get("final_candidate_count"),
+        }
 
     @staticmethod
     def _mark_route_candidate_failed(failed_candidate_keys: set[tuple[int, int]], candidate: Any) -> None:
@@ -7340,7 +7419,7 @@ class ProxyService:
         requested_model: str,
     ) -> dict[str, Any]:
         response_id = str(responses_payload.get("id") or f"chatcmpl_{uuid4().hex}")
-        created_at = responses_payload.get("created_at") or int(datetime.utcnow().timestamp())
+        created_at = responses_payload.get("created_at") or int(now_beijing().timestamp())
         model_name = str(responses_payload.get("model") or requested_model or "")
         assistant_text = ProxyService._extract_response_text(responses_payload, limit_bytes=1_048_576) or ""
         finish_reason = ProxyService._extract_finish_reason(responses_payload) or "stop"
@@ -7369,7 +7448,7 @@ class ProxyService:
         return {
             "id": response_id,
             "object": "chat.completion",
-            "created": int(created_at or datetime.utcnow().timestamp()),
+            "created": int(created_at or now_beijing().timestamp()),
             "model": model_name,
             "choices": [
                 {
@@ -7392,7 +7471,7 @@ class ProxyService:
         requested_model: str,
     ) -> dict[str, Any]:
         response_id = str(chat_response.get("id") or f"cmpl_{uuid4().hex}")
-        created_at = chat_response.get("created") or int(datetime.utcnow().timestamp())
+        created_at = chat_response.get("created") or int(now_beijing().timestamp())
         model_name = str(chat_response.get("model") or requested_model or "")
         choices = chat_response.get("choices") if isinstance(chat_response.get("choices"), list) else []
         text_choices: list[dict[str, Any]] = []
@@ -7414,7 +7493,7 @@ class ProxyService:
         payload: dict[str, Any] = {
             "id": response_id.replace("chatcmpl_", "cmpl_", 1),
             "object": "text_completion",
-            "created": int(created_at or datetime.utcnow().timestamp()),
+            "created": int(created_at or now_beijing().timestamp()),
             "model": model_name,
             "choices": text_choices,
         }
@@ -7485,7 +7564,7 @@ class ProxyService:
             "buffer": bytearray(),
             "response_id": response_id if isinstance(response_id, str) and response_id.strip() else f"resp_{uuid4().hex}",
             "message_id": f"msg_{uuid4().hex}",
-            "created_at": int(datetime.utcnow().timestamp()),
+            "created_at": int(now_beijing().timestamp()),
             "model": str(payload.get("model") or ""),
             "output_text_parts": [],
             "tool_calls": {},
@@ -7700,7 +7779,7 @@ class ProxyService:
         return {
             "buffer": bytearray(),
             "chunk_id": f"chatcmpl_{uuid4().hex}",
-            "created": int(datetime.utcnow().timestamp()),
+            "created": int(now_beijing().timestamp()),
             "model": str(payload.get("model") or ""),
             "finish_reason": None,
             "created_sent": False,
@@ -7712,7 +7791,7 @@ class ProxyService:
         return {
             "buffer": bytearray(),
             "chunk_id": f"cmpl_{uuid4().hex}",
-            "created": int(datetime.utcnow().timestamp()),
+            "created": int(now_beijing().timestamp()),
             "model": str(payload.get("model") or ""),
             "finish_reason": None,
             "completed_sent": False,
@@ -8265,7 +8344,7 @@ class ProxyService:
                 error_code=ProxyService._error_code_from_detail(detail),
                 retryable=ProxyService._is_retryable_status(status_code, detail),
                 **ProxyService._build_api_client_log_kwargs(api_client_auth, auth_result="authenticated"),
-                trace=trace,
+                trace=trace_for_log,
                 attempt_count=attempt_count,
                 token_request_payload=request_payload,
                 schedule_token_fill=schedule_token_fill,

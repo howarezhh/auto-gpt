@@ -1,3 +1,4 @@
+from app.utils.timezone import now_beijing
 from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Text
@@ -19,7 +20,7 @@ class AlertSubscription(Base):
     notify_failure_rate_alerts: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     browser_notifications_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     poll_interval_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=30)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing, onupdate=now_beijing)
 
     user_account = relationship("UserAccount")
