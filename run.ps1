@@ -74,6 +74,109 @@ sys.exit(0 if actual_prefix == expected and actual_prefix != base_prefix and has
     }
 }
 
+function Get-ProjectDependencyFingerprint {
+    param(
+        [string]$ProjectPythonExe,
+        [string]$RequirementsPath
+    )
+
+    if (-not (Test-Path -LiteralPath $RequirementsPath)) {
+        throw "依赖清单不存在: $RequirementsPath"
+    }
+
+    $requirementsHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $RequirementsPath).Hash
+    $pythonVersion = (& $ProjectPythonExe -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')").Trim()
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($pythonVersion)) {
+        throw "读取项目 Python 版本失败，无法判断依赖安装状态。"
+    }
+
+    return "python=$pythonVersion`nrequirements_sha256=$requirementsHash"
+}
+
+function Test-ProjectDependenciesImportable {
+    param(
+        [string]$ProjectPythonExe
+    )
+
+    & $ProjectPythonExe -c @"
+import importlib
+import sys
+
+modules = [
+    "fastapi",
+    "uvicorn",
+    "sqlalchemy",
+    "psycopg",
+    "pydantic",
+    "pydantic_settings",
+    "jinja2",
+    "httpx",
+    "aiohttp",
+    "apscheduler",
+    "multipart",
+    "tiktoken",
+    "itsdangerous",
+    "cryptography",
+    "redis",
+    "psutil",
+]
+
+missing = []
+for name in modules:
+    try:
+        importlib.import_module(name)
+    except Exception:
+        missing.append(name)
+
+if missing:
+    print("missing=" + ",".join(missing))
+    sys.exit(1)
+"@
+    return $LASTEXITCODE -eq 0
+}
+
+function Install-ProjectDependenciesIfNeeded {
+    param(
+        [string]$ProjectPythonExe,
+        [string]$RequirementsPath,
+        [string]$RunStateDirPath,
+        [string]$IndexUrl
+    )
+
+    New-Item -ItemType Directory -Force -Path $RunStateDirPath | Out-Null
+
+    $markerPath = Join-Path $RunStateDirPath "requirements.sha256"
+    $fingerprint = Get-ProjectDependencyFingerprint -ProjectPythonExe $ProjectPythonExe -RequirementsPath $RequirementsPath
+    $storedFingerprint = ""
+    if (Test-Path -LiteralPath $markerPath) {
+        $storedFingerprint = (Get-Content -Raw -LiteralPath $markerPath).Trim()
+    }
+
+    $dependenciesImportable = Test-ProjectDependenciesImportable -ProjectPythonExe $ProjectPythonExe
+    if ($dependenciesImportable -and $storedFingerprint -eq $fingerprint) {
+        Write-Host "依赖未变化，跳过 pip 安装。"
+        return
+    }
+    if ($dependenciesImportable -and [string]::IsNullOrWhiteSpace($storedFingerprint)) {
+        Set-Content -LiteralPath $markerPath -Value $fingerprint -Encoding UTF8
+        Write-Host "依赖已可用，补写 requirements 指纹并跳过 pip 安装。"
+        return
+    }
+
+    Write-Host "检测到依赖首次安装、缺失或 requirements.txt 已变化，开始同步项目依赖..."
+    & $ProjectPythonExe -m pip install --upgrade pip -i $IndexUrl
+    if ($LASTEXITCODE -ne 0) {
+        throw "升级 pip 失败。"
+    }
+    & $ProjectPythonExe -m pip install -r $RequirementsPath -i $IndexUrl
+    if ($LASTEXITCODE -ne 0) {
+        throw "安装项目依赖失败。"
+    }
+
+    Set-Content -LiteralPath $markerPath -Value $fingerprint -Encoding UTF8
+    Write-Host "依赖同步完成，已记录 requirements 指纹。"
+}
+
 function Get-DotEnvValues {
     param(
         [string]$EnvFilePath
@@ -736,8 +839,11 @@ try {
     Write-Host "启动模式: $(if ($EnableReload) { 'reload' } else { 'stable(no-reload)' })"
 
     $env:TZ = "Asia/Shanghai"
-    & $PythonExe -m pip install --upgrade pip -i $PipIndexUrl
-    & $PythonExe -m pip install -r requirements.txt -i $PipIndexUrl
+    Install-ProjectDependenciesIfNeeded `
+        -ProjectPythonExe $PythonExe `
+        -RequirementsPath (Join-Path $ProjectRoot "requirements.txt") `
+        -RunStateDirPath $RunStateDir `
+        -IndexUrl $PipIndexUrl
 
     $Port = Resolve-AvailablePort -PreferredPort $Port -ForceKillPreferredPort $AllowForceKillPortProcess
     Write-Host "服务地址: http://$HostAddress`:$Port"

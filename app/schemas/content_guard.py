@@ -20,7 +20,7 @@ from app.utils.content_guard_config import (
 )
 
 
-ContentGuardProbeKey = Literal["fixed_answer", "pollution_rules", "json", "sse"]
+ContentGuardProbeKey = Literal["fixed_answer", "pollution_rules", "json", "sse", "vision"]
 ContentGuardEndpointPath = Literal["/chat/completions", "/responses"]
 ContentGuardProbeProtocolType = Literal["chat_completions", "responses"]
 ContentGuardRuleMatchType = Literal["keyword_any", "regex", "unexpected_url"]
@@ -319,7 +319,7 @@ class ContentGuardRunRequest(BaseModel):
     external: ContentGuardExternalTarget | None = None
     probe_keys: list[ContentGuardProbeKey] = Field(
         default_factory=lambda: ["fixed_answer", "pollution_rules", "sse"],
-        max_length=4,
+        max_length=5,
     )
     persist_internal_result: bool = True
 

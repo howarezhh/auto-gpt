@@ -27,6 +27,7 @@ class ContentTrustProbeService:
         "pollution_rules": "外链广告识别",
         "json": "严格 JSON",
         "sse": "流式污染检测",
+        "vision": "图片检查",
     }
     REQUIRED_TRUST_PROBE_KEYS = ["fixed_answer", "pollution_rules", "sse"]
     MIN_CONTENT_INTEGRITY_SCORE = 20
@@ -38,6 +39,7 @@ class ContentTrustProbeService:
         + ContentGuardProbeService.SSE_PROBE_MAX_DURATION_SECONDS
         + 2,
         "pollution_rules": ContentGuardProbeService.POLLUTION_PROBE_TIMEOUT_SECONDS + 2,
+        "vision": 12,
     }
     COMBINABLE_TEXT_PROBE_KEYS = ("fixed_answer", "pollution_rules")
 
@@ -129,6 +131,7 @@ class ContentTrustProbeService:
         runnable: list[str] = []
         json_enabled = ContentTrustProbeService.json_probe_enabled()
         supports_stream = bool(getattr(provider_model, "supports_stream", True))
+        supports_vision = bool(getattr(provider_model, "supports_vision", True))
         for key in ordered_keys:
             if key == "json" and not json_enabled:
                 skipped.append({
@@ -142,6 +145,13 @@ class ContentTrustProbeService:
                     "probe_key": key,
                     "probe_label": ContentTrustProbeService.PROBE_LABELS.get(key, key),
                     "reason": "模型未启用流式能力",
+                })
+                continue
+            if key == "vision" and not supports_vision:
+                skipped.append({
+                    "probe_key": key,
+                    "probe_label": ContentTrustProbeService.PROBE_LABELS.get(key, key),
+                    "reason": "模型未启用图片输入能力",
                 })
                 continue
             if key not in ContentTrustProbeService.PROBE_LABELS:
@@ -247,6 +257,16 @@ class ContentTrustProbeService:
                         probe_key=probe_key,
                         endpoint_path=endpoint_path,
                         message="模型未启用流式能力",
+                    ),
+                ))
+                continue
+            if probe_key == "vision" and not bool(getattr(provider_model, "supports_vision", True)):
+                ordered_probe_slots.append((
+                    index,
+                    ContentTrustProbeService.skipped_probe(
+                        probe_key=probe_key,
+                        endpoint_path=endpoint_path,
+                        message="模型未启用图片输入能力",
                     ),
                 ))
                 continue
@@ -526,6 +546,7 @@ class ContentTrustProbeService:
             supports_tools=False,
             supports_chat_completions=external.endpoint_path == "/chat/completions",
             supports_responses=external.endpoint_path == "/responses",
+            supports_vision=True,
             protocol_type=protocol_type,
         )
         provider_model.provider = provider
@@ -573,6 +594,8 @@ class ContentTrustProbeService:
             result = await ContentGuardProbeService.probe_json(provider, provider_model, endpoint_path=endpoint_path)
         elif probe_key == "sse":
             result = await ContentGuardProbeService.probe_sse(provider, provider_model, endpoint_path=endpoint_path)
+        elif probe_key == "vision":
+            result = await ContentGuardProbeService.probe_vision(provider, provider_model, endpoint_path=endpoint_path)
         else:
             result = ContentTrustProbeService.invalid_probe(
                 probe_key=probe_key,

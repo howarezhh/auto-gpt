@@ -34,6 +34,7 @@ from app.models.logging_events import (
     TokenFinalizeEvent,
     UserOperationAuditLog,
 )
+from app.models.provider import Provider
 from app.models.request_log import RequestLog
 from app.schemas.log import RequestLogOut
 from app.services.admin_audit_service import AdminAuditService
@@ -173,7 +174,8 @@ TYPED_LOG_EXPORT_FIELDS: dict[str, list[str]] = {
         "is_external_v1", "stack_hash", "stack_excerpt", "detail_json", "occurred_at",
     ],
     "health-runs": [
-        "id", "run_id", "trigger_type", "scope_type", "scope_id", "overall_result",
+        "id", "run_id", "trigger_type", "scope_type", "scope_id",
+        "health_probe_provider_names", "health_probe_model_ids", "overall_result",
         "total_probes", "success_probes", "failed_probes", "duration_ms", "started_at", "finished_at",
     ],
     "billing-events": [
@@ -238,6 +240,8 @@ TYPED_LOG_EXPORT_FIELD_LABELS: dict[str, str] = {
     "request_log_id": "请求日志 ID",
     "provider_id": "提供商 ID",
     "provider_name": "提供商",
+    "health_probe_provider_names": "检测提供商名称",
+    "health_probe_model_ids": "检测模型 ID",
     "provider_model_id": "提供商模型 ID",
     "model_name": "实际模型",
     "requested_model": "请求模型",
@@ -522,6 +526,7 @@ def list_health_runs(
         start_at=start_at,
         end_at=end_at,
     )
+    _enrich_health_run_probe_context(db, data.get("items") or [])
     return _enrich_typed_log_response(db, "health-runs", data)
 
 
@@ -618,6 +623,73 @@ def _health_probe_detail_summary_from_db(db: Session, run_id: str) -> dict[str, 
         "model_success_count": model_success_count,
         "model_failed_count": max(0, model_count - model_success_count),
     }
+
+
+def _ordered_unique(values: list[Any]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def _enrich_health_run_probe_context(db: Session, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    run_ids = _ordered_unique([item.get("run_id") for item in items if isinstance(item, dict)])
+    if not run_ids:
+        return items
+    probes = db.scalars(
+        select(HealthProbeEvent)
+        .where(HealthProbeEvent.run_id.in_(run_ids))
+        .order_by(HealthProbeEvent.created_at.asc(), HealthProbeEvent.id.asc())
+    ).all()
+    provider_ids = _ordered_unique([
+        probe.provider_id
+        for probe in probes
+        if probe.provider_id is not None
+    ])
+    provider_name_by_id: dict[str, str] = {}
+    if provider_ids:
+        provider_rows = db.execute(
+            select(Provider.id, Provider.name).where(Provider.id.in_([int(item) for item in provider_ids]))
+        ).all()
+        provider_name_by_id = {
+            str(provider_id): provider_name
+            for provider_id, provider_name in provider_rows
+            if provider_name
+        }
+    context_by_run_id: dict[str, dict[str, list[str]]] = {
+        run_id: {"provider_names": [], "model_ids": []}
+        for run_id in run_ids
+    }
+    for probe in probes:
+        run_id = str(probe.run_id or "")
+        if run_id not in context_by_run_id:
+            continue
+        if probe.provider_id is not None:
+            provider_key = str(probe.provider_id)
+            context_by_run_id[run_id]["provider_names"].append(
+                provider_name_by_id.get(provider_key) or f"提供商 {provider_key}"
+            )
+        if probe.provider_model_id is not None:
+            context_by_run_id[run_id]["model_ids"].append(str(probe.provider_model_id))
+        elif probe.model_name:
+            context_by_run_id[run_id]["model_ids"].append(f"未记录 ID：{probe.model_name}")
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        run_id = str(item.get("run_id") or "")
+        context = context_by_run_id.get(run_id) or {"provider_names": [], "model_ids": []}
+        provider_names = _ordered_unique(context["provider_names"])
+        model_ids = _ordered_unique(context["model_ids"])
+        item["health_probe_provider_names"] = provider_names
+        item["health_probe_model_ids"] = model_ids
+        item["health_probe_provider_count"] = len(provider_names)
+        item["health_probe_model_count"] = len(model_ids)
+    return items
 
 
 def _health_probe_detail_summary(probes: list[dict[str, Any]]) -> dict[str, Any]:
@@ -989,6 +1061,7 @@ def export_typed_logs(
             start_at=start_at,
             end_at=end_at,
         )
+        _enrich_health_run_probe_context(db, data.get("items") or [])
     elif resolved_log_type == "billing-events":
         data = list_billing_events(
             page=1,

@@ -249,6 +249,7 @@ class ModelCatalogService:
         catalog = ModelCatalog(
             model_name=payload.model_name,
             display_name=payload.display_name,
+            model_group=ProviderService.normalize_model_group(payload.model_group or ProviderService.infer_model_group(payload.model_name)),
             enabled=payload.enabled,
             supports_stream=payload.supports_stream,
             supports_vision=payload.supports_vision,
@@ -299,6 +300,10 @@ class ModelCatalogService:
             data["input_price_per_1k"] = normalized_pricing["input_price_per_1k"]
             data["output_price_per_1k"] = normalized_pricing["output_price_per_1k"]
             data["cache_price_per_1k"] = normalized_pricing["cache_price_per_1k"]
+        if "model_group" in data:
+            data["model_group"] = ProviderService.normalize_model_group(
+                data.get("model_group") or ProviderService.infer_model_group(catalog.model_name)
+            )
         for field, value in data.items():
             setattr(catalog, field, value)
         changed_price_fields = set(data) & pricing_field_names
@@ -350,12 +355,18 @@ class ModelCatalogService:
 
     @staticmethod
     async def test_model_health(db: Session, model_name: str, *, phase_keys: frozenset[str] | None = None) -> dict[str, Any]:
-        """并行测试单个目录模型在所有绑定渠道上的可用性。"""
+        """测试单个目录模型在所有绑定渠道上的可用性。"""
         catalog = ModelCatalogService.get_catalog(db, model_name)
         if catalog is None:
             raise ValueError("模型不存在")
         providers = ModelCatalogService._load_providers_for_catalogs(db, [catalog])
-        raw_result = await ModelCatalogService._probe_catalog_health(catalog, providers, quick_text_only=True, phase_keys=phase_keys)
+        raw_results = await ModelCatalogService._probe_catalogs_health(
+            [catalog],
+            providers,
+            quick_text_only=True,
+            phase_keys=phase_keys,
+        )
+        raw_result = raw_results[0] if raw_results else {"catalog": catalog, "channel_results": []}
         return ModelCatalogService._finalize_catalog_health_test(
             db,
             raw_result,
@@ -364,20 +375,19 @@ class ModelCatalogService:
 
     @staticmethod
     async def test_all_model_health(db: Session, *, phase_keys: frozenset[str] | None = None) -> list[dict[str, Any]]:
-        """并行测试全部目录模型；模型之间并行，单模型渠道之间也并行。"""
+        """按提供商分组错峰测试全部目录模型。"""
         catalogs, providers = ModelCatalogService._load_catalogs_and_providers(
             db,
             catalog_limit=ModelCatalogService.MODEL_HEALTH_TEST_ALL_LIMIT,
         )
         if not catalogs:
             return []
-        model_semaphore = asyncio.Semaphore(ModelCatalogService.MODEL_HEALTH_MAX_PARALLEL_MODELS)
-
-        async def run_catalog(catalog: ModelCatalog) -> dict[str, Any]:
-            async with model_semaphore:
-                return await ModelCatalogService._probe_catalog_health(catalog, providers, quick_text_only=True, phase_keys=phase_keys)
-
-        raw_results = await asyncio.gather(*(run_catalog(catalog) for catalog in catalogs))
+        raw_results = await ModelCatalogService._probe_catalogs_health(
+            catalogs,
+            providers,
+            quick_text_only=True,
+            phase_keys=phase_keys,
+        )
         return [
             ModelCatalogService._finalize_catalog_health_test(
                 db,
@@ -434,6 +444,7 @@ class ModelCatalogService:
                 catalog = ModelCatalog(
                     model_name=model_name,
                     display_name=None,
+                    model_group=ProviderService.infer_model_group(model_name),
                     enabled=True,
                     supports_stream=any(item.supports_stream for item in items),
                     supports_vision=any(item.supports_vision for item in items),
@@ -456,6 +467,13 @@ class ModelCatalogService:
                 changed = True
 
             for item in items:
+                inferred_group = item.model_group or ProviderService.infer_model_group(item.model_name)
+                if not item.model_group or item.model_group == "unknown":
+                    item.model_group = ProviderService.normalize_model_group(inferred_group)
+                    changed = True
+                if (not catalog.model_group or catalog.model_group == "unknown") and inferred_group:
+                    catalog.model_group = ProviderService.normalize_model_group(inferred_group)
+                    changed = True
                 for field in ("context_window_tokens", "max_input_tokens", "max_output_tokens"):
                     if getattr(item, field) != getattr(catalog, field):
                         setattr(item, field, getattr(catalog, field))
@@ -533,6 +551,8 @@ class ModelCatalogService:
                 {
                     "model_name": catalog.model_name,
                     "display_name": catalog.display_name,
+                    "model_group": catalog.model_group or ProviderService.infer_model_group(catalog.model_name),
+                    "model_group_label": ProviderService.model_group_label(catalog.model_group or ProviderService.infer_model_group(catalog.model_name)),
                     "speed_label": catalog.speed_label,
                     "remark": catalog.remark,
                     "supports_stream": capability_summary["supports_stream"],
@@ -782,6 +802,8 @@ class ModelCatalogService:
             "id": catalog.id,
             "model_name": catalog.model_name,
             "display_name": catalog.display_name,
+            "model_group": catalog.model_group or ProviderService.infer_model_group(catalog.model_name),
+            "model_group_label": ProviderService.model_group_label(catalog.model_group or ProviderService.infer_model_group(catalog.model_name)),
             "enabled": catalog.enabled,
             "supports_stream": capability_summary["supports_stream"],
             "supports_vision": capability_summary["supports_vision"],
@@ -838,6 +860,8 @@ class ModelCatalogService:
         return {
             "model_name": serialized["model_name"],
             "display_name": serialized["display_name"],
+            "model_group": serialized["model_group"],
+            "model_group_label": serialized["model_group_label"],
             "enabled": serialized["enabled"],
             "supports_stream": serialized["supports_stream"],
             "supports_vision": serialized["supports_vision"],
@@ -885,6 +909,7 @@ class ModelCatalogService:
 
             if provider_model is None:
                 provider_model = ProviderModel(provider=provider, model_name=catalog.model_name)
+                provider_model.model_group = catalog.model_group or ProviderService.infer_model_group(catalog.model_name)
                 provider_model.supports_stream = catalog.supports_stream
                 provider_model.supports_vision = catalog.supports_vision
                 provider_model.supports_tools = catalog.supports_tools
@@ -1003,59 +1028,75 @@ class ModelCatalogService:
         quick_text_only: bool = False,
         phase_keys: frozenset[str] | None = None,
     ) -> dict[str, Any]:
+        raw_results = await ModelCatalogService._probe_catalogs_health(
+            [catalog],
+            providers,
+            quick_text_only=quick_text_only,
+            phase_keys=phase_keys,
+        )
+        return raw_results[0] if raw_results else {"catalog": catalog, "channel_results": []}
+
+    @staticmethod
+    async def _probe_catalogs_health(
+        catalogs: list[ModelCatalog],
+        providers: list[Provider],
+        *,
+        quick_text_only: bool = False,
+        phase_keys: frozenset[str] | None = None,
+    ) -> list[dict[str, Any]]:
         from app.services.health_service import HealthService
 
-        targets = ModelCatalogService._collect_catalog_test_targets(catalog, providers)
-        if not targets:
-            return {"catalog": catalog, "channel_results": []}
-        channel_semaphore = asyncio.Semaphore(
-            max(1, min(len(targets), int(HealthService.MAX_PARALLEL_MODEL_PROBES) * 4))
-        )
-
-        async def run_channel(provider: Provider, provider_model: ProviderModel) -> tuple[Provider, ProviderModel, dict[str, Any]]:
-            async with channel_semaphore:
-                result = (
-                    await HealthService._run_provider_model_checks(
-                        provider,
-                        [provider_model],
-                        phase_keys=(
-                            phase_keys
-                            if phase_keys is not None
-                            else (HealthService.INTERACTIVE_TEXT_PROBE_PHASE_KEYS if quick_text_only else None)
-                        ),
-                        text_probe_max_tokens=(
-                            HealthService.INTERACTIVE_TEXT_PROBE_MAX_TOKENS
-                            if quick_text_only
-                            else None
-                        ),
-                        capability_probe_max_tokens=HealthService.INTERACTIVE_CAPABILITY_PROBE_MAX_TOKENS,
-                        interactive_mode=True,
-                        parallel_phases=True,
-                        single_endpoint_mode=True,
-                    )
-                )[0]
-                return provider, provider_model, result
-
-        tasks = [
-            asyncio.create_task(run_channel(provider, provider_model))
-            for provider, provider_model in targets
-        ]
-        done, pending = await asyncio.wait(
-            tasks,
-            timeout=ModelCatalogService.INTERACTIVE_MODEL_TEST_TOTAL_TIMEOUT_SECONDS,
-        )
-        channel_results: list[tuple[Provider, ProviderModel, dict[str, Any]]] = []
-        task_target_map = {
-            task: target
-            for task, target in zip(tasks, targets, strict=False)
+        raw_results_by_catalog = {
+            catalog.model_name: {"catalog": catalog, "channel_results": []}
+            for catalog in catalogs
         }
-        for task in done:
-            try:
-                channel_results.append(task.result())
-            except Exception as exc:
-                provider, provider_model = task_target_map[task]
-                channel_results.append(
-                    (
+        jobs: list[tuple[ModelCatalog, Provider, ProviderModel]] = []
+        for catalog in catalogs:
+            for provider, provider_model in ModelCatalogService._collect_catalog_test_targets(catalog, providers):
+                jobs.append((catalog, provider, provider_model))
+        if not jobs:
+            return list(raw_results_by_catalog.values())
+        channel_semaphore = asyncio.Semaphore(max(1, min(len(jobs), int(HealthService.MAX_PARALLEL_MODEL_PROBES) * 4)))
+
+        async def run_channel(job: tuple[ModelCatalog, Provider, ProviderModel]) -> tuple[ModelCatalog, Provider, ProviderModel, dict[str, Any]]:
+            catalog, provider, provider_model = job
+            async with channel_semaphore:
+                try:
+                    result = await asyncio.wait_for(
+                        HealthService._run_provider_model_checks(
+                            provider,
+                            [provider_model],
+                            phase_keys=(
+                                phase_keys
+                                if phase_keys is not None
+                                else (HealthService.INTERACTIVE_TEXT_PROBE_PHASE_KEYS if quick_text_only else None)
+                            ),
+                            text_probe_max_tokens=(
+                                HealthService.INTERACTIVE_TEXT_PROBE_MAX_TOKENS
+                                if quick_text_only
+                                else None
+                            ),
+                            capability_probe_max_tokens=HealthService.INTERACTIVE_CAPABILITY_PROBE_MAX_TOKENS,
+                            interactive_mode=True,
+                            parallel_phases=True,
+                            single_endpoint_mode=True,
+                        ),
+                        timeout=ModelCatalogService.INTERACTIVE_MODEL_TEST_TOTAL_TIMEOUT_SECONDS,
+                    )
+                    return catalog, provider, provider_model, result[0]
+                except asyncio.TimeoutError:
+                    return (
+                        catalog,
+                        provider,
+                        provider_model,
+                        ModelCatalogService._build_channel_timeout_result(
+                            provider_model,
+                            message=f"单模型测试总耗时超过 {int(ModelCatalogService.INTERACTIVE_MODEL_TEST_TOTAL_TIMEOUT_SECONDS)} 秒，已停止等待该渠道结果",
+                        ),
+                    )
+                except Exception as exc:
+                    return (
+                        catalog,
                         provider,
                         provider_model,
                         ModelCatalogService._build_channel_timeout_result(
@@ -1063,23 +1104,24 @@ class ModelCatalogService:
                             message=f"即时测试执行异常：{exc}",
                         ),
                     )
-                )
-        for task in pending:
-            task.cancel()
-            provider, provider_model = task_target_map[task]
-            channel_results.append(
-                (
-                    provider,
-                    provider_model,
-                    ModelCatalogService._build_channel_timeout_result(
-                        provider_model,
-                        message=f"单模型测试总耗时超过 {int(ModelCatalogService.INTERACTIVE_MODEL_TEST_TOTAL_TIMEOUT_SECONDS)} 秒，已停止等待该渠道结果",
-                    ),
-                )
+
+        provider_order = list(dict.fromkeys(provider.id for _catalog, provider, _provider_model in jobs))
+        jobs_by_provider = {
+            provider_id: [job for job in jobs if job[1].id == provider_id]
+            for provider_id in provider_order
+        }
+
+        async def run_provider_jobs(provider_id: int) -> list[tuple[ModelCatalog, Provider, ProviderModel, dict[str, Any]]]:
+            return await HealthService._gather_staggered_by_previous_completion(
+                jobs_by_provider.get(provider_id) or [],
+                run_channel,
             )
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
-        return {"catalog": catalog, "channel_results": channel_results}
+
+        grouped_results = await asyncio.gather(*(run_provider_jobs(provider_id) for provider_id in provider_order))
+        for group in grouped_results:
+            for catalog, provider, provider_model, result in group:
+                raw_results_by_catalog[catalog.model_name]["channel_results"].append((provider, provider_model, result))
+        return list(raw_results_by_catalog.values())
 
     @staticmethod
     def _build_channel_timeout_result(provider_model: ProviderModel, *, message: str) -> dict[str, Any]:

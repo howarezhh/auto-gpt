@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 import time
+import unicodedata
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any
@@ -14,6 +15,8 @@ from sqlalchemy.orm import Session
 from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
 from app.services.content_guard_service import ContentGuardResult, ContentGuardService
+from app.services.native_protocol_adapter import NativeProtocolAdapter
+from app.services.probe_error_policy_service import ProbeErrorPolicyService
 from app.services.probe_rate_limit_service import ProbeRateLimitService
 from app.services.provider_service import ProviderService
 from app.services.setting_service import SettingService
@@ -36,13 +39,20 @@ class ContentGuardProbeService:
     """内容完整性探针、检测结果与内容完整性状态维护。"""
 
     FIXED_ANSWER = "AOTU_CONTENT_GUARD_OK"
+    FIXED_ANSWER_JSON_FIELDS = frozenset({"marker", "answer", "text", "content", "output"})
     JSON_EXPECTED = {"status": "ok", "marker": "AOTU_CONTENT_GUARD_OK"}
+    VISION_EXPECTED = "红色"
+    VISION_PROBE_IMAGE_DATA_URL = (
+        "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGP4z8AARAwQCgAf7gP9i18U1AAAAABJRU5ErkJggg=="
+    )
     PROBE_PHASE_KEYS = frozenset(
         {
             "content_fixed_answer",
             "content_pollution_rules",
             "content_json",
             "content_sse",
+            "content_vision",
         }
     )
     TRUST_PROBE_KEYS = frozenset({"content_fixed_answer", "content_pollution_rules", "content_sse"})
@@ -89,6 +99,9 @@ class ContentGuardProbeService:
 
     @staticmethod
     def content_probe_endpoint_path(provider: Provider, provider_model: ProviderModel) -> str | None:
+        native_protocol = ProviderService.provider_or_model_native_protocol(provider, provider_model)
+        if native_protocol:
+            return f"/native/{native_protocol}"
         chat_supported = ProviderService.provider_supports_chat_completions(provider) and bool(getattr(provider_model, "supports_chat_completions", False))
         responses_supported = ProviderService.provider_supports_responses(provider) and bool(getattr(provider_model, "supports_responses", False))
         probe_protocol_type = ContentGuardProbeService._content_guard_probe_protocol_type()
@@ -116,6 +129,14 @@ class ContentGuardProbeService:
         return "chat_completions"
 
     @staticmethod
+    def _native_protocol_from_probe_endpoint(endpoint_path: str) -> str | None:
+        text = str(endpoint_path or "").strip()
+        if not text.startswith("/native/"):
+            return None
+        protocol_type = text.removeprefix("/native/")
+        return protocol_type if protocol_type in NativeProtocolAdapter.NATIVE_PROTOCOLS else None
+
+    @staticmethod
     def build_health_phase_specs(
         provider: Provider,
         *,
@@ -128,7 +149,7 @@ class ContentGuardProbeService:
                 "key": "content_fixed_answer",
                 "label": "固定答案完整性探针",
                 "targets": lambda model: bool(
-                    should_test_endpoint(model, "chat") or should_test_endpoint(model, "responses")
+                    should_test_endpoint(model, "native") or should_test_endpoint(model, "chat") or should_test_endpoint(model, "responses")
                 ),
                 "probes": [
                     {
@@ -145,7 +166,7 @@ class ContentGuardProbeService:
                 "key": "content_pollution_rules",
                 "label": "外链广告识别探针",
                 "targets": lambda model: bool(
-                    should_test_endpoint(model, "chat") or should_test_endpoint(model, "responses")
+                    should_test_endpoint(model, "native") or should_test_endpoint(model, "chat") or should_test_endpoint(model, "responses")
                 ),
                 "probes": [
                     {
@@ -163,7 +184,7 @@ class ContentGuardProbeService:
                 "label": "流式污染检测探针",
                 "targets": lambda model: bool(
                     model.supports_stream
-                    and (should_test_endpoint(model, "chat") or should_test_endpoint(model, "responses"))
+                    and (should_test_endpoint(model, "native") or should_test_endpoint(model, "chat") or should_test_endpoint(model, "responses"))
                 ),
                 "probes": [
                     {
@@ -185,6 +206,7 @@ class ContentGuardProbeService:
                     "label": "严格 JSON 完整性探针",
                     "targets": lambda model: bool(
                         should_test_endpoint(model, "chat") or should_test_endpoint(model, "responses")
+                        or should_test_endpoint(model, "native")
                     ),
                     "probes": [
                         {
@@ -227,15 +249,51 @@ class ContentGuardProbeService:
             )
         setting = await ProxyService._get_setting_async()
         try:
-            response, _, fallback_trace = await ProxyService._forward_json_with_endpoint_fallback(
-                provider,
-                provider_model,
-                endpoint_path,
-                payload,
-                started=started,
-                setting=setting,
-                extra_headers={"Accept-Encoding": "identity"},
-            )
+            native_protocol = ContentGuardProbeService._native_protocol_from_probe_endpoint(endpoint_path)
+            if native_protocol:
+                from app.services.proxy_service import PreparedUpstreamRequest
+
+                native_model_name = ProviderService.provider_model_upstream_model_name(provider_model)
+                native_path = NativeProtocolAdapter.request_path(
+                    native_protocol,
+                    native_model_name,
+                    endpoint_path_template=(
+                        getattr(provider_model, "native_endpoint_path", None)
+                        or getattr(provider, "native_endpoint_path", None)
+                    ),
+                )
+                prepared = PreparedUpstreamRequest(
+                    request_path=native_path,
+                    request_payload=payload,
+                    public_endpoint_path=endpoint_path,
+                    upstream_protocol_type=native_protocol,
+                    response_model_override=native_model_name,
+                )
+                response, _ = await ProxyService._send_prepared_json(
+                    provider,
+                    prepared=prepared,
+                    headers={"Accept-Encoding": "identity"},
+                    requested_payload={"model": native_model_name},
+                    setting=setting,
+                )
+                fallback_trace = [
+                    {
+                        "result": "native_content_guard_probe",
+                        "protocol_type": native_protocol,
+                        "endpoint": native_path,
+                        "is_detection_traffic": True,
+                    }
+                ]
+            else:
+                response, _, fallback_trace = await ProxyService._forward_json_with_endpoint_fallback(
+                    provider,
+                    provider_model,
+                    endpoint_path,
+                    payload,
+                    started=started,
+                    setting=setting,
+                    extra_headers={"Accept-Encoding": "identity"},
+                )
             return (
                 response,
                 int((time.perf_counter() - started) * 1000),
@@ -351,6 +409,7 @@ class ContentGuardProbeService:
     def mark_detection_result(result: dict[str, Any]) -> dict[str, Any]:
         result["traffic_type"] = ContentGuardProbeService.DETECTION_TRAFFIC_TYPE
         result["is_detection_traffic"] = True
+        ProbeErrorPolicyService.annotate_result(result, probe_kind="content_guard")
         trace = result.get("trace") if isinstance(result.get("trace"), list) else []
         result["trace"] = ContentGuardProbeService.mark_detection_trace(
             trace,
@@ -373,6 +432,66 @@ class ContentGuardProbeService:
             "preview": text[:limit],
             "original_chars": len(text),
         }
+
+    @staticmethod
+    def _safe_probe_reason_text(value: Any, *, max_chars: int = 500) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, dict):
+            error = value.get("error")
+            if isinstance(error, dict) and error.get("message"):
+                text = str(error.get("message") or "")
+            elif value.get("message"):
+                text = str(value.get("message") or "")
+            else:
+                try:
+                    text = dumps_json(value)
+                except Exception:
+                    text = str(value)
+        else:
+            text = str(value)
+        text = re.sub(r"(?i)(authorization|api[-_ ]?key|token|password|secret)(['\"\s:=]+)[^,'\"\s}]+", r"\1\2***", text)
+        text = re.sub(r"(?i)bearer\s+[a-z0-9._\-]+", "Bearer ***", text)
+        text = " ".join(text.split())
+        if len(text) > max_chars:
+            return f"{text[:max_chars]}..."
+        return text
+
+    @staticmethod
+    def content_probe_failure_reason(error_result: dict[str, Any] | None, *, fallback: str) -> str:
+        if not isinstance(error_result, dict):
+            return fallback
+        generic_messages = {
+            "",
+            "Upstream request failed",
+            "upstream request failed",
+            "文本内容完整性组合探针请求失败",
+            "外链广告识别组合探针请求失败",
+        }
+        candidates: list[str] = []
+        raw = error_result.get("raw_provider_response")
+        if isinstance(error_result.get("error_detail"), (dict, str)):
+            candidates.append(ContentGuardProbeService._safe_probe_reason_text(error_result.get("error_detail")))
+        if isinstance(raw, dict):
+            for key in ("normalized_error", "body", "error", "message"):
+                candidates.append(ContentGuardProbeService._safe_probe_reason_text(raw.get(key)))
+        candidates.append(ContentGuardProbeService._safe_probe_reason_text(error_result.get("message")))
+        candidates.append(ContentGuardProbeService._safe_probe_reason_text(error_result.get("reason")))
+        for candidate in candidates:
+            if candidate and candidate not in generic_messages:
+                return candidate
+        status_code = error_result.get("status_code")
+        if status_code is None and isinstance(raw, dict):
+            status_code = raw.get("status_code")
+        code = error_result.get("error_code") or error_result.get("support_mode")
+        if isinstance(error_result.get("error_detail"), dict):
+            code = error_result["error_detail"].get("code") or code
+        parts = [fallback]
+        if status_code is not None:
+            parts.append(f"状态码 {status_code}")
+        if code:
+            parts.append(f"错误码 {code}")
+        return "；".join(parts)
 
     @staticmethod
     def attach_raw_provider_response(
@@ -520,8 +639,29 @@ class ContentGuardProbeService:
         return value
 
     @staticmethod
+    def fixed_answer_prompt() -> str:
+        return (
+            "固定答案完整性检测。你只能输出下一行固定字符串，不能输出其它任何字符。\n"
+            f"{ContentGuardProbeService.FIXED_ANSWER}\n"
+            "严格要求：\n"
+            "1. 输出内容必须与固定字符串逐字符完全一致。\n"
+            "2. 不要 Markdown、JSON、引号、标点、空格、换行、解释、前缀或后缀。\n"
+            "3. 不要复述规则，不要输出多余文本。"
+        )
+
+    @staticmethod
     def build_fixed_answer_payload(provider_model: ProviderModel, *, endpoint_path: str, stream: bool = False) -> dict[str, Any]:
-        prompt = f"只输出这一段固定字符串，不要输出任何解释、标点或换行：{ContentGuardProbeService.FIXED_ANSWER}"
+        prompt = ContentGuardProbeService.fixed_answer_prompt()
+        native_protocol = ContentGuardProbeService._native_protocol_from_probe_endpoint(endpoint_path)
+        if native_protocol:
+            model_name = ProviderService.provider_model_upstream_model_name(provider_model)
+            return NativeProtocolAdapter.native_text_payload(
+                native_protocol,
+                model_name=model_name,
+                prompt=prompt,
+                max_tokens=16,
+                stream=stream,
+            )
         if endpoint_path == "/chat/completions":
             payload: dict[str, Any] = {
                 "model": provider_model.model_name,
@@ -544,6 +684,15 @@ class ContentGuardProbeService:
 
     @staticmethod
     def build_pollution_probe_payload(provider_model: ProviderModel, *, endpoint_path: str, prompt: str) -> dict[str, Any]:
+        native_protocol = ContentGuardProbeService._native_protocol_from_probe_endpoint(endpoint_path)
+        if native_protocol:
+            model_name = ProviderService.provider_model_upstream_model_name(provider_model)
+            return NativeProtocolAdapter.native_text_payload(
+                native_protocol,
+                model_name=model_name,
+                prompt=prompt,
+                max_tokens=512,
+            )
         if endpoint_path == "/chat/completions":
             return {
                 "model": provider_model.model_name,
@@ -636,20 +785,68 @@ class ContentGuardProbeService:
         return sections
 
     @staticmethod
+    def normalize_fixed_answer_probe_text(output_text: str) -> str:
+        def prepare_text(value: Any) -> str:
+            text = "" if value is None else str(value)
+            text = unicodedata.normalize("NFKC", text)
+            for char in ("\ufeff", "\u200b", "\u200c", "\u200d", "\u2060"):
+                text = text.replace(char, "")
+            return text.strip()
+
+        def strip_wrapping_noise(text: str) -> str:
+            pairs = {
+                '"': '"',
+                "'": "'",
+                "`": "`",
+                "“": "”",
+                "‘": "’",
+                "「": "」",
+                "『": "』",
+                "《": "》",
+                "(": ")",
+                "[": "]",
+            }
+            edge_punctuation = " \t\r\n\u00a0.,，。;；:：!！?？、"
+            previous = None
+            while text and text != previous:
+                previous = text
+                text = text.strip(edge_punctuation)
+                if len(text) >= 2 and pairs.get(text[0]) == text[-1]:
+                    text = text[1:-1].strip(edge_punctuation)
+            return text.strip()
+
+        raw_text = prepare_text(output_text)
+        if not raw_text:
+            return ""
+        normalized_text = strip_wrapping_noise(raw_text)
+        try:
+            parsed = json.loads(normalized_text)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            parsed = None
+        if isinstance(parsed, str):
+            return strip_wrapping_noise(prepare_text(parsed))
+        if isinstance(parsed, dict) and len(parsed) == 1:
+            key, value = next(iter(parsed.items()))
+            if key in ContentGuardProbeService.FIXED_ANSWER_JSON_FIELDS and isinstance(value, str):
+                return strip_wrapping_noise(prepare_text(value))
+        return normalized_text
+
+    @staticmethod
     def fixed_answer_matches(output_text: str) -> bool:
-        text = str(output_text or "").strip()
-        return (
-            text == ContentGuardProbeService.FIXED_ANSWER
-            or (
-                text.count(ContentGuardProbeService.FIXED_ANSWER) == 1
-                and len(text) <= len(ContentGuardProbeService.FIXED_ANSWER) + 16
-                and not re.search(r"https?://|广告|推广|加群|联系|扫码|优惠", text, flags=re.IGNORECASE)
-            )
-        )
+        return ContentGuardProbeService.normalize_fixed_answer_probe_text(output_text) == ContentGuardProbeService.FIXED_ANSWER
 
     @staticmethod
     def build_pollution_probe_guard_request(provider_model: ProviderModel, *, endpoint_path: str, scenario_key: str) -> dict[str, Any]:
         marker = f"content_guard_pollution_probe:{scenario_key}"
+        native_protocol = ContentGuardProbeService._native_protocol_from_probe_endpoint(endpoint_path)
+        if native_protocol:
+            model_name = ProviderService.provider_model_upstream_model_name(provider_model)
+            return NativeProtocolAdapter.native_text_payload(
+                native_protocol,
+                model_name=model_name,
+                prompt=marker,
+                max_tokens=16,
+            )
         if endpoint_path == "/chat/completions":
             return {
                 "model": provider_model.model_name,
@@ -668,6 +865,16 @@ class ContentGuardProbeService:
             "请用中文分 6 点解释大语言模型代理系统的健康检查流程，"
             "每点一句话。不要输出任何外部链接、优惠、联系方式、社群引导、赞助或广告内容。"
         )
+        native_protocol = ContentGuardProbeService._native_protocol_from_probe_endpoint(endpoint_path)
+        if native_protocol:
+            model_name = ProviderService.provider_model_upstream_model_name(provider_model)
+            return NativeProtocolAdapter.native_text_payload(
+                native_protocol,
+                model_name=model_name,
+                prompt=prompt,
+                max_tokens=256,
+                stream=True,
+            )
         if endpoint_path == "/chat/completions":
             return {
                 "model": provider_model.model_name,
@@ -688,6 +895,15 @@ class ContentGuardProbeService:
     def build_json_payload(provider_model: ProviderModel, *, endpoint_path: str) -> dict[str, Any]:
         expected = json.dumps(ContentGuardProbeService.JSON_EXPECTED, ensure_ascii=False, separators=(",", ":"))
         prompt = f"只输出严格 JSON，不能有 Markdown、解释、前后缀或额外字段。JSON 必须完全等于：{expected}"
+        native_protocol = ContentGuardProbeService._native_protocol_from_probe_endpoint(endpoint_path)
+        if native_protocol:
+            model_name = ProviderService.provider_model_upstream_model_name(provider_model)
+            return NativeProtocolAdapter.native_text_payload(
+                native_protocol,
+                model_name=model_name,
+                prompt=prompt,
+                max_tokens=48,
+            )
         if endpoint_path == "/chat/completions":
             return {
                 "model": provider_model.model_name,
@@ -717,6 +933,70 @@ class ContentGuardProbeService:
                     "strict": True,
                 }
             },
+        }
+
+    @staticmethod
+    def build_vision_payload(provider_model: ProviderModel, *, endpoint_path: str) -> dict[str, Any]:
+        prompt = "请识别图片中像素块的主色，只输出颜色名，不要解释。"
+        native_protocol = ContentGuardProbeService._native_protocol_from_probe_endpoint(endpoint_path)
+        if native_protocol:
+            model_name = ProviderService.provider_model_upstream_model_name(provider_model)
+            return NativeProtocolAdapter.openai_to_native_payload(
+                native_protocol,
+                "/chat/completions",
+                {
+                    "model": model_name,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {"type": "image_url", "image_url": {"url": ContentGuardProbeService.VISION_PROBE_IMAGE_DATA_URL}},
+                            ],
+                        }
+                    ],
+                    "temperature": 0,
+                    "max_tokens": 32,
+                },
+            )
+        if endpoint_path == "/chat/completions":
+            return {
+                "model": provider_model.model_name,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": ContentGuardProbeService.VISION_PROBE_IMAGE_DATA_URL,
+                                    "detail": "low",
+                                },
+                            },
+                        ],
+                    }
+                ],
+                "temperature": 0,
+                "max_tokens": 32,
+            }
+        return {
+            "model": provider_model.model_name,
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": prompt},
+                        {
+                            "type": "input_image",
+                            "image_url": ContentGuardProbeService.VISION_PROBE_IMAGE_DATA_URL,
+                            "detail": "low",
+                        },
+                    ],
+                }
+            ],
+            "temperature": 0,
+            "max_output_tokens": 32,
         }
 
     @staticmethod
@@ -854,6 +1134,71 @@ class ContentGuardProbeService:
         )
 
     @staticmethod
+    async def probe_vision(provider: Provider, provider_model: ProviderModel, *, endpoint_path: str) -> dict[str, Any]:
+        endpoint_label = "图片输入能力探针"
+        payload = ContentGuardProbeService.build_vision_payload(provider_model, endpoint_path=endpoint_path)
+        response, latency_ms, status_code, trace, error_result = await ContentGuardProbeService.send_content_probe_json(
+            provider,
+            provider_model,
+            endpoint_path=endpoint_path,
+            payload=payload,
+            endpoint_label=endpoint_label,
+        )
+        if error_result is not None:
+            return error_result
+        structure_guard = ContentGuardProbeService.inspect_probe_json_response(
+            response,
+            provider=provider,
+            provider_model=provider_model,
+            endpoint_path=endpoint_path,
+            request_payload=payload,
+        )
+        if structure_guard.result != ContentGuardService.RESULT_PASS:
+            return ContentGuardProbeService.attach_raw_provider_response(
+                ContentGuardProbeService.probe_failure(
+                    endpoint_path=endpoint_path,
+                    endpoint_label=endpoint_label,
+                    support_label="图片探针未通过",
+                    latency_ms=latency_ms,
+                    status_code=status_code,
+                    guard_result=structure_guard,
+                ),
+                response=response,
+            )
+        ProxyService = _proxy_service()
+        output_text = (ProxyService._extract_response_text(response or {}, limit_bytes=512) or "").strip()
+        if "红" not in output_text and "red" not in output_text.lower():
+            return ContentGuardProbeService.attach_raw_provider_response(
+                ContentGuardProbeService.probe_failure(
+                    endpoint_path=endpoint_path,
+                    endpoint_label=endpoint_label,
+                    support_label="图片探针未通过",
+                    latency_ms=latency_ms,
+                    status_code=status_code,
+                    guard_result=ContentGuardProbeService.review_result(
+                        "图片探针返回内容未识别出预期主色",
+                        category="vision_probe_mismatch",
+                        excerpt=output_text[:200],
+                    ),
+                ),
+                response=response,
+                output_text=output_text,
+            )
+        return ContentGuardProbeService.attach_raw_provider_response(
+            ContentGuardProbeService.probe_success(
+                endpoint_path=endpoint_path,
+                endpoint_label=endpoint_label,
+                support_label="图片探针通过",
+                latency_ms=latency_ms,
+                status_code=status_code,
+                message="图片输入请求正常",
+                trace=trace,
+            ),
+            response=response,
+            output_text=output_text,
+        )
+
+    @staticmethod
     def _invalid_sse_control_line_reason(event: str) -> str | None:
         for raw_line in event.splitlines():
             line = raw_line.strip()
@@ -916,20 +1261,60 @@ class ContentGuardProbeService:
                 )
             )
         try:
-            response, _prepared, stream_context, _fallback_trace = await ProxyService._open_stream_with_endpoint_fallback(
-                provider,
-                provider_model,
-                endpoint_path,
-                payload,
-                started=started,
-                stream_connect_timeout_seconds=ContentGuardProbeService.provider_stream_connect_timeout_seconds(provider),
-                extra_headers={"Accept-Encoding": "identity"},
-            )
-            fallback_trace = ContentGuardProbeService.mark_detection_trace(
-                _fallback_trace,
-                endpoint_path=endpoint_path,
-                endpoint_label=endpoint_label,
-            )
+            native_protocol = ContentGuardProbeService._native_protocol_from_probe_endpoint(endpoint_path)
+            if native_protocol:
+                from app.services.proxy_service import PreparedUpstreamRequest
+
+                native_model_name = ProviderService.provider_model_upstream_model_name(provider_model)
+                native_path = NativeProtocolAdapter.request_path(
+                    native_protocol,
+                    native_model_name,
+                    stream=True,
+                    endpoint_path_template=(
+                        getattr(provider_model, "native_endpoint_path", None)
+                        or getattr(provider, "native_endpoint_path", None)
+                    ),
+                )
+                prepared = PreparedUpstreamRequest(
+                    request_path=native_path,
+                    request_payload=payload,
+                    public_endpoint_path=endpoint_path,
+                    upstream_protocol_type=native_protocol,
+                    response_model_override=native_model_name,
+                )
+                headers = ProxyService._build_upstream_headers(
+                    provider,
+                    prepared=prepared,
+                    extra_headers={"Accept-Encoding": "identity"},
+                )
+                stream_context = ProxyService._stream_prepared_request(
+                    provider,
+                    prepared=prepared,
+                    headers=headers,
+                    stream_connect_timeout_seconds=ContentGuardProbeService.provider_stream_connect_timeout_seconds(provider),
+                )
+                response, _prepared = await stream_context.__aenter__()
+                await ProxyService._raise_stream_response_for_status(response)
+                fallback_trace = ContentGuardProbeService.mark_detection_trace(
+                    [{"result": "native_content_guard_stream_probe", "protocol_type": native_protocol, "endpoint": native_path}],
+                    endpoint_path=endpoint_path,
+                    endpoint_label=endpoint_label,
+                )
+            else:
+                response, _prepared, stream_context, _fallback_trace = await ProxyService._open_stream_with_endpoint_fallback(
+                    provider,
+                    provider_model,
+                    endpoint_path,
+                    payload,
+                    started=started,
+                    stream_connect_timeout_seconds=ContentGuardProbeService.provider_stream_connect_timeout_seconds(provider),
+                    extra_headers={"Accept-Encoding": "identity"},
+                )
+                fallback_trace = ContentGuardProbeService.mark_detection_trace(
+                    _fallback_trace,
+                    endpoint_path=endpoint_path,
+                    endpoint_label=endpoint_label,
+                )
             timeout_policy = StreamTimeoutPolicy(
                 first_token_timeout_seconds=ContentGuardProbeService.provider_stream_first_token_timeout_seconds(provider),
                 idle_timeout_seconds=ContentGuardProbeService.SSE_PROBE_IDLE_TIMEOUT_SECONDS,
@@ -1068,7 +1453,7 @@ class ContentGuardProbeService:
                     "content_guard": ContentGuardProbeService.serialize_guard_result(guard_result),
                 }), output_text="".join(text_parts).strip())
             output_text = "".join(text_parts).strip()
-            if output_text != ContentGuardProbeService.FIXED_ANSWER:
+            if not ContentGuardProbeService.fixed_answer_matches(output_text):
                 return with_stream_raw(ContentGuardProbeService.probe_failure(
                     endpoint_path=endpoint_path,
                     endpoint_label=endpoint_label,
@@ -1076,7 +1461,7 @@ class ContentGuardProbeService:
                     latency_ms=int((time.perf_counter() - started) * 1000),
                     status_code=200,
                     guard_result=ContentGuardProbeService.review_result(
-                        "SSE 探针聚合文本与固定答案不一致",
+                        f"SSE 探针聚合文本与固定答案不一致，实际聚合文本：{output_text[:180] or '空'}",
                         category="sse_fixed_answer_mismatch",
                         excerpt=output_text[:300],
                     ),
@@ -1133,6 +1518,32 @@ class ContentGuardProbeService:
         parsed = safeJsonParse(data)
         if not isinstance(parsed, dict):
             return ""
+        candidates = parsed.get("candidates")
+        if isinstance(candidates, list):
+            parts: list[str] = []
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                content = candidate.get("content")
+                if not isinstance(content, dict):
+                    continue
+                for part in content.get("parts") or []:
+                    if isinstance(part, dict) and isinstance(part.get("text"), str):
+                        parts.append(part["text"])
+            if parts:
+                return "".join(parts)
+        delta = parsed.get("delta")
+        if isinstance(delta, dict) and isinstance(delta.get("text"), str):
+            return delta["text"]
+        content = parsed.get("content")
+        if isinstance(content, list):
+            parts = [
+                block.get("text", "")
+                for block in content
+                if isinstance(block, dict) and isinstance(block.get("text"), str)
+            ]
+            if parts:
+                return "".join(parts)
         ProxyService = _proxy_service()
         return ProxyService._extract_response_text(parsed, limit_bytes=4096) or ""
 
@@ -1306,8 +1717,12 @@ class ContentGuardProbeService:
         if error_result is not None:
             if ProbeRateLimitService.is_rate_limited_result(error_result):
                 return error_result
+            reason = ContentGuardProbeService.content_probe_failure_reason(
+                error_result,
+                fallback="外链广告识别组合探针请求失败",
+            )
             error_guard = ContentGuardProbeService.review_result(
-                str(error_result.get("message") or error_result.get("reason") or "外链广告识别组合探针请求失败"),
+                reason,
                 category="pollution_probe_request_failed",
             )
             detections = [
@@ -1401,7 +1816,7 @@ class ContentGuardProbeService:
         fixed_scenario = {
             "key": "fixed_answer",
             "label": "固定答案",
-            "prompt": f"只输出这一段固定字符串，不要输出任何解释、标点或换行：{ContentGuardProbeService.FIXED_ANSWER}",
+            "prompt": ContentGuardProbeService.fixed_answer_prompt(),
         }
         pollution_scenarios = ContentGuardProbeService.pollution_probe_scenarios()[
             : ContentGuardProbeService.POLLUTION_PROBE_MAX_SCENARIOS
@@ -1480,9 +1895,13 @@ class ContentGuardProbeService:
                 pollution["endpoint_label"] = "外链广告识别探针"
                 pollution["support_label"] = "外链广告识别探针已限频"
                 return {"fixed_answer": fixed, "pollution_rules": pollution}
+            reason = ContentGuardProbeService.content_probe_failure_reason(
+                error_result,
+                fallback="文本内容完整性组合探针请求失败",
+            )
             results = paired_failure(
                 ContentGuardProbeService.review_result(
-                    str(error_result.get("message") or error_result.get("reason") or "文本内容完整性组合探针请求失败"),
+                    reason,
                     category="combined_text_probe_request_failed",
                 ),
                 status_code=status_code,

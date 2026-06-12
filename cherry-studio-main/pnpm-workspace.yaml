@@ -1,0 +1,9 @@
+packages:
+  - 'packages/*'
+  - 'packages/vectorstores/*'
+
+supportedArchitectures:
+  os:
+  - current
+  cpu:
+  - current

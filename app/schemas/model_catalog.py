@@ -2,6 +2,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field, field_validator
 
+from app.schemas.provider import normalize_model_group
+
 
 class ModelProviderBindingBase(BaseModel):
     provider_id: int
@@ -36,6 +38,7 @@ class ModelProviderBindingOut(ModelProviderBindingBase):
 class ModelCatalogBase(BaseModel):
     model_name: str = Field(..., min_length=1)
     display_name: str | None = None
+    model_group: str | None = None
     enabled: bool = True
     supports_stream: bool = True
     supports_vision: bool = True
@@ -66,6 +69,13 @@ class ModelCatalogBase(BaseModel):
         normalized = value.strip()
         return normalized or None
 
+    @field_validator("model_group")
+    @classmethod
+    def normalize_group(cls, value: str | None) -> str | None:
+        if value is None or str(value).strip() == "":
+            return None
+        return normalize_model_group(value)
+
 
 class ModelCatalogCreate(ModelCatalogBase):
     provider_bindings: list[ModelProviderBindingIn] = Field(default_factory=list)
@@ -73,6 +83,7 @@ class ModelCatalogCreate(ModelCatalogBase):
 
 class ModelCatalogUpdate(BaseModel):
     display_name: str | None = None
+    model_group: str | None = None
     enabled: bool | None = None
     supports_stream: bool | None = None
     supports_vision: bool | None = None
@@ -98,6 +109,13 @@ class ModelCatalogUpdate(BaseModel):
             return None
         normalized = value.strip()
         return normalized or None
+
+    @field_validator("model_group")
+    @classmethod
+    def normalize_group(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return normalize_model_group(value)
 
 
 class ModelCatalogBatchContextWindowUpdate(BaseModel):
@@ -162,6 +180,8 @@ class ModelCatalogDetailOut(ModelCatalogOut):
 class ModelCatalogOptionOut(BaseModel):
     model_name: str
     display_name: str | None = None
+    model_group: str = "unknown"
+    model_group_label: str = "未知分组"
     enabled: bool = True
     supports_stream: bool = True
     supports_vision: bool = True
@@ -180,6 +200,8 @@ class ModelCatalogOptionOut(BaseModel):
 class UserModelOut(BaseModel):
     model_name: str
     display_name: str | None = None
+    model_group: str = "unknown"
+    model_group_label: str = "未知分组"
     speed_label: str | None = None
     remark: str | None = None
     supports_stream: bool = True

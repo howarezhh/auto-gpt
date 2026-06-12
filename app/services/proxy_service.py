@@ -40,6 +40,7 @@ from app.services.content_guard_service import ContentGuardResult, ContentGuardS
 from app.services.content_runtime_guard_service import ContentRuntimeGuardService
 from app.services.log_service import LogService
 from app.services.model_mapping_service import ModelMappingResolution, ModelMappingService
+from app.services.native_protocol_adapter import NativeProtocolAdapter
 from app.services.model_pricing_service import ModelPricingService
 from app.services.openai_error_service import OpenAIErrorService
 from app.services.provider_capacity_service import (
@@ -68,6 +69,8 @@ class PreparedUpstreamRequest:
 
     request_path: str
     request_payload: dict[str, Any]
+    public_endpoint_path: str | None = None
+    upstream_protocol_type: str | None = None
     adapt_chat_response_to_responses: bool = False
     adapt_responses_response_to_chat: bool = False
     adapt_chat_response_to_completions: bool = False
@@ -602,7 +605,7 @@ class ProxyService:
 
     @staticmethod
     def _estimate_preflight_request_cost(
-        db: Session,
+        db: Session | None,
         *,
         provider_model: ProviderModel,
         payload: dict[str, Any],
@@ -618,7 +621,12 @@ class ProxyService:
         if input_tokens is None:
             return None, None, 0
         output_tokens = int(ProxyService._requested_output_token_limit(payload) or provider_model.max_output_tokens or 0)
-        catalog = db.scalar(select(ModelCatalog).where(ModelCatalog.model_name == provider_model.model_name))
+        catalog_statement = select(ModelCatalog).where(ModelCatalog.model_name == provider_model.model_name)
+        if db is None:
+            with SessionLocal() as scoped_db:
+                catalog = scoped_db.scalar(catalog_statement)
+        else:
+            catalog = db.scalar(catalog_statement)
         if catalog is not None:
             prices = ModelPricingService.resolve_catalog_prices_for_provider(
                 pricing_mode=catalog.pricing_mode,
@@ -3650,6 +3658,11 @@ class ProxyService:
                             if prepared.adapt_responses_response_to_chat
                             else None
                         )
+                        native_stream_transform_state: dict[str, Any] | None = (
+                            {}
+                            if prepared.upstream_protocol_type in NativeProtocolAdapter.NATIVE_PROTOCOLS
+                            else None
+                        )
                         timeout_policy = ProxyService._build_stream_timeout_policy(provider=provider, setting=setting)
                         stream_started = time.perf_counter()
                         try:
@@ -3792,6 +3805,40 @@ class ProxyService:
                                         ):
                                             downstream_started = True
                                             yield downstream_chunk
+                                    elif prepared.upstream_protocol_type in NativeProtocolAdapter.NATIVE_PROTOCOLS:
+                                        native_chat_chunks = NativeProtocolAdapter.native_stream_chunk_to_chat_chunks(
+                                            prepared.upstream_protocol_type,
+                                            upstream_chunk,
+                                            requested_model=str(prepared.response_model_override or requested_model_name or payload.get("model") or ""),
+                                            state=native_stream_transform_state if native_stream_transform_state is not None else {},
+                                        )
+                                        if endpoint_path == "/responses":
+                                            for chat_chunk in native_chat_chunks:
+                                                for downstream_chunk in ProxyService._adapt_chat_stream_chunk_to_responses_events(
+                                                    chat_chunk,
+                                                    state=downstream_transform_state
+                                                    or ProxyService._create_responses_stream_state(
+                                                        payload=payload,
+                                                        response_id=prepared.response_id_override,
+                                                    ),
+                                                    requested_model=str(prepared.response_model_override or requested_model_name or payload.get("model") or ""),
+                                                ):
+                                                    downstream_started = True
+                                                    yield downstream_chunk
+                                        elif prepared.adapt_chat_response_to_completions:
+                                            for chat_chunk in native_chat_chunks:
+                                                for downstream_chunk in ProxyService._adapt_chat_stream_chunk_to_text_completion_events(
+                                                    chat_chunk,
+                                                    state=completion_stream_transform_state
+                                                    or ProxyService._create_text_completion_stream_state(payload=payload),
+                                                    requested_model=str(requested_model_name or payload.get("model") or ""),
+                                                ):
+                                                    downstream_started = True
+                                                    yield downstream_chunk
+                                        else:
+                                            for downstream_chunk in native_chat_chunks:
+                                                downstream_started = True
+                                                yield downstream_chunk
                                     elif prepared.adapt_chat_response_to_completions:
                                         for downstream_chunk in ProxyService._adapt_chat_stream_chunk_to_text_completion_events(
                                             upstream_chunk,
@@ -3833,6 +3880,32 @@ class ProxyService:
                                 ):
                                     downstream_started = True
                                     yield downstream_chunk
+                            elif (
+                                prepared.upstream_protocol_type in NativeProtocolAdapter.NATIVE_PROTOCOLS
+                                and endpoint_path == "/responses"
+                            ):
+                                for downstream_chunk in ProxyService._build_responses_stream_completion_events(
+                                    downstream_transform_state
+                                    or ProxyService._create_responses_stream_state(
+                                        payload=payload,
+                                        response_id=prepared.response_id_override,
+                                    )
+                                ):
+                                    downstream_started = True
+                                    yield downstream_chunk
+                            elif (
+                                prepared.upstream_protocol_type in NativeProtocolAdapter.NATIVE_PROTOCOLS
+                                and prepared.adapt_chat_response_to_completions
+                            ):
+                                for downstream_chunk in ProxyService._build_text_completion_stream_done_events(
+                                    completion_stream_transform_state
+                                    or ProxyService._create_text_completion_stream_state(payload=payload)
+                                ):
+                                    downstream_started = True
+                                    yield downstream_chunk
+                            elif prepared.upstream_protocol_type in NativeProtocolAdapter.NATIVE_PROTOCOLS:
+                                downstream_started = True
+                                yield b"data: [DONE]\n\n"
                             elif prepared.adapt_chat_response_to_completions:
                                 for downstream_chunk in ProxyService._build_text_completion_stream_done_events(
                                     completion_stream_transform_state
@@ -4361,7 +4434,7 @@ class ProxyService:
 
     @staticmethod
     async def _forward_json(provider: Provider, endpoint_path: str, payload: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
-        headers = {"Authorization": f"Bearer {provider.api_key}"}
+        headers = ProxyService._build_upstream_headers(provider)
         prepared = ProxyService._prepare_upstream_request(provider, endpoint_path=endpoint_path, payload=payload)
         setting = await ProxyService._get_setting_async()
         return await ProxyService._send_prepared_json(provider, prepared=prepared, headers=headers, requested_payload=payload, setting=setting)
@@ -4376,9 +4449,12 @@ class ProxyService:
         started: float,
         setting: Any,
         request_timeout_seconds: float | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> tuple[dict[str, Any], str | None, list[dict]]:
-        headers = {"Authorization": f"Bearer {provider.api_key}"}
-        prepared = ProxyService._prepare_upstream_request(provider, endpoint_path=endpoint_path, payload=payload)
+        headers = ProxyService._build_upstream_headers(provider)
+        if extra_headers:
+            headers.update(extra_headers)
+        prepared = ProxyService._prepare_upstream_request(provider, provider_model=provider_model, endpoint_path=endpoint_path, payload=payload)
         response_json, upstream_request_id = await ProxyService._send_prepared_json(
             provider,
             prepared=prepared,
@@ -4399,6 +4475,7 @@ class ProxyService:
         setting: Any,
         request_timeout_seconds: float | None = None,
     ) -> tuple[dict[str, Any], str | None]:
+        headers = ProxyService._build_upstream_headers(provider, prepared=prepared, extra_headers=headers)
         if ProxyService._payload_needs_image_transport(prepared.request_payload):
             return await ProxyService._forward_json_image_request(
                 provider,
@@ -4423,6 +4500,13 @@ class ProxyService:
         )
         response.raise_for_status()
         response_json = response.json()
+        if prepared.upstream_protocol_type in NativeProtocolAdapter.NATIVE_PROTOCOLS:
+            response_json = NativeProtocolAdapter.native_response_to_openai(
+                prepared.upstream_protocol_type,
+                prepared.public_endpoint_path or prepared.request_path,
+                response_json,
+                requested_model=str(prepared.response_model_override or requested_payload.get("model") or ""),
+            )
         if prepared.adapt_chat_response_to_responses:
             ProxyService._assert_chat_response_adapter_safe(response_json)
             response_json = ProxyService._convert_chat_completion_to_responses_payload(
@@ -4708,7 +4792,7 @@ class ProxyService:
         *,
         stream_connect_timeout_seconds: int | None = None,
     ) -> AsyncIterator[tuple[httpx.Response, PreparedUpstreamRequest]]:
-        headers = {"Authorization": f"Bearer {provider.api_key}"}
+        headers = ProxyService._build_upstream_headers(provider)
         client = ProxyService._select_upstream_client(payload=payload)
         prepared = ProxyService._prepare_upstream_request(provider, endpoint_path=endpoint_path, payload=payload)
         async with ProxyService._stream_prepared_request(
@@ -4768,9 +4852,12 @@ class ProxyService:
         *,
         started: float,
         stream_connect_timeout_seconds: int | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> tuple[UpstreamStreamResponse, PreparedUpstreamRequest, Any, list[dict]]:
-        headers = {"Authorization": f"Bearer {provider.api_key}"}
-        prepared = ProxyService._prepare_upstream_request(provider, endpoint_path=endpoint_path, payload=payload)
+        headers = ProxyService._build_upstream_headers(provider)
+        if extra_headers:
+            headers.update(extra_headers)
+        prepared = ProxyService._prepare_upstream_request(provider, provider_model=provider_model, endpoint_path=endpoint_path, payload=payload)
         stream_context = ProxyService._stream_prepared_request(
             provider,
             prepared=prepared,
@@ -4797,6 +4884,28 @@ class ProxyService:
         if ProxyService._payload_needs_image_transport(payload):
             return UpstreamClientService.get_http1_client()
         return UpstreamClientService.get_client()
+
+    @staticmethod
+    def _build_upstream_headers(
+        provider: Provider,
+        *,
+        prepared: PreparedUpstreamRequest | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict[str, str]:
+        protocol_type = prepared.upstream_protocol_type if prepared and prepared.upstream_protocol_type else ProviderService.provider_protocol_type(provider)
+        headers = NativeProtocolAdapter.headers(protocol_type, provider.api_key)
+        if extra_headers:
+            for key, value in extra_headers.items():
+                normalized_key = str(key).lower()
+                if protocol_type in NativeProtocolAdapter.NATIVE_PROTOCOLS and normalized_key in {
+                    "authorization",
+                    "x-goog-api-key",
+                    "x-api-key",
+                    "anthropic-version",
+                }:
+                    continue
+                headers[key] = value
+        return headers
 
     @staticmethod
     def _select_upstream_stream_client_name(*, payload: dict[str, Any]) -> str:
@@ -6007,7 +6116,12 @@ class ProxyService:
         endpoint_path: str,
         payload: dict[str, Any],
     ) -> PreparedUpstreamRequest:
-        return ProxyService._prepare_upstream_request(provider, endpoint_path=endpoint_path, payload=payload)
+        return ProxyService._prepare_upstream_request(
+            provider,
+            provider_model=provider_model,
+            endpoint_path=endpoint_path,
+            payload=payload,
+        )
 
     @staticmethod
     def _build_preselected_endpoint_fallback_trace(
@@ -6034,7 +6148,13 @@ class ProxyService:
         ]
 
     @staticmethod
-    def _prepare_upstream_request(provider: Provider, *, endpoint_path: str, payload: dict[str, Any]) -> PreparedUpstreamRequest:
+    def _prepare_upstream_request(
+        provider: Provider,
+        *,
+        endpoint_path: str,
+        payload: dict[str, Any],
+        provider_model: ProviderModel | None = None,
+    ) -> PreparedUpstreamRequest:
         internal_payload = dict(payload)
         adapt_chat_response_to_responses = bool(internal_payload.pop("__aotu_responses_chat_adapter", False))
         force_stream_usage = bool(internal_payload.pop("__aotu_include_usage", False))
@@ -6048,10 +6168,44 @@ class ProxyService:
             adapt_chat_response_to_completions = True
         if force_stream_usage and upstream_endpoint_path == "/chat/completions":
             internal_payload = ProxyService._ensure_chat_stream_include_usage(internal_payload)
+        native_protocol = ProviderService.provider_or_model_native_protocol(provider, provider_model)
+        if native_protocol:
+            native_model_name = ProviderService.provider_model_upstream_model_name(
+                provider_model,
+                fallback_model=str(internal_payload.get("model") or ""),
+            )
+            native_stream = bool(internal_payload.get("stream") is True)
+            native_source_payload = dict(internal_payload)
+            native_source_payload["model"] = str(native_model_name)
+            normalized_payload = NativeProtocolAdapter.openai_to_native_payload(
+                native_protocol,
+                upstream_endpoint_path,
+                native_source_payload,
+            )
+            upstream_endpoint_path = NativeProtocolAdapter.request_path(
+                native_protocol,
+                str(native_model_name),
+                stream=native_stream,
+                endpoint_path_template=(
+                    getattr(provider_model, "native_endpoint_path", None)
+                    or getattr(provider, "native_endpoint_path", None)
+                ),
+            )
+            return PreparedUpstreamRequest(
+                request_path=upstream_endpoint_path,
+                request_payload=normalized_payload,
+                public_endpoint_path=endpoint_path,
+                upstream_protocol_type=native_protocol,
+                adapt_chat_response_to_responses=adapt_chat_response_to_responses,
+                adapt_chat_response_to_completions=adapt_chat_response_to_completions,
+                response_model_override=response_model_override if isinstance(response_model_override, str) else None,
+                response_id_override=response_id_override if isinstance(response_id_override, str) else None,
+            )
         normalized_payload = ProxyService._normalize_provider_request_payload(provider, endpoint_path=upstream_endpoint_path, payload=internal_payload)
         return PreparedUpstreamRequest(
             request_path=upstream_endpoint_path,
             request_payload=normalized_payload,
+            public_endpoint_path=endpoint_path,
             adapt_chat_response_to_responses=adapt_chat_response_to_responses,
             adapt_chat_response_to_completions=adapt_chat_response_to_completions,
             response_model_override=response_model_override if isinstance(response_model_override, str) else None,
@@ -8673,18 +8827,12 @@ class ProxyService:
                 "cache_read_tokens": None,
                 "cache_write_tokens": None,
             }
-        prompt_tokens = usage.get("prompt_tokens", usage.get("input_tokens"))
-        completion_tokens = usage.get("completion_tokens", usage.get("output_tokens"))
-        total_tokens = usage.get("total_tokens")
+        token_counts = LogService.extract_usage_token_counts(usage)
         cache_read_tokens, cache_write_tokens = LogService.extract_cache_tokens({"usage": usage})
-        normalized_prompt_tokens = LogService.normalize_prompt_tokens_for_cache_usage(
-            usage,
-            ProxyService._coerce_non_negative_int(prompt_tokens),
-        )
         return {
-            "prompt_tokens": normalized_prompt_tokens,
-            "completion_tokens": ProxyService._coerce_non_negative_int(completion_tokens),
-            "total_tokens": ProxyService._coerce_non_negative_int(total_tokens),
+            "prompt_tokens": token_counts["prompt_tokens"],
+            "completion_tokens": token_counts["completion_tokens"],
+            "total_tokens": token_counts["total_tokens"],
             "cache_read_tokens": cache_read_tokens,
             "cache_write_tokens": cache_write_tokens,
         }

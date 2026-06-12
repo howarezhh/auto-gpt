@@ -373,7 +373,7 @@
         </div>
         <div class="content-guard-segment" role="group" aria-label="检测目标">
             <button class="content-guard-segment-option is-active" type="button" data-content-guard-target-type="internal" aria-pressed="true">本项目</button>
-            <button class="content-guard-segment-option" type="button" data-content-guard-target-type="external" aria-pressed="false">外部提供商托管配置</button>
+            <button class="content-guard-segment-option" type="button" data-content-guard-target-type="external" aria-pressed="false">外部提供商检测</button>
         </div>
         <div class="content-guard-target-stack">
             <div class="content-guard-target-group" id="content-guard-internal-fields">
@@ -396,9 +396,13 @@
                     <input class="field-input" id="content-guard-external-model-name" type="text" placeholder="例如 gpt-4.1-mini" autocomplete="off">
                 </label>
                 <label>
+                    <span>密钥</span>
+                    <input class="field-input" id="content-guard-external-api-key" type="password" placeholder="仅用于本次检测" autocomplete="off" spellcheck="false">
+                </label>
+                <label>
                     <span class="content-guard-label">
                         <span>端点</span>
-                        <button class="settings-help-btn" type="button" aria-label="外部端点拼接说明" data-settings-tooltip-trigger="true" data-settings-tooltip-title="外部端点拼接说明" data-settings-tooltip-copy="接口地址不含 /responses 或 /chat/completions；端点由下方选项单独选择。浏览器不接收外部 API Key，外部提供商只能通过后端托管配置检测。">
+                        <button class="settings-help-btn" type="button" aria-label="外部端点拼接说明" data-settings-tooltip-trigger="true" data-settings-tooltip-title="外部端点拼接说明" data-settings-tooltip-copy="接口地址不含 /responses 或 /chat/completions；端点由下方选项单独选择。密钥仅随本次检测请求提交，不保存到本地或项目配置。">
                             <i class="bi bi-question-circle" aria-hidden="true"></i>
                         </button>
                     </span>
@@ -622,6 +626,8 @@
                         <th>原生/适配</th>
                         <th>规则</th>
                         <th>分类</th>
+                        <th>错误类型</th>
+                        <th>处理</th>
                         <th>评分</th>
                         <th>策略</th>
                         <th>写入</th>
@@ -633,7 +639,7 @@
                 </thead>
                 <tbody id="content-guard-result-body">
                     <tr>
-                        <td colspan="15" class="table-muted">等待检测</td>
+                        <td colspan="17" class="table-muted">等待检测</td>
                     </tr>
                 </tbody>
             </table>

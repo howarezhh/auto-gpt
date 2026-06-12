@@ -34,6 +34,7 @@ from app.routers.metrics import router as metrics_router
 from app.routers.models import router as models_router
 from app.routers.pages import router as pages_router
 from app.routers.provider_models import router as provider_models_router
+from app.routers.provider_credentials import router as provider_credentials_router
 from app.routers.providers import router as providers_router
 from app.routers.proxy import router as proxy_router
 from app.routers.settings import router as settings_router
@@ -327,6 +328,7 @@ def _migrate_provider_model_capacity_columns(db) -> None:
         "max_active_streams": "ALTER TABLE provider_models ADD COLUMN max_active_streams INTEGER",
         "max_qps": "ALTER TABLE provider_models ADD COLUMN max_qps INTEGER",
         "max_rpm": "ALTER TABLE provider_models ADD COLUMN max_rpm INTEGER",
+        "native_endpoint_path": "ALTER TABLE provider_models ADD COLUMN native_endpoint_path TEXT",
     }
     changed = False
     for column, ddl in additions.items():
@@ -406,6 +408,7 @@ def _migrate_provider_metadata_columns(db) -> None:
         "group_name": "ALTER TABLE providers ADD COLUMN group_name TEXT",
         "region_tag": "ALTER TABLE providers ADD COLUMN region_tag TEXT",
         "protocol_type": "ALTER TABLE providers ADD COLUMN protocol_type TEXT NOT NULL DEFAULT 'both'",
+        "native_endpoint_path": "ALTER TABLE providers ADD COLUMN native_endpoint_path TEXT",
         "maintenance_window": "ALTER TABLE providers ADD COLUMN maintenance_window TEXT",
         "maintenance_mode_enabled": f"ALTER TABLE providers ADD COLUMN maintenance_mode_enabled BOOLEAN NOT NULL DEFAULT {false_default}",
         "auto_circuit_break_enabled": f"ALTER TABLE providers ADD COLUMN auto_circuit_break_enabled BOOLEAN NOT NULL DEFAULT {true_default}",
@@ -428,7 +431,7 @@ def _migrate_provider_metadata_columns(db) -> None:
         db.execute(
             text(
                 "UPDATE providers SET protocol_type = 'both' "
-                "WHERE protocol_type IS NULL OR protocol_type NOT IN ('both', 'chat_completions', 'responses')"
+                "WHERE protocol_type IS NULL OR protocol_type NOT IN ('both', 'chat_completions', 'responses', 'gemini', 'claude_messages')"
             )
         )
         db.commit()
@@ -607,6 +610,7 @@ def _migrate_cache_price_columns(db) -> None:
             "supports_image_generation": f"ALTER TABLE provider_models ADD COLUMN supports_image_generation BOOLEAN NOT NULL DEFAULT {false_default}",
             "supports_chat_completions": f"ALTER TABLE provider_models ADD COLUMN supports_chat_completions BOOLEAN NOT NULL DEFAULT {true_default}",
             "supports_responses": f"ALTER TABLE provider_models ADD COLUMN supports_responses BOOLEAN NOT NULL DEFAULT {true_default}",
+            "model_group": "ALTER TABLE provider_models ADD COLUMN model_group TEXT NOT NULL DEFAULT 'unknown'",
             **content_guard_compat["provider_models"],
             "context_window_tokens": "ALTER TABLE provider_models ADD COLUMN context_window_tokens INTEGER",
             "max_input_tokens": "ALTER TABLE provider_models ADD COLUMN max_input_tokens INTEGER",
@@ -619,6 +623,7 @@ def _migrate_cache_price_columns(db) -> None:
             "supports_tools": f"ALTER TABLE model_catalogs ADD COLUMN supports_tools BOOLEAN NOT NULL DEFAULT {false_default}",
             "supports_chat_completions": f"ALTER TABLE model_catalogs ADD COLUMN supports_chat_completions BOOLEAN NOT NULL DEFAULT {true_default}",
             "supports_responses": f"ALTER TABLE model_catalogs ADD COLUMN supports_responses BOOLEAN NOT NULL DEFAULT {true_default}",
+            "model_group": "ALTER TABLE model_catalogs ADD COLUMN model_group TEXT NOT NULL DEFAULT 'unknown'",
             "context_window_tokens": "ALTER TABLE model_catalogs ADD COLUMN context_window_tokens INTEGER",
             "max_input_tokens": "ALTER TABLE model_catalogs ADD COLUMN max_input_tokens INTEGER",
             "max_output_tokens": "ALTER TABLE model_catalogs ADD COLUMN max_output_tokens INTEGER",
@@ -1027,6 +1032,10 @@ async def trace_and_runtime_middleware(request: Request, call_next):
     RuntimeStateService.enter_request()
     ingress_lease = None
     try:
+        if request.method.upper() == "OPTIONS" and _is_provider_credentials_path(request.url.path):
+            response = JSONResponse(status_code=204, content=None)
+            _apply_provider_credentials_cors_headers(request, response)
+            return response
         body_limit_response = _reject_oversized_v1_request_by_content_length(request)
         if body_limit_response is not None:
             _apply_v1_cors_headers(request, body_limit_response)
@@ -1057,6 +1066,7 @@ async def trace_and_runtime_middleware(request: Request, call_next):
     elif request.url.path.startswith("/uploaded-assets/"):
         response.headers.setdefault("Cache-Control", "public, max-age=3600")
     _apply_v1_cors_headers(request, response)
+    _apply_provider_credentials_cors_headers(request, response)
     return response
 
 
@@ -1198,6 +1208,10 @@ def _is_external_v1_path(path: str) -> bool:
     return path == "/v1" or path.startswith("/v1/")
 
 
+def _is_provider_credentials_path(path: str) -> bool:
+    return path == "/api/provider-credentials" or path.startswith("/api/provider-credentials/")
+
+
 def _apply_v1_cors_headers(request: Request, response) -> None:
     if not _is_external_v1_path(request.url.path):
         return
@@ -1211,6 +1225,17 @@ def _apply_v1_cors_headers(request: Request, response) -> None:
     response.headers["Access-Control-Expose-Headers"] = (
         "x-request-id,x-trace-id,x-proxy-provider-id,x-proxy-provider-name,x-proxy-latency-ms"
     )
+    response.headers["Vary"] = "Origin"
+
+
+def _apply_provider_credentials_cors_headers(request: Request, response) -> None:
+    if not _is_provider_credentials_path(request.url.path):
+        return
+    origin = request.headers.get("origin")
+    response.headers["Access-Control-Allow-Origin"] = origin or "*"
+    response.headers["Access-Control-Allow-Methods"] = "POST,OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = request.headers.get("access-control-request-headers") or "content-type"
+    response.headers["Access-Control-Expose-Headers"] = "x-request-id,x-trace-id"
     response.headers["Vary"] = "Origin"
 
 
@@ -1862,6 +1887,7 @@ app.include_router(dashboard_router, dependencies=[Depends(require_admin_api_use
 app.include_router(conversations_router, dependencies=[Depends(require_admin_api_user)])
 app.include_router(api_keys_router, dependencies=[Depends(require_admin_api_user)])
 app.include_router(api_key_policy_templates_router, dependencies=[Depends(require_admin_api_user)])
+app.include_router(provider_credentials_router)
 app.include_router(providers_router, dependencies=[Depends(require_admin_api_user)])
 app.include_router(provider_models_router, dependencies=[Depends(require_admin_api_user)])
 app.include_router(models_router)

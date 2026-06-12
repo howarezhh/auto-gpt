@@ -51,11 +51,31 @@
             </select>
         </label>
         <label>
-            <span>统计时间</span>
-            <select class="field-input" id="provider-model-quality-window">
-                <option value="1" selected>近1小时</option>
-                <option value="24">近1天</option>
-                <option value="168">近1周</option>
+            <span>模型分组</span>
+            <select class="field-input" id="provider-model-model-group">
+                <option value="">全部分组</option>
+                <option value="openai">OpenAI</option>
+                <option value="deepseek">DeepSeek</option>
+                <option value="qwen">通义千问</option>
+                <option value="glm">智谱 GLM</option>
+                <option value="doubao">豆包</option>
+                <option value="kimi">Kimi</option>
+                <option value="baichuan">百川</option>
+                <option value="ernie">文心一言</option>
+                <option value="hunyuan">腾讯混元</option>
+                <option value="minimax">MiniMax</option>
+                <option value="step">阶跃星辰</option>
+                <option value="internlm">书生浦语</option>
+                <option value="spark">讯飞星火</option>
+                <option value="yi">零一万物</option>
+                <option value="mistral">Mistral</option>
+                <option value="llama">Llama</option>
+                <option value="gemini">Gemini</option>
+                <option value="claude">Claude</option>
+                <option value="grok">Grok</option>
+                <option value="cohere">Cohere</option>
+                <option value="perplexity">Perplexity</option>
+                <option value="unknown">未知分组</option>
             </select>
         </label>
         <label>
@@ -143,6 +163,35 @@
                         <option value="responses">Responses</option>
                         <option value="chat_completions">Chat</option>
                         <option value="both">双协议</option>
+                        <option value="gemini">Gemini</option>
+                        <option value="claude_messages">Claude</option>
+                    </select>
+                </label>
+                <label>
+                    <span>模型分组</span>
+                    <select class="field-input" id="provider-model-edit-group">
+                        <option value="openai">OpenAI</option>
+                        <option value="deepseek">DeepSeek</option>
+                        <option value="qwen">通义千问</option>
+                        <option value="glm">智谱 GLM</option>
+                        <option value="doubao">豆包</option>
+                        <option value="kimi">Kimi</option>
+                        <option value="baichuan">百川</option>
+                        <option value="ernie">文心一言</option>
+                        <option value="hunyuan">腾讯混元</option>
+                        <option value="minimax">MiniMax</option>
+                        <option value="step">阶跃星辰</option>
+                        <option value="internlm">书生浦语</option>
+                        <option value="spark">讯飞星火</option>
+                        <option value="yi">零一万物</option>
+                        <option value="mistral">Mistral</option>
+                        <option value="llama">Llama</option>
+                        <option value="gemini">Gemini</option>
+                        <option value="claude">Claude</option>
+                        <option value="grok">Grok</option>
+                        <option value="cohere">Cohere</option>
+                        <option value="perplexity">Perplexity</option>
+                        <option value="unknown">未知分组</option>
                     </select>
                 </label>
                 <label>

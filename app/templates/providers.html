@@ -92,55 +92,28 @@
                 <input class="field-input" id="provider-api-key" placeholder="当前 API Key；编辑时可直接修改">
             </label>
             <label for="provider-type">
-                <span>类型</span>
-                <input class="field-input" id="provider-type" list="provider-type-options" value="openai_compatible">
-                <datalist id="provider-type-options">
-                    <option value="openai_compatible" label="OpenAI 兼容"></option>
-                    <option value="openai_official" label="OpenAI 官方"></option>
-                    <option value="azure_openai" label="Azure OpenAI"></option>
-                    <option value="anthropic_official" label="Anthropic 官方"></option>
-                    <option value="google_gemini" label="Google Gemini"></option>
-                    <option value="aws_bedrock" label="AWS Bedrock"></option>
-                    <option value="dashscope" label="阿里云百炼 / DashScope"></option>
-                    <option value="volcengine_ark" label="火山方舟"></option>
-                    <option value="tencent_hunyuan" label="腾讯混元"></option>
-                    <option value="baidu_qianfan" label="百度千帆"></option>
-                    <option value="zhipu_bigmodel" label="智谱 BigModel"></option>
-                    <option value="moonshot" label="Moonshot / Kimi"></option>
-                    <option value="deepseek" label="DeepSeek 官方"></option>
-                    <option value="xai_grok" label="xAI Grok"></option>
-                    <option value="mistral" label="Mistral 官方"></option>
-                    <option value="cohere" label="Cohere"></option>
-                    <option value="groq" label="Groq"></option>
-                    <option value="together_ai" label="Together AI"></option>
-                    <option value="fireworks_ai" label="Fireworks AI"></option>
-                    <option value="openrouter" label="OpenRouter"></option>
-                    <option value="siliconflow" label="SiliconFlow"></option>
-                    <option value="modelscope" label="ModelScope"></option>
-                    <option value="perplexity" label="Perplexity"></option>
-                    <option value="cloudflare_workers_ai" label="Cloudflare Workers AI"></option>
-                    <option value="nvidia_nim" label="NVIDIA NIM"></option>
-                    <option value="cerebras" label="Cerebras"></option>
-                    <option value="sambanova" label="SambaNova"></option>
-                    <option value="nebius_ai" label="Nebius AI"></option>
-                    <option value="lepton_ai" label="Lepton AI"></option>
-                    <option value="novita_ai" label="Novita AI"></option>
-                    <option value="baseten" label="Baseten"></option>
-                    <option value="modal" label="Modal"></option>
-                    <option value="fal_ai" label="fal.ai"></option>
-                    <option value="replicate" label="Replicate"></option>
-                    <option value="huggingface" label="Hugging Face"></option>
-                    <option value="ai_gateway" label="AI 网关"></option>
-                    <option value="model_router" label="模型路由器"></option>
-                    <option value="serverless_inference" label="Serverless 推理"></option>
-                    <option value="gpu_cloud_inference" label="GPU 云推理"></option>
-                    <option value="ollama" label="Ollama"></option>
-                    <option value="vllm_self_hosted" label="自建 vLLM"></option>
-                    <option value="llama_cpp_self_hosted" label="自建 llama.cpp"></option>
-                    <option value="xinference_self_hosted" label="自建 Xinference"></option>
-                    <option value="litellm_gateway" label="LiteLLM 网关"></option>
-                    <option value="other" label="其它"></option>
-                </datalist>
+                <span>提供商类型</span>
+                <select class="field-input" id="provider-type">
+                    <option value="openai_official">OpenAI</option>
+                    <option value="openai_response">OpenAI-Response</option>
+                    <option value="google_gemini">Gemini</option>
+                    <option value="anthropic_official">Anthropic</option>
+                    <option value="azure_openai">Azure OpenAI</option>
+                    <option value="new_api">New API</option>
+                    <option value="cherryin">CherryIN</option>
+                    <option value="ollama">Ollama</option>
+                    <option value="openai_compatible">OpenAI 兼容</option>
+                    <option value="dashscope">阿里云百炼</option>
+                    <option value="volcengine_ark">火山方舟</option>
+                    <option value="tencent_hunyuan">腾讯混元</option>
+                    <option value="baidu_qianfan">百度千帆</option>
+                    <option value="zhipu_bigmodel">智谱 BigModel</option>
+                    <option value="moonshot">Moonshot / Kimi</option>
+                    <option value="deepseek">DeepSeek</option>
+                    <option value="openrouter">OpenRouter</option>
+                    <option value="litellm_gateway">LiteLLM 网关</option>
+                    <option value="other">其它</option>
+                </select>
             </label>
             <label for="provider-group-name">
                 <span>渠道分组</span>
@@ -357,6 +330,7 @@
                     <span>模型名称 *</span>
                     <span>启用</span>
                     <span>端点协议</span>
+                    <span>模型分组</span>
                     <span>倍率</span>
                     <span>操作</span>
                 </div>

@@ -814,6 +814,34 @@ SyntaxError: Unexpected token ')'
 
 ---
 
+## [ERR-20260612-002] in_app_browser_kernel_assets_missing
+
+**Logged**: 2026-06-12T12:18:00+08:00
+**Priority**: low
+**Status**: pending
+**Area**: tooling
+
+### Summary
+In-app browser verification could not start because the browser plugin failed while writing kernel assets.
+
+### Error
+```text
+failed to write kernel assets: 系统找不到指定的路径。 (os error 3)
+```
+
+### Context
+- Attempted to connect to the Codex in-app browser after restarting the local app.
+- The project was running on `127.0.0.1:8000`, but browser runtime setup failed before page navigation.
+
+### Suggested Fix
+When this browser plugin error appears, verify behavior through direct service/API checks and startup logs, or repair the plugin cache path before relying on browser screenshots.
+
+### Metadata
+- Reproducible: unknown
+- Related Files: `app/services/provider_service.py`
+
+---
+
 ## [ERR-20260612-001] pwsh_outer_variable_expansion
 
 **Logged**: 2026-06-12T11:57:54+08:00

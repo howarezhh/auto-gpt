@@ -62,6 +62,204 @@ def test_content_trust_probe_execution_plan_reports_stream_skip() -> None:
     assert plan["skipped_probes"][0]["probe_key"] == "sse"
 
 
+def test_content_probe_failure_reason_prefers_raw_upstream_error() -> None:
+    reason = ContentGuardProbeService.content_probe_failure_reason(
+        {
+            "message": "Upstream request failed",
+            "status_code": 502,
+            "error_detail": {"message": "Upstream request failed", "code": "upstream_request_failed"},
+            "raw_provider_response": {
+                "status_code": 502,
+                "body": {"error": {"message": "上游余额不足，请充值后重试"}},
+                "normalized_error": {"message": "上游余额不足，请充值后重试", "code": "insufficient_balance"},
+            },
+        },
+        fallback="文本内容完整性组合探针请求失败",
+    )
+
+    assert reason == "上游余额不足，请充值后重试"
+
+
+def test_combined_content_probe_request_failure_uses_upstream_reason() -> None:
+    async def fake_send(*args, **kwargs):
+        return (
+            None,
+            1000,
+            502,
+            [{"result": "fake_trace"}],
+            {
+                "message": "Upstream request failed",
+                "status_code": 502,
+                "error_detail": {"message": "Upstream request failed", "code": "upstream_request_failed"},
+                "raw_provider_response": {
+                    "status_code": 502,
+                    "body": {"error": {"message": "上游余额不足，请充值后重试"}},
+                    "normalized_error": {"message": "上游余额不足，请充值后重试", "code": "insufficient_balance"},
+                },
+            },
+        )
+
+    async def run_case() -> None:
+        original = ContentGuardProbeService.send_content_probe_json
+        ContentGuardProbeService.send_content_probe_json = staticmethod(fake_send)
+        try:
+            provider = SimpleNamespace(id=1, name="测试提供商", provider_type="openai", base_url="http://example.test")
+            provider_model = SimpleNamespace(id=1, model_name="测试模型", custom_model_name="test-model")
+            result = await ContentGuardProbeService.probe_fixed_answer_and_pollution_rules(
+                provider,
+                provider_model,
+                endpoint_path="/responses",
+            )
+        finally:
+            ContentGuardProbeService.send_content_probe_json = original
+        assert result["fixed_answer"]["content_guard"]["content_guard_reason"] == "上游余额不足，请充值后重试"
+        assert result["pollution_rules"]["content_guard"]["content_guard_reason"] == "上游余额不足，请充值后重试"
+
+    asyncio.run(run_case())
+
+
+def test_fixed_answer_match_requires_exact_value_after_limited_normalization() -> None:
+    assert ContentGuardProbeService.fixed_answer_matches('"AOTU_CONTENT_GUARD_OK"') is True
+    assert ContentGuardProbeService.fixed_answer_matches("AOTU_CONTENT_GUARD_OK\n") is True
+    assert ContentGuardProbeService.fixed_answer_matches('{"marker": "AOTU_CONTENT_GUARD_OK"}') is True
+    assert ContentGuardProbeService.fixed_answer_matches("“AOTU_CONTENT_GUARD_OK”。") is True
+    assert ContentGuardProbeService.fixed_answer_matches("答案是 AOTU_CONTENT_GUARD_OK") is False
+    assert ContentGuardProbeService.fixed_answer_matches("AOTU_CONTENT_GUARD_OK extra") is False
+    assert ContentGuardProbeService.fixed_answer_matches('{"answer": "AOTU_CONTENT_GUARD_OK", "explanation": "ok"}') is False
+
+
+def test_fixed_answer_prompt_reduces_wrapping_risk() -> None:
+    prompt = ContentGuardProbeService.fixed_answer_prompt()
+
+    assert "AOTU_CONTENT_GUARD_OK" in prompt
+    assert "逐字符完全一致" in prompt
+    assert "不要 Markdown、JSON、引号、标点、空格、换行、解释、前缀或后缀" in prompt
+
+
+def test_content_trust_probe_execution_plan_supports_optional_vision_probe() -> None:
+    provider_model = ProviderModel(
+        id=1,
+        provider_id=1,
+        model_name="测试视觉模型",
+        enabled=True,
+        supports_stream=True,
+        supports_vision=True,
+    )
+
+    plan = ContentTrustProbeService.describe_probe_execution_plan(
+        ["fixed_answer", "pollution_rules", "sse", "vision"],
+        provider_model,
+    )
+
+    assert plan["logical_probe_count"] == 4
+    assert plan["upstream_request_count"] == 3
+    assert [group["request_key"] for group in plan["request_groups"]] == ["combined_text", "sse", "vision"]
+    assert "vision" not in plan["required_probe_keys"]
+
+
+def test_content_trust_probe_execution_plan_skips_vision_when_model_disables_it() -> None:
+    provider_model = ProviderModel(
+        id=1,
+        provider_id=1,
+        model_name="测试文本模型",
+        enabled=True,
+        supports_stream=True,
+        supports_vision=False,
+    )
+
+    plan = ContentTrustProbeService.describe_probe_execution_plan(
+        ["vision"],
+        provider_model,
+    )
+
+    assert plan["upstream_request_count"] == 0
+    assert plan["skipped_probe_count"] == 1
+    assert plan["skipped_probes"][0]["probe_key"] == "vision"
+
+
+def test_external_content_guard_target_supports_vision_without_returning_api_key() -> None:
+    payload = ContentGuardRunRequest(
+        target_type="external",
+        external={
+            "base_url": "https://example.com/v1",
+            "api_key": "sk-test-external",
+            "model_name": "测试外部模型",
+            "endpoint_path": "/responses",
+        },
+        probe_keys=["vision"],
+    )
+
+    provider, provider_model, target = ContentTrustProbeService.resolve_external_probe_target(payload.external)
+
+    assert provider.api_key == "sk-test-external"
+    assert provider_model.supports_vision is True
+    assert provider_model.supports_responses is True
+    assert "api_key" not in target
+
+
+def test_content_guard_vision_payload_matches_selected_endpoint_protocol() -> None:
+    provider_model = SimpleNamespace(model_name="测试视觉模型")
+
+    chat_payload = ContentGuardProbeService.build_vision_payload(provider_model, endpoint_path="/chat/completions")
+    responses_payload = ContentGuardProbeService.build_vision_payload(provider_model, endpoint_path="/responses")
+
+    chat_content = chat_payload["messages"][0]["content"]
+    responses_content = responses_payload["input"][0]["content"]
+    assert chat_content[0]["type"] == "text"
+    assert chat_content[1]["type"] == "image_url"
+    assert chat_content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+    assert responses_content[0]["type"] == "input_text"
+    assert responses_content[1]["type"] == "input_image"
+    assert responses_content[1]["image_url"].startswith("data:image/png;base64,")
+
+
+def test_content_guard_probe_uses_native_endpoint_for_native_protocol_mounts() -> None:
+    provider = SimpleNamespace(protocol_type="gemini")
+    provider_model = SimpleNamespace(
+        model_name="gemini-2.5-pro",
+        protocol_type="gemini",
+        supports_chat_completions=False,
+        supports_responses=False,
+    )
+
+    endpoint_path = ContentGuardProbeService.content_probe_endpoint_path(provider, provider_model)
+
+    assert endpoint_path == "/native/gemini"
+
+
+def test_content_guard_vision_probe_passes_when_upstream_reads_image(monkeypatch) -> None:
+    async def fake_send(provider, provider_model, *, endpoint_path, payload, endpoint_label):
+        assert payload["messages"][0]["content"][1]["type"] == "image_url"
+        return (
+            {
+                "id": "chatcmpl_test",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "红色"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+            100,
+            200,
+            [{"result": "fake_trace"}],
+            None,
+        )
+
+    monkeypatch.setattr(ContentGuardProbeService, "send_content_probe_json", staticmethod(fake_send))
+    provider = SimpleNamespace(id=1, name="测试提供商", provider_type="openai", base_url="https://example.com/v1")
+    provider_model = SimpleNamespace(id=1, model_name="测试视觉模型", supports_vision=True)
+
+    result = asyncio.run(
+        ContentGuardProbeService.probe_vision(provider, provider_model, endpoint_path="/chat/completions")
+    )
+
+    assert result["success"] is True
+    assert result["raw_provider_response"]["output_text"] == "红色"
+
+
 def test_stream_guard_buffering_defaults_on_for_buffer_mode_even_with_legacy_provider_flag() -> None:
     setting = SimpleNamespace(content_guard_enabled=True, content_guard_stream_mode="buffer_300ms")
     provider = SimpleNamespace(

@@ -1812,6 +1812,24 @@ class LogService:
             return None
         usage = response_payload.get("usage")
         if not isinstance(usage, dict):
+            usage_metadata = response_payload.get("usageMetadata")
+            if isinstance(usage_metadata, dict):
+                usage = {
+                    "usage_schema": "gemini_usage_metadata",
+                    "prompt_tokens": usage_metadata.get("promptTokenCount"),
+                    "input_tokens": usage_metadata.get("promptTokenCount"),
+                    "completion_tokens": usage_metadata.get("candidatesTokenCount"),
+                    "output_tokens": usage_metadata.get("candidatesTokenCount"),
+                    "total_tokens": usage_metadata.get("totalTokenCount"),
+                    "cache_read_tokens": usage_metadata.get("cachedContentTokenCount"),
+                    "prompt_tokens_details": {"cached_tokens": usage_metadata.get("cachedContentTokenCount")},
+                    "native_usage": {"provider": "gemini", "usageMetadata": usage_metadata},
+                }
+                if usage_metadata.get("thoughtsTokenCount") is not None:
+                    usage["reasoning_tokens"] = usage_metadata.get("thoughtsTokenCount")
+                    usage["completion_tokens_details"] = {"reasoning_tokens": usage_metadata.get("thoughtsTokenCount")}
+                return usage
+        if not isinstance(usage, dict):
             nested_response = response_payload.get("response")
             if isinstance(nested_response, dict):
                 usage = nested_response.get("usage")
@@ -1832,6 +1850,8 @@ class LogService:
             ("output_tokens",),
         )
         total_tokens = LogService._extract_usage_int(usage, ("total_tokens",))
+        if total_tokens is None and (prompt_tokens is not None or completion_tokens is not None):
+            total_tokens = int(prompt_tokens or 0) + int(completion_tokens or 0)
         return {
             "prompt_tokens": LogService.normalize_prompt_tokens_for_cache_usage(usage, prompt_tokens),
             "completion_tokens": completion_tokens,
@@ -1851,6 +1871,8 @@ class LogService:
         return {
             "reasoning_tokens": LogService._extract_usage_int(
                 usage,
+                ("reasoning_tokens",),
+                ("thoughtsTokenCount",),
                 ("completion_tokens_details", "reasoning_tokens"),
                 ("output_tokens_details", "reasoning_tokens"),
             ),

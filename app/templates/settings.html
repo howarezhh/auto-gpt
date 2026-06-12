@@ -31,7 +31,7 @@
             </span>
             <input class="field-input" id="setting-route-exhausted-retry-max-wait-seconds" type="number" min="0" max="600" placeholder="默认 600">
         </label>
-        <label class="settings-switch-card">
+        <label class="settings-switch-card" for="setting-route-exhausted-retry-infinite-enabled">
             <span class="settings-switch-copy">
                 <strong>候选耗尽无限重试</strong>
                 <small>开启后，非项目自身问题导致所有候选临时不可用时，会持续等待并重试；正常模式仍按等待窗口返回。</small>
@@ -41,7 +41,7 @@
                 <span class="settings-switch-slider"></span>
             </span>
         </label>
-        <label class="settings-switch-card">
+        <label class="settings-switch-card" for="setting-trusted-providers-only">
             <span class="settings-switch-copy">
                 <strong>只走可信提供商</strong>
                 <small>开启后，正式路由仅允许官方或可信等级提供商；默认关闭。</small>
@@ -57,7 +57,7 @@
                 <h4 id="settings-health-group-title">自动健康检查</h4>
             </div>
             <div class="form-grid settings-subgrid settings-health-grid">
-                <label class="settings-switch-card settings-health-switch-card">
+                <label class="settings-switch-card settings-health-switch-card" for="setting-auto-health-check">
                     <span class="settings-switch-copy">
                         <span class="settings-switch-title-row">
                             <strong>启用自动健康检查</strong>
@@ -262,7 +262,7 @@
                 <h4 id="settings-responses-chat-adapter-title">Responses→Chat 兼容适配</h4>
             </div>
             <div class="settings-switch-grid">
-                <label class="settings-switch-card">
+                <label class="settings-switch-card" for="setting-responses-chat-adapter-enabled">
                     <span class="settings-switch-copy">
                         <strong>启用单向适配</strong>
                         <small>开启后，/v1/responses 可按模型映射转发到 Chat-only 国内上游。</small>
@@ -272,7 +272,7 @@
                         <span class="settings-switch-slider"></span>
                     </span>
                 </label>
-                <label class="settings-switch-card">
+                <label class="settings-switch-card" for="setting-responses-chat-adapter-web-search-enabled">
                     <span class="settings-switch-copy">
                         <strong>启用搜索代理</strong>
                         <small>仅 web_search 使用；file_search 与 code_interpreter 仍直接拒绝。</small>
@@ -335,7 +335,7 @@
             </div>
         </div>
         <div class="form-span-2 settings-switch-grid">
-            <label class="settings-switch-card">
+            <label class="settings-switch-card" for="setting-enable-token-logging">
                 <span class="settings-switch-copy">
                     <strong>记录 token 使用量</strong>
                 </span>
@@ -344,7 +344,7 @@
                     <span class="settings-switch-slider"></span>
                 </span>
             </label>
-            <label class="settings-switch-card">
+            <label class="settings-switch-card" for="setting-enable-payload-logging">
                 <span class="settings-switch-copy">
                     <strong>记录请求与响应正文</strong>
                 </span>
@@ -353,7 +353,7 @@
                     <span class="settings-switch-slider"></span>
                 </span>
             </label>
-            <label class="settings-switch-card">
+            <label class="settings-switch-card" for="setting-enable-stream-response-persist">
                 <span class="settings-switch-copy">
                     <strong>记录流式最终回复文本</strong>
                 </span>
@@ -362,7 +362,7 @@
                     <span class="settings-switch-slider"></span>
                 </span>
             </label>
-            <label class="settings-switch-card">
+            <label class="settings-switch-card" for="setting-mask-sensitive-fields">
                 <span class="settings-switch-copy">
                     <strong>日志中脱敏敏感字段</strong>
                 </span>
@@ -371,7 +371,7 @@
                     <span class="settings-switch-slider"></span>
                 </span>
             </label>
-            <label class="settings-switch-card">
+            <label class="settings-switch-card" for="setting-allow-public-user-registration">
                 <span class="settings-switch-copy">
                     <strong>允许公开注册普通用户</strong>
                 </span>

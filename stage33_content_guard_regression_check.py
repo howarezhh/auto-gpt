@@ -2316,10 +2316,10 @@ def _check_content_guard_browser_smoke() -> None:
                 "内容防护页面必须渲染能力探针和本地检测表单",
             )
             _assert(
-                page.locator("[data-content-guard-target-type='external']").is_disabled()
+                page.locator("[data-content-guard-target-type='external']").is_enabled()
                 and page.locator("input[name='content_guard_target_type']").count() == 0
-                and page.locator("#content-guard-external-api-key").count() == 0,
-                "内容防护页面禁止让浏览器持有外部 API Key，外部提供商只能通过后端托管配置检测",
+                and page.locator("#content-guard-external-api-key").count() == 1,
+                "内容防护页面必须支持外部提供商一次性密钥检测，并继续使用分段按钮选择目标",
             )
         finally:
             browser.close()
@@ -2444,6 +2444,8 @@ def _check_content_guard_template_dom_contract() -> None:
             "原生/适配",
             "规则",
             "分类",
+            "错误类型",
+            "处理",
             "评分",
             "策略",
             "写入",
@@ -2580,7 +2582,8 @@ def _check_frontend_and_log_wiring() -> None:
             "content-guard-settings-form",
             "content-guard-probe-form",
             "content-guard-external-base-url",
-            "浏览器不接收外部 API Key",
+            "content-guard-external-api-key",
+            "密钥仅随本次检测请求提交",
             "不含 /responses 或 /chat/completions",
             "content-guard-rules-body",
             "content-guard-page-error",
@@ -2732,7 +2735,8 @@ def _check_frontend_and_log_wiring() -> None:
             "放行动作时扣分必须为 0",
             "拦截动作时风险等级必须为高",
             "/api/content-guard/precheck/trust-probe",
-            "浏览器不接收外部 API Key",
+            "api_key: apiKey",
+            "persist_internal_result: false",
             "runGovernanceBatchAction",
             "data-content-guard-provider-evidence",
             "provider_keyword",
@@ -2782,10 +2786,10 @@ def _check_frontend_and_log_wiring() -> None:
     _assert('body[data-page="content-guard"] .content-guard-rules-table' in app_css and "table-layout: auto;" in app_css, "内容防护规则表移动端必须取消硬宽并使用卡片化披露")
     content_guard_template = Path("app/templates/content_guard.html").read_text(encoding="utf-8", errors="ignore")
     _assert("用户请求中出现过的域名会自动加入本次白名单" not in content_guard_template, "URL 白名单说明禁止暗示请求体可自动放行域名")
-    _assert("content-guard-external-api-key" not in content_guard_template, "内容防护页面禁止保留外部探针 API Key 输入框")
+    _assert("content-guard-external-api-key" in content_guard_template, "内容防护页面必须支持外部提供商一次性密钥检测")
     _assert("content_guard_target_type" not in content_guard_template and "data-content-guard-target-type" in content_guard_template, "内容防护探测目标必须使用分段按钮而不是原生 radio")
     _assert("<th>策略</th>" in content_guard_template and "<th>可信度</th>" not in content_guard_template, "内容防护规则表必须采用核心主列加详情披露")
-    _assert('<td colspan="15" class="table-muted">等待检测</td>' in content_guard_template, "探针结果表扩展证据列后空态 colspan 必须同步")
+    _assert('<td colspan="17" class="table-muted">等待检测</td>' in content_guard_template, "探针结果表扩展证据列后空态 colspan 必须同步")
     app_js = Path("app/static/js/app.js").read_text(encoding="utf-8", errors="ignore")
     _assert('patterns: ["待填写"]' not in app_js and 'patterns: [],' in app_js, "新增内容防护规则禁止把占位词作为真实匹配项")
     _assert('window.confirm("恢复默认规则？")' not in app_js, "恢复默认规则禁止继续使用 window.confirm")
@@ -2800,14 +2804,16 @@ def _check_frontend_and_log_wiring() -> None:
     ):
         _assert(needle in app_js, f"内容防护规则编辑必须支持行级保存、撤销和脏状态：{needle}")
     _assert("existingChecked" in app_js and "selectedProviderId = providerSelect.value" in app_js, "内容防护刷新必须保留探针勾选和提供商选择")
-    _assert("content-guard-external-api-key" not in app_js, "内容防护前端禁止继续读取或保留外部探针 API Key")
+    _assert("content-guard-external-api-key" in app_js and "api_key: apiKey" in app_js, "内容防护前端必须支持外部提供商一次性密钥检测")
+    _assert("localStorage.setItem(\"content-guard-external-api-key\"" not in app_js and "localStorage?.setItem(\"content-guard-external-api-key\"" not in app_js, "内容防护外部探针密钥禁止写入 localStorage")
+    _assert("sessionStorage.setItem(\"content-guard-external-api-key\"" not in app_js and "sessionStorage?.setItem(\"content-guard-external-api-key\"" not in app_js, "内容防护外部探针密钥禁止写入 sessionStorage")
     for needle in (
         "endpointPath = item.endpoint_path",
         "statusCode = item.status_code",
         "adapted_success",
         "native_success",
         "trace_id || item.trace",
-        'colspan="15"',
+        'colspan="17"',
     ):
         _assert(needle in app_js, f"内容防护探针结果渲染缺少排障字段：{needle}")
     _assert("extract_probe_sse_text_delta" in Path("app/services/content_guard_probe_service.py").read_text(encoding="utf-8", errors="ignore"), "SSE 探针必须聚合流式文本校验固定答案")

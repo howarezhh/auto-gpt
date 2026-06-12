@@ -1,7 +1,9 @@
+import asyncio
 from decimal import Decimal
 from types import SimpleNamespace
 
-from app.services.proxy_service import ProxyService
+from app.services.proxy_service import PreparedUpstreamRequest, ProxyService
+from app.services.native_protocol_adapter import NativeProtocolAdapter
 
 
 class _FakeSession:
@@ -49,3 +51,446 @@ def test_preflight_cost_estimation_opens_session_when_db_is_none(monkeypatch):
     assert estimated_cost == Decimal("0.004")
     assert input_tokens == 10
     assert output_tokens == 5
+
+
+def test_stream_endpoint_fallback_accepts_extra_headers(monkeypatch):
+    captured_headers = {}
+
+    class FakeStreamResponse:
+        pass
+
+    class FakeStreamContext:
+        async def __aenter__(self):
+            return FakeStreamResponse(), SimpleNamespace(request_payload={})
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_stream_prepared_request(_provider, *, headers, **_kwargs):
+        captured_headers.update(headers)
+        return FakeStreamContext()
+
+    async def fake_raise_for_status(_response):
+        return None
+
+    monkeypatch.setattr(ProxyService, "_stream_prepared_request", staticmethod(fake_stream_prepared_request))
+    monkeypatch.setattr(ProxyService, "_raise_stream_response_for_status", staticmethod(fake_raise_for_status))
+
+    provider = SimpleNamespace(api_key="sk-test", base_url="https://example.com/v1")
+    provider_model = SimpleNamespace(model_name="测试模型")
+
+    asyncio.run(
+        ProxyService._open_stream_with_endpoint_fallback(
+            provider,
+            provider_model,
+            "/responses",
+            {"model": "测试模型", "input": "ping", "stream": True},
+            started=0.0,
+            extra_headers={"Accept-Encoding": "identity"},
+        )
+    )
+
+    assert captured_headers["Authorization"] == "Bearer sk-test"
+    assert captured_headers["Accept-Encoding"] == "identity"
+
+
+def test_json_endpoint_fallback_accepts_extra_headers(monkeypatch):
+    captured_headers = {}
+
+    async def fake_send_json(_provider, *, headers, **_kwargs):
+        captured_headers.update(headers)
+        return {"id": "resp_1"}, "upstream-request-id"
+
+    monkeypatch.setattr(ProxyService, "_send_prepared_json", staticmethod(fake_send_json))
+
+    provider = SimpleNamespace(api_key="sk-test", base_url="https://example.com/v1")
+    provider_model = SimpleNamespace(model_name="测试模型")
+
+    response_json, upstream_request_id, trace = asyncio.run(
+        ProxyService._forward_json_with_endpoint_fallback(
+            provider,
+            provider_model,
+            "/responses",
+            {"model": "测试模型", "input": "ping"},
+            started=0.0,
+            setting=SimpleNamespace(),
+            extra_headers={"Accept-Encoding": "identity"},
+        )
+    )
+
+    assert response_json == {"id": "resp_1"}
+    assert upstream_request_id == "upstream-request-id"
+    assert trace == []
+    assert captured_headers["Authorization"] == "Bearer sk-test"
+    assert captured_headers["Accept-Encoding"] == "identity"
+
+
+def test_model_name_defaults_route_openai_domestic_gemini_and_claude_protocols():
+    from app.services.provider_service import ProviderService
+
+    assert ProviderService.default_supports_for_model_name("gpt-4.1") == ("both", True, True)
+    assert ProviderService.default_supports_for_model_name("qwen-plus") == ("chat_completions", True, False)
+    assert ProviderService.default_supports_for_model_name("deepseek-chat") == ("chat_completions", True, False)
+    assert ProviderService.default_supports_for_model_name("gemini-2.5-pro") == ("gemini", False, False)
+    assert ProviderService.default_supports_for_model_name("claude-3-5-sonnet-latest") == ("claude_messages", False, False)
+
+
+def test_prepare_gemini_native_request_uses_generate_content_and_inline_data():
+    provider = SimpleNamespace(
+        protocol_type="gemini",
+        api_key="gemini-key",
+        base_url="https://generativelanguage.googleapis.com/v1beta",
+    )
+    provider_model = SimpleNamespace(
+        model_name="gemini-2.5-pro",
+        protocol_type="gemini",
+        supports_chat_completions=False,
+        supports_responses=False,
+    )
+
+    prepared = ProxyService._prepare_upstream_request(
+        provider,
+        provider_model=provider_model,
+        endpoint_path="/chat/completions",
+        payload={
+            "model": "gemini-2.5-pro",
+            "messages": [
+                {"role": "system", "content": "只返回简短答案"},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "识别图片"},
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD"}},
+                    ],
+                },
+            ],
+            "max_tokens": 12,
+        },
+    )
+
+    assert prepared.request_path == "/models/gemini-2.5-pro:generateContent"
+    assert prepared.upstream_protocol_type == "gemini"
+    assert prepared.public_endpoint_path == "/chat/completions"
+    assert prepared.request_payload["generationConfig"]["maxOutputTokens"] == 12
+    assert prepared.request_payload["systemInstruction"]["parts"][0]["text"] == "只返回简短答案"
+    assert prepared.request_payload["contents"][0]["parts"][1]["inlineData"] == {
+        "mimeType": "image/png",
+        "data": "QUJD",
+    }
+    assert NativeProtocolAdapter.headers("gemini", "gemini-key") == {"x-goog-api-key": "gemini-key"}
+
+
+def test_prepare_claude_native_request_uses_messages_api_headers_and_body():
+    provider = SimpleNamespace(
+        protocol_type="claude_messages",
+        api_key="claude-key",
+        base_url="https://api.anthropic.com",
+    )
+    provider_model = SimpleNamespace(
+        model_name="claude-3-5-sonnet-latest",
+        protocol_type="claude_messages",
+        supports_chat_completions=False,
+        supports_responses=False,
+    )
+
+    prepared = ProxyService._prepare_upstream_request(
+        provider,
+        provider_model=provider_model,
+        endpoint_path="/responses",
+        payload={
+            "model": "claude-3-5-sonnet-latest",
+            "input": [
+                {"role": "system", "content": "只返回简短答案"},
+                {"role": "user", "content": "说 pong"},
+            ],
+            "max_output_tokens": 8,
+        },
+    )
+
+    assert prepared.request_path == "/v1/messages"
+    assert prepared.upstream_protocol_type == "claude_messages"
+    assert prepared.public_endpoint_path == "/responses"
+    assert prepared.request_payload["model"] == "claude-3-5-sonnet-latest"
+    assert prepared.request_payload["max_tokens"] == 8
+    assert prepared.request_payload["system"] == "只返回简短答案"
+    assert prepared.request_payload["messages"] == [{"role": "user", "content": [{"type": "text", "text": "说 pong"}]}]
+    assert NativeProtocolAdapter.headers("claude_messages", "claude-key") == {
+        "x-api-key": "claude-key",
+        "anthropic-version": "2023-06-01",
+    }
+
+
+def test_claude_native_request_uses_provider_model_id_and_native_auth_headers():
+    provider = SimpleNamespace(
+        protocol_type="both",
+        api_key="claude-key",
+        base_url="https://api.anthropic.com",
+    )
+    provider_model = SimpleNamespace(
+        model_name="claude-public",
+        provider_model_id="claude-3-5-sonnet-latest",
+        protocol_type="claude_messages",
+        supports_chat_completions=False,
+        supports_responses=False,
+    )
+
+    prepared = ProxyService._prepare_upstream_request(
+        provider,
+        provider_model=provider_model,
+        endpoint_path="/chat/completions",
+        payload={
+            "model": "claude-public",
+            "messages": [{"role": "user", "content": "说 pong"}],
+            "max_tokens": 8,
+        },
+    )
+    headers = ProxyService._build_upstream_headers(
+        provider,
+        prepared=prepared,
+        extra_headers={"Authorization": "Bearer should-not-leak", "Accept-Encoding": "identity"},
+    )
+
+    assert prepared.request_payload["model"] == "claude-3-5-sonnet-latest"
+    assert headers == {
+        "x-api-key": "claude-key",
+        "anthropic-version": "2023-06-01",
+        "Accept-Encoding": "identity",
+    }
+
+
+def test_native_health_and_content_guard_payloads_use_provider_model_id():
+    from app.services.content_guard_probe_service import ContentGuardProbeService
+    from app.services.health_service import HealthService
+
+    provider_model = SimpleNamespace(
+        model_name="公开别名",
+        provider_model_id="gemini-2.5-pro",
+    )
+    provider = SimpleNamespace(native_endpoint_path=None)
+
+    prepared = HealthService._native_health_prepared_request(
+        provider,
+        provider_model,
+        protocol_type="gemini",
+        prompt="ping",
+        max_tokens=8,
+    )
+    fixed_payload = ContentGuardProbeService.build_fixed_answer_payload(
+        provider_model,
+        endpoint_path="/native/gemini",
+    )
+    vision_payload = ContentGuardProbeService.build_vision_payload(
+        provider_model,
+        endpoint_path="/native/gemini",
+    )
+
+    assert prepared.request_path == "/models/gemini-2.5-pro:generateContent"
+    assert prepared.request_payload["contents"][0]["parts"][0]["text"] == "ping"
+    assert fixed_payload["contents"][0]["parts"][0]["text"]
+    assert "model" not in fixed_payload
+    assert vision_payload["contents"][0]["parts"][1]["inlineData"]["mimeType"] == "image/png"
+
+
+def test_native_health_log_protocol_type_is_recorded():
+    from app.services.health_service import HealthService
+
+    captured = []
+
+    class FakeHealthLogRecorder:
+        @staticmethod
+        def record_probe(_db, **kwargs):
+            captured.append(kwargs)
+
+    monkeypatch = __import__("pytest").MonkeyPatch()
+    try:
+        monkeypatch.setattr("app.services.health_service.HealthLogRecorder", FakeHealthLogRecorder)
+        HealthService._record_run_results(
+            SimpleNamespace(commit=lambda: None),
+            run_id="run-native",
+            provider_results=[
+                {
+                    "provider_id": 1,
+                    "model_results": [
+                        {
+                            "model_name": "gemini-alias",
+                            "endpoint_results": [
+                                {
+                                    "provider_model_id": 2,
+                                    "endpoint_path": "/models/gemini-2.5-pro:generateContent",
+                                    "protocol_type": "gemini",
+                                    "endpoint_label": "Gemini generateContent",
+                                    "success": True,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        )
+    finally:
+        monkeypatch.undo()
+
+    assert captured[0]["protocol_type"] == "gemini"
+
+
+def test_gemini_native_auth_headers_ignore_openai_bearer_overlay():
+    provider = SimpleNamespace(
+        protocol_type="both",
+        api_key="gemini-key",
+        base_url="https://generativelanguage.googleapis.com/v1beta",
+    )
+    prepared = PreparedUpstreamRequest(
+        request_path="/models/gemini-2.5-pro:generateContent",
+        request_payload={"contents": [{"role": "user", "parts": [{"text": "ping"}]}]},
+        upstream_protocol_type="gemini",
+    )
+
+    headers = ProxyService._build_upstream_headers(
+        provider,
+        prepared=prepared,
+        extra_headers={"Authorization": "Bearer should-not-leak", "Accept-Encoding": "identity"},
+    )
+
+    assert headers == {"x-goog-api-key": "gemini-key", "Accept-Encoding": "identity"}
+
+
+def test_native_stream_chunks_are_converted_to_openai_chat_sse():
+    state = {}
+    gemini_chunks = NativeProtocolAdapter.native_stream_chunk_to_chat_chunks(
+        "gemini",
+        b'data: {"candidates":[{"content":{"parts":[{"text":"pong"}]},"finishReason":"STOP"}]}\n\n',
+        requested_model="gemini-2.5-pro",
+        state=state,
+    )
+    claude_chunks = NativeProtocolAdapter.native_stream_chunk_to_chat_chunks(
+        "claude_messages",
+        b'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"pong"}}\n\n',
+        requested_model="claude-3-5-sonnet-latest",
+        state={},
+    )
+
+    assert b'"object":"chat.completion.chunk"' in gemini_chunks[0]
+    assert b'"content":"pong"' in gemini_chunks[0]
+    assert b'"finish_reason":"stop"' in gemini_chunks[0]
+    assert b'"object":"chat.completion.chunk"' in claude_chunks[0]
+    assert b'"content":"pong"' in claude_chunks[0]
+
+
+def test_native_usage_mapping_preserves_gemini_and_claude_token_fields():
+    from app.services.log_service import LogService
+
+    gemini_payload = NativeProtocolAdapter.native_response_to_openai(
+        "gemini",
+        "/chat/completions",
+        {
+            "candidates": [{"content": {"parts": [{"text": "pong"}]}, "finishReason": "STOP"}],
+            "usageMetadata": {
+                "promptTokenCount": 442,
+                "cachedContentTokenCount": 30,
+                "candidatesTokenCount": 212,
+                "thoughtsTokenCount": 5,
+                "totalTokenCount": 689,
+            },
+        },
+        requested_model="gemini-2.5-pro",
+    )
+    claude_payload = NativeProtocolAdapter.native_response_to_openai(
+        "claude_messages",
+        "/chat/completions",
+        {
+            "content": [{"type": "text", "text": "pong"}],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 442,
+                "cache_read_input_tokens": 10,
+                "cache_creation_input_tokens": 20,
+                "output_tokens": 212,
+            },
+        },
+        requested_model="claude-3-5-sonnet-latest",
+    )
+
+    gemini_usage = gemini_payload["usage"]
+    claude_usage = claude_payload["usage"]
+    assert gemini_usage["usage_schema"] == "gemini_usage_metadata"
+    assert gemini_usage["prompt_tokens"] == 442
+    assert gemini_usage["completion_tokens"] == 212
+    assert gemini_usage["cache_read_tokens"] == 30
+    assert gemini_usage["completion_tokens_details"]["reasoning_tokens"] == 5
+    assert gemini_usage["native_usage"]["usageMetadata"]["promptTokenCount"] == 442
+    assert LogService.extract_usage_token_counts(gemini_usage) == {
+        "prompt_tokens": 442,
+        "completion_tokens": 212,
+        "total_tokens": 689,
+    }
+    assert claude_usage["usage_schema"] == "claude_messages_usage"
+    assert claude_usage["prompt_tokens"] == 472
+    assert claude_usage["completion_tokens"] == 212
+    assert claude_usage["cache_read_tokens"] == 10
+    assert claude_usage["cache_write_tokens"] == 20
+    assert claude_usage["native_usage"]["usage"]["cache_creation_input_tokens"] == 20
+    assert LogService.extract_cache_tokens({"usage": claude_usage}) == (10, 20)
+
+
+def test_log_service_extracts_raw_gemini_usage_metadata():
+    from app.services.log_service import LogService
+
+    usage = LogService.extract_usage_payload(
+        {
+            "usageMetadata": {
+                "promptTokenCount": 442,
+                "cachedContentTokenCount": 30,
+                "candidatesTokenCount": 212,
+                "totalTokenCount": 684,
+            }
+        }
+    )
+
+    assert LogService.extract_usage_token_counts(usage) == {
+        "prompt_tokens": 442,
+        "completion_tokens": 212,
+        "total_tokens": 684,
+    }
+    assert LogService.extract_cache_tokens({"usage": usage}) == (30, None)
+
+
+def test_claude_native_stream_usage_is_merged_for_logging():
+    state = {}
+    NativeProtocolAdapter.native_stream_chunk_to_chat_chunks(
+        "claude_messages",
+        b'data: {"type":"message_start","message":{"usage":{"input_tokens":442,"cache_read_input_tokens":10,"cache_creation_input_tokens":20,"output_tokens":0}}}\n\n',
+        requested_model="claude-3-5-sonnet-latest",
+        state=state,
+    )
+    chunks = NativeProtocolAdapter.native_stream_chunk_to_chat_chunks(
+        "claude_messages",
+        b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":212}}\n\n',
+        requested_model="claude-3-5-sonnet-latest",
+        state=state,
+    )
+
+    assert b'"prompt_tokens":472' in chunks[0]
+    assert b'"completion_tokens":212' in chunks[0]
+    assert b'"total_tokens":684' in chunks[0]
+    assert b'"cache_read_tokens":10' in chunks[0]
+    assert b'"cache_write_tokens":20' in chunks[0]
+    assert b'"usage_schema":"claude_messages_usage"' in chunks[0]
+
+
+def test_native_request_path_supports_custom_gateway_templates():
+    assert NativeProtocolAdapter.request_path(
+        "gemini",
+        "gemini-2.5-pro",
+        endpoint_path_template="/proxy/google/{model}:{action}",
+    ) == "/proxy/google/gemini-2.5-pro:generateContent"
+    assert NativeProtocolAdapter.request_path(
+        "gemini",
+        "gemini-2.5-pro",
+        stream=True,
+        endpoint_path_template="/proxy/google/{model}:{action}",
+    ) == "/proxy/google/gemini-2.5-pro:streamGenerateContent?alt=sse"
+    assert NativeProtocolAdapter.request_path(
+        "claude_messages",
+        "claude-3-5-sonnet-latest",
+        endpoint_path_template="anthropic/messages",
+    ) == "/anthropic/messages"

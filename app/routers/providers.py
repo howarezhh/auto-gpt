@@ -255,22 +255,27 @@ def list_provider_model_mounts(
     enabled: bool | None = Query(default=None),
     health_status: str | None = Query(default=None),
     trust_status: str | None = Query(default=None),
+    model_group: str | None = Query(default=None),
     quality_window_hours: int = Query(default=1, ge=1),
     db: Session = Depends(get_db),
 ) -> ProviderModelMountListResponse:
-    return ProviderModelMountListResponse(
-        **ProviderService.list_provider_model_mounts(
-            db,
-            page=page,
-            page_size=page_size,
-            keyword=keyword,
-            provider_id=provider_id,
-            enabled=enabled,
-            health_status=health_status,
-            trust_status=trust_status,
-            quality_window_hours=quality_window_hours,
+    try:
+        return ProviderModelMountListResponse(
+            **ProviderService.list_provider_model_mounts(
+                db,
+                page=page,
+                page_size=page_size,
+                keyword=keyword,
+                provider_id=provider_id,
+                enabled=enabled,
+                health_status=health_status,
+                trust_status=trust_status,
+                model_group=model_group,
+                quality_window_hours=quality_window_hours,
+            )
         )
-    )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/protocol-detection")

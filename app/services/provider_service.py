@@ -5,6 +5,7 @@ import re
 from collections import defaultdict
 from datetime import datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 from httpx import HTTPError
 from sqlalchemy import delete, func, or_, select, update
@@ -19,6 +20,7 @@ from app.models.api_client_key_provider_binding import ApiClientKeyProviderBindi
 from app.models.api_client_key import ApiClientKey
 from app.schemas.provider import (
     CONTENT_INTEGRITY_STATUS_LABELS,
+    MODEL_GROUP_LABELS,
     MODEL_TRUST_STATUS_LABELS,
     PROVIDER_TRUST_STATUS_LABELS,
     PROVIDER_TRUST_LEVEL_LABELS,
@@ -32,6 +34,8 @@ from app.schemas.provider import (
     ProviderModelConfigUpdate,
     ProviderUpdate,
     format_provider_protocol_label as schema_format_provider_protocol_label,
+    normalize_model_group as schema_normalize_model_group,
+    normalize_native_endpoint_path as schema_normalize_native_endpoint_path,
     normalize_provider_protocol_type as schema_normalize_provider_protocol_type,
     protocol_type_from_supports as schema_protocol_type_from_supports,
     supports_from_protocol_type,
@@ -63,6 +67,50 @@ class ProviderService:
     RECENT_CONTENT_GUARD_EVENT_LIMIT = 500
     PROVIDER_LIST_MODEL_CONFIG_LIMIT = 500
     PROVIDER_LIGHT_LIST_CACHE_TTL_SECONDS = 15
+    OPENAI_MODEL_PREFIXES = ("gpt-", "o1", "o3", "o4")
+    GEMINI_MODEL_PREFIXES = ("gemini",)
+    CLAUDE_MODEL_PREFIXES = ("claude",)
+    MODEL_GROUP_PREFIX_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
+        (("gpt-", "o1", "o3", "o4"), "openai"),
+        (("deepseek",), "deepseek"),
+        (("qwen", "qwq", "qvq"), "qwen"),
+        (("glm",), "glm"),
+        (("doubao",), "doubao"),
+        (("kimi", "moonshot"), "kimi"),
+        (("baichuan",), "baichuan"),
+        (("ernie", "wenxin"), "ernie"),
+        (("hunyuan",), "hunyuan"),
+        (("minimax", "abab"), "minimax"),
+        (("step",), "step"),
+        (("internlm",), "internlm"),
+        (("spark", "xinghuo"), "spark"),
+        (("yi-", "yi_", "yi."), "yi"),
+        (("mistral", "mixtral", "codestral"), "mistral"),
+        (("llama", "meta-llama"), "llama"),
+        (("gemini",), "gemini"),
+        (("claude",), "claude"),
+        (("grok",), "grok"),
+        (("command", "cohere"), "cohere"),
+        (("sonar", "pplx", "perplexity"), "perplexity"),
+    )
+    DOMESTIC_CHAT_MODEL_PREFIXES = (
+        "deepseek",
+        "qwen",
+        "glm",
+        "doubao",
+        "kimi",
+        "moonshot",
+        "yi-",
+        "baichuan",
+        "ernie",
+        "hunyuan",
+        "minimax",
+        "abab",
+        "step",
+        "internlm",
+        "spark",
+        "sensechat",
+    )
     VISION_MODEL_HINTS = (
         "gpt-4o",
         "gpt-4.1",
@@ -147,11 +195,47 @@ API Key: sk-yyyy
         return schema_normalize_provider_protocol_type(value)
 
     @staticmethod
+    def normalize_native_endpoint_path(value: str | None) -> str | None:
+        return schema_normalize_native_endpoint_path(value)
+
+    @staticmethod
     def provider_protocol_label(value: str | None) -> str:
         try:
             return schema_format_provider_protocol_label(value)
         except ValueError:
             return schema_format_provider_protocol_label("both")
+
+    @staticmethod
+    def normalize_model_group(value: str | None) -> str:
+        return schema_normalize_model_group(value)
+
+    @staticmethod
+    def model_group_label(value: str | None) -> str:
+        try:
+            normalized = ProviderService.normalize_model_group(value)
+        except ValueError:
+            normalized = "unknown"
+        return MODEL_GROUP_LABELS.get(normalized, normalized)
+
+    @staticmethod
+    def infer_model_group(model_name: str) -> str:
+        normalized = (model_name or "").strip().lower()
+        if not normalized:
+            return "unknown"
+        compact = normalized.replace("/", "-").replace("_", "-")
+        for prefixes, group in ProviderService.MODEL_GROUP_PREFIX_RULES:
+            if compact.startswith(prefixes):
+                return group
+        for marker, group in (
+            ("deepseek", "deepseek"),
+            ("qwen", "qwen"),
+            ("gemini", "gemini"),
+            ("claude", "claude"),
+            ("llama", "llama"),
+        ):
+            if marker in compact:
+                return group
+        return "unknown"
 
     @staticmethod
     def provider_protocol_type(provider: Provider) -> str:
@@ -167,6 +251,122 @@ API Key: sk-yyyy
     @staticmethod
     def provider_supports_responses(provider: Provider) -> bool:
         return ProviderService.provider_protocol_type(provider) in {"both", "responses"}
+
+    @staticmethod
+    def provider_uses_native_adapter(provider: Provider) -> bool:
+        return ProviderService.provider_protocol_type(provider) in {"gemini", "claude_messages"}
+
+    @staticmethod
+    def model_protocol_type_from_name(model_name: str) -> str:
+        normalized = (model_name or "").strip().lower()
+        if not normalized:
+            return "chat_completions"
+        if normalized.startswith(ProviderService.GEMINI_MODEL_PREFIXES):
+            return "gemini"
+        if normalized.startswith(ProviderService.CLAUDE_MODEL_PREFIXES):
+            return "claude_messages"
+        if normalized.startswith(ProviderService.OPENAI_MODEL_PREFIXES):
+            return "both"
+        if normalized.startswith(ProviderService.DOMESTIC_CHAT_MODEL_PREFIXES):
+            return "chat_completions"
+        return "chat_completions"
+
+    @staticmethod
+    def default_supports_for_model_name(model_name: str) -> tuple[str, bool, bool]:
+        protocol_type = ProviderService.model_protocol_type_from_name(model_name)
+        supports_chat, supports_responses = supports_from_protocol_type(protocol_type)
+        return protocol_type, supports_chat, supports_responses
+
+    @staticmethod
+    def protocol_type_for_model_group(
+        model_group: str | None,
+        model_name: str | None = None,
+        requested_protocol: str | None = None,
+    ) -> str:
+        normalized_group = ProviderService.normalize_model_group(
+            model_group or ProviderService.infer_model_group(model_name or "")
+        )
+        if normalized_group == "gemini":
+            return "gemini"
+        if normalized_group == "claude":
+            return "claude_messages"
+        if requested_protocol is not None:
+            try:
+                return ProviderService.normalize_provider_protocol_type(requested_protocol)
+            except ValueError:
+                pass
+        return ProviderService.model_protocol_type_from_name(model_name or "")
+
+    @staticmethod
+    def provider_model_protocol_type(provider_model: ProviderModel) -> str:
+        forced_protocol = ProviderService.protocol_type_for_model_group(
+            getattr(provider_model, "model_group", None),
+            getattr(provider_model, "model_name", ""),
+            None,
+        )
+        if forced_protocol in {"gemini", "claude_messages"}:
+            return forced_protocol
+        raw_protocol = getattr(provider_model, "protocol_type", None)
+        try:
+            normalized = ProviderService.normalize_provider_protocol_type(raw_protocol)
+            if raw_protocol is not None:
+                return normalized
+        except ValueError:
+            pass
+        has_chat_attr = hasattr(provider_model, "supports_chat_completions")
+        has_responses_attr = hasattr(provider_model, "supports_responses")
+        if not has_chat_attr and not has_responses_attr:
+            return ProviderService.model_protocol_type_from_name(getattr(provider_model, "model_name", ""))
+        return schema_protocol_type_from_supports(
+            supports_chat_completions=bool(getattr(provider_model, "supports_chat_completions", False)),
+            supports_responses=bool(getattr(provider_model, "supports_responses", False)),
+        )
+
+    @staticmethod
+    def provider_or_model_native_protocol(provider: Provider, provider_model: ProviderModel | None = None) -> str | None:
+        if provider_model is not None:
+            model_protocol = ProviderService.provider_model_protocol_type(provider_model)
+            if model_protocol in {"gemini", "claude_messages"}:
+                return model_protocol
+        provider_protocol = ProviderService.provider_protocol_type(provider)
+        if provider_protocol in {"gemini", "claude_messages"}:
+            return provider_protocol
+        return None
+
+    @staticmethod
+    def provider_model_upstream_model_name(provider_model: ProviderModel | Any, *, fallback_model: str | None = None) -> str:
+        for field_name in ("provider_model_id", "upstream_model_name", "upstream_model"):
+            value = getattr(provider_model, field_name, None)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        model_name = getattr(provider_model, "model_name", None)
+        if isinstance(model_name, str) and model_name.strip():
+            return model_name.strip()
+        return str(fallback_model or "").strip()
+
+    @staticmethod
+    def provider_can_serve_openai_endpoint(provider: Provider, endpoint_path: str) -> bool:
+        if ProviderService.provider_uses_native_adapter(provider):
+            return endpoint_path in {"/chat/completions", "/responses", "/completions"}
+        if endpoint_path == "/responses":
+            return ProviderService.provider_supports_responses(provider)
+        if endpoint_path in {"/chat/completions", "/completions"}:
+            return ProviderService.provider_supports_chat_completions(provider)
+        return True
+
+    @staticmethod
+    def provider_model_can_serve_openai_endpoint(
+        provider: Provider,
+        provider_model: ProviderModel,
+        endpoint_path: str,
+    ) -> bool:
+        if ProviderService.provider_or_model_native_protocol(provider, provider_model):
+            return endpoint_path in {"/chat/completions", "/responses", "/completions"}
+        if endpoint_path == "/responses":
+            return bool(provider_model.supports_responses)
+        if endpoint_path in {"/chat/completions", "/completions"}:
+            return bool(provider_model.supports_chat_completions)
+        return True
 
     @staticmethod
     def _model_name_supports_vision(normalized: str) -> bool:
@@ -232,13 +432,6 @@ API Key: sk-yyyy
         return bool(provider_model.supports_image_generation)
 
     @staticmethod
-    def provider_model_protocol_type(provider_model: ProviderModel) -> str:
-        return schema_protocol_type_from_supports(
-            supports_chat_completions=bool(provider_model.supports_chat_completions),
-            supports_responses=bool(provider_model.supports_responses),
-        )
-
-    @staticmethod
     def provider_model_protocol_label(provider_model: ProviderModel) -> str:
         return ProviderService.provider_protocol_label(ProviderService.provider_model_protocol_type(provider_model))
 
@@ -246,14 +439,17 @@ API Key: sk-yyyy
     def _build_model_config_input_from_name(model_name: str) -> ProviderModelConfigInput:
         """根据模型名生成默认模型配置；端点协议只给管理员可编辑默认值。"""
         capabilities = ProviderService._infer_model_capabilities(model_name)
+        protocol_type, supports_chat, supports_responses = ProviderService.default_supports_for_model_name(model_name)
         return ProviderModelConfigInput(
             model_name=model_name,
+            model_group=ProviderService.infer_model_group(model_name),
+            protocol_type=protocol_type,
             supports_stream=capabilities["supports_stream"],
             supports_vision=capabilities["supports_vision"],
             supports_tools=capabilities["supports_tools"],
             supports_image_generation=False,
-            supports_chat_completions=True,
-            supports_responses=True,
+            supports_chat_completions=supports_chat,
+            supports_responses=supports_responses,
         )
 
     @staticmethod
@@ -433,6 +629,7 @@ API Key: sk-yyyy
                         Provider.priority,
                         Provider.health_status,
                         Provider.protocol_type,
+                        Provider.native_endpoint_path,
                         Provider.circuit_state,
                         Provider.last_latency_ms,
                     ),
@@ -459,6 +656,7 @@ API Key: sk-yyyy
                         Provider.priority,
                         Provider.health_status,
                         Provider.protocol_type,
+                        Provider.native_endpoint_path,
                     ),
                     selectinload(Provider.provider_models).load_only(
                         ProviderModel.id,
@@ -488,10 +686,14 @@ API Key: sk-yyyy
         enabled: bool | None = None,
         health_status: str | None = None,
         trust_status: str | None = None,
+        model_group: str | None = None,
+        quality_window_hours: int = 1,
     ) -> dict:
         """分页返回 provider model 挂载列表。"""
         page = max(1, page)
         page_size = max(1, min(page_size, 100))
+        quality_window_hours = max(1, min(int(quality_window_hours or 1), 24 * 7))
+        quality_window_minutes = quality_window_hours * 60
         filters = []
         normalized_keyword = (keyword or "").strip()
         if normalized_keyword:
@@ -522,6 +724,9 @@ API Key: sk-yyyy
             filters.append(ProviderModel.content_integrity_status.in_(["degraded", "blocked"]))
         elif normalized_trust == "unknown":
             filters.append(ProviderModel.content_integrity_status == "unknown")
+        normalized_model_group = (model_group or "").strip()
+        if normalized_model_group:
+            filters.append(ProviderModel.model_group == ProviderService.normalize_model_group(normalized_model_group))
 
         base_stmt = select(ProviderModel).join(Provider)
         if filters:
@@ -537,12 +742,21 @@ API Key: sk-yyyy
             )
         )
         providers = list({item.provider.id: item.provider for item in provider_models if item.provider is not None}.values())
-        metrics = ProviderService._build_quality_metrics(db, providers) if providers else {"provider_models": {}}
+        metrics = (
+            ProviderService._build_quality_metrics(
+                db,
+                providers,
+                quality_window_minutes=quality_window_minutes,
+            )
+            if providers
+            else {"provider_models": {}}
+        )
         return {
             "total": total,
             "page": page,
             "page_size": page_size,
             "total_pages": max(1, (total + page_size - 1) // page_size),
+            "quality_window_hours": quality_window_hours,
             "items": [
                 ProviderService.provider_model_mount_to_dict(
                     item,
@@ -591,6 +805,7 @@ API Key: sk-yyyy
             api_key=payload.api_key,
             provider_type=payload.provider_type,
             protocol_type=payload.protocol_type,
+            native_endpoint_path=payload.native_endpoint_path,
             group_name=payload.group_name,
             region_tag=payload.region_tag,
             enabled=payload.enabled,
@@ -810,6 +1025,13 @@ API Key: sk-yyyy
             "protocol_type": "protocol_type",
             "supportedprotocol": "protocol_type",
             "supported_protocol": "protocol_type",
+            "原生接口路径": "native_endpoint_path",
+            "原生路径": "native_endpoint_path",
+            "自定义接口路径": "native_endpoint_path",
+            "nativeendpointpath": "native_endpoint_path",
+            "native_endpoint_path": "native_endpoint_path",
+            "endpointpath": "native_endpoint_path",
+            "endpoint_path": "native_endpoint_path",
             "分组": "group_name",
             "渠道分组": "group_name",
             "group": "group_name",
@@ -897,6 +1119,9 @@ API Key: sk-yyyy
             protocol_type = ProviderService.normalize_provider_protocol_type(
                 ProviderService._clean_optional_text(normalized.get("protocol_type"))
             )
+            native_endpoint_path = ProviderService.normalize_native_endpoint_path(
+                ProviderService._clean_optional_text(normalized.get("native_endpoint_path"))
+            )
         except ValueError as exc:
             errors.append(str(exc))
             return None
@@ -906,6 +1131,7 @@ API Key: sk-yyyy
             "api_key": api_key,
             "provider_type": ProviderService._clean_optional_text(normalized.get("provider_type")) or "openai_compatible",
             "protocol_type": protocol_type,
+            "native_endpoint_path": native_endpoint_path,
             "group_name": ProviderService._clean_optional_text(normalized.get("group_name")),
             "region_tag": ProviderService._clean_optional_text(normalized.get("region_tag")),
             "enabled": ProviderService._parse_batch_bool(normalized.get("enabled"), default=True),
@@ -957,8 +1183,8 @@ API Key: sk-yyyy
             "supports_vision": True,
             "supports_tools": True,
             "supports_image_generation": False,
-            "supports_chat_completions": False,
-            "supports_responses": True,
+            "supports_chat_completions": True,
+            "supports_responses": False,
         }
 
     @staticmethod
@@ -994,14 +1220,17 @@ API Key: sk-yyyy
 
     @staticmethod
     def _build_batch_model_config(model_name: str, capabilities: dict[str, bool]) -> ProviderModelConfigInput:
+        protocol_type, default_chat, default_responses = ProviderService.default_supports_for_model_name(model_name)
         return ProviderModelConfigInput(
             model_name=model_name,
+            model_group=ProviderService.infer_model_group(model_name),
+            protocol_type=protocol_type,
             supports_stream=capabilities["supports_stream"],
             supports_vision=capabilities["supports_vision"],
             supports_tools=capabilities["supports_tools"],
             supports_image_generation=capabilities.get("supports_image_generation", False),
-            supports_chat_completions=capabilities["supports_chat_completions"],
-            supports_responses=capabilities["supports_responses"],
+            supports_chat_completions=capabilities.get("supports_chat_completions", default_chat),
+            supports_responses=capabilities.get("supports_responses", default_responses),
         )
 
     @staticmethod
@@ -1048,12 +1277,14 @@ API Key: sk-yyyy
                 continue
             if field == "base_url" and isinstance(value, str):
                 value = value.rstrip("/")
+            if field == "native_endpoint_path":
+                value = ProviderService.normalize_native_endpoint_path(value)
             setattr(provider, field, value)
 
         if "models" in data or "model_configs" in data:
             ProviderService._replace_provider_models(db, provider, ProviderService._resolve_model_configs(payload, provider))
 
-        if {"base_url", "api_key"} & set(data.keys()):
+        if {"base_url", "api_key", "native_endpoint_path", "protocol_type"} & set(data.keys()):
             # 上游连接信息变化后，强制重置健康状态并等待重新探测。
             provider.health_status = "unknown"
             provider.circuit_state = "closed"
@@ -1111,10 +1342,31 @@ API Key: sk-yyyy
             raise ValueError("Provider model not found")
 
         for field, value in payload.model_dump(exclude_unset=True).items():
-            if field == "protocol_type":
-                supports_chat, supports_responses = supports_from_protocol_type(value)
+            if field == "model_group":
+                provider_model.model_group = ProviderService.normalize_model_group(value or ProviderService.infer_model_group(provider_model.model_name))
+                protocol_type = ProviderService.protocol_type_for_model_group(
+                    provider_model.model_group,
+                    provider_model.model_name,
+                    provider_model.protocol_type,
+                )
+                supports_chat, supports_responses = supports_from_protocol_type(protocol_type)
+                provider_model.protocol_type = protocol_type
                 provider_model.supports_chat_completions = supports_chat
                 provider_model.supports_responses = supports_responses
+                continue
+            if field == "protocol_type":
+                protocol_type = ProviderService.protocol_type_for_model_group(
+                    provider_model.model_group,
+                    provider_model.model_name,
+                    value,
+                )
+                supports_chat, supports_responses = supports_from_protocol_type(protocol_type)
+                provider_model.protocol_type = protocol_type
+                provider_model.supports_chat_completions = supports_chat
+                provider_model.supports_responses = supports_responses
+                continue
+            if field == "native_endpoint_path":
+                provider_model.native_endpoint_path = ProviderService.normalize_native_endpoint_path(value)
                 continue
             if field in {
                 "context_window_tokens",
@@ -1133,6 +1385,15 @@ API Key: sk-yyyy
                 ProviderService._ensure_manual_content_probe_reason(provider_model)
                 continue
             setattr(provider_model, field, value)
+        protocol_type = ProviderService.protocol_type_for_model_group(
+            provider_model.model_group,
+            provider_model.model_name,
+            provider_model.protocol_type,
+        )
+        supports_chat, supports_responses = supports_from_protocol_type(protocol_type)
+        provider_model.protocol_type = protocol_type
+        provider_model.supports_chat_completions = supports_chat
+        provider_model.supports_responses = supports_responses
         ProviderService._sync_provider_model_price_from_catalog(db, provider_model)
 
         ProviderService.refresh_provider_state(provider)
@@ -1307,6 +1568,7 @@ API Key: sk-yyyy
             "provider_type": provider.provider_type,
             "protocol_type": ProviderService.provider_protocol_type(provider),
             "protocol_label": ProviderService.provider_protocol_label(getattr(provider, "protocol_type", None)),
+            "native_endpoint_path": provider.native_endpoint_path,
             "group_name": provider.group_name,
             "region_tag": provider.region_tag,
             "enabled": provider.enabled,
@@ -1378,6 +1640,7 @@ API Key: sk-yyyy
             "health_status": provider.health_status,
             "protocol_type": ProviderService.provider_protocol_type(provider),
             "protocol_label": ProviderService.provider_protocol_label(getattr(provider, "protocol_type", None)),
+            "native_endpoint_path": provider.native_endpoint_path,
             "models": [item.model_name for item in provider.provider_models],
         }
 
@@ -1414,6 +1677,7 @@ API Key: sk-yyyy
             "health_status": provider.health_status,
             "protocol_type": ProviderService.provider_protocol_type(provider),
             "protocol_label": ProviderService.provider_protocol_label(getattr(provider, "protocol_type", None)),
+            "native_endpoint_path": provider.native_endpoint_path,
             "circuit_state": provider.circuit_state,
             "last_latency_ms": provider.last_latency_ms,
             "models": [item.model_name for item in provider.provider_models],
@@ -1519,6 +1783,8 @@ API Key: sk-yyyy
         discovered_items = [
             ProviderDiscoveredModelOut(
                 model_name=model_name,
+                model_group=ProviderService.infer_model_group(model_name),
+                model_group_label=ProviderService.model_group_label(ProviderService.infer_model_group(model_name)),
                 supports_stream=capabilities["supports_stream"],
                 supports_vision=capabilities["supports_vision"],
                 supports_tools=capabilities["supports_tools"],
@@ -1607,6 +1873,8 @@ API Key: sk-yyyy
         return {
             "id": provider_model.id,
             "model_name": provider_model.model_name,
+            "model_group": provider_model.model_group or ProviderService.infer_model_group(provider_model.model_name),
+            "model_group_label": ProviderService.model_group_label(provider_model.model_group or ProviderService.infer_model_group(provider_model.model_name)),
             "enabled": provider_model.enabled,
             "priority": provider_model.priority,
             "health_status": provider_model.health_status,
@@ -1630,6 +1898,7 @@ API Key: sk-yyyy
             "supports_responses": provider_model.supports_responses,
             "protocol_type": ProviderService.provider_model_protocol_type(provider_model),
             "protocol_label": ProviderService.provider_model_protocol_label(provider_model),
+            "native_endpoint_path": getattr(provider_model, "native_endpoint_path", None),
             "content_integrity_status": provider_model.content_integrity_status,
             "content_integrity_status_label": CONTENT_INTEGRITY_STATUS_LABELS.get(provider_model.content_integrity_status, provider_model.content_integrity_status),
             "content_probe_last_passed_at": provider_model.content_probe_last_passed_at,
@@ -1655,6 +1924,7 @@ API Key: sk-yyyy
             "success_rate": metrics.get("success_rate"),
             "avg_first_token_latency_ms": metrics.get("avg_first_token_latency_ms"),
             "stability_score": metrics.get("stability_score"),
+            "quality_window_minutes": metrics.get("quality_window_minutes", ProviderService.QUALITY_WINDOW_MINUTES),
             "created_at": provider_model.created_at,
             "updated_at": provider_model.updated_at,
         }
@@ -1737,6 +2007,7 @@ API Key: sk-yyyy
                 "base_url": provider.base_url,
                 "protocol_type": ProviderService.provider_protocol_type(provider),
                 "protocol_label": ProviderService.provider_protocol_label(getattr(provider, "protocol_type", None)),
+                "native_endpoint_path": provider.native_endpoint_path,
                 "group_name": provider.group_name,
                 "region_tag": provider.region_tag,
                 "enabled": provider.enabled,
@@ -1875,6 +2146,7 @@ API Key: sk-yyyy
         return [
             ProviderModelConfigInput(
                 model_name=item.model_name,
+                model_group=item.model_group or ProviderService.infer_model_group(item.model_name),
                 enabled=item.enabled,
                 priority=item.priority,
                 supports_stream=item.supports_stream,
@@ -1883,6 +2155,8 @@ API Key: sk-yyyy
                 supports_image_generation=item.supports_image_generation,
                 supports_chat_completions=item.supports_chat_completions,
                 supports_responses=item.supports_responses,
+                protocol_type=ProviderService.provider_model_protocol_type(item),
+                native_endpoint_path=getattr(item, "native_endpoint_path", None),
                 context_window_tokens=item.context_window_tokens,
                 max_input_tokens=item.max_input_tokens,
                 max_output_tokens=item.max_output_tokens,
@@ -1912,6 +2186,7 @@ API Key: sk-yyyy
                 provider_model = ProviderModel(provider=provider, model_name=config.model_name)
                 db.add(provider_model)
             provider_model.enabled = config.enabled
+            provider_model.model_group = ProviderService.normalize_model_group(config.model_group or ProviderService.infer_model_group(config.model_name))
             provider_model.priority = config.priority
             provider_model.price_multiplier = to_multiplier_decimal(config.price_multiplier)
             catalog = catalogs_by_name.get(config.model_name)
@@ -1924,6 +2199,15 @@ API Key: sk-yyyy
                 provider_model.cache_write_price_per_1k = to_price_decimal(config.cache_write_price_per_1k)
             provider_model.supports_chat_completions = bool(config.supports_chat_completions)
             provider_model.supports_responses = bool(config.supports_responses)
+            provider_model.protocol_type = ProviderService.protocol_type_for_model_group(
+                provider_model.model_group,
+                provider_model.model_name,
+                config.protocol_type,
+            )
+            supports_chat, supports_responses = supports_from_protocol_type(provider_model.protocol_type)
+            provider_model.supports_chat_completions = supports_chat
+            provider_model.supports_responses = supports_responses
+            provider_model.native_endpoint_path = ProviderService.normalize_native_endpoint_path(config.native_endpoint_path)
             provider_model.supports_stream = bool(config.supports_stream)
             provider_model.supports_vision = bool(config.supports_vision)
             provider_model.supports_tools = bool(config.supports_tools)
@@ -2031,7 +2315,13 @@ API Key: sk-yyyy
         CacheService.invalidate_prefix("provider-light-lists")
 
     @staticmethod
-    def _build_quality_metrics(db: Session, providers: list[Provider]) -> dict[str, dict]:
+    def _build_quality_metrics(
+        db: Session,
+        providers: list[Provider],
+        *,
+        quality_window_minutes: int | None = None,
+    ) -> dict[str, dict]:
+        quality_window_minutes = max(1, int(quality_window_minutes or ProviderService.QUALITY_WINDOW_MINUTES))
         provider_ids = {item.id for item in providers}
         provider_model_map = {
             item.id: item
@@ -2040,13 +2330,17 @@ API Key: sk-yyyy
         }
         if not provider_ids:
             return {"providers": {}, "provider_models": {}}
-        provider_stats, model_stats = ProviderService._load_quality_accumulators(db)
+        provider_stats, model_stats = ProviderService._load_quality_accumulators(
+            db,
+            quality_window_minutes=quality_window_minutes,
+        )
 
         provider_metrics = {
             provider.id: ProviderService._finalize_quality_snapshot(
                 provider_stats.get(provider.id, ProviderService._empty_quality_accumulator()),
                 health_status=provider.health_status,
                 circuit_state=provider.circuit_state,
+                quality_window_minutes=quality_window_minutes,
             )
             for provider in providers
         }
@@ -2055,14 +2349,20 @@ API Key: sk-yyyy
                 model_stats.get(provider_model.id, ProviderService._empty_quality_accumulator()),
                 health_status=provider_model.health_status,
                 circuit_state=provider_model.circuit_state,
+                quality_window_minutes=quality_window_minutes,
             )
             for provider_model in provider_model_map.values()
         }
         return {"providers": provider_metrics, "provider_models": provider_model_metrics}
 
     @staticmethod
-    def _load_quality_accumulators(db: Session) -> tuple[dict[int, dict], dict[int, dict]]:
-        cache_key = "provider-quality:accumulators"
+    def _load_quality_accumulators(
+        db: Session,
+        *,
+        quality_window_minutes: int | None = None,
+    ) -> tuple[dict[int, dict], dict[int, dict]]:
+        quality_window_minutes = max(1, int(quality_window_minutes or ProviderService.QUALITY_WINDOW_MINUTES))
+        cache_key = f"provider-quality:accumulators:{quality_window_minutes}"
         cached = CacheService.get(cache_key)
         if isinstance(cached, dict):
             cached_provider_stats = cached.get("providers")
@@ -2073,7 +2373,7 @@ API Key: sk-yyyy
                     {int(key): value for key, value in cached_model_stats.items()},
                 )
 
-        since = now_beijing() - timedelta(minutes=ProviderService.QUALITY_WINDOW_MINUTES)
+        since = now_beijing() - timedelta(minutes=quality_window_minutes)
         rows = db.execute(
             select(
                 RequestLog.provider_id,
@@ -2157,7 +2457,9 @@ API Key: sk-yyyy
         *,
         health_status: str,
         circuit_state: str,
+        quality_window_minutes: int | None = None,
     ) -> dict[str, int | float | None]:
+        quality_window_minutes = max(1, int(quality_window_minutes or ProviderService.QUALITY_WINDOW_MINUTES))
         request_count = int(stats.get("recent_request_count", 0) or 0)
         success_count = int(stats.get("success_count", 0) or 0)
         first_token_count = int(stats.get("first_token_count", 0) or 0)
@@ -2179,6 +2481,7 @@ API Key: sk-yyyy
             "success_rate": success_rate,
             "avg_first_token_latency_ms": avg_first_token_latency_ms,
             "stability_score": stability_score,
+            "quality_window_minutes": quality_window_minutes,
         }
 
     @staticmethod

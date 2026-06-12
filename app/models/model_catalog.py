@@ -15,6 +15,7 @@ class ModelCatalog(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     model_name: Mapped[str] = mapped_column(Text, unique=True, nullable=False, index=True)
     display_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    model_group: Mapped[str] = mapped_column(Text, nullable=False, default="unknown", index=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     supports_stream: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     supports_vision: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

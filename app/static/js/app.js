@@ -119,6 +119,68 @@
         content_json: "JSON",
         content_sse: "流式污染检测",
     };
+    const PROVIDER_MODEL_PROTOCOL_OPTIONS = [
+        ["responses", "Responses"],
+        ["chat_completions", "Chat"],
+        ["both", "双协议"],
+        ["gemini", "Gemini"],
+        ["claude_messages", "Claude"],
+    ];
+    const PROVIDER_MODEL_PROTOCOL_LABELS = {
+        responses: "Responses API",
+        chat_completions: "Chat Completions API",
+        both: "双协议",
+        gemini: "Gemini 原生协议",
+        claude_messages: "Claude Messages API",
+    };
+    const MODEL_GROUP_OPTIONS = [
+        ["openai", "OpenAI"],
+        ["deepseek", "DeepSeek"],
+        ["qwen", "通义千问"],
+        ["glm", "智谱 GLM"],
+        ["doubao", "豆包"],
+        ["kimi", "Kimi"],
+        ["baichuan", "百川"],
+        ["ernie", "文心一言"],
+        ["hunyuan", "腾讯混元"],
+        ["minimax", "MiniMax"],
+        ["step", "阶跃星辰"],
+        ["internlm", "书生浦语"],
+        ["spark", "讯飞星火"],
+        ["yi", "零一万物"],
+        ["mistral", "Mistral"],
+        ["llama", "Llama"],
+        ["gemini", "Gemini"],
+        ["claude", "Claude"],
+        ["grok", "Grok"],
+        ["cohere", "Cohere"],
+        ["perplexity", "Perplexity"],
+        ["unknown", "未知分组"],
+    ];
+    const MODEL_GROUP_LABELS = Object.fromEntries(MODEL_GROUP_OPTIONS);
+    const MODEL_GROUP_PREFIX_RULES = [
+        [["gpt-", "o1", "o3", "o4"], "openai"],
+        [["deepseek"], "deepseek"],
+        [["qwen", "qwq", "qvq"], "qwen"],
+        [["glm"], "glm"],
+        [["doubao"], "doubao"],
+        [["kimi", "moonshot"], "kimi"],
+        [["baichuan"], "baichuan"],
+        [["ernie", "wenxin"], "ernie"],
+        [["hunyuan"], "hunyuan"],
+        [["minimax", "abab"], "minimax"],
+        [["step"], "step"],
+        [["internlm"], "internlm"],
+        [["spark", "xinghuo"], "spark"],
+        [["yi-", "yi_", "yi."], "yi"],
+        [["mistral", "mixtral", "codestral"], "mistral"],
+        [["llama", "meta-llama"], "llama"],
+        [["gemini"], "gemini"],
+        [["claude"], "claude"],
+        [["grok"], "grok"],
+        [["command", "cohere"], "cohere"],
+        [["sonar", "pplx", "perplexity"], "perplexity"],
+    ];
     const ENDPOINT_PROBE_LABELS = {
         "chat/completions": "Chat 调用检查",
         "chat/completions stream": "Chat 流式检查",
@@ -155,6 +217,75 @@
     const referenceCacheStore = new Map();
     let currentPageAbortController = new AbortController();
     let shellNavigationAbortController = null;
+
+    function normalizeModelGroup(value, fallback = "unknown") {
+        const raw = String(value || "").trim().toLowerCase().replace(/[\s_-]+/g, "");
+        if (!raw) return fallback;
+        const match = MODEL_GROUP_OPTIONS.find(([group]) => group === value || group === raw);
+        if (match) return match[0];
+        const aliases = {
+            gpt: "openai",
+            google: "gemini",
+            anthropic: "claude",
+            tongyi: "qwen",
+            zhipu: "glm",
+            bytedance: "doubao",
+            moonshot: "kimi",
+            wenxin: "ernie",
+            abab: "minimax",
+            xinghuo: "spark",
+            meta: "llama",
+            xai: "grok",
+            command: "cohere",
+            sonar: "perplexity",
+            pplx: "perplexity",
+        };
+        return aliases[raw] || fallback;
+    }
+
+    function inferModelGroup(modelName) {
+        const normalized = String(modelName || "").trim().toLowerCase();
+        if (!normalized) return "unknown";
+        const compact = normalized.replace(/[/_]/g, "-");
+        for (const [prefixes, group] of MODEL_GROUP_PREFIX_RULES) {
+            if (prefixes.some((prefix) => compact.startsWith(prefix))) {
+                return group;
+            }
+        }
+        for (const [marker, group] of [
+            ["deepseek", "deepseek"],
+            ["qwen", "qwen"],
+            ["gemini", "gemini"],
+            ["claude", "claude"],
+            ["llama", "llama"],
+        ]) {
+            if (compact.includes(marker)) return group;
+        }
+        return "unknown";
+    }
+
+    function formatModelGroupLabel(value, modelName = "") {
+        const group = normalizeModelGroup(value, inferModelGroup(modelName));
+        return MODEL_GROUP_LABELS[group] || MODEL_GROUP_LABELS.unknown;
+    }
+
+    function renderModelGroupOptions(selectedValue, modelName = "") {
+        const selected = normalizeModelGroup(selectedValue, inferModelGroup(modelName));
+        return MODEL_GROUP_OPTIONS.map(([value, label]) => (
+            `<option value="${escapeHtml(value)}" ${selected === value ? "selected" : ""}>${escapeHtml(label)}</option>`
+        )).join("");
+    }
+
+    function protocolTypeForModelGroup(modelGroup, modelName = "", fallbackProtocol = "responses") {
+        const group = normalizeModelGroup(modelGroup, inferModelGroup(modelName));
+        if (group === "gemini") return "gemini";
+        if (group === "claude") return "claude_messages";
+        return PROVIDER_MODEL_PROTOCOL_LABELS[fallbackProtocol] ? fallbackProtocol : "responses";
+    }
+
+    function isProviderModelProtocolLocked(modelGroup, modelName = "") {
+        return ["gemini", "claude"].includes(normalizeModelGroup(modelGroup, inferModelGroup(modelName)));
+    }
 
     const api = {
         get: async (url, options = {}) => parseResponse(await fetchWithTimeout(url, { cache: "no-store", headers: { "Cache-Control": "no-cache" }, ...options })),
@@ -676,6 +807,26 @@
         return new Promise((resolve) => window.setTimeout(resolve, ms));
     }
 
+    const PROVIDER_MODEL_PROBE_STAGGER_MS = 10000;
+
+    async function runStaggeredByPreviousCompletion(items, runner, staggerMs = PROVIDER_MODEL_PROBE_STAGGER_MS) {
+        const list = Array.isArray(items) ? items : [];
+        const tasks = [];
+        let previousTask = null;
+        for (const item of list) {
+            if (previousTask) {
+                await Promise.race([
+                    previousTask.catch(() => undefined),
+                    wait(staggerMs),
+                ]);
+            }
+            const task = Promise.resolve().then(() => runner(item));
+            tasks.push(task);
+            previousTask = task;
+        }
+        return Promise.all(tasks);
+    }
+
     function ensureHealthCheckResultModalController() {
         const modal = document.getElementById("provider-test-result-modal");
         const titleNode = document.getElementById("provider-test-result-modal-title");
@@ -1080,9 +1231,67 @@
                     · 状态码 ${escapeHtml(String(item.status_code ?? "-"))}
                     · 耗时 ${escapeHtml(String(item.latency_ms ?? "-"))} ms
                     · ${escapeHtml(item.message || "-")}
+                    ${renderEndpointProbePolicyHtml(item)}
                 </div>
             </div>
         `).join("");
+    }
+
+    function renderEndpointProbePolicyHtml(item) {
+        if (!item || item.success) return "";
+        const label = formatProbeErrorLabel(item);
+        const strategy = formatProbeHandlingStrategy(item);
+        if (!label && !strategy) return "";
+        return ` · ${escapeHtml(label || "探针失败")}${strategy ? ` ${renderInlineTooltipHelp(strategy, "处理策略")}` : ""}`;
+    }
+
+    function renderInlineTooltipHelp(text, title = "说明") {
+        const normalized = String(text || "").trim();
+        if (!normalized || normalized === "-") return "";
+        const summary = normalized.length > 18 ? `${normalized.slice(0, 18)}...` : normalized;
+        return `
+            <span class="content-guard-reason-inline">
+                <span>${escapeHtml(summary)}</span>
+                <button class="settings-help-btn" type="button" aria-label="${escapeHtml(title)}" data-settings-tooltip-trigger="true" data-settings-tooltip-title="${escapeHtml(title)}" data-settings-tooltip-copy="${escapeHtml(normalized)}">
+                    <i class="bi bi-question-circle" aria-hidden="true"></i>
+                </button>
+            </span>
+        `;
+    }
+
+    function formatProbeErrorLabel(item) {
+        if (!item) return "";
+        const direct = String(item.frontend_label || "").trim();
+        if (direct) return direct;
+        const code = String(item.error_code || item.support_mode || "").trim();
+        const labels = {
+            probe_rate_limited: "探针限频",
+            provider_maintenance_mode: "维护跳过",
+            probe_config_invalid: "配置错误",
+            probe_target_disabled_or_missing: "目标不可用",
+            probe_capability_skipped: "能力跳过",
+            upstream_auth_error: "鉴权失败",
+            upstream_quota_or_billing: "额度不足",
+            upstream_rate_limited: "上游限流",
+            upstream_timeout: "上游超时",
+            upstream_network_error: "网络异常",
+            upstream_5xx_unavailable: "上游故障",
+            endpoint_explicit_unsupported: "端点不支持",
+            model_or_capability_not_supported: "能力不支持",
+            invalid_upstream_response: "响应异常",
+            transport_decompression_error: "压缩异常",
+            stream_empty_or_invalid_sse: "SSE 异常",
+            content_integrity_violation: "内容风险",
+            probe_internal_exception: "内部异常",
+            client_cancelled: "客户端取消",
+            probe_failed: "探针失败",
+        };
+        return labels[code] || "";
+    }
+
+    function formatProbeHandlingStrategy(item) {
+        if (!item) return "";
+        return String(item.handling_strategy || item.frontend_message || item.state_update_policy || "").trim();
     }
 
     function formatEndpointProbeLabel(value) {
@@ -2330,6 +2539,24 @@
     let helpTooltipConfig = null;
     const HELP_TOOLTIP_VIEWPORT_PADDING = 12;
     const HELP_TOOLTIP_GAP = 12;
+    const HELP_TOOLTIP_TRIGGER_SELECTOR = [
+        "[data-billing-tooltip-trigger='true']",
+        "[data-provider-status-tooltip-trigger='true']",
+        "[data-settings-tooltip-trigger='true']",
+        "[data-request-key-tooltip-trigger='true']",
+        "[data-log-tooltip-trigger='true']",
+    ].join(", ");
+    const HELP_ONLY_TRIGGER_SELECTOR = [
+        ".provider-status-help-btn",
+        ".settings-help-btn",
+        ".log-billing-help-btn",
+        ".help-icon-btn",
+        ".ip-action-help-icon",
+        "[data-billing-tooltip-trigger='true']",
+        "[data-provider-status-tooltip-trigger='true']",
+        "[data-request-key-tooltip-trigger='true']",
+        "[data-log-tooltip-trigger='true']",
+    ].join(", ");
     const HELP_TOOLTIP_CONFIGS = [
         {
             name: "billing",
@@ -2482,12 +2709,51 @@
         return null;
     }
 
+    function isFunctionalTooltipHost(trigger) {
+        return trigger instanceof HTMLButtonElement
+            && !trigger.matches(HELP_ONLY_TRIGGER_SELECTOR)
+            && trigger.classList.contains("interactive-btn");
+    }
+
+    function findHelpTooltipTriggerFromEvent(event) {
+        if (!(event.target instanceof Element)) return null;
+        const trigger = event.target.closest(HELP_TOOLTIP_TRIGGER_SELECTOR);
+        if (!trigger) return null;
+        if (isFunctionalTooltipHost(trigger) && !event.target.closest(".ip-action-help-icon")) {
+            return null;
+        }
+        return trigger;
+    }
+
+    function initInteractionHitAreaGuards() {
+        if (document.body.dataset.interactionHitAreaGuardsBound === "true") return;
+        document.body.dataset.interactionHitAreaGuardsBound = "true";
+        document.addEventListener("click", (event) => {
+            if (!(event.target instanceof Element)) return;
+            const helpTrigger = event.target.closest(HELP_ONLY_TRIGGER_SELECTOR);
+            if (helpTrigger) {
+                event.preventDefault();
+                event.stopPropagation();
+                const tooltipTrigger = helpTrigger.matches(".ip-action-help-icon")
+                    ? helpTrigger.closest(HELP_TOOLTIP_TRIGGER_SELECTOR)
+                    : helpTrigger;
+                if (tooltipTrigger) showHelpTooltip(tooltipTrigger);
+                return;
+            }
+            const switchCard = event.target.closest("label.settings-switch-card");
+            if (!switchCard) return;
+            if (event.target.closest(".settings-switch-control")) return;
+            if (event.target.closest("input, select, textarea")) return;
+            event.preventDefault();
+        }, true);
+    }
+
     function initHelpTooltipLayer() {
         prepareSettingsTooltipTriggers(document);
         if (document.body.dataset.helpTooltipBound === "true") return;
         document.body.dataset.helpTooltipBound = "true";
         document.addEventListener("mouseover", (event) => {
-            const trigger = event.target.closest(HELP_TOOLTIP_CONFIGS.map((config) => config.triggerSelector).join(", "));
+            const trigger = findHelpTooltipTriggerFromEvent(event);
             if (!trigger) return;
             if (helpTooltipOwner === trigger) return;
             showHelpTooltip(trigger);
@@ -2500,7 +2766,7 @@
             hideHelpTooltip();
         });
         document.addEventListener("focusin", (event) => {
-            const trigger = event.target.closest(HELP_TOOLTIP_CONFIGS.map((config) => config.triggerSelector).join(", "));
+            const trigger = findHelpTooltipTriggerFromEvent(event);
             if (!trigger) return;
             showHelpTooltip(trigger);
         });
@@ -3037,6 +3303,44 @@
         ];
     }
 
+    function normalizeTypedDisplayList(value) {
+        if (Array.isArray(value)) {
+            return value
+                .map((item) => String(item ?? "").trim())
+                .filter(Boolean);
+        }
+        if (value && typeof value === "object") {
+            return Object.values(value)
+                .flat()
+                .map((item) => String(item ?? "").trim())
+                .filter(Boolean);
+        }
+        const text = String(value ?? "").trim();
+        if (!text) return [];
+        const parsed = safeJsonParse(text);
+        if (parsed !== null && parsed !== undefined && parsed !== value) {
+            return normalizeTypedDisplayList(parsed);
+        }
+        return text
+            .split(/[、,，;；|]/)
+            .map((item) => item.trim())
+            .filter(Boolean);
+    }
+
+    function renderTypedCompactList(value, { label = "完整内容", empty = "-" } = {}) {
+        const items = normalizeTypedDisplayList(value);
+        if (!items.length) return escapeHtml(empty);
+        const visibleItems = items.slice(0, 2);
+        const hiddenCount = Math.max(0, items.length - visibleItems.length);
+        const visibleText = `${visibleItems.join("、")}${hiddenCount ? ` +${formatNumber(hiddenCount)}` : ""}`;
+        const fullText = items.join("、");
+        return `
+            <span class="typed-log-compact-list log-tooltip-trigger" ${renderLogTooltipAttrs(label, fullText)}>
+                ${escapeHtml(visibleText)}
+            </span>
+        `;
+    }
+
     function createTypedLogConfigs({ renderTypedPrimary, formatMetricValue }) {
         return {
             exceptions: {
@@ -3122,7 +3426,9 @@
                 ],
                 columns: [
                     ["开始时间", (item) => formatDate(item.started_at || item.created_at)],
-                    ["批次", (item) => renderTypedPrimary(item.run_id, `${formatTypedLogStatusLabel(item.trigger_type)} · ${formatTypedLogStatusLabel(item.scope_type)}`)],
+                    ["触发方式", (item) => escapeHtml(formatTypedLogStatusLabel(item.trigger_type))],
+                    ["提供商名称", (item) => renderTypedCompactList(item.health_probe_provider_names, { label: "检测提供商名称" })],
+                    ["模型 ID", (item) => renderTypedCompactList(item.health_probe_model_ids, { label: "检测模型 ID" })],
                     ["结果", (item) => escapeHtml(formatTypedLogStatusLabel(item.overall_result))],
                     ["探针", (item) => `${formatNumber(item.success_probes || 0)} / ${formatNumber(item.total_probes || 0)}`],
                     ["耗时", (item) => formatMetricValue(item.duration_ms, " ms")],
@@ -3634,6 +3940,82 @@
             item.health_status || "",
             modelText,
         ].join(" ").toLowerCase();
+    }
+
+    function createPlaygroundProviderProbeResult(provider) {
+        const modelConfigs = (Array.isArray(provider?.model_configs) ? provider.model_configs : [])
+            .filter((modelConfig) => modelConfig?.enabled !== false && modelConfig?.id != null);
+        return {
+            provider_id: provider?.id,
+            provider_name: provider?.name || `提供商 ${provider?.id || "-"}`,
+            provider_enabled: provider?.enabled !== false,
+            success: false,
+            provider_success: false,
+            health_status: modelConfigs.length ? "unknown" : "unhealthy",
+            status_code: modelConfigs.length ? "等待中" : "-",
+            latency_ms: 0,
+            message: modelConfigs.length ? "等待模型检测结果" : "当前提供商没有可测试的挂载模型",
+            models_total: modelConfigs.length,
+            models_success: 0,
+            models_failed: modelConfigs.length,
+            model_results: modelConfigs.map((modelConfig) => ({
+                provider_model_id: modelConfig.id,
+                model_name: modelConfig.model_name || `挂载 ${modelConfig.id}`,
+                success: false,
+                provider_success: false,
+                health_status: "unknown",
+                status_code: "等待中",
+                latency_ms: "-",
+                message: "等待检测",
+                endpoint_results: [],
+            })),
+        };
+    }
+
+    function recalculatePlaygroundProviderProbeResult(providerResult) {
+        const modelResults = Array.isArray(providerResult?.model_results) ? providerResult.model_results : [];
+        const completedResults = modelResults.filter((item) => !["等待中", "检测中"].includes(String(item.status_code ?? "")));
+        const successCount = modelResults.filter((item) => isHealthCheckUsable(item)).length;
+        const failedCount = Math.max(Number(providerResult.models_total || 0) - successCount, 0);
+        const hasRunning = completedResults.length < modelResults.length;
+        providerResult.models_success = successCount;
+        providerResult.models_failed = failedCount;
+        providerResult.provider_success = successCount > 0;
+        providerResult.success = modelResults.length > 0 && completedResults.length === modelResults.length && failedCount === 0;
+        providerResult.health_status = hasRunning
+            ? (successCount > 0 ? "degraded" : "unknown")
+            : (providerResult.success ? "healthy" : (successCount > 0 ? "degraded" : "unhealthy"));
+        providerResult.status_code = hasRunning
+            ? "检测中"
+            : (modelResults.find((item) => !isHealthCheckUsable(item))?.status_code ?? (providerResult.success ? 200 : "-"));
+        providerResult.latency_ms = Math.max(
+            0,
+            ...modelResults
+                .map((item) => Number(item.latency_ms))
+                .filter((value) => Number.isFinite(value)),
+        );
+        providerResult.message = hasRunning
+            ? `模型检测中，已完成 ${completedResults.length}/${modelResults.length}`
+            : `模型检测完成，正常 ${successCount}/${modelResults.length}`;
+        return providerResult;
+    }
+
+    function applyPlaygroundProviderModelProbeResult(providerResult, modelConfig, result) {
+        if (!providerResult || !modelConfig) return;
+        const modelResults = Array.isArray(providerResult.model_results) ? providerResult.model_results : [];
+        const index = modelResults.findIndex((item) => String(item.provider_model_id) === String(modelConfig.id));
+        const nextResult = {
+            provider_model_id: modelConfig.id,
+            model_name: modelConfig.model_name || result?.model_name || `挂载 ${modelConfig.id}`,
+            ...(result || {}),
+        };
+        if (!nextResult.model_name) nextResult.model_name = modelConfig.model_name || `挂载 ${modelConfig.id}`;
+        if (index >= 0) {
+            modelResults[index] = nextResult;
+        } else {
+            modelResults.push(nextResult);
+        }
+        recalculatePlaygroundProviderProbeResult(providerResult);
     }
 
     function summarizeEndpointResults(endpointResults = []) {
@@ -5119,7 +5501,7 @@
         });
         try {
             await Promise.all(Array.from(groups.values()).map(async (items) => {
-                for (const item of items) {
+                await runStaggeredByPreviousCompletion(items, async (item) => {
                     item.status = "running";
                     item.resultLabel = "检测中";
                     item.message = "正在执行健康测试";
@@ -5143,7 +5525,7 @@
                         item.message = error.message || "健康检测请求失败";
                     }
                     refresh();
-                }
+                });
             }));
             const summary = summarizeProviderMountedHealthBatchState(batchState);
             setButtonTransientFeedback(trigger, summary.failed === 0 && summary.rateLimited === 0 ? "success" : "error", {
@@ -5629,7 +6011,20 @@
             max_qps: null,
             max_rpm: null,
         };
-        const DEFAULT_PROVIDER_PRESETS = ["gpt-5.4", "gpt-5", "gpt-5-mini", "gpt-4.1", "gpt-4o", "gpt-4o-mini", "o3", "o4-mini"];
+        const DEFAULT_PROVIDER_PRESETS = [
+            "gpt-5.4",
+            "gpt-5",
+            "gpt-5-mini",
+            "gpt-4.1",
+            "gpt-4o",
+            "gpt-4o-mini",
+            "o3",
+            "o4-mini",
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+            "claude-3-5-sonnet-latest",
+            "claude-3-5-haiku-latest",
+        ];
         const PROVIDER_PRESETS_STORAGE_KEY = "aotu_provider_model_presets";
         let providers = [];
         let providerModelItems = [];
@@ -5651,6 +6046,20 @@
         let providerMaintenanceWindowControlsTouched = false;
         let editingProviderApiKey = "";
         const selectedProviderIds = new Set();
+        const PROVIDER_MODEL_PROTOCOL_OPTIONS = [
+            ["responses", "Responses"],
+            ["chat_completions", "Chat"],
+            ["both", "双协议"],
+            ["gemini", "Gemini"],
+            ["claude_messages", "Claude"],
+        ];
+        const PROVIDER_MODEL_PROTOCOL_LABELS = {
+            responses: "Responses API",
+            chat_completions: "Chat Completions API",
+            both: "双协议",
+            gemini: "Gemini 原生协议",
+            claude_messages: "Claude Messages API",
+        };
 
         if (!tableBody || !modal || !providerForm || !providerModelConfigList) return;
 
@@ -5669,16 +6078,34 @@
 
         function normalizeProviderModelProtocolType(configOrValue = "responses") {
             if (typeof configOrValue === "object" && configOrValue !== null) {
+                const modelName = configOrValue.model_name || "";
+                const modelGroup = normalizeModelGroup(configOrValue.model_group, inferModelGroup(modelName));
                 const rawProtocolType = String(configOrValue.protocol_type || "").trim();
-                if (["both", "chat_completions", "responses"].includes(rawProtocolType)) return rawProtocolType;
+                if (PROVIDER_MODEL_PROTOCOL_LABELS[rawProtocolType]) {
+                    return protocolTypeForModelGroup(modelGroup, modelName, rawProtocolType);
+                }
+                const inferredProtocol = inferProviderModelProtocolType(modelName);
+                if (inferredProtocol) return protocolTypeForModelGroup(modelGroup, modelName, inferredProtocol);
                 const supportsChat = configOrValue.supports_chat_completions === true;
                 const supportsResponses = configOrValue.supports_responses !== false;
-                if (supportsChat && supportsResponses) return "both";
-                if (supportsChat) return "chat_completions";
-                return "responses";
+                if (supportsChat && supportsResponses) return protocolTypeForModelGroup(modelGroup, modelName, "both");
+                if (supportsChat) return protocolTypeForModelGroup(modelGroup, modelName, "chat_completions");
+                return protocolTypeForModelGroup(modelGroup, modelName, "responses");
             }
             const normalized = String(configOrValue || "responses").trim();
-            return ["both", "chat_completions", "responses"].includes(normalized) ? normalized : "responses";
+            return PROVIDER_MODEL_PROTOCOL_LABELS[normalized] ? normalized : "responses";
+        }
+
+        function inferProviderModelProtocolType(modelName) {
+            const normalized = String(modelName || "").trim().toLowerCase();
+            if (!normalized) return "";
+            if (normalized.startsWith("gemini")) return "gemini";
+            if (normalized.startsWith("claude")) return "claude_messages";
+            if (["gpt-", "o1", "o3", "o4"].some((prefix) => normalized.startsWith(prefix))) return "both";
+            if (["deepseek", "qwen", "qwq", "qvq", "glm", "doubao", "kimi", "moonshot", "yi-", "baichuan", "ernie", "hunyuan", "minimax", "abab", "step", "internlm", "spark", "sensechat"].some((prefix) => normalized.startsWith(prefix))) {
+                return "chat_completions";
+            }
+            return "chat_completions";
         }
 
         function providerModelProtocolSupports(protocolType) {
@@ -5694,9 +6121,63 @@
             if (typeof configOrValue === "object" && configOrValue?.protocol_label) {
                 return configOrValue.protocol_label;
             }
-            if (protocolType === "chat_completions") return "Chat Completions API";
-            if (protocolType === "both") return "双协议";
-            return "Responses API";
+            return PROVIDER_MODEL_PROTOCOL_LABELS[protocolType] || PROVIDER_MODEL_PROTOCOL_LABELS.responses;
+        }
+
+        function renderProviderModelProtocolOptions(selectedValue) {
+            const normalized = normalizeProviderModelProtocolType(selectedValue);
+            return PROVIDER_MODEL_PROTOCOL_OPTIONS.map(([value, label]) => (
+                `<option value="${escapeHtml(value)}" ${normalized === value ? "selected" : ""}>${escapeHtml(label)}</option>`
+            )).join("");
+        }
+
+        function nativeEndpointPathPlaceholder(protocolType) {
+            const normalized = normalizeProviderModelProtocolType(protocolType);
+            if (normalized === "gemini") return "/models/{model}:{action}";
+            if (normalized === "claude_messages") return "/v1/messages";
+            return "仅 Gemini / Claude 原生协议需要";
+        }
+
+        function syncModelNativeEndpointPathPlaceholder(row) {
+            const nativePathInput = row?.querySelector('[data-model-config-field="native_endpoint_path"]');
+            const protocolInput = row?.querySelector('[data-model-config-field="protocol_type"]');
+            if (!nativePathInput) return;
+            const protocolType = normalizeProviderModelProtocolType(protocolInput?.value || "responses");
+            if (protocolType === "gemini") {
+                nativePathInput.placeholder = nativeEndpointPathPlaceholder(protocolType);
+            } else if (protocolType === "claude_messages") {
+                nativePathInput.placeholder = nativeEndpointPathPlaceholder(protocolType);
+            } else {
+                nativePathInput.placeholder = nativeEndpointPathPlaceholder(protocolType);
+            }
+        }
+
+        function syncModelProtocolLock(row) {
+            const nameInput = row?.querySelector('[data-model-config-field="model_name"]');
+            const groupInput = row?.querySelector('[data-model-config-field="model_group"]');
+            const protocolInput = row?.querySelector('[data-model-config-field="protocol_type"]');
+            if (!protocolInput) return;
+            const modelName = String(nameInput?.value || "").trim();
+            const modelGroup = normalizeModelGroup(groupInput?.value, inferModelGroup(modelName));
+            const locked = isProviderModelProtocolLocked(modelGroup, modelName);
+            if (locked) {
+                protocolInput.value = protocolTypeForModelGroup(modelGroup, modelName, protocolInput.value);
+                protocolInput.disabled = true;
+                protocolInput.title = "Gemini/Claude 分组必须使用对应官方原生端点协议，提供商地址仍可通过 Base URL 和原生接口路径配置。";
+            } else {
+                protocolInput.disabled = false;
+                protocolInput.removeAttribute("title");
+            }
+            syncModelNativeEndpointPathPlaceholder(row);
+        }
+
+        function formatEndpointResultProtocolLabel(item = {}) {
+            const value = String(item.protocol_type || item.endpoint_type || "").trim();
+            if (value === "chat_completions") return "Chat";
+            if (value === "responses") return "Responses";
+            if (value === "gemini") return "Gemini";
+            if (value === "claude_messages") return "Claude";
+            return item.endpoint_label || "端点";
         }
 
         function isValidMaintenanceTime(value) {
@@ -5853,15 +6334,23 @@
 
         function normalizeProviderModelConfig(config = {}) {
             const modelName = String(config.model_name || "").trim();
-            const protocolType = normalizeProviderModelProtocolType(config);
+            const modelGroup = normalizeModelGroup(config.model_group, inferModelGroup(modelName));
+            const protocolType = protocolTypeForModelGroup(
+                modelGroup,
+                modelName,
+                normalizeProviderModelProtocolType(config),
+            );
             const protocolSupports = providerModelProtocolSupports(protocolType);
             return {
                 model_name: modelName,
+                model_group: modelGroup,
+                model_group_label: config.model_group_label || formatModelGroupLabel(modelGroup, modelName),
                 supports_stream: config.supports_stream ?? DEFAULT_PROVIDER_MODEL_CONFIG.supports_stream,
                 supports_vision: config.supports_vision ?? DEFAULT_PROVIDER_MODEL_CONFIG.supports_vision,
                 supports_tools: config.supports_tools ?? DEFAULT_PROVIDER_MODEL_CONFIG.supports_tools,
                 supports_image_generation: config.supports_image_generation ?? DEFAULT_PROVIDER_MODEL_CONFIG.supports_image_generation,
                 protocol_type: protocolType,
+                native_endpoint_path: String(config.native_endpoint_path || "").trim(),
                 supports_chat_completions: protocolSupports.supports_chat_completions,
                 supports_responses: protocolSupports.supports_responses,
                 enabled: config.enabled ?? DEFAULT_PROVIDER_MODEL_CONFIG.enabled,
@@ -5903,9 +6392,13 @@
                 <label>
                     <span class="visually-hidden">端点协议</span>
                     <select class="field-input" data-model-config-field="protocol_type" aria-label="端点协议">
-                        <option value="responses" ${item.protocol_type === "responses" ? "selected" : ""}>Responses</option>
-                        <option value="chat_completions" ${item.protocol_type === "chat_completions" ? "selected" : ""}>Chat</option>
-                        <option value="both" ${item.protocol_type === "both" ? "selected" : ""}>双协议</option>
+                        ${renderProviderModelProtocolOptions(item.protocol_type)}
+                    </select>
+                </label>
+                <label>
+                    <span class="visually-hidden">模型分组</span>
+                    <select class="field-input" data-model-config-field="model_group" aria-label="模型分组">
+                        ${renderModelGroupOptions(item.model_group, item.model_name)}
                     </select>
                 </label>
                 <label>
@@ -5914,8 +6407,12 @@
                 </label>
                 <button class="table-action-btn" data-action="remove-model-config" type="button">删除</button>
                 <details class="provider-model-config-advanced">
-                    <summary>容量</summary>
+                    <summary>容量 / 原生路径</summary>
                     <div class="provider-model-capacity-grid">
+                        <label class="form-span-2">
+                            <span>原生接口路径</span>
+                            <input class="field-input" data-model-config-field="native_endpoint_path" value="${escapeHtml(item.native_endpoint_path)}" placeholder="${escapeHtml(nativeEndpointPathPlaceholder(item.protocol_type))}">
+                        </label>
                         <label>
                             <span>请求</span>
                             <input class="field-input" type="number" min="0" step="1" data-model-config-field="max_active_requests" value="${item.max_active_requests ?? ""}" placeholder="继承">
@@ -5935,6 +6432,35 @@
                     </div>
                 </details>
             `;
+            const nameInput = row.querySelector('[data-model-config-field="model_name"]');
+            const groupInput = row.querySelector('[data-model-config-field="model_group"]');
+            const protocolInput = row.querySelector('[data-model-config-field="protocol_type"]');
+            const nativePathInput = row.querySelector('[data-model-config-field="native_endpoint_path"]');
+            groupInput?.addEventListener("change", () => {
+                groupInput.dataset.userEdited = "true";
+                syncModelProtocolLock(row);
+            });
+            protocolInput?.addEventListener("change", () => {
+                if (isProviderModelProtocolLocked(groupInput?.value, nameInput?.value)) {
+                    syncModelProtocolLock(row);
+                    return;
+                }
+                protocolInput.dataset.userEdited = "true";
+                syncModelNativeEndpointPathPlaceholder(row);
+            });
+            nativePathInput?.addEventListener("input", () => {
+                nativePathInput.dataset.userEdited = "true";
+            });
+            nameInput?.addEventListener("input", () => {
+                if (groupInput && groupInput.dataset.userEdited !== "true") {
+                    groupInput.value = inferModelGroup(nameInput.value);
+                }
+                if (protocolInput && (protocolInput.dataset.userEdited !== "true" || isProviderModelProtocolLocked(groupInput?.value, nameInput.value))) {
+                    protocolInput.value = inferProviderModelProtocolType(nameInput.value);
+                }
+                syncModelProtocolLock(row);
+            });
+            syncModelProtocolLock(row);
             return row;
         }
 
@@ -5995,7 +6521,10 @@
                     return null;
                 }
                 seen.add(modelName);
-                const protocolType = normalizeProviderModelProtocolType(row.querySelector('[data-model-config-field="protocol_type"]')?.value);
+                const modelGroupInput = row.querySelector('[data-model-config-field="model_group"]');
+                const modelGroup = normalizeModelGroup(modelGroupInput?.value, inferModelGroup(modelName));
+                const requestedProtocolType = normalizeProviderModelProtocolType(row.querySelector('[data-model-config-field="protocol_type"]')?.value);
+                const protocolType = protocolTypeForModelGroup(modelGroup, modelName, requestedProtocolType);
                 const protocolSupports = providerModelProtocolSupports(protocolType);
                 const priceMultiplierInput = row.querySelector('[data-model-config-field="price_multiplier"]');
                 const priceMultiplier = Number(priceMultiplierInput?.value || DEFAULT_PROVIDER_MODEL_CONFIG.price_multiplier);
@@ -6006,12 +6535,14 @@
                 }
                 configs.push({
                     model_name: modelName,
+                    model_group: modelGroup,
                     priority: Number(providerPriorityInput.value || 100),
                     supports_stream: row.dataset.supportsStream ? row.dataset.supportsStream === "true" : DEFAULT_PROVIDER_MODEL_CONFIG.supports_stream,
                     supports_vision: row.dataset.supportsVision ? row.dataset.supportsVision === "true" : DEFAULT_PROVIDER_MODEL_CONFIG.supports_vision,
                     supports_tools: row.dataset.supportsTools ? row.dataset.supportsTools === "true" : DEFAULT_PROVIDER_MODEL_CONFIG.supports_tools,
                     supports_image_generation: row.dataset.supportsImageGeneration ? row.dataset.supportsImageGeneration === "true" : DEFAULT_PROVIDER_MODEL_CONFIG.supports_image_generation,
                     protocol_type: protocolType,
+                    native_endpoint_path: row.querySelector('[data-model-config-field="native_endpoint_path"]')?.value.trim() || null,
                     supports_chat_completions: protocolSupports.supports_chat_completions,
                     supports_responses: protocolSupports.supports_responses,
                     enabled: row.querySelector('[data-model-config-field="enabled"]')?.checked ?? DEFAULT_PROVIDER_MODEL_CONFIG.enabled,
@@ -6088,6 +6619,7 @@
                 content_integrity_score: "内容完整性分数",
                 model_configs: "模型挂载",
                 model_name: "模型名称",
+                model_group: "模型分组",
                 price_multiplier: "模型倍率",
                 context_window_tokens: "上下文窗口 token",
                 max_input_tokens: "最大输入 token",
@@ -6848,6 +7380,7 @@
                 <tr>
                     <td class="provider-model-name-cell">
                         <strong class="provider-model-detail-name">${escapeHtml(item.model_name)}</strong>
+                        <div class="table-muted">分组 ${escapeHtml(item.model_group_label || formatModelGroupLabel(item.model_group, item.model_name))}</div>
                         <div class="table-muted">可信度 ${renderTrustStatusWithHint(item.trust_status || "unknown", item.trust_status_label, item.trust_status_reason, "可信度异常原因")}</div>
                         <div class="table-muted">上次通过 ${escapeHtml(formatDate(item.content_probe_last_passed_at))}</div>
                         <div class="table-muted">上次失败 ${escapeHtml(formatDate(item.content_probe_last_failed_at))}</div>
@@ -7042,6 +7575,7 @@
                     <td><input type="checkbox" data-discovered-model-name="${escapeHtml(item.model_name)}" ${item.already_configured ? "disabled" : ""}></td>
                     <td>
                         <strong>${escapeHtml(item.model_name)}</strong>
+                        <div class="table-muted">${escapeHtml(item.model_group_label || formatModelGroupLabel(item.model_group, item.model_name))}</div>
                     </td>
                     <td>${formatModelCapabilitySummary(item)}</td>
                     <td>${item.already_configured ? "已在当前配置中" : "可导入"}</td>
@@ -7059,6 +7593,8 @@
                 supports_vision: item.supports_vision === true,
                 supports_tools: item.supports_tools === true,
                 supports_image_generation: item.supports_image_generation === true,
+                model_group: normalizeModelGroup(item.model_group, inferModelGroup(item.model_name)),
+                model_group_label: item.model_group_label || formatModelGroupLabel(item.model_group, item.model_name),
                 input_price_per_1k: item.input_price_per_1k ?? null,
                 output_price_per_1k: item.output_price_per_1k ?? null,
                 cache_price_per_1k: item.cache_price_per_1k ?? null,
@@ -7097,6 +7633,7 @@
                     <td>
                         <strong>${escapeHtml(item.model_name)}</strong>
                         ${item.display_name ? `<div class="table-muted">${escapeHtml(item.display_name)}</div>` : ""}
+                        <div class="table-muted">${escapeHtml(item.model_group_label || formatModelGroupLabel(item.model_group, item.model_name))}</div>
                     </td>
                     <td>${formatModelCapabilitySummary(item)}</td>
                     <td>
@@ -7168,9 +7705,11 @@
         }
 
         function importDiscoveredModels(modelNames) {
+            const discoveredByName = new Map(discoveredModels.map((item) => [item.model_name, item]));
             let addedCount = 0;
             modelNames.forEach((modelName) => {
-                if (addProviderModelConfig({ model_name: modelName })) {
+                const discoveredModel = discoveredByName.get(modelName) || {};
+                if (addProviderModelConfig({ model_name: modelName, model_group: discoveredModel.model_group })) {
                     addedCount += 1;
                 }
             });
@@ -7220,6 +7759,7 @@
                 const catalogModel = catalogByName.get(modelName) || {};
                 if (addProviderModelConfig({
                     model_name: modelName,
+                    model_group: catalogModel.model_group,
                     supports_stream: catalogModel.supports_stream,
                     supports_vision: catalogModel.supports_vision,
                     supports_tools: catalogModel.supports_tools,
@@ -7382,6 +7922,7 @@
             if (!Number.isFinite(providerId) || !Number.isFinite(modelId)) return null;
             const providerName = provider?.name || `提供商 ${providerId}`;
             const modelName = modelConfig?.model_name || `模型 ${modelId}`;
+            const protocolType = normalizeProviderModelProtocolType(modelConfig);
             return {
                 key: `${providerId}:${modelId}`,
                 providerId,
@@ -7389,6 +7930,8 @@
                 providerName,
                 modelName,
                 displayName: `${providerName} / ${modelName}`,
+                protocolType,
+                protocolLabel: formatProviderModelProtocolLabel(modelConfig),
                 providerEnabled: provider?.enabled !== false,
                 modelEnabled: modelConfig?.enabled !== false,
             };
@@ -7536,10 +8079,10 @@
             executableItems.forEach((item) => {
                 if (!groups.has(item.providerId)) groups.set(item.providerId, []);
                 groups.get(item.providerId).push(item);
-            });
-            try {
-                await Promise.all(Array.from(groups.values()).map(async (items) => {
-                    for (const item of items) {
+        });
+        try {
+            await Promise.all(Array.from(groups.values()).map(async (items) => {
+                    await runStaggeredByPreviousCompletion(items, async (item) => {
                         item.status = "running";
                         item.resultLabel = "检测中";
                         item.message = "正在执行健康测试";
@@ -7563,7 +8106,7 @@
                             item.message = error.message || "健康检测请求失败";
                         }
                         refresh();
-                    }
+                    });
                 }));
                 const summary = summarizeProviderHealthBatchState(batchState);
                 setButtonTransientFeedback(trigger, summary.failed === 0 && summary.rateLimited === 0 ? "success" : "error", {
@@ -7715,7 +8258,7 @@
             });
             try {
                 await Promise.all(Array.from(groups.values()).map(async (items) => {
-                    for (const item of items) {
+                    await runStaggeredByPreviousCompletion(items, async (item) => {
                         item.status = "running";
                         item.resultLabel = "执行中";
                         item.message = formatContentTrustRunningMessage();
@@ -7742,7 +8285,7 @@
                             item.message = error.message || "可信检测请求失败";
                         }
                         refresh();
-                    }
+                    });
                 }));
                 const summary = summarizeProviderTrustBatchState(batchState);
                 setButtonTransientFeedback(trigger, summary.failed === 0 && summary.rateLimited === 0 ? (summary.review ? "review" : "success") : "error", {
@@ -7804,7 +8347,7 @@
             const endpoints = Array.isArray(result.endpoint_results) ? result.endpoint_results : [];
             if (!endpoints.length) return "";
             return endpoints.map((item) => {
-                const label = item.protocol_type === "chat_completions" ? "Chat" : "Responses";
+                const label = formatEndpointResultProtocolLabel(item);
                 const status = item.success ? "通过" : "失败";
                 const statusCode = item.status_code == null ? "-" : item.status_code;
                 return `${label} ${status}（${statusCode}）`;
@@ -7879,13 +8422,21 @@
                     item.message = "该提供商没有可检测的挂载模型";
                     return;
                 }
+                if (["gemini", "claude_messages"].includes(String(item.protocolType || ""))) {
+                    item.status = "skipped";
+                    item.resultLabel = item.protocolLabel || "原生协议";
+                    item.message = "Gemini/Claude 原生协议模型无需端点协议检测，请使用健康检测和可信检测";
+                    return;
+                }
                 item.status = "running";
                 item.resultLabel = "检测中";
                 item.message = "正在分别请求 Chat Completions 与 Responses 端点";
             });
             setButtonLoading(trigger, true);
             openHealthCheckResultModal(title, renderProviderProtocolBatchProgress(batchState), trigger);
-            const executableItems = batchState.items.filter((item) => item.modelId != null);
+            const executableItems = batchState.items.filter(
+                (item) => item.modelId != null && !["gemini", "claude_messages"].includes(String(item.protocolType || "")),
+            );
             const groups = new Map();
             executableItems.forEach((item) => {
                 if (!groups.has(item.providerId)) groups.set(item.providerId, []);
@@ -7893,7 +8444,7 @@
             });
             try {
                 await Promise.all(Array.from(groups.values()).map(async (items) => {
-                    for (const item of items) {
+                    await runStaggeredByPreviousCompletion(items, async (item) => {
                         item.status = "running";
                         item.resultLabel = "检测中";
                         item.message = "正在分别请求 Chat Completions 与 Responses 端点";
@@ -7924,7 +8475,7 @@
                             item.message = error.message || "协议检测请求失败";
                         }
                         refresh();
-                    }
+                    });
                 }));
                 const summary = summarizeProviderProtocolBatchState(batchState);
                 setButtonTransientFeedback(trigger, summary.failed === 0 && summary.rateLimited === 0 ? "success" : "error", {
@@ -8062,9 +8613,7 @@
                     <td class="provider-model-status-cell">${renderStatusWithErrorHint(model.health_status, model.last_error)}</td>
                     <td>
                         <select class="field-input" data-model-field="protocol_type" data-provider-id="${provider.id}" data-model-id="${model.id}" aria-label="端点协议">
-                            <option value="responses" ${normalizeProviderModelProtocolType(model) === "responses" ? "selected" : ""}>Responses</option>
-                            <option value="chat_completions" ${normalizeProviderModelProtocolType(model) === "chat_completions" ? "selected" : ""}>Chat</option>
-                            <option value="both" ${normalizeProviderModelProtocolType(model) === "both" ? "selected" : ""}>双协议</option>
+                            ${renderProviderModelProtocolOptions(model)}
                         </select>
                         <div class="table-muted">${escapeHtml(formatProviderModelProtocolLabel(model))}</div>
                     </td>
@@ -8239,27 +8788,12 @@
                 if (action === "test") {
                     const features = await openTestFeaturePicker({ title: `选择提供商测试功能 · ${provider.name}` });
                     if (!features) return;
-                    setButtonLoading(button, true);
-                    const result = await runHealthCheckStream({
-                        url: `/api/providers/${id}/test-stream`,
+                    const targets = getProviderBatchTargets([provider], {
+                        emptyMessage: "该提供商当前没有可执行健康检测的挂载模型。",
+                    });
+                    await runProviderHealthBatch(targets, button, features, {
                         title: `提供商测试结果 · ${provider.name}`,
-                        scope: "provider",
-                        trigger: button,
-                        showModal: true,
-                        data: { features },
                     });
-                    const resultUsable = isHealthCheckUsable(result);
-                    setButtonLoading(button, false);
-                    setButtonTransientFeedback(button, resultUsable ? "success" : "error", {
-                        successText: result.success ? "成功" : "可用",
-                        errorText: "失败",
-                    });
-                    showToast(
-                        formatTestResultLabel(result, provider.name),
-                        resultUsable ? "success" : "error",
-                    );
-                    await wait(650);
-                    await loadProviders();
                     return;
                 }
                 if (action === "toggle") {
@@ -8634,7 +9168,7 @@
         const providerModelEnabledSelect = document.getElementById("provider-model-enabled");
         const providerModelHealthSelect = document.getElementById("provider-model-health");
         const providerModelTrustSelect = document.getElementById("provider-model-trust");
-        const providerModelQualityWindowSelect = document.getElementById("provider-model-quality-window");
+        const providerModelGroupSelect = document.getElementById("provider-model-model-group");
         const providerModelPageSizeSelect = document.getElementById("provider-model-page-size");
         const providerModelPageMeta = document.getElementById("provider-model-page-meta");
         const providerModelPrevPageBtn = document.getElementById("provider-model-prev-page-btn");
@@ -8658,6 +9192,7 @@
         const providerModelEditModelIdInput = document.getElementById("provider-model-edit-model-id");
         const providerModelEditTrustInput = document.getElementById("provider-model-edit-trust");
         const providerModelEditProtocolInput = document.getElementById("provider-model-edit-protocol");
+        const providerModelEditGroupInput = document.getElementById("provider-model-edit-group");
         const providerModelEditMultiplierInput = document.getElementById("provider-model-edit-multiplier");
         const providerModelEditInputPriceInput = document.getElementById("provider-model-edit-input-price");
         const providerModelEditOutputPriceInput = document.getElementById("provider-model-edit-output-price");
@@ -8693,7 +9228,7 @@
         function normalizeProviderModelProtocolType(configOrValue = "responses") {
             if (typeof configOrValue === "object" && configOrValue !== null) {
                 const rawProtocolType = String(configOrValue.protocol_type || "").trim();
-                if (["both", "chat_completions", "responses"].includes(rawProtocolType)) return rawProtocolType;
+                if (PROVIDER_MODEL_PROTOCOL_LABELS[rawProtocolType]) return rawProtocolType;
                 const supportsChat = configOrValue.supports_chat_completions === true;
                 const supportsResponses = configOrValue.supports_responses !== false;
                 if (supportsChat && supportsResponses) return "both";
@@ -8701,7 +9236,7 @@
                 return "responses";
             }
             const normalized = String(configOrValue || "responses").trim();
-            return ["both", "chat_completions", "responses"].includes(normalized) ? normalized : "responses";
+            return PROVIDER_MODEL_PROTOCOL_LABELS[normalized] ? normalized : "responses";
         }
 
         function formatProviderModelProtocolLabel(configOrValue) {
@@ -8709,9 +9244,7 @@
             if (typeof configOrValue === "object" && configOrValue?.protocol_label) {
                 return configOrValue.protocol_label;
             }
-            if (protocolType === "chat_completions") return "Chat Completions API";
-            if (protocolType === "both") return "双协议";
-            return "Responses API";
+            return PROVIDER_MODEL_PROTOCOL_LABELS[protocolType] || PROVIDER_MODEL_PROTOCOL_LABELS.responses;
         }
 
         function renderProviderModelFilterOptions(selectedProviderId = providerModelProviderSelect?.value || "") {
@@ -8734,7 +9267,7 @@
             if (providerModelEnabledSelect?.value) params.set("enabled", providerModelEnabledSelect.value);
             if (providerModelHealthSelect?.value) params.set("health_status", providerModelHealthSelect.value);
             if (providerModelTrustSelect?.value) params.set("trust_status", providerModelTrustSelect.value);
-            if (providerModelQualityWindowSelect?.value) params.set("quality_window_hours", providerModelQualityWindowSelect.value);
+            if (providerModelGroupSelect?.value) params.set("model_group", providerModelGroupSelect.value);
             return params;
         }
 
@@ -8766,6 +9299,7 @@
             const providerId = Number(provider.id);
             const modelId = Number(model.id);
             if (!Number.isFinite(providerId) || !Number.isFinite(modelId)) return null;
+            const protocolType = normalizeProviderModelProtocolType(model);
             return {
                 key: getProviderModelSelectionKey(providerId, modelId),
                 providerId,
@@ -8773,6 +9307,8 @@
                 providerName: provider.name || "-",
                 modelName: model.model_name || "-",
                 displayName: `${provider.name || "-"} / ${model.model_name || "-"}`,
+                protocolType,
+                protocolLabel: formatProviderModelProtocolLabel(model),
             };
         }
 
@@ -8888,6 +9424,10 @@
             providerModelEditModelIdInput.value = String(modelId);
             providerModelEditTrustInput.value = normalizeProviderModelTrustEditValue(modelConfig);
             providerModelEditProtocolInput.value = normalizeProviderModelProtocolType(modelConfig);
+            if (providerModelEditGroupInput) {
+                providerModelEditGroupInput.innerHTML = renderModelGroupOptions(modelConfig.model_group, modelConfig.model_name);
+                providerModelEditGroupInput.value = normalizeModelGroup(modelConfig.model_group, inferModelGroup(modelConfig.model_name));
+            }
             providerModelEditMultiplierInput.value = modelConfig.price_multiplier ?? 1;
             setOptionalPriceInput(providerModelEditInputPriceInput, modelConfig.input_price_per_1k);
             setOptionalPriceInput(providerModelEditOutputPriceInput, modelConfig.output_price_per_1k);
@@ -8916,6 +9456,7 @@
                     </td>
                     <td class="provider-model-name-cell">
                         <strong>${escapeHtml(model.model_name)}</strong>
+                        <div class="table-muted">${escapeHtml(model.model_group_label || formatModelGroupLabel(model.model_group, model.model_name))}</div>
                     </td>
                     <td class="provider-model-status-cell">${renderStatusWithErrorHint(model.health_status, model.last_error)}</td>
                     <td>
@@ -8960,9 +9501,6 @@
             state.pageSize = Number(result.page_size || state.pageSize || 20);
             state.totalPages = Number(result.total_pages || 1);
             if (providerModelPageSizeSelect) providerModelPageSizeSelect.value = String(state.pageSize);
-            if (providerModelQualityWindowSelect && result.quality_window_hours) {
-                providerModelQualityWindowSelect.value = String(result.quality_window_hours);
-            }
             renderProviderModels(state.items);
             renderProviderModelPagination();
             if (!silent) showToast("模型挂载矩阵已刷新");
@@ -9154,7 +9692,7 @@
             const endpoints = Array.isArray(result.endpoint_results) ? result.endpoint_results : [];
             if (!endpoints.length) return "";
             return endpoints.map((item) => {
-                const label = item.protocol_type === "chat_completions" ? "Chat" : "Responses";
+                const label = formatEndpointResultProtocolLabel(item);
                 const status = item.success ? "通过" : "失败";
                 const statusCode = item.status_code == null ? "-" : item.status_code;
                 return `${label} ${status}（${statusCode}）`;
@@ -9249,6 +9787,12 @@
             const title = "批量协议检测结果";
             const refresh = () => refreshHealthCheckResultModal(title, renderProviderModelProtocolBatchProgress(batchState));
             batchState.items.forEach((item) => {
+                if (["gemini", "claude_messages"].includes(String(item.protocolType || ""))) {
+                    item.status = "skipped";
+                    item.resultLabel = item.protocolLabel || "原生协议";
+                    item.message = "Gemini/Claude 原生协议模型无需端点协议检测，请使用健康检测和可信检测";
+                    return;
+                }
                 item.status = "running";
                 item.resultLabel = "检测中";
                 item.message = "正在分别请求 Chat Completions 与 Responses 端点";
@@ -9257,13 +9801,14 @@
             openHealthCheckResultModal(title, renderProviderModelProtocolBatchProgress(batchState), trigger);
             const providerGroups = new Map();
             batchState.items.forEach((item) => {
+                if (["gemini", "claude_messages"].includes(String(item.protocolType || ""))) return;
                 const groupKey = Number.isFinite(Number(item.providerId)) ? Number(item.providerId) : item.key;
                 if (!providerGroups.has(groupKey)) providerGroups.set(groupKey, []);
                 providerGroups.get(groupKey).push(item);
             });
             try {
                 await Promise.all(Array.from(providerGroups.values()).map(async (items) => {
-                    await Promise.all(items.map(async (item) => {
+                    await runStaggeredByPreviousCompletion(items, async (item) => {
                         item.status = "running";
                         item.resultLabel = "检测中";
                         item.message = "正在分别请求 Chat Completions 与 Responses 端点";
@@ -9298,7 +9843,7 @@
                             item.message = error.message || "协议检测请求失败";
                         }
                         refresh();
-                    }));
+                    });
                 }));
                 const summary = summarizeProviderModelProtocolBatchState(batchState);
                 setButtonTransientFeedback(trigger, summary.failed === 0 && summary.rateLimited === 0 ? "success" : "error", {
@@ -9325,6 +9870,17 @@
             const batchState = createProviderModelBatchState(kind, targets);
             const title = kind === "trust" ? "批量可信检测结果" : "批量测试结果";
             const refresh = () => refreshHealthCheckResultModal(title, renderProviderModelBatchProgress(batchState));
+            let tableRefreshQueue = Promise.resolve();
+            const refreshTableAfterItem = async () => {
+                tableRefreshQueue = tableRefreshQueue
+                    .catch(() => {})
+                    .then(() => loadProviderModels({ silent: true }));
+                try {
+                    await tableRefreshQueue;
+                } catch (error) {
+                    console.warn("模型挂载矩阵刷新失败", error);
+                }
+            };
             const runBatchItem = async (item) => {
                 item.status = "running";
                 item.resultLabel = "执行中";
@@ -9366,6 +9922,7 @@
                     item.latencyMs = Date.now() - startedAt;
                     item.message = error.message || "请求失败";
                 }
+                await refreshTableAfterItem();
                 refresh();
             };
             const providerGroups = new Map();
@@ -9378,9 +9935,7 @@
             openHealthCheckResultModal(title, renderProviderModelBatchProgress(batchState), trigger);
             try {
                 await Promise.all(Array.from(providerGroups.values()).map(async (items) => {
-                    for (const item of items) {
-                        await runBatchItem(item);
-                    }
+                    await runStaggeredByPreviousCompletion(items, runBatchItem);
                 }));
                 const summary = summarizeProviderModelBatchState(batchState);
                 setButtonTransientFeedback(trigger, summary.failed === 0 && summary.rateLimited === 0 ? "success" : "error", {
@@ -9482,6 +10037,7 @@
                 payload = {
                     content_integrity_status: providerModelEditTrustInput.value,
                     protocol_type: normalizeProviderModelProtocolType(providerModelEditProtocolInput.value),
+                    model_group: normalizeModelGroup(providerModelEditGroupInput?.value, inferModelGroup(modelConfig.model_name)),
                     price_multiplier: multiplier,
                     input_price_per_1k: readOptionalPriceInput(providerModelEditInputPriceInput, "输入单价"),
                     output_price_per_1k: readOptionalPriceInput(providerModelEditOutputPriceInput, "输出单价"),
@@ -9517,7 +10073,7 @@
             window.clearTimeout(searchTimer);
             searchTimer = window.setTimeout(() => reloadFirstPage().catch((error) => showToast(error.message, "error")), 250);
         });
-        [providerModelProviderSelect, providerModelEnabledSelect, providerModelHealthSelect, providerModelTrustSelect, providerModelQualityWindowSelect].forEach((field) => {
+        [providerModelProviderSelect, providerModelEnabledSelect, providerModelHealthSelect, providerModelTrustSelect, providerModelGroupSelect].forEach((field) => {
             field?.addEventListener("change", () => reloadFirstPage().catch((error) => showToast(error.message, "error")));
         });
         providerModelSelectPageInput?.addEventListener("change", () => {
@@ -9592,6 +10148,7 @@
         const form = document.getElementById("model-form");
         const submitBtn = document.getElementById("model-submit-btn");
         const nameInput = document.getElementById("model-name");
+        const modelGroupInput = document.getElementById("model-group");
         const displayNameInput = document.getElementById("model-display-name");
         const enabledInput = document.getElementById("model-enabled");
         const supportsStreamInput = document.getElementById("model-supports-stream");
@@ -9629,7 +10186,7 @@
             || !supportsStreamInput || !supportsVisionInput || !supportsToolsInput
             || !contextWindowInput || !maxInputTokensInput || !maxOutputTokensInput
             || !selectPageInput || !batchMeta || !batchContextWindowInput || !batchContextApplyBtn
-            || !pageMeta || !prevPageBtn || !nextPageBtn || !testAllBtn || !refreshBtn || !addBtn || !modal || !form || !bindingBody
+            || !pageMeta || !prevPageBtn || !nextPageBtn || !testAllBtn || !refreshBtn || !addBtn || !modal || !form || !bindingBody || !modelGroupInput
             || !mappingDrawer || !mappingDrawerCard || !mappingDrawerTitle || !mappingDrawerIntro || !mappingDrawerCloseBtn || !mappingSummary
             || !mappingForm || !mappingSourceInput || !mappingEnabledInput || !mappingRemarkInput
             || !mappingTargetList || !mappingTableBody || !mappingAddTargetBtn || !mappingSubmitBtn || !mappingCancelBtn
@@ -9819,6 +10376,11 @@
                             <span>速度标签</span>
                             <strong>${escapeHtml(item.speed_label || "-")}</strong>
                             <small>${escapeHtml(item.remark || "无备注")}</small>
+                        </div>
+                        <div>
+                            <span>模型分组</span>
+                            <strong>${escapeHtml(item.model_group_label || formatModelGroupLabel(item.model_group, item.model_name))}</strong>
+                            <small>${escapeHtml(item.model_group || inferModelGroup(item.model_name))}</small>
                         </div>
                     </div>
                     ${renderModelBindingPreview(item, modelIndex)}
@@ -10086,6 +10648,7 @@
                             <div class="models-card-title">
                                 <strong>${escapeHtml(item.display_name || item.model_name)}</strong>
                                 <span>${escapeHtml(item.model_name)}</span>
+                                <span>${escapeHtml(item.model_group_label || formatModelGroupLabel(item.model_group, item.model_name))}</span>
                             </div>
                             <div class="models-card-section">
                                 <span>状态</span>
@@ -10366,6 +10929,9 @@
             modalTitle.textContent = isEditing ? `编辑模型 ${detail.model_name}` : "新增模型";
             nameInput.value = detail?.model_name || "";
             nameInput.disabled = isEditing;
+            modelGroupInput.innerHTML = renderModelGroupOptions(detail?.model_group, detail?.model_name || nameInput.value);
+            modelGroupInput.value = normalizeModelGroup(detail?.model_group, inferModelGroup(detail?.model_name || nameInput.value));
+            modelGroupInput.dataset.userEdited = isEditing ? "true" : "false";
             displayNameInput.value = detail?.display_name || "";
             enabledInput.checked = detail?.enabled ?? true;
             supportsStreamInput.checked = detail?.supports_stream ?? true;
@@ -10841,6 +11407,13 @@
         inputPriceInput.addEventListener("input", refreshBindingRows);
         outputPriceInput.addEventListener("input", refreshBindingRows);
         cachePriceInput.addEventListener("input", refreshBindingRows);
+        modelGroupInput.addEventListener("change", () => {
+            modelGroupInput.dataset.userEdited = "true";
+        });
+        nameInput.addEventListener("input", () => {
+            if (state.editingModelName || modelGroupInput.dataset.userEdited === "true") return;
+            modelGroupInput.value = inferModelGroup(nameInput.value);
+        });
 
         form.addEventListener("submit", async (event) => {
             event.preventDefault();
@@ -10853,6 +11426,7 @@
                 }
                 const inputPricePer1K = parseOptionalPriceField(inputPriceInput, "输入单价");
                 const payload = {
+                    model_group: normalizeModelGroup(modelGroupInput.value, inferModelGroup(modelName)),
                     display_name: displayNameInput.value.trim() || null,
                     enabled: enabledInput.checked,
                     supports_stream: supportsStreamInput.checked,
@@ -11111,6 +11685,7 @@
         const externalFields = document.getElementById("content-guard-external-fields");
         const externalBaseUrlInput = document.getElementById("content-guard-external-base-url");
         const externalModelNameInput = document.getElementById("content-guard-external-model-name");
+        const externalApiKeyInput = document.getElementById("content-guard-external-api-key");
         const externalEndpointPathSelect = document.getElementById("content-guard-external-endpoint-path");
         const probeOptionsNode = document.getElementById("content-guard-probe-options");
         const manualNotice = document.getElementById("content-guard-manual-notice");
@@ -11229,6 +11804,7 @@
             pollution_rules: "外链广告识别",
             json: "严格 JSON",
             sse: "流式污染检测",
+            vision: "图片检查",
         };
 
         const setText = (id, value) => {
@@ -11632,8 +12208,14 @@
             const internalTarget = selectedTargetType() === "internal";
             const hasProvider = Boolean(providerSelect.value);
             const hasModel = Boolean(providerModelSelect.value);
+            const hasExternalTarget = Boolean(
+                String(externalBaseUrlInput?.value || "").trim()
+                && String(externalModelNameInput?.value || "").trim()
+                && String(externalApiKeyInput?.value || "").trim()
+                && String(externalEndpointPathSelect?.value || "").trim()
+            );
             if (probeSubmitBtn) {
-                probeSubmitBtn.disabled = internalTarget && (!hasProvider || !hasModel);
+                probeSubmitBtn.disabled = internalTarget ? (!hasProvider || !hasModel) : !hasExternalTarget;
             }
         };
 
@@ -12054,9 +12636,25 @@
             if (selectedTargetType() === "external") {
                 const baseUrl = String(externalBaseUrlInput?.value || "").trim();
                 const modelName = String(externalModelNameInput?.value || "").trim();
+                const apiKey = String(externalApiKeyInput?.value || "").trim();
+                const endpointPath = String(externalEndpointPathSelect?.value || "").trim() || "/chat/completions";
                 if (!baseUrl) throw new Error("请填写外部提供商接口地址");
                 if (!modelName) throw new Error("请填写外部提供商模型名");
-                throw new Error("浏览器不接收外部 API Key，外部提供商只能通过后端托管配置检测");
+                if (!apiKey) throw new Error("请填写外部提供商密钥");
+                if (!["/chat/completions", "/responses"].includes(endpointPath)) {
+                    throw new Error("请选择有效的外部端点协议");
+                }
+                return {
+                    target_type: "external",
+                    external: {
+                        base_url: baseUrl,
+                        api_key: apiKey,
+                        model_name: modelName,
+                        endpoint_path: endpointPath,
+                    },
+                    probe_keys: probeKeys,
+                    persist_internal_result: false,
+                };
             }
             if (!providerSelect.value || !providerModelSelect.value) {
                 throw new Error("请选择提供商和模型");
@@ -12117,6 +12715,8 @@
                     .slice(0, 4)
                     .join("、");
                 const categoriesText = formatContentGuardCategories(guard.content_guard_categories_json || guard.categories || matchedRules.map((rule) => rule?.category).filter(Boolean));
+                const errorLabel = item.success ? "-" : (formatProbeErrorLabel(item) || "-");
+                const handlingStrategy = item.success ? "-" : (formatProbeHandlingStrategy(item) || "-");
                 const confidence = guard.content_guard_confidence ?? guard.confidence;
                 const scoreDelta = guard.content_guard_score_delta ?? guard.score_delta;
                 const finalStrategy = guard.content_guard_final_strategy || guard.final_strategy || guard.content_guard_action || "-";
@@ -12133,6 +12733,8 @@
                         <td>${escapeHtml(supportMode)}</td>
                         <td>${escapeHtml(ruleIds || "-")}</td>
                         <td>${escapeHtml(categoriesText)}</td>
+                        <td>${escapeHtml(errorLabel)}</td>
+                        <td>${renderReasonHelp(handlingStrategy, "处理策略")}</td>
                         <td>${escapeHtml(confidence == null ? "-" : `${Math.round(Number(confidence || 0) * 100)}%`)} / ${escapeHtml(scoreDelta == null ? "-" : String(scoreDelta))}</td>
                         <td>${escapeHtml(formatContentGuardActionLabel(finalStrategy))}</td>
                         <td>${escapeHtml(persisted)}</td>
@@ -12142,7 +12744,7 @@
                         <td>${renderContentGuardRawResponseButton(item, item.probe_label || item.endpoint_label || item.probe_key || "内容防护探针")}</td>
                     </tr>
                 `;
-            }).join("") : '<tr><td colspan="15" class="table-muted">未返回检测结果</td></tr>';
+            }).join("") : '<tr><td colspan="17" class="table-muted">未返回检测结果</td></tr>';
             scheduleResponsiveTableSync(document.querySelector(".content-guard-result-panel"));
         };
 
@@ -12170,6 +12772,8 @@
                     <td>-</td>
                     <td>-</td>
                     <td>-</td>
+                    <td>-</td>
+                    <td>-</td>
                     <td>等待结果</td>
                     <td>-</td>
                     <td>-</td>
@@ -12177,7 +12781,7 @@
                     <td>-</td>
                 </tr>
             `).join("");
-            document.getElementById("content-guard-result-body").innerHTML = rows || '<tr><td colspan="15" class="table-muted">正在准备探针</td></tr>';
+            document.getElementById("content-guard-result-body").innerHTML = rows || '<tr><td colspan="17" class="table-muted">正在准备探针</td></tr>';
             scheduleResponsiveTableSync(document.querySelector(".content-guard-result-panel"));
         };
 
@@ -12202,7 +12806,8 @@
                     <td>-</td>
                     <td>-</td>
                     <td>-</td>
-                    <td>-</td>
+                    <td>内部异常</td>
+                    <td>${renderReasonHelp("记录内部异常并提示排查系统代码或配置；不更新上游沉淀状态。", "处理策略")}</td>
                     <td>-</td>
                     <td>未写入</td>
                     <td>-</td>
@@ -12309,7 +12914,7 @@
             button.addEventListener("click", () => activateContentGuardTab(button.dataset.contentGuardTab || "settings"));
         });
         providerSelect.addEventListener("change", renderProviderModelOptions);
-        [externalBaseUrlInput, externalModelNameInput, externalEndpointPathSelect].forEach((node) => {
+        [externalBaseUrlInput, externalModelNameInput, externalApiKeyInput, externalEndpointPathSelect].forEach((node) => {
             node?.addEventListener("input", refreshProbeAvailability);
             node?.addEventListener("change", refreshProbeAvailability);
         });
@@ -13417,11 +14022,72 @@
             setBatchPlaceholder("批量测试中...");
             try {
                 setButtonLoading(batchSubmitBtn, true);
-                const results = await api.post("/api/providers/test-connectivity", { provider_ids: providerIds });
-                batchResultsState.results = Array.isArray(results) ? results : [];
+                batchResultsState.results = [];
                 batchResultsState.keyword = "";
                 batchResultsState.health = "";
                 batchResultsState.page = 1;
+                const selectedProviders = providerIds
+                    .map((providerId) => providerOptions.find((provider) => Number(provider.id) === Number(providerId)))
+                    .filter(Boolean);
+                const providerResults = new Map();
+                selectedProviders.forEach((provider) => {
+                    providerResults.set(provider.id, createPlaygroundProviderProbeResult(provider));
+                    batchResultsState.results.push(providerResults.get(provider.id));
+                });
+                renderBatchResultsView();
+                const providerGroups = selectedProviders.map((provider) => ({
+                    provider,
+                    models: (Array.isArray(provider.model_configs) ? provider.model_configs : [])
+                        .filter((modelConfig) => modelConfig?.enabled !== false && modelConfig?.id != null),
+                }));
+                const runProviderGroup = async ({ provider, models }) => {
+                    const providerResult = providerResults.get(provider.id);
+                    if (!providerResult) return;
+                    if (!models.length) {
+                        recalculatePlaygroundProviderProbeResult(providerResult);
+                        batchMeta.textContent = `批量测试中，已完成 ${batchResultsState.results.filter((item) => !["等待中", "检测中"].includes(String(item.status_code ?? ""))).length}/${providerIds.length} 个渠道`;
+                        renderBatchResultsView();
+                        return;
+                    }
+                    await runStaggeredByPreviousCompletion(models, async (modelConfig) => {
+                        const startedAt = Date.now();
+                        applyPlaygroundProviderModelProbeResult(providerResult, modelConfig, {
+                            status_code: "检测中",
+                            latency_ms: "检测中",
+                            message: "正在执行单模型检测",
+                            health_status: "unknown",
+                        });
+                        batchMeta.textContent = `批量测试中，已完成 ${batchResultsState.results.filter((item) => !["等待中", "检测中"].includes(String(item.status_code ?? ""))).length}/${providerIds.length} 个渠道`;
+                        renderBatchResultsView();
+                        try {
+                            const result = await api.post(
+                                `/api/providers/${provider.id}/models/${modelConfig.id}/test`,
+                                { features: ["text_stream"] },
+                                { timeoutMs: PROBE_API_TIMEOUT_MS },
+                            );
+                            applyPlaygroundProviderModelProbeResult(providerResult, modelConfig, {
+                                ...result,
+                                latency_ms: result?.latency_ms ?? (Date.now() - startedAt),
+                                model_name: modelConfig.model_name,
+                            });
+                        } catch (error) {
+                            applyPlaygroundProviderModelProbeResult(providerResult, modelConfig, {
+                                success: false,
+                                provider_success: false,
+                                health_status: "unhealthy",
+                                status_code: "-",
+                                latency_ms: Date.now() - startedAt,
+                                message: error.message || "批量测试请求失败",
+                                model_name: modelConfig.model_name,
+                                endpoint_results: [],
+                            });
+                        }
+                        recalculatePlaygroundProviderProbeResult(providerResult);
+                        batchMeta.textContent = `批量测试中，已完成 ${batchResultsState.results.filter((item) => !["等待中", "检测中"].includes(String(item.status_code ?? ""))).length}/${providerIds.length} 个渠道`;
+                        renderBatchResultsView();
+                    });
+                };
+                await Promise.all(providerGroups.map(runProviderGroup));
                 batchMeta.textContent = `批量测试完成，共 ${batchResultsState.results.length} 个渠道`;
                 renderBatchResultsView();
                 showToast("批量测试完成");
@@ -18230,6 +18896,8 @@
                             ["运行批次", item.run_id],
                             ["触发方式", formatLogStatusLabel(item.trigger_type)],
                             ["范围", `${formatLogStatusLabel(item.scope_type)} ${item.scope_id || ""}`.trim()],
+                            ["检测提供商名称", normalizeTypedDisplayList(item.health_probe_provider_names).join("、") || "-"],
+                            ["检测模型 ID", normalizeTypedDisplayList(item.health_probe_model_ids).join("、") || "-"],
                             ["创建时间", formatDate(item.created_at)],
                         ],
                     },
@@ -20632,6 +21300,7 @@
             currentPageAbortController = new AbortController();
             page = document.body.dataset.page;
             const pageScope = document.getElementById("app-content") || document;
+            initInteractionHitAreaGuards();
             initBillingTooltipLayer();
             initProviderStatusTooltipLayer();
             if (document.body.dataset.globalUiEnhancementsBound !== "true") {

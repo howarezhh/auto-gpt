@@ -3071,7 +3071,7 @@ textarea.field-input {
     border-radius: 0;
     border: 1px solid rgba(128, 149, 182, 0.1);
     background: rgba(255, 255, 255, 0.92);
-    cursor: pointer;
+    cursor: default;
     box-shadow: none;
 }
 
@@ -3113,6 +3113,7 @@ html[data-theme="dark"] .settings-switch-copy small {
     width: 54px;
     height: 32px;
     flex: 0 0 auto;
+    cursor: pointer;
 }
 
 .settings-switch-control input {
@@ -3132,6 +3133,7 @@ html[data-theme="dark"] .settings-switch-copy small {
     background: rgba(148, 163, 184, 0.38);
     transition: background 180ms ease;
     position: relative;
+    pointer-events: none;
 }
 
 .settings-switch-slider::after {
@@ -3366,6 +3368,7 @@ html[data-theme="dark"] .settings-switch-control input:checked + .settings-switc
 .content-guard-target-stack {
     display: grid;
     align-items: start;
+    min-height: 132px;
 }
 
 .content-guard-segment-option,
@@ -3853,6 +3856,7 @@ html[data-theme="dark"] .settings-switch-control input:checked + .settings-switc
     grid-template-columns:
         minmax(220px, 1fr)
         58px
+        minmax(128px, 0.5fr)
         minmax(128px, 0.5fr)
         minmax(86px, 0.45fr)
         auto;
@@ -6861,6 +6865,26 @@ html[data-theme="dark"] .benchmark-log-window {
 
 .typed-log-primary strong {
     color: var(--text);
+}
+
+.typed-log-compact-list {
+    display: inline-flex;
+    max-width: min(220px, 100%);
+    align-items: center;
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1.35;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    vertical-align: middle;
+    white-space: nowrap;
+}
+
+.typed-log-compact-list:hover,
+.typed-log-compact-list:focus-visible {
+    color: var(--accent);
+    outline: none;
 }
 
 .log-trace-shell {
@@ -13869,6 +13893,7 @@ body[data-page="ip-management"] .ip-action-help-icon {
     font-size: 13px;
     color: currentColor;
     opacity: 0.72;
+    cursor: help;
 }
 
 body[data-page="ip-management"] .content-guard-tab .ip-action-help-icon {
@@ -14025,6 +14050,10 @@ html[data-theme="dark"] body[data-page="ip-management"] .ip-management-result {
 }
 
 @media (max-width: 768px) {
+    body[data-page="content-guard"] .content-guard-target-stack {
+        min-height: 284px;
+    }
+
     body[data-page="content-guard"] .content-guard-target-group,
     body[data-page="settings"] #settings-form,
     body[data-page="settings"] .settings-subgrid,

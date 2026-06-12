@@ -37,6 +37,8 @@ class ProviderModel(Base):
     supports_chat_completions: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     supports_responses: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     protocol_type: Mapped[str] = mapped_column(Text, nullable=False, default="responses")
+    native_endpoint_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    model_group: Mapped[str] = mapped_column(Text, nullable=False, default="unknown")
     content_integrity_status: Mapped[str] = mapped_column(Text, nullable=False, default="unknown")
     content_probe_last_passed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     content_probe_last_failed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

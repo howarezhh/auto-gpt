@@ -9,6 +9,33 @@ PROVIDER_PROTOCOL_TYPE_LABELS = {
     "both": "双协议",
     "chat_completions": "Chat Completions API",
     "responses": "Responses API",
+    "gemini": "Gemini 原生协议",
+    "claude_messages": "Claude Messages API",
+}
+
+MODEL_GROUP_LABELS = {
+    "openai": "OpenAI",
+    "deepseek": "DeepSeek",
+    "qwen": "通义千问",
+    "glm": "智谱 GLM",
+    "doubao": "豆包",
+    "kimi": "Kimi",
+    "baichuan": "百川",
+    "ernie": "文心一言",
+    "hunyuan": "腾讯混元",
+    "minimax": "MiniMax",
+    "step": "阶跃星辰",
+    "internlm": "书生浦语",
+    "spark": "讯飞星火",
+    "yi": "零一万物",
+    "mistral": "Mistral",
+    "llama": "Llama",
+    "gemini": "Gemini",
+    "claude": "Claude",
+    "grok": "Grok",
+    "cohere": "Cohere",
+    "perplexity": "Perplexity",
+    "unknown": "未知分组",
 }
 
 PROVIDER_TRUST_LEVEL_LABELS = {
@@ -154,12 +181,34 @@ def normalize_provider_protocol_type(value: str | None) -> str:
         "responsesapi": "responses",
         "响应": "responses",
         "响应式": "responses",
+        "gemini": "gemini",
+        "google": "gemini",
+        "googleai": "gemini",
+        "googleaiapi": "gemini",
+        "geminiapi": "gemini",
+        "gemini原生协议": "gemini",
+        "claude": "claude_messages",
+        "anthropic": "claude_messages",
+        "anthropicapi": "claude_messages",
+        "claudemessages": "claude_messages",
+        "claudemessagesapi": "claude_messages",
+        "claudeapi": "claude_messages",
+        "claude原生协议": "claude_messages",
     }
     if normalized in PROVIDER_PROTOCOL_TYPE_LABELS:
         return normalized
     if compact in aliases:
         return aliases[compact]
-    raise ValueError("协议仅支持 双协议、Chat Completions API 或 Responses API")
+    raise ValueError("协议仅支持 双协议、Chat Completions API、Responses API、Gemini 原生协议或 Claude Messages API")
+
+
+def normalize_native_endpoint_path(value: str | None) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.lower().startswith(("http://", "https://")):
+        raise ValueError("原生接口路径只填写路径部分，例如 /models/{model}:{action}，域名请填写在 Base URL")
+    return text if text.startswith("/") else f"/{text}"
 
 
 def format_provider_protocol_label(value: str | None) -> str:
@@ -179,11 +228,73 @@ def supports_from_protocol_type(value: str | None) -> tuple[bool, bool]:
     return normalized in {"both", "chat_completions"}, normalized in {"both", "responses"}
 
 
+def normalize_model_group(value: str | None) -> str:
+    raw = str(value or "").strip()
+    normalized = raw.lower().replace(" ", "").replace("_", "").replace("-", "")
+    aliases = {
+        "": "unknown",
+        "unknown": "unknown",
+        "未知": "unknown",
+        "openai": "openai",
+        "gpt": "openai",
+        "deepseek": "deepseek",
+        "qwen": "qwen",
+        "通义千问": "qwen",
+        "tongyi": "qwen",
+        "glm": "glm",
+        "zhipu": "glm",
+        "智谱": "glm",
+        "doubao": "doubao",
+        "豆包": "doubao",
+        "bytedance": "doubao",
+        "kimi": "kimi",
+        "moonshot": "kimi",
+        "月之暗面": "kimi",
+        "baichuan": "baichuan",
+        "百川": "baichuan",
+        "ernie": "ernie",
+        "wenxin": "ernie",
+        "文心": "ernie",
+        "hunyuan": "hunyuan",
+        "混元": "hunyuan",
+        "minimax": "minimax",
+        "abab": "minimax",
+        "step": "step",
+        "阶跃": "step",
+        "internlm": "internlm",
+        "书生": "internlm",
+        "spark": "spark",
+        "讯飞星火": "spark",
+        "yi": "yi",
+        "零一万物": "yi",
+        "mistral": "mistral",
+        "llama": "llama",
+        "meta": "llama",
+        "gemini": "gemini",
+        "google": "gemini",
+        "claude": "claude",
+        "anthropic": "claude",
+        "grok": "grok",
+        "xai": "grok",
+        "cohere": "cohere",
+        "command": "cohere",
+        "perplexity": "perplexity",
+        "sonar": "perplexity",
+    }
+    if raw in MODEL_GROUP_LABELS:
+        return raw
+    if normalized in aliases:
+        return aliases[normalized]
+    raise ValueError("模型分组仅支持国内外主流大模型品牌名")
+
+
 class ProviderModelConfigBase(BaseModel):
     model_name: str = Field(..., min_length=1)
+    model_group: str | None = None
     enabled: bool = True
     priority: int = 100
     protocol_type: str = "responses"
+    native_endpoint_path: str | None = None
     supports_stream: bool = True
     supports_vision: bool = True
     supports_tools: bool = True
@@ -213,6 +324,18 @@ class ProviderModelConfigBase(BaseModel):
     def normalize_protocol_type(cls, value: str | None) -> str:
         return normalize_provider_protocol_type(value or "responses")
 
+    @field_validator("native_endpoint_path")
+    @classmethod
+    def normalize_native_path(cls, value: str | None) -> str | None:
+        return normalize_native_endpoint_path(value)
+
+    @field_validator("model_group")
+    @classmethod
+    def normalize_group(cls, value: str | None) -> str | None:
+        if value is None or str(value).strip() == "":
+            return None
+        return normalize_model_group(value)
+
 
 class ProviderModelConfigInput(ProviderModelConfigBase):
     pass
@@ -220,6 +343,8 @@ class ProviderModelConfigInput(ProviderModelConfigBase):
 
 class ProviderModelConfigOut(ProviderModelConfigBase):
     id: int
+    model_group: str = "unknown"
+    model_group_label: str = "未知分组"
     protocol_type: str = "responses"
     protocol_label: str = "Responses API"
     health_status: str
@@ -261,6 +386,7 @@ class ProviderModelMountProviderOut(BaseModel):
     base_url: str
     protocol_type: str = "both"
     protocol_label: str = "双协议"
+    native_endpoint_path: str | None = None
     group_name: str | None = None
     region_tag: str | None = None
     enabled: bool
@@ -290,9 +416,11 @@ class ProviderModelMountListResponse(BaseModel):
 
 
 class ProviderModelConfigUpdate(BaseModel):
+    model_group: str | None = None
     enabled: bool | None = None
     priority: int | None = None
     protocol_type: str | None = None
+    native_endpoint_path: str | None = None
     supports_stream: bool | None = None
     supports_vision: bool | None = None
     supports_tools: bool | None = None
@@ -319,6 +447,20 @@ class ProviderModelConfigUpdate(BaseModel):
         if value is None:
             return None
         return normalize_provider_protocol_type(value)
+
+    @field_validator("native_endpoint_path")
+    @classmethod
+    def normalize_native_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return normalize_native_endpoint_path(value)
+
+    @field_validator("model_group")
+    @classmethod
+    def normalize_group(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return normalize_model_group(value)
 
     @field_validator("content_integrity_status")
     @classmethod
@@ -385,6 +527,7 @@ class ProviderBase(BaseModel):
     api_key: str = Field(..., min_length=1)
     provider_type: str = "openai_compatible"
     protocol_type: str = "both"
+    native_endpoint_path: str | None = None
     group_name: str | None = None
     region_tag: str | None = None
     enabled: bool = True
@@ -433,6 +576,11 @@ class ProviderBase(BaseModel):
     def normalize_protocol_type(cls, value: str | None) -> str:
         return normalize_provider_protocol_type(value)
 
+    @field_validator("native_endpoint_path")
+    @classmethod
+    def normalize_native_path(cls, value: str | None) -> str | None:
+        return normalize_native_endpoint_path(value)
+
     @field_validator("maintenance_window")
     @classmethod
     def normalize_maintenance_window(cls, value: str | None) -> str | None:
@@ -459,6 +607,7 @@ class ProviderUpdate(BaseModel):
     api_key: str | None = None
     provider_type: str | None = None
     protocol_type: str | None = None
+    native_endpoint_path: str | None = None
     group_name: str | None = None
     region_tag: str | None = None
     enabled: bool | None = None
@@ -513,6 +662,13 @@ class ProviderUpdate(BaseModel):
             return None
         return normalize_provider_protocol_type(value)
 
+    @field_validator("native_endpoint_path")
+    @classmethod
+    def normalize_native_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return normalize_native_endpoint_path(value)
+
     @field_validator("maintenance_window")
     @classmethod
     def normalize_maintenance_window(cls, value: str | None) -> str | None:
@@ -544,6 +700,7 @@ class ProviderOut(BaseModel):
     provider_type: str
     protocol_type: str
     protocol_label: str
+    native_endpoint_path: str | None = None
     group_name: str | None
     region_tag: str | None
     enabled: bool
@@ -635,6 +792,7 @@ class ProviderOptionOut(BaseModel):
     health_state_updated_at: datetime | str | None = None
     protocol_type: str = "both"
     protocol_label: str = "双协议"
+    native_endpoint_path: str | None = None
     models: list[str] = Field(default_factory=list)
 
 
@@ -664,6 +822,7 @@ class ProviderPlaygroundOut(BaseModel):
     health_state_updated_at: datetime | str | None = None
     protocol_type: str = "both"
     protocol_label: str = "双协议"
+    native_endpoint_path: str | None = None
     models: list[str] = Field(default_factory=list)
     model_configs: list[ProviderPlaygroundModelOut] = Field(default_factory=list)
 
@@ -683,6 +842,7 @@ class ProviderSummaryOut(BaseModel):
     health_state_updated_at: datetime | str | None = None
     protocol_type: str = "both"
     protocol_label: str = "双协议"
+    native_endpoint_path: str | None = None
     circuit_state: str
     last_latency_ms: int | None = None
     models: list[str] = Field(default_factory=list)
@@ -704,6 +864,113 @@ class ProviderCredentialRotateIn(BaseModel):
             return None
         normalized = value.strip()
         return normalized or None
+
+
+class ProviderCredentialAuth(BaseModel):
+    username: str = Field(..., min_length=1)
+    password: str = Field(..., min_length=1)
+
+    @field_validator("username")
+    @classmethod
+    def normalize_username_for_credential_api(cls, value: str) -> str:
+        return value.strip()
+
+
+class ProviderCredentialExternalItem(BaseModel):
+    id: int
+    name: str
+    base_url: str
+    enabled: bool
+    group_name: str | None = None
+    region_tag: str | None = None
+    api_key: str
+    masked_api_key: str
+    credential_hint: str | None = None
+    credential_rotated_at: datetime | None = None
+    updated_at: datetime
+
+
+class ProviderCredentialListRequest(ProviderCredentialAuth):
+    provider_ids: list[int] = Field(default_factory=list)
+    provider_names: list[str] = Field(default_factory=list)
+
+    @field_validator("provider_ids")
+    @classmethod
+    def normalize_provider_ids(cls, value: list[int]) -> list[int]:
+        seen: set[int] = set()
+        normalized: list[int] = []
+        for item in value:
+            provider_id = int(item)
+            if provider_id <= 0 or provider_id in seen:
+                continue
+            seen.add(provider_id)
+            normalized.append(provider_id)
+        return normalized
+
+    @field_validator("provider_names")
+    @classmethod
+    def normalize_provider_names(cls, value: list[str]) -> list[str]:
+        seen: set[str] = set()
+        normalized: list[str] = []
+        for item in value:
+            name = str(item or "").strip()
+            key = name.lower()
+            if not name or key in seen:
+                continue
+            seen.add(key)
+            normalized.append(name)
+        return normalized
+
+
+class ProviderCredentialListResponse(BaseModel):
+    total: int
+    providers: list[ProviderCredentialExternalItem]
+
+
+class ProviderCredentialUpdateItem(BaseModel):
+    provider_id: int | None = Field(default=None, ge=1)
+    provider_name: str | None = Field(default=None, min_length=1)
+    api_key: str = Field(..., min_length=1)
+    credential_hint: str | None = None
+
+    @field_validator("provider_name", "credential_hint")
+    @classmethod
+    def normalize_optional_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+    @field_validator("api_key")
+    @classmethod
+    def normalize_required_api_key(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("提供商密钥不能为空")
+        return normalized
+
+
+class ProviderCredentialUpdateRequest(ProviderCredentialAuth, ProviderCredentialUpdateItem):
+    pass
+
+
+class ProviderCredentialBatchUpdateRequest(ProviderCredentialAuth):
+    items: list[ProviderCredentialUpdateItem] = Field(..., min_length=1, max_length=100)
+
+
+class ProviderCredentialUpdateResult(BaseModel):
+    success: bool
+    provider_id: int | None = None
+    provider_name: str | None = None
+    message: str
+    provider: ProviderCredentialExternalItem | None = None
+
+
+class ProviderCredentialBatchUpdateResponse(BaseModel):
+    total: int
+    success_count: int
+    failed_count: int
+    results: list[ProviderCredentialUpdateResult]
 
 
 class ProviderDiscoverModelsIn(BaseModel):
@@ -738,6 +1005,8 @@ class ProviderDiscoverModelsIn(BaseModel):
 
 class ProviderDiscoveredModelOut(BaseModel):
     model_name: str
+    model_group: str = "unknown"
+    model_group_label: str = "未知分组"
     supports_stream: bool = True
     supports_vision: bool = True
     supports_tools: bool = True
