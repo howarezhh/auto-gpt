@@ -801,6 +801,67 @@ def scheduled_token_usage_backfill() -> dict[str, int]:
         db.close()
 
 
+def _should_suppress_empty_success_log(
+    result: dict[str, int | bool] | None,
+    *,
+    processed_count: int,
+    success_count: int,
+    failed_count: int,
+) -> bool:
+    """兼容后台任务日志判断：显式要求且本轮无处理、无成功、无失败时抑制成功日志。"""
+    if not isinstance(result, dict) or not bool(result.get("suppress_empty_success_log")):
+        return False
+    return int(processed_count or 0) == 0 and int(success_count or 0) == 0 and int(failed_count or 0) == 0
+
+
+def _content_integrity_job_summary(results: list[dict] | None) -> dict[str, int]:
+    provider_count = 0
+    provider_success = 0
+    provider_with_successful_probe = 0
+    model_count = 0
+    model_with_successful_probe = 0
+    processed_count = 0
+    success_count = 0
+    failed_count = 0
+    for provider_result in results or []:
+        if not isinstance(provider_result, dict):
+            continue
+        provider_count += 1
+        if bool(provider_result.get("success")):
+            provider_success += 1
+        provider_has_success = False
+        for model_result in provider_result.get("model_results") or []:
+            if not isinstance(model_result, dict):
+                continue
+            model_count += 1
+            model_has_success = False
+            endpoint_results = model_result.get("endpoint_results") or []
+            for endpoint_result in endpoint_results:
+                if not isinstance(endpoint_result, dict):
+                    continue
+                processed_count += 1
+                if bool(endpoint_result.get("success")):
+                    success_count += 1
+                    model_has_success = True
+                    provider_has_success = True
+                else:
+                    failed_count += 1
+            if model_has_success:
+                model_with_successful_probe += 1
+        if provider_has_success:
+            provider_with_successful_probe += 1
+    return {
+        "processed_count": processed_count,
+        "success_count": success_count,
+        "failed_count": failed_count,
+        "provider_count": provider_count,
+        "provider_success": provider_success,
+        "provider_with_successful_probe": provider_with_successful_probe,
+        "model_count": model_count,
+        "model_with_successful_probe": model_with_successful_probe,
+    }
+
+
 @distributed_job_lock("data_retention_cleanup", ttl_seconds=60 * 60 * 8)
 def scheduled_data_retention_cleanup() -> dict[str, int]:
     db = SessionLocal()

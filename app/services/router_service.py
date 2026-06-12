@@ -975,6 +975,69 @@ class RouterService:
                 db.close()
 
     @staticmethod
+    def _append_recent_session_direct_candidate(
+        db: Session,
+        candidates: list[RouteCandidate],
+        *,
+        sticky_key: str | None,
+        model_name: str | None,
+        route_context: RoutePolicyContext | None = None,
+        require_vision: bool = False,
+        require_stream: bool = False,
+        require_tools: bool = False,
+        require_image_generation: bool = False,
+        require_chat_completions: bool = False,
+        require_responses: bool = False,
+    ) -> list[RouteCandidate]:
+        recent_route = RouterService.load_recent_session_route(db, sticky_key)
+        if recent_route is None or recent_route.provider_id is None or recent_route.provider_model_id is None:
+            return candidates
+        if any(
+            item.provider.id == recent_route.provider_id and item.provider_model.id == recent_route.provider_model_id
+            for item in candidates
+        ):
+            return candidates
+        provider = db.get(Provider, recent_route.provider_id)
+        provider_model = db.get(ProviderModel, recent_route.provider_model_id)
+        if provider is None or provider_model is None:
+            return candidates
+        if not bool(getattr(provider, "enabled", True)) or bool(getattr(provider, "maintenance_mode_enabled", False)):
+            return candidates
+        if not bool(getattr(provider_model, "enabled", True)):
+            return candidates
+        if model_name and getattr(provider_model, "model_name", None) != model_name:
+            return candidates
+        if RouterService._provider_blocked_by_content_policy(provider, route_context=route_context):
+            return candidates
+        if RouterService._provider_model_blocked_by_content_policy(provider_model, provider=provider, route_context=route_context):
+            return candidates
+        if require_chat_completions and (
+            not ProviderService.provider_supports_chat_completions(provider)
+            or not bool(getattr(provider_model, "supports_chat_completions", False))
+        ):
+            return candidates
+        if require_responses and (
+            not ProviderService.provider_supports_responses(provider)
+            or not bool(getattr(provider_model, "supports_responses", False))
+        ):
+            return candidates
+        if require_stream and not bool(getattr(provider_model, "supports_stream", False)):
+            return candidates
+        if require_vision and not bool(getattr(provider_model, "supports_vision", False)):
+            return candidates
+        if require_tools and not bool(getattr(provider_model, "supports_tools", False)):
+            return candidates
+        if require_image_generation and not ProviderService.provider_model_supports_image_generation(provider_model):
+            return candidates
+        direct_candidate = RouteCandidate(
+            provider=provider,
+            provider_model=provider_model,
+            sticky_affinity=1_000_000.0,
+            selection_reason="recent_session_direct",
+        )
+        return [direct_candidate, *candidates]
+
+    @staticmethod
     def _primary_route_order(
         candidates: list[RouteCandidate],
         *,
