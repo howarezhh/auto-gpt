@@ -814,6 +814,38 @@ SyntaxError: Unexpected token ')'
 
 ---
 
+## [ERR-20260612-001] pwsh_outer_variable_expansion
+
+**Logged**: 2026-06-12T11:57:54+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tooling
+
+### Summary
+Nested PowerShell health-check command failed because `$` variables in the inner script were expanded by the outer shell.
+
+### Error
+```text
+.Exception.Message: The term '.Exception.Message' is not recognized as a name of a cmdlet, function, script file, or executable program.
+```
+
+### Context
+- Attempted command used `$r` and `$_.Exception.Message` inside a double-quoted `pwsh -Command` string.
+- The outer PowerShell parsed those variables before the inner PowerShell received the script.
+
+### Suggested Fix
+Prefer short commands without `$` for simple checks, or wrap inner PowerShell scripts in single quotes / script blocks so the outer shell cannot expand variables.
+
+### Metadata
+- Reproducible: yes
+- Related Files: `项目全局规范.md`
+
+### Resolution
+- **Resolved**: 2026-06-12T11:57:54+08:00
+- **Notes**: Re-ran the health check with `Invoke-RestMethod ... | ConvertTo-Json -Compress`, avoiding outer-shell variable expansion.
+
+---
+
 ## [ERR-20260611-003] pwsh_rg_pattern_pipe_parsing
 
 **Logged**: 2026-06-11T23:58:00+08:00
