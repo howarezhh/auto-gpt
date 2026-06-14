@@ -209,6 +209,7 @@ def _users_page_response(
         page_size=page_size,
     )
     key_counts = UserPortalService.count_user_key_map(db, user_ids=[item.id for item in users])
+    usage_map = UserPortalService.get_admin_user_usage_map(db, users=users)
     admin_count = sum(1 for item in users if item.role == USER_ROLE_ADMIN)
     enabled_count = sum(1 for item in users if item.enabled)
     total_pages = max(1, ceil(total / page_size)) if page_size else 1
@@ -223,6 +224,7 @@ def _users_page_response(
             "current_user": current_user,
             "users": users,
             "key_counts": key_counts,
+            "usage_map": usage_map,
             "admin_count": admin_count,
             "enabled_count": enabled_count,
             "allow_public_user_registration": SettingService.get_or_create(db).allow_public_user_registration,
@@ -482,11 +484,12 @@ def adjust_user_balance(
     if user is None:
         return _redirect_users(error="not_found")
     try:
+        parsed_amount = Decimal((amount or "").strip())
         payload = ApiKeyBalanceAdjustmentIn(
-            amount=float((amount or "").strip()),
+            amount=parsed_amount,
             remark=remark,
         )
-    except ValueError as exc:
+    except (ValueError, InvalidOperation) as exc:
         return _redirect_user_detail(user_id, error=str(exc))
     try:
         BillingService.create_user_balance_adjustment(db, user=user, amount=payload.amount, remark=payload.remark)
@@ -502,7 +505,7 @@ def adjust_user_balance(
         entity_name=user.username,
         target_user_id=user.id,
         summary=f"从用户详情页调整账户共享余额",
-        detail={"amount": payload.amount, "remark": payload.remark},
+        detail={"amount": str(payload.amount), "remark": payload.remark},
     )
     return _redirect_user_detail(user_id, success="balance_adjusted")
 
@@ -657,6 +660,7 @@ def export_users(
         )
     )
     key_counts = UserPortalService.count_user_key_map(db, user_ids=[item.id for item in users])
+    usage_map = UserPortalService.get_admin_user_usage_map(db, users=users)
     buffer = io.StringIO()
     writer = csv.writer(buffer)
     writer.writerow(["id", "username", "email", "role", "enabled", "api_key_count", "last_login_at", "created_at"])

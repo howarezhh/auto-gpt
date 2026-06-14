@@ -17,6 +17,7 @@ from app.config import get_settings
 from app.database import SessionLocal
 from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
+from app.services.log_service import LogService
 from app.models.responses_chat_adapter_session import ResponsesChatAdapterSession
 from app.services.api_key_service import ApiClientAuthContext
 from app.services.proxy_service import ProxyService
@@ -61,6 +62,48 @@ class PreparedAdapterRequest:
 class ResponsesChatAdapterService:
     """Responses→Chat 单向兼容适配层。"""
 
+    SUPPORTED_TOP_LEVEL_FIELDS = {
+        "model",
+        "instructions",
+        "input",
+        "previous_response_id",
+        "tools",
+        "tool_choice",
+        "temperature",
+        "top_p",
+        "presence_penalty",
+        "frequency_penalty",
+        "stop",
+        "logprobs",
+        "top_logprobs",
+        "stream",
+        "stream_options",
+        "user",
+        "metadata",
+        "client_metadata",
+        "seed",
+        "max_output_tokens",
+        "max_tokens",
+        "parallel_tool_calls",
+        "reasoning",
+        "reasoning_effort",
+        "model_reasoning_effort",
+        "text",
+        "response_format",
+        "store",
+        "prompt_cache_key",
+        "context_management",
+        "truncation",
+    }
+    UNSUPPORTED_TOP_LEVEL_FIELDS = {
+        "include",
+        "background",
+        "modalities",
+        "audio",
+        "prediction",
+        "max_tool_calls",
+        "service_tier",
+    }
     _memory_sessions: dict[str, tuple[dict[str, Any], float | None]] = {}
     DATABASE_CLEANUP_BATCH_SIZE = 5000
     DATABASE_CLEANUP_MAX_BATCHES = 100
@@ -252,6 +295,7 @@ class ResponsesChatAdapterService:
 
     @staticmethod
     async def prepare_request(payload: dict[str, Any]) -> PreparedAdapterRequest:
+        ResponsesChatAdapterService._validate_supported_payload(payload)
         ResponsesChatAdapterService._reject_unsupported_builtin_tools(payload)
         previous_response_id = payload.get("previous_response_id")
         previous_state = None
@@ -278,15 +322,47 @@ class ResponsesChatAdapterService:
         upstream_model = ResponsesChatAdapterService._mapped_model(requested_model)
         base_messages = [ResponsesChatAdapterService._copy_message(item) for item in (previous_state.messages if previous_state else [])]
         instructions = previous_state.instructions if previous_state else None
+        incoming_instructions = payload.get("instructions")
         if previous_state is None:
-            incoming_instructions = payload.get("instructions")
             if isinstance(incoming_instructions, str) and incoming_instructions.strip():
                 instructions = incoming_instructions
                 base_messages.append({"role": "system", "content": incoming_instructions})
+        elif isinstance(incoming_instructions, str) and incoming_instructions.strip():
+            stored_instructions = previous_state.instructions or ""
+            if incoming_instructions != stored_instructions:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "message": "Responses→Chat adapter cannot change instructions when previous_response_id is used",
+                        "code": "responses_chat_adapter_instruction_mismatch",
+                        "previous_response_id": previous_response_id,
+                    },
+                )
         new_messages = ResponsesChatAdapterService._input_to_chat_messages(
             payload.get("input"),
             pending_tool_call_ids=previous_state.pending_tool_call_ids if previous_state else [],
+            require_message=previous_state is None,
         )
+        if previous_state and previous_state.pending_tool_call_ids:
+            provided_tool_ids = {
+                str(item.get("tool_call_id") or "")
+                for item in new_messages
+                if isinstance(item, dict) and item.get("role") == "tool"
+            }
+            missing_tool_ids = [
+                call_id
+                for call_id in previous_state.pending_tool_call_ids
+                if call_id not in provided_tool_ids
+            ]
+            if missing_tool_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "message": "Responses→Chat adapter requires function_call_output for all pending tool calls before continuing",
+                        "code": "responses_chat_adapter_missing_tool_outputs",
+                        "missing_tool_call_ids": missing_tool_ids,
+                    },
+                )
         adapter_payload = dict(payload)
         new_messages = await ResponsesChatAdapterService._maybe_apply_web_search_proxy(adapter_payload, new_messages)
         raw_messages = base_messages + new_messages
@@ -303,7 +379,7 @@ class ResponsesChatAdapterService:
             and messages[0] != raw_messages[0]
         )
         tool_round_count = int(previous_state.tool_round_count if previous_state else 0)
-        if new_messages and all(item.get("role") == "tool" for item in new_messages):
+        if new_messages and any(item.get("role") == "tool" for item in new_messages):
             max_tool_rounds = int(ResponsesChatAdapterService._setting_value("responses_chat_adapter_max_tool_rounds", 10) or 10)
             if tool_round_count >= max_tool_rounds:
                 raise HTTPException(
@@ -405,17 +481,26 @@ class ResponsesChatAdapterService:
             "top_p",
             "presence_penalty",
             "frequency_penalty",
+            "stop",
+            "logprobs",
+            "top_logprobs",
             "tools",
             "tool_choice",
             "parallel_tool_calls",
             "stream",
+            "stream_options",
             "user",
             "metadata",
             "seed",
+            "store",
+            "response_format",
         }
         for key in passthrough_keys:
             if key in payload:
                 chat_payload[key] = payload[key]
+        text_response_format = ProxyService._responses_text_format_to_chat_response_format(payload.get("text"))
+        if text_response_format is not None and "response_format" not in chat_payload:
+            chat_payload["response_format"] = text_response_format
         if "tools" in chat_payload:
             chat_payload["tools"] = ProxyService._normalize_responses_tools_for_chat(chat_payload.get("tools"))
         if "tool_choice" in chat_payload:
@@ -424,13 +509,23 @@ class ResponsesChatAdapterService:
             chat_payload["max_completion_tokens"] = payload["max_output_tokens"]
         elif "max_tokens" in payload:
             chat_payload["max_tokens"] = payload["max_tokens"]
+        reasoning_effort = LogService.extract_model_reasoning_effort(payload)
+        if reasoning_effort is not None:
+            chat_payload["reasoning_effort"] = reasoning_effort
+        if chat_payload.get("stream") is True:
+            chat_payload = ProxyService._ensure_chat_stream_include_usage(chat_payload)
         return chat_payload
 
     @staticmethod
-    def _input_to_chat_messages(input_value: Any, *, pending_tool_call_ids: list[str]) -> list[dict[str, Any]]:
-        items = input_value if isinstance(input_value, list) else [input_value]
+    def _input_to_chat_messages(
+        input_value: Any,
+        *,
+        pending_tool_call_ids: list[str],
+        require_message: bool = True,
+    ) -> list[dict[str, Any]]:
         if input_value is None:
-            return [{"role": "user", "content": ""}]
+            return [{"role": "user", "content": ""}] if require_message else []
+        items = input_value if isinstance(input_value, list) else [input_value]
         tool_outputs: dict[str, dict[str, Any]] = {}
         messages: list[dict[str, Any]] = []
         for item in items:
@@ -453,8 +548,14 @@ class ResponsesChatAdapterService:
         if tool_outputs:
             ordered_ids = [call_id for call_id in pending_tool_call_ids if call_id in tool_outputs]
             ordered_ids.extend(call_id for call_id in tool_outputs if call_id not in ordered_ids)
-            messages.extend(tool_outputs[call_id] for call_id in ordered_ids)
-        return messages or [{"role": "user", "content": ""}]
+            ordered_tool_messages = [tool_outputs[call_id] for call_id in ordered_ids]
+            if pending_tool_call_ids:
+                messages = ordered_tool_messages + messages
+            else:
+                messages.extend(ordered_tool_messages)
+        if messages:
+            return messages
+        return [{"role": "user", "content": ""}] if require_message else []
 
     @staticmethod
     def _convert_input_item_to_chat_message(item: Any) -> dict[str, Any] | None:
@@ -475,8 +576,16 @@ class ResponsesChatAdapterService:
                 "role": "user",
                 "content": [ProxyService._convert_responses_content_part_to_chat_content(item)],
             }
-        if item_type in {"function_call", "reasoning"}:
-            return None
+        if item_type == "function_call":
+            return ResponsesChatAdapterService._function_call_item_to_chat_message(item)
+        if item_type == "reasoning":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "message": "Responses reasoning items cannot be safely converted to Chat messages",
+                    "code": "responses_chat_adapter_reasoning_item_unsupported",
+                },
+            )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
@@ -485,6 +594,71 @@ class ResponsesChatAdapterService:
                 "input_type": item_type,
             },
         )
+
+    @staticmethod
+    def _function_call_item_to_chat_message(item: dict[str, Any]) -> dict[str, Any]:
+        call_id = str(item.get("call_id") or item.get("id") or "").strip()
+        name = item.get("name")
+        arguments = item.get("arguments")
+        if not call_id or not isinstance(name, str) or not name.strip() or not isinstance(arguments, str):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "message": "Responses function_call items require call_id/id, name, and string arguments",
+                    "code": "responses_chat_adapter_invalid_function_call_item",
+                },
+            )
+        return {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": name.strip(), "arguments": arguments},
+                }
+            ],
+        }
+
+    @staticmethod
+    def _validate_supported_payload(payload: dict[str, Any]) -> None:
+        unsupported = sorted(
+            key
+            for key in payload
+            if key in ResponsesChatAdapterService.UNSUPPORTED_TOP_LEVEL_FIELDS
+            or key not in ResponsesChatAdapterService.SUPPORTED_TOP_LEVEL_FIELDS
+        )
+        if unsupported:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "message": "Responses→Chat adapter received unsupported Responses fields",
+                    "code": "responses_chat_adapter_unsupported_fields",
+                    "unsupported_fields": unsupported,
+                },
+            )
+        text_value = payload.get("text")
+        if isinstance(text_value, dict):
+            text_keys = set(text_value.keys())
+            allowed_text_keys = {"format"}
+            if text_keys - allowed_text_keys:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "message": "Responses→Chat adapter only supports text.format mapping",
+                        "code": "responses_chat_adapter_unsupported_text_options",
+                        "unsupported_fields": sorted(text_keys - allowed_text_keys),
+                    },
+                )
+            ProxyService._responses_text_format_to_chat_response_format(text_value)
+        elif text_value is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "message": "Responses text option must be an object",
+                    "code": "responses_chat_adapter_invalid_text_option",
+                },
+            )
 
     @staticmethod
     def _reject_unsupported_builtin_tools(payload: dict[str, Any]) -> None:
@@ -648,6 +822,8 @@ class ResponsesChatAdapterService:
         truncation_mode: str | None = None,
     ) -> list[dict[str, Any]]:
         context_window = int(ResponsesChatAdapterService._setting_value("responses_chat_adapter_context_window_tokens", 0) or 0)
+        if compact_threshold is None and truncation_mode != "auto":
+            return messages
         threshold = compact_threshold if isinstance(compact_threshold, int) and compact_threshold > 0 else context_window
         if threshold <= 0:
             return messages
@@ -681,10 +857,9 @@ class ResponsesChatAdapterService:
         ]
         base_system_text = str(first_system.get("content") or "") if first_system else ""
         summary_text = ResponsesChatAdapterService._deterministic_summary(summarized_non_user_prefix)
-        compacted_system = {
+        summary_system = {
             "role": "system",
             "content": (
-                f"{base_system_text}\n\n"
                 "[Responses→Chat adapter immutable summary]\n"
                 "Official Responses compaction produces opaque encrypted compaction items. "
                 "This Chat-only compatibility layer preserves older user messages where possible "
@@ -692,7 +867,11 @@ class ResponsesChatAdapterService:
                 f"{summary_text}"
             ).strip(),
         }
-        return [compacted_system] + preserved_user_prefix + preserved_tail
+        if first_system:
+            return [ResponsesChatAdapterService._copy_message(first_system), summary_system] + preserved_user_prefix + preserved_tail
+        if base_system_text:
+            summary_system["content"] = f"{base_system_text}\n\n{summary_system['content']}".strip()
+        return [summary_system] + preserved_user_prefix + preserved_tail
 
     @staticmethod
     def _compact_threshold_from_context_management(value: Any) -> int | None:

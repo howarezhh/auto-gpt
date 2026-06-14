@@ -54,6 +54,7 @@ from app.services.model_mapping_service import ModelMappingService
 from app.services.openai_error_service import OpenAIErrorService
 from app.services.provider_service import ProviderService
 from app.services.proxy_request_context import (
+    clear_current_ip_management_event_id,
     clear_current_provider_candidate,
     clear_current_request_headers_json,
     get_current_provider_candidate,
@@ -281,6 +282,8 @@ def CONTENT_GUARD_COMPAT_COLUMNS(
             "content_guard_enhanced_obfuscation_enabled": f"ALTER TABLE app_settings ADD COLUMN content_guard_enhanced_obfuscation_enabled BOOLEAN NOT NULL DEFAULT {true_default}",
             "content_guard_enhanced_threshold": "ALTER TABLE app_settings ADD COLUMN content_guard_enhanced_threshold INTEGER NOT NULL DEFAULT 70",
             "content_guard_enhanced_context_window_chars": "ALTER TABLE app_settings ADD COLUMN content_guard_enhanced_context_window_chars INTEGER NOT NULL DEFAULT 96",
+            "probe_rate_limit_per_minute": "ALTER TABLE app_settings ADD COLUMN probe_rate_limit_per_minute INTEGER NOT NULL DEFAULT 4",
+            "probe_type_rate_limit_per_minute": "ALTER TABLE app_settings ADD COLUMN probe_type_rate_limit_per_minute INTEGER NOT NULL DEFAULT 4",
         },
     }
 
@@ -594,6 +597,7 @@ def _migrate_cache_price_columns(db) -> None:
     """为模型和日志表补充缓存计费与能力字段。"""
     dialect_name = db.get_bind().dialect.name
     price_type = f"NUMERIC({DB_PRICE_PRECISION}, {DB_PRICE_SCALE})"
+    money_type = f"NUMERIC({DB_MONEY_PRECISION}, {DB_MONEY_SCALE})"
     true_default = "TRUE" if dialect_name == "postgresql" else "1"
     false_default = "FALSE" if dialect_name == "postgresql" else "0"
     datetime_type = "TIMESTAMP" if dialect_name == "postgresql" else "DATETIME"
@@ -604,6 +608,7 @@ def _migrate_cache_price_columns(db) -> None:
     )
     additions_by_table = {
         "provider_models": {
+            "upstream_model_name": "ALTER TABLE provider_models ADD COLUMN upstream_model_name TEXT",
             "cache_price_per_1k": f"ALTER TABLE provider_models ADD COLUMN cache_price_per_1k {price_type}",
             "cache_write_price_per_1k": f"ALTER TABLE provider_models ADD COLUMN cache_write_price_per_1k {price_type}",
             "supports_tools": f"ALTER TABLE provider_models ADD COLUMN supports_tools BOOLEAN NOT NULL DEFAULT {false_default}",
@@ -615,9 +620,21 @@ def _migrate_cache_price_columns(db) -> None:
             "context_window_tokens": "ALTER TABLE provider_models ADD COLUMN context_window_tokens INTEGER",
             "max_input_tokens": "ALTER TABLE provider_models ADD COLUMN max_input_tokens INTEGER",
             "max_output_tokens": "ALTER TABLE provider_models ADD COLUMN max_output_tokens INTEGER",
+            "source_currency": "ALTER TABLE provider_models ADD COLUMN source_currency TEXT NOT NULL DEFAULT 'USD'",
+            "billing_currency": "ALTER TABLE provider_models ADD COLUMN billing_currency TEXT NOT NULL DEFAULT 'USD'",
+            "source_input_price_per_1k": f"ALTER TABLE provider_models ADD COLUMN source_input_price_per_1k {price_type}",
+            "source_output_price_per_1k": f"ALTER TABLE provider_models ADD COLUMN source_output_price_per_1k {price_type}",
+            "source_cache_price_per_1k": f"ALTER TABLE provider_models ADD COLUMN source_cache_price_per_1k {price_type}",
+            "source_cache_write_price_per_1k": f"ALTER TABLE provider_models ADD COLUMN source_cache_write_price_per_1k {price_type}",
+            "exchange_rate_to_billing_currency": f"ALTER TABLE provider_models ADD COLUMN exchange_rate_to_billing_currency {price_type}",
+            "exchange_rate_source": "ALTER TABLE provider_models ADD COLUMN exchange_rate_source TEXT",
+            "exchange_rate_at": f"ALTER TABLE provider_models ADD COLUMN exchange_rate_at {datetime_type}",
+            "exchange_rate_version": "ALTER TABLE provider_models ADD COLUMN exchange_rate_version TEXT",
+            "rounding_strategy": "ALTER TABLE provider_models ADD COLUMN rounding_strategy TEXT NOT NULL DEFAULT 'ROUND_HALF_UP'",
         },
         "model_catalogs": {
             "cache_price_per_1k": f"ALTER TABLE model_catalogs ADD COLUMN cache_price_per_1k {price_type}",
+            "cache_write_price_per_1k": f"ALTER TABLE model_catalogs ADD COLUMN cache_write_price_per_1k {price_type}",
             "supports_stream": f"ALTER TABLE model_catalogs ADD COLUMN supports_stream BOOLEAN NOT NULL DEFAULT {true_default}",
             "supports_vision": f"ALTER TABLE model_catalogs ADD COLUMN supports_vision BOOLEAN NOT NULL DEFAULT {false_default}",
             "supports_tools": f"ALTER TABLE model_catalogs ADD COLUMN supports_tools BOOLEAN NOT NULL DEFAULT {false_default}",
@@ -629,10 +646,35 @@ def _migrate_cache_price_columns(db) -> None:
             "max_output_tokens": "ALTER TABLE model_catalogs ADD COLUMN max_output_tokens INTEGER",
             "pricing_mode": "ALTER TABLE model_catalogs ADD COLUMN pricing_mode TEXT NOT NULL DEFAULT 'fixed'",
             "pricing_json": "ALTER TABLE model_catalogs ADD COLUMN pricing_json TEXT",
+            "source_currency": "ALTER TABLE model_catalogs ADD COLUMN source_currency TEXT NOT NULL DEFAULT 'USD'",
+            "billing_currency": "ALTER TABLE model_catalogs ADD COLUMN billing_currency TEXT NOT NULL DEFAULT 'USD'",
+            "source_input_price_per_1k": f"ALTER TABLE model_catalogs ADD COLUMN source_input_price_per_1k {price_type}",
+            "source_output_price_per_1k": f"ALTER TABLE model_catalogs ADD COLUMN source_output_price_per_1k {price_type}",
+            "source_cache_price_per_1k": f"ALTER TABLE model_catalogs ADD COLUMN source_cache_price_per_1k {price_type}",
+            "source_cache_write_price_per_1k": f"ALTER TABLE model_catalogs ADD COLUMN source_cache_write_price_per_1k {price_type}",
+            "exchange_rate_to_billing_currency": f"ALTER TABLE model_catalogs ADD COLUMN exchange_rate_to_billing_currency {price_type}",
+            "exchange_rate_source": "ALTER TABLE model_catalogs ADD COLUMN exchange_rate_source TEXT",
+            "exchange_rate_at": f"ALTER TABLE model_catalogs ADD COLUMN exchange_rate_at {datetime_type}",
+            "exchange_rate_version": "ALTER TABLE model_catalogs ADD COLUMN exchange_rate_version TEXT",
+            "rounding_strategy": "ALTER TABLE model_catalogs ADD COLUMN rounding_strategy TEXT NOT NULL DEFAULT 'ROUND_HALF_UP'",
         },
         "request_logs": {
             "channel_price_cache_per_1k": f"ALTER TABLE request_logs ADD COLUMN channel_price_cache_per_1k {price_type}",
             "channel_price_cache_write_per_1k": f"ALTER TABLE request_logs ADD COLUMN channel_price_cache_write_per_1k {price_type}",
+            "source_currency": "ALTER TABLE request_logs ADD COLUMN source_currency TEXT",
+            "billing_currency": "ALTER TABLE request_logs ADD COLUMN billing_currency TEXT",
+            "source_price_input_per_1k": f"ALTER TABLE request_logs ADD COLUMN source_price_input_per_1k {price_type}",
+            "source_price_output_per_1k": f"ALTER TABLE request_logs ADD COLUMN source_price_output_per_1k {price_type}",
+            "source_price_cache_per_1k": f"ALTER TABLE request_logs ADD COLUMN source_price_cache_per_1k {price_type}",
+            "source_price_cache_write_per_1k": f"ALTER TABLE request_logs ADD COLUMN source_price_cache_write_per_1k {price_type}",
+            "source_prompt_cost": f"ALTER TABLE request_logs ADD COLUMN source_prompt_cost {money_type}",
+            "source_completion_cost": f"ALTER TABLE request_logs ADD COLUMN source_completion_cost {money_type}",
+            "source_total_cost": f"ALTER TABLE request_logs ADD COLUMN source_total_cost {money_type}",
+            "exchange_rate_to_billing_currency": f"ALTER TABLE request_logs ADD COLUMN exchange_rate_to_billing_currency {price_type}",
+            "exchange_rate_source": "ALTER TABLE request_logs ADD COLUMN exchange_rate_source TEXT",
+            "exchange_rate_at": f"ALTER TABLE request_logs ADD COLUMN exchange_rate_at {datetime_type}",
+            "exchange_rate_version": "ALTER TABLE request_logs ADD COLUMN exchange_rate_version TEXT",
+            "rounding_strategy": "ALTER TABLE request_logs ADD COLUMN rounding_strategy TEXT",
             "model_reasoning_effort": "ALTER TABLE request_logs ADD COLUMN model_reasoning_effort TEXT",
             "pricing_tier_key": "ALTER TABLE request_logs ADD COLUMN pricing_tier_key TEXT",
             "pricing_tier_name": "ALTER TABLE request_logs ADD COLUMN pricing_tier_name TEXT",
@@ -652,12 +694,39 @@ def _migrate_cache_price_columns(db) -> None:
             "cache_write_tokens": "ALTER TABLE api_client_billing_records ADD COLUMN cache_write_tokens INTEGER",
             "unit_cache_read_price_per_1k": f"ALTER TABLE api_client_billing_records ADD COLUMN unit_cache_read_price_per_1k {price_type}",
             "unit_cache_write_price_per_1k": f"ALTER TABLE api_client_billing_records ADD COLUMN unit_cache_write_price_per_1k {price_type}",
+            "source_currency": "ALTER TABLE api_client_billing_records ADD COLUMN source_currency TEXT",
+            "billing_currency": "ALTER TABLE api_client_billing_records ADD COLUMN billing_currency TEXT",
+            "source_amount": f"ALTER TABLE api_client_billing_records ADD COLUMN source_amount {money_type}",
+            "unit_source_input_price_per_1k": f"ALTER TABLE api_client_billing_records ADD COLUMN unit_source_input_price_per_1k {price_type}",
+            "unit_source_output_price_per_1k": f"ALTER TABLE api_client_billing_records ADD COLUMN unit_source_output_price_per_1k {price_type}",
+            "unit_source_cache_read_price_per_1k": f"ALTER TABLE api_client_billing_records ADD COLUMN unit_source_cache_read_price_per_1k {price_type}",
+            "unit_source_cache_write_price_per_1k": f"ALTER TABLE api_client_billing_records ADD COLUMN unit_source_cache_write_price_per_1k {price_type}",
+            "exchange_rate_to_billing_currency": f"ALTER TABLE api_client_billing_records ADD COLUMN exchange_rate_to_billing_currency {price_type}",
+            "exchange_rate_source": "ALTER TABLE api_client_billing_records ADD COLUMN exchange_rate_source TEXT",
+            "exchange_rate_at": f"ALTER TABLE api_client_billing_records ADD COLUMN exchange_rate_at {datetime_type}",
+            "exchange_rate_version": "ALTER TABLE api_client_billing_records ADD COLUMN exchange_rate_version TEXT",
+            "rounding_strategy": "ALTER TABLE api_client_billing_records ADD COLUMN rounding_strategy TEXT",
         },
         "user_account_billing_records": {
             "cache_read_tokens": "ALTER TABLE user_account_billing_records ADD COLUMN cache_read_tokens INTEGER",
             "cache_write_tokens": "ALTER TABLE user_account_billing_records ADD COLUMN cache_write_tokens INTEGER",
             "unit_cache_read_price_per_1k": f"ALTER TABLE user_account_billing_records ADD COLUMN unit_cache_read_price_per_1k {price_type}",
             "unit_cache_write_price_per_1k": f"ALTER TABLE user_account_billing_records ADD COLUMN unit_cache_write_price_per_1k {price_type}",
+            "source_currency": "ALTER TABLE user_account_billing_records ADD COLUMN source_currency TEXT",
+            "billing_currency": "ALTER TABLE user_account_billing_records ADD COLUMN billing_currency TEXT",
+            "source_amount": f"ALTER TABLE user_account_billing_records ADD COLUMN source_amount {money_type}",
+            "unit_source_input_price_per_1k": f"ALTER TABLE user_account_billing_records ADD COLUMN unit_source_input_price_per_1k {price_type}",
+            "unit_source_output_price_per_1k": f"ALTER TABLE user_account_billing_records ADD COLUMN unit_source_output_price_per_1k {price_type}",
+            "unit_source_cache_read_price_per_1k": f"ALTER TABLE user_account_billing_records ADD COLUMN unit_source_cache_read_price_per_1k {price_type}",
+            "unit_source_cache_write_price_per_1k": f"ALTER TABLE user_account_billing_records ADD COLUMN unit_source_cache_write_price_per_1k {price_type}",
+            "exchange_rate_to_billing_currency": f"ALTER TABLE user_account_billing_records ADD COLUMN exchange_rate_to_billing_currency {price_type}",
+            "exchange_rate_source": "ALTER TABLE user_account_billing_records ADD COLUMN exchange_rate_source TEXT",
+            "exchange_rate_at": f"ALTER TABLE user_account_billing_records ADD COLUMN exchange_rate_at {datetime_type}",
+            "exchange_rate_version": "ALTER TABLE user_account_billing_records ADD COLUMN exchange_rate_version TEXT",
+            "rounding_strategy": "ALTER TABLE user_account_billing_records ADD COLUMN rounding_strategy TEXT",
+        },
+        "user_accounts": {
+            "currency_code": "ALTER TABLE user_accounts ADD COLUMN currency_code TEXT NOT NULL DEFAULT 'USD'",
         },
     }
     changed = False
@@ -1025,6 +1094,8 @@ app.mount("/uploaded-assets", StaticFiles(directory=settings.uploads_dir), name=
 async def trace_and_runtime_middleware(request: Request, call_next):
     trace_id = getattr(request.state, "trace_id", None) or request.headers.get("x-trace-id") or request.headers.get("x-request-id") or uuid4().hex
     request.state.trace_id = trace_id
+    if not getattr(request.state, "ip_management", None):
+        clear_current_ip_management_event_id()
     clear_current_provider_candidate()
     clear_current_request_headers_json()
     if _is_external_v1_path(request.url.path):
@@ -1200,12 +1271,14 @@ def _effective_v1_body_limit(app_setting: AppSetting, request_path: str) -> int:
         endpoint_limit = int(getattr(app_setting, "max_v1_chat_request_body_bytes", 0) or 0)
     elif request_path == "/v1/responses":
         endpoint_limit = int(getattr(app_setting, "max_v1_responses_request_body_bytes", 0) or 0)
+    elif request_path in {"/v1beta/models", "/v1beta/messages"} or request_path.startswith("/v1beta/models/") or request_path == "/v1/messages":
+        endpoint_limit = int(getattr(app_setting, "max_v1_responses_request_body_bytes", 0) or 0)
     positive_limits = [item for item in (global_limit, endpoint_limit) if item > 0]
     return min(positive_limits) if positive_limits else 0
 
 
 def _is_external_v1_path(path: str) -> bool:
-    return path == "/v1" or path.startswith("/v1/")
+    return path == "/v1" or path.startswith("/v1/") or path == "/v1beta" or path.startswith("/v1beta/")
 
 
 def _is_provider_credentials_path(path: str) -> bool:

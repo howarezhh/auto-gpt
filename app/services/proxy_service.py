@@ -13,6 +13,7 @@ from datetime import datetime
 from decimal import Decimal
 from email.utils import parsedate_to_datetime
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import aiohttp
@@ -36,6 +37,7 @@ from app.services.asset_service import AssetService
 from app.services.billing_reservation_service import BillingReservationError, BillingReservationService, BillingReservationUnavailableError
 from app.services.billing_service import BillingService
 from app.services.cache_service import CacheService
+from app.services.currency_service import CurrencyService
 from app.services.content_guard_service import ContentGuardResult, ContentGuardService
 from app.services.content_runtime_guard_service import ContentRuntimeGuardService
 from app.services.log_service import LogService
@@ -71,6 +73,7 @@ class PreparedUpstreamRequest:
     request_payload: dict[str, Any]
     public_endpoint_path: str | None = None
     upstream_protocol_type: str | None = None
+    preserve_native_response: bool = False
     adapt_chat_response_to_responses: bool = False
     adapt_responses_response_to_chat: bool = False
     adapt_chat_response_to_completions: bool = False
@@ -190,19 +193,25 @@ class ProxyService:
         "top_p",
         "presence_penalty",
         "frequency_penalty",
+        "stop",
+        "logprobs",
+        "top_logprobs",
         "stream",
+        "stream_options",
         "user",
         "metadata",
         "seed",
         "max_output_tokens",
         "max_tokens",
-    }
-    RESPONSES_CHAT_ADAPTER_MAPPABLE_FIELDS = {
+        "parallel_tool_calls",
         "reasoning",
         "reasoning_effort",
+        "model_reasoning_effort",
+        "text",
+        "response_format",
         "store",
-        "include",
-        "parallel_tool_calls",
+    }
+    RESPONSES_CHAT_ADAPTER_MAPPABLE_FIELDS = {
         "prompt_cache_key",
         "client_metadata",
     }
@@ -611,6 +620,7 @@ class ProxyService:
         payload: dict[str, Any],
         request_path: str,
         model_name: str | None,
+        billing_currency: str | None = None,
     ) -> tuple[Decimal | None, int | None, int]:
         input_tokens, _ = ProxyService._estimate_request_tokens_for_precheck(
             payload,
@@ -634,15 +644,49 @@ class ProxyService:
                 input_price_per_1k=catalog.input_price_per_1k,
                 output_price_per_1k=catalog.output_price_per_1k,
                 cache_price_per_1k=catalog.cache_price_per_1k,
+                cache_write_price_per_1k=catalog.cache_write_price_per_1k,
                 price_multiplier=provider_model.price_multiplier,
                 prompt_tokens=input_tokens,
                 completion_tokens=output_tokens,
             )
             input_price = prices.get("input_price_per_1k")
             output_price = prices.get("output_price_per_1k")
+            source_currency = prices.get("source_currency")
+            price_currency = prices.get("billing_currency")
+            pricing_metadata = prices.get("pricing_json") if isinstance(prices.get("pricing_json"), dict) else {}
+            source_input_price = prices.get("source_input_price_per_1k")
+            source_output_price = prices.get("source_output_price_per_1k")
         else:
             input_price = provider_model.input_price_per_1k
             output_price = provider_model.output_price_per_1k
+            source_currency = getattr(provider_model, "source_currency", None) or "USD"
+            price_currency = getattr(provider_model, "billing_currency", None) or "USD"
+            pricing_metadata = {}
+            source_input_price = getattr(provider_model, "source_input_price_per_1k", None)
+            source_output_price = getattr(provider_model, "source_output_price_per_1k", None)
+        account_currency = CurrencyService.normalize_currency(billing_currency or price_currency)
+
+        def resolve_account_price(price_value, source_value):
+            if source_value is not None:
+                converted, _ = CurrencyService.convert_price(
+                    source_value,
+                    source_currency=source_currency,
+                    billing_currency=account_currency,
+                    pricing_metadata=pricing_metadata,
+                )
+                return converted
+            if CurrencyService.normalize_currency(price_currency) != account_currency:
+                converted, _ = CurrencyService.convert_price(
+                    price_value,
+                    source_currency=price_currency,
+                    billing_currency=account_currency,
+                    pricing_metadata=pricing_metadata,
+                )
+                return converted
+            return price_value
+
+        input_price = resolve_account_price(input_price, source_input_price)
+        output_price = resolve_account_price(output_price, source_output_price)
         if input_tokens > 0 and input_price is None:
             return None, input_tokens, output_tokens
         if output_tokens > 0 and output_price is None:
@@ -675,7 +719,17 @@ class ProxyService:
             payload=payload,
             request_path=request_path,
             model_name=model_name,
+            billing_currency=getattr(owner_user, "currency_code", None),
         )
+        if estimated_cost is None and estimated_input_tokens is not None:
+            return {
+                "message": "模型价格未完整设置，已阻止进入正式生产路由",
+                "code": "model_price_unset",
+                "estimated_input_tokens": estimated_input_tokens,
+                "estimated_output_tokens": estimated_output_tokens,
+                "provider_model_id": provider_model.id,
+                "model_name": provider_model.model_name,
+            }
         if estimated_cost is None or estimated_cost <= Decimal("0"):
             return None
         available_balance = BillingService.to_decimal(owner_user.balance_amount) - BillingService.to_decimal(owner_user.frozen_amount)
@@ -1754,6 +1808,31 @@ class ProxyService:
         return await ProxyService.forward_stream_request(endpoint_path="/responses", payload=payload, log_type="responses")
 
     @staticmethod
+    def gemini_external_payload(model_name: str, payload: dict[str, Any], *, stream: bool = False) -> dict[str, Any]:
+        native_payload = dict(payload)
+        native_payload["model"] = model_name
+        if stream:
+            native_payload["stream"] = True
+        return native_payload
+
+    @staticmethod
+    def claude_external_payload(payload: dict[str, Any]) -> dict[str, Any]:
+        return dict(payload)
+
+    @staticmethod
+    def _normalize_required_upstream_protocol_type(protocol_type: str | None) -> str | None:
+        if protocol_type is None:
+            return None
+        normalized = str(protocol_type).strip().lower()
+        if normalized in {"", "openai", "openai_compatible", "chat_completions", "responses", "both"}:
+            return None
+        if normalized == NativeProtocolAdapter.GEMINI:
+            return NativeProtocolAdapter.GEMINI
+        if normalized in {"claude", "anthropic", NativeProtocolAdapter.CLAUDE_MESSAGES}:
+            return NativeProtocolAdapter.CLAUDE_MESSAGES
+        raise ValueError(f"unsupported required upstream protocol type: {protocol_type}")
+
+    @staticmethod
     async def forward_json_request(db: Session | None = None, **kwargs) -> tuple[dict[str, Any], Provider, list[dict], int]:
         route_retry_started_at = kwargs.pop("route_retry_started_at", None)
         route_retry_round = int(kwargs.pop("route_retry_round", 0) or 0)
@@ -1793,6 +1872,7 @@ class ProxyService:
         public_endpoint_path: str | None = None,
         response_transform: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         suppress_success_log: bool = False,
+        required_upstream_protocol_type: str | None = None,
         route_retry_started_at: float | None = None,
         route_retry_round: int = 0,
         route_retry_trace: list[dict] | None = None,
@@ -1831,6 +1911,7 @@ class ProxyService:
         reasoning_level = LogService.extract_reasoning_level(payload)
         model_reasoning_effort = LogService.extract_model_reasoning_effort(payload)
         require_chat_completions, require_responses = ProxyService._route_endpoint_requirements(endpoint_path, payload)
+        required_upstream_protocol_type = ProxyService._normalize_required_upstream_protocol_type(required_upstream_protocol_type)
         trace: list[dict] = list(route_retry_trace or [])
         ProxyService._append_auth_trace_event(trace, api_client_auth)
         required_capabilities_json = ProxyService._request_capabilities_payload(
@@ -2077,6 +2158,12 @@ class ProxyService:
                 is_stream=False,
             )
         )
+        if candidates and required_upstream_protocol_type:
+            candidates = [
+                candidate
+                for candidate in candidates
+                if ProviderService.provider_or_model_native_protocol(candidate.provider, candidate.provider_model) == required_upstream_protocol_type
+            ]
         if candidates and failed_candidate_keys:
             candidates = ProxyService._filter_failed_route_candidates(candidates, failed_candidate_keys)
         if candidates:
@@ -2333,6 +2420,8 @@ class ProxyService:
                             payload,
                             started=started,
                             setting=setting,
+                            preserve_native_payload=bool(required_upstream_protocol_type),
+                            preserve_native_response=bool(required_upstream_protocol_type),
                         )
                     latency_ms = int((time.perf_counter() - started) * 1000)
                     usage_info = ProxyService._extract_usage_info(response) if setting.enable_token_logging else {
@@ -2943,6 +3032,7 @@ class ProxyService:
         source_ip: str | None = None,
         request_path_for_log: str | None = None,
         public_endpoint_path: str | None = None,
+        required_upstream_protocol_type: str | None = None,
         route_retry_started_at: float | None = None,
         route_retry_round: int = 0,
         route_retry_trace: list[dict] | None = None,
@@ -2976,6 +3066,7 @@ class ProxyService:
         reasoning_level = LogService.extract_reasoning_level(payload)
         model_reasoning_effort = LogService.extract_model_reasoning_effort(payload)
         require_chat_completions, require_responses = ProxyService._route_endpoint_requirements(endpoint_path, payload)
+        required_upstream_protocol_type = ProxyService._normalize_required_upstream_protocol_type(required_upstream_protocol_type)
         trace: list[dict] = list(route_retry_trace or [])
         ProxyService._append_auth_trace_event(trace, api_client_auth)
         required_capabilities_json = ProxyService._request_capabilities_payload(
@@ -3209,6 +3300,12 @@ class ProxyService:
                 is_stream=True,
             )
         )
+        if candidates and required_upstream_protocol_type:
+            candidates = [
+                candidate
+                for candidate in candidates
+                if ProviderService.provider_or_model_native_protocol(candidate.provider, candidate.provider_model) == required_upstream_protocol_type
+            ]
         if candidates and failed_candidate_keys:
             candidates = ProxyService._filter_failed_route_candidates(candidates, failed_candidate_keys)
         if candidates:
@@ -3469,6 +3566,8 @@ class ProxyService:
                         payload,
                         started=started,
                         stream_connect_timeout_seconds=setting.stream_connect_timeout_seconds,
+                        preserve_native_payload=bool(required_upstream_protocol_type),
+                        preserve_native_response=bool(required_upstream_protocol_type),
                     )
                     latency_ms = int((time.perf_counter() - started) * 1000)
                     upstream_request_id = ProxyService._extract_upstream_request_id(response)
@@ -3805,6 +3904,9 @@ class ProxyService:
                                         ):
                                             downstream_started = True
                                             yield downstream_chunk
+                                    elif prepared.upstream_protocol_type in NativeProtocolAdapter.NATIVE_PROTOCOLS and prepared.preserve_native_response:
+                                        downstream_started = True
+                                        yield upstream_chunk
                                     elif prepared.upstream_protocol_type in NativeProtocolAdapter.NATIVE_PROTOCOLS:
                                         native_chat_chunks = NativeProtocolAdapter.native_stream_chunk_to_chat_chunks(
                                             prepared.upstream_protocol_type,
@@ -4450,11 +4552,20 @@ class ProxyService:
         setting: Any,
         request_timeout_seconds: float | None = None,
         extra_headers: dict[str, str] | None = None,
+        preserve_native_payload: bool = False,
+        preserve_native_response: bool = False,
     ) -> tuple[dict[str, Any], str | None, list[dict]]:
         headers = ProxyService._build_upstream_headers(provider)
         if extra_headers:
             headers.update(extra_headers)
-        prepared = ProxyService._prepare_upstream_request(provider, provider_model=provider_model, endpoint_path=endpoint_path, payload=payload)
+        prepared = ProxyService._prepare_upstream_request(
+            provider,
+            provider_model=provider_model,
+            endpoint_path=endpoint_path,
+            payload=payload,
+            preserve_native_payload=preserve_native_payload,
+            preserve_native_response=preserve_native_response,
+        )
         response_json, upstream_request_id = await ProxyService._send_prepared_json(
             provider,
             prepared=prepared,
@@ -4487,7 +4598,7 @@ class ProxyService:
         client = ProxyService._select_upstream_client(payload=prepared.request_payload)
         response = await ProxyService._post_json_with_response_size_limit(
             client,
-            f"{provider.base_url}{prepared.request_path}",
+            ProxyService._prepared_request_url(provider, prepared),
             headers=headers,
             json=prepared.request_payload,
             timeout=ProxyService._build_httpx_timeout(
@@ -4500,7 +4611,7 @@ class ProxyService:
         )
         response.raise_for_status()
         response_json = response.json()
-        if prepared.upstream_protocol_type in NativeProtocolAdapter.NATIVE_PROTOCOLS:
+        if prepared.upstream_protocol_type in NativeProtocolAdapter.NATIVE_PROTOCOLS and not prepared.preserve_native_response:
             response_json = NativeProtocolAdapter.native_response_to_openai(
                 prepared.upstream_protocol_type,
                 prepared.public_endpoint_path or prepared.request_path,
@@ -4538,7 +4649,7 @@ class ProxyService:
         client = ProxyService._select_upstream_client(payload=prepared.request_payload)
         response = await ProxyService._post_json_with_response_size_limit(
             client,
-            f"{provider.base_url}{prepared.request_path}",
+            ProxyService._prepared_request_url(provider, prepared),
             headers=headers,
             json=prepared.request_payload,
             timeout=ProxyService._build_httpx_timeout(
@@ -4812,7 +4923,7 @@ class ProxyService:
         headers: dict[str, str],
         stream_connect_timeout_seconds: int | None = None,
     ) -> AsyncIterator[tuple[UpstreamStreamResponse, PreparedUpstreamRequest]]:
-        request_url = f"{provider.base_url}{prepared.request_path}"
+        request_url = ProxyService._prepared_request_url(provider, prepared)
         if ProxyService._select_upstream_stream_client_name(payload=prepared.request_payload) == "aiohttp":
             session = UpstreamClientService.get_aiohttp_session()
             async with session.post(
@@ -4844,6 +4955,18 @@ class ProxyService:
             yield response, prepared
 
     @staticmethod
+    def _prepared_request_url(provider: Provider, prepared: PreparedUpstreamRequest) -> str:
+        base_url = str(getattr(provider, "base_url", "") or "").rstrip("/")
+        request_path = str(prepared.request_path or "")
+        if not request_path.startswith("/"):
+            request_path = f"/{request_path}"
+        if prepared.upstream_protocol_type == NativeProtocolAdapter.GEMINI and request_path.startswith("/models/"):
+            base_path = urlsplit(base_url).path.rstrip("/").lower()
+            if base_path not in {"/v1", "/v1beta"}:
+                request_path = f"/v1beta{request_path}"
+        return f"{base_url}{request_path}"
+
+    @staticmethod
     async def _open_stream_with_endpoint_fallback(
         provider: Provider,
         provider_model: ProviderModel,
@@ -4853,11 +4976,20 @@ class ProxyService:
         started: float,
         stream_connect_timeout_seconds: int | None = None,
         extra_headers: dict[str, str] | None = None,
+        preserve_native_payload: bool = False,
+        preserve_native_response: bool = False,
     ) -> tuple[UpstreamStreamResponse, PreparedUpstreamRequest, Any, list[dict]]:
         headers = ProxyService._build_upstream_headers(provider)
         if extra_headers:
             headers.update(extra_headers)
-        prepared = ProxyService._prepare_upstream_request(provider, provider_model=provider_model, endpoint_path=endpoint_path, payload=payload)
+        prepared = ProxyService._prepare_upstream_request(
+            provider,
+            provider_model=provider_model,
+            endpoint_path=endpoint_path,
+            payload=payload,
+            preserve_native_payload=preserve_native_payload,
+            preserve_native_response=preserve_native_response,
+        )
         stream_context = ProxyService._stream_prepared_request(
             provider,
             prepared=prepared,
@@ -5124,6 +5256,7 @@ class ProxyService:
     @staticmethod
     def _assess_responses_to_chat_conversion_safety(payload: dict[str, Any]) -> EndpointConversionSafety:
         unsafe_fields: list[str] = []
+        unsafe_reasons: list[str] = []
         for key in payload.keys():
             if key in ProxyService.RESPONSES_CHAT_ADAPTER_MAPPABLE_FIELDS:
                 continue
@@ -5138,9 +5271,32 @@ class ProxyService:
                 if not ProxyService._responses_tool_choice_is_adapter_safe(payload.get("tool_choice")):
                     unsafe_fields.append(key)
                 continue
+            if key == "text":
+                if not ProxyService._responses_text_is_adapter_safe(payload.get("text"), unsafe_reasons=unsafe_reasons):
+                    unsafe_fields.append(key)
+                continue
+            if key == "response_format":
+                if not ProxyService._chat_response_format_is_adapter_safe(payload.get("response_format")):
+                    unsafe_fields.append(key)
+                continue
+            if key == "reasoning":
+                if LogService.extract_model_reasoning_effort(payload) is None:
+                    unsafe_fields.append(key)
+                continue
+            if key == "reasoning_effort":
+                if LogService.extract_model_reasoning_effort(payload) is None:
+                    unsafe_fields.append(key)
+                continue
+            if key == "model_reasoning_effort":
+                if LogService.extract_model_reasoning_effort(payload) is None:
+                    unsafe_fields.append(key)
+                continue
+            if key == "stream_options":
+                if not isinstance(payload.get("stream_options"), dict):
+                    unsafe_fields.append(key)
+                continue
             if key in ProxyService.ENDPOINT_ADAPTER_RISKY_FIELDS:
                 unsafe_fields.append(key)
-        unsafe_reasons: list[str] = []
         input_value = payload.get("input")
         if not ProxyService._responses_input_is_adapter_safe(input_value, unsafe_reasons=unsafe_reasons):
             pass
@@ -5245,6 +5401,44 @@ class ProxyService:
         return isinstance(name, str) and bool(name.strip())
 
     @staticmethod
+    def _responses_text_is_adapter_safe(value: Any, *, unsafe_reasons: list[str]) -> bool:
+        if value is None:
+            return True
+        if not isinstance(value, dict):
+            unsafe_reasons.append("responses text option must be an object")
+            return False
+        unsupported_keys = sorted(set(value.keys()) - {"format"})
+        if unsupported_keys:
+            unsafe_reasons.append(f"responses text contains unsupported keys: {', '.join(unsupported_keys)}")
+            return False
+        if "format" not in value:
+            return True
+        try:
+            response_format = ProxyService._responses_text_format_to_chat_response_format(value)
+        except HTTPException:
+            unsafe_reasons.append("responses text.format is not convertible to chat response_format")
+            return False
+        return ProxyService._chat_response_format_is_adapter_safe(response_format)
+
+    @staticmethod
+    def _chat_response_format_is_adapter_safe(value: Any) -> bool:
+        if value is None:
+            return True
+        if not isinstance(value, dict):
+            return False
+        format_type = value.get("type")
+        if format_type in {None, "text", "json_object"}:
+            return True
+        if format_type != "json_schema":
+            return False
+        json_schema = value.get("json_schema")
+        if not isinstance(json_schema, dict):
+            return False
+        name = json_schema.get("name")
+        schema = json_schema.get("schema")
+        return isinstance(name, str) and bool(name.strip()) and isinstance(schema, dict)
+
+    @staticmethod
     def _responses_input_is_adapter_safe(value: Any, *, unsafe_reasons: list[str]) -> bool:
         if isinstance(value, str):
             return True
@@ -5306,9 +5500,11 @@ class ProxyService:
                 continue
             if (isinstance(part_type, str) and part_type in {"input_image", "image_url"}) or "image_url" in part:
                 image_url = part.get("image_url")
-                if isinstance(image_url, (str, dict)):
+                if isinstance(image_url, str) and image_url.strip():
                     continue
-                unsafe_reasons.append("responses image part must use a string or object image_url")
+                if isinstance(image_url, dict) and isinstance(image_url.get("url"), str) and image_url["url"].strip():
+                    continue
+                unsafe_reasons.append("responses image part must use a non-empty string image_url or image_url.url")
                 safe = False
                 continue
             unsafe_reasons.append(f"responses content part type {part_type!r} is not convertible")
@@ -6115,12 +6311,16 @@ class ProxyService:
         *,
         endpoint_path: str,
         payload: dict[str, Any],
+        preserve_native_payload: bool = False,
+        preserve_native_response: bool = False,
     ) -> PreparedUpstreamRequest:
         return ProxyService._prepare_upstream_request(
             provider,
             provider_model=provider_model,
             endpoint_path=endpoint_path,
             payload=payload,
+            preserve_native_payload=preserve_native_payload,
+            preserve_native_response=preserve_native_response,
         )
 
     @staticmethod
@@ -6154,6 +6354,8 @@ class ProxyService:
         endpoint_path: str,
         payload: dict[str, Any],
         provider_model: ProviderModel | None = None,
+        preserve_native_payload: bool = False,
+        preserve_native_response: bool = False,
     ) -> PreparedUpstreamRequest:
         internal_payload = dict(payload)
         adapt_chat_response_to_responses = bool(internal_payload.pop("__aotu_responses_chat_adapter", False))
@@ -6173,15 +6375,24 @@ class ProxyService:
             native_model_name = ProviderService.provider_model_upstream_model_name(
                 provider_model,
                 fallback_model=str(internal_payload.get("model") or ""),
+                include_provider_model_id=True,
             )
             native_stream = bool(internal_payload.get("stream") is True)
-            native_source_payload = dict(internal_payload)
-            native_source_payload["model"] = str(native_model_name)
-            normalized_payload = NativeProtocolAdapter.openai_to_native_payload(
-                native_protocol,
-                upstream_endpoint_path,
-                native_source_payload,
-            )
+            if preserve_native_payload:
+                normalized_payload = dict(internal_payload)
+                if native_protocol == NativeProtocolAdapter.CLAUDE_MESSAGES:
+                    normalized_payload["model"] = str(native_model_name)
+                else:
+                    normalized_payload.pop("model", None)
+                normalized_payload.pop("stream", None)
+            else:
+                native_source_payload = dict(internal_payload)
+                native_source_payload["model"] = str(native_model_name)
+                normalized_payload = NativeProtocolAdapter.openai_to_native_payload(
+                    native_protocol,
+                    upstream_endpoint_path,
+                    native_source_payload,
+                )
             upstream_endpoint_path = NativeProtocolAdapter.request_path(
                 native_protocol,
                 str(native_model_name),
@@ -6196,6 +6407,7 @@ class ProxyService:
                 request_payload=normalized_payload,
                 public_endpoint_path=endpoint_path,
                 upstream_protocol_type=native_protocol,
+                preserve_native_response=preserve_native_response,
                 adapt_chat_response_to_responses=adapt_chat_response_to_responses,
                 adapt_chat_response_to_completions=adapt_chat_response_to_completions,
                 response_model_override=response_model_override if isinstance(response_model_override, str) else None,
@@ -7340,16 +7552,25 @@ class ProxyService:
             "top_p",
             "presence_penalty",
             "frequency_penalty",
+            "stop",
+            "logprobs",
+            "top_logprobs",
             "tools",
             "tool_choice",
             "stream",
+            "stream_options",
             "user",
             "metadata",
             "seed",
+            "store",
+            "response_format",
         }
         for key in passthrough_keys:
             if key in payload:
                 chat_payload[key] = payload[key]
+        text_response_format = ProxyService._responses_text_format_to_chat_response_format(payload.get("text"))
+        if text_response_format is not None and "response_format" not in chat_payload:
+            chat_payload["response_format"] = text_response_format
         if "parallel_tool_calls" in payload:
             chat_payload["parallel_tool_calls"] = payload["parallel_tool_calls"]
         if "tools" in chat_payload:
@@ -7365,7 +7586,58 @@ class ProxyService:
         reasoning_effort = LogService.extract_model_reasoning_effort(payload)
         if reasoning_effort is not None and "reasoning_effort" not in chat_payload:
             chat_payload["reasoning_effort"] = reasoning_effort
+        if chat_payload.get("stream") is True:
+            chat_payload = ProxyService._ensure_chat_stream_include_usage(chat_payload)
         return chat_payload
+
+    @staticmethod
+    def _responses_text_format_to_chat_response_format(value: Any) -> dict[str, Any] | None:
+        if not isinstance(value, dict):
+            return None
+        text_format = value.get("format")
+        if text_format is None:
+            return None
+        if not isinstance(text_format, dict):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "message": "Responses text.format must be an object",
+                    "code": "responses_chat_adapter_invalid_text_format",
+                },
+            )
+        format_type = text_format.get("type")
+        if format_type in {None, "text"}:
+            return None
+        if format_type == "json_object":
+            return {"type": "json_object"}
+        if format_type != "json_schema":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "message": "Responses→Chat adapter only supports text.format types text, json_object, and json_schema",
+                    "code": "responses_chat_adapter_unsupported_text_format",
+                    "format_type": format_type,
+                },
+            )
+        if isinstance(text_format.get("json_schema"), dict):
+            json_schema = dict(text_format["json_schema"])
+        else:
+            name = text_format.get("name")
+            schema = text_format.get("schema")
+            if not isinstance(name, str) or not name.strip() or not isinstance(schema, dict):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "message": "Responses json_schema text.format requires name and schema",
+                        "code": "responses_chat_adapter_invalid_json_schema_format",
+                    },
+                )
+            json_schema = {"name": name.strip(), "schema": schema}
+            if "description" in text_format:
+                json_schema["description"] = text_format["description"]
+            if "strict" in text_format:
+                json_schema["strict"] = text_format["strict"]
+        return {"type": "json_schema", "json_schema": json_schema}
 
     @staticmethod
     def _convert_responses_input_item_to_chat_message(item: Any) -> dict[str, Any] | None:
@@ -7413,10 +7685,26 @@ class ProxyService:
         if (isinstance(part_type, str) and part_type in {"input_image", "image_url"}) or "image_url" in part:
             image_url_value = part.get("image_url")
             detail = part.get("detail")
+            if not isinstance(image_url_value, (str, dict)):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "message": "Responses image content requires image_url when converting to Chat",
+                        "code": "responses_chat_adapter_invalid_image_url",
+                    },
+                )
             if isinstance(image_url_value, dict):
                 image_url_payload = dict(image_url_value)
             else:
                 image_url_payload = {"url": image_url_value}
+            if not isinstance(image_url_payload.get("url"), str) or not image_url_payload["url"].strip():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "message": "Responses image content requires a non-empty image_url.url when converting to Chat",
+                        "code": "responses_chat_adapter_invalid_image_url",
+                    },
+                )
             if detail and "detail" not in image_url_payload:
                 image_url_payload["detail"] = detail
             return {"type": "image_url", "image_url": image_url_payload}
@@ -8819,6 +9107,13 @@ class ProxyService:
     @staticmethod
     def _extract_usage_info(response_json: dict[str, Any]) -> dict[str, int | None]:
         usage = LogService.extract_usage_payload(response_json)
+        if not isinstance(usage, dict) and isinstance(response_json, dict):
+            if isinstance(response_json.get("usageMetadata"), dict):
+                usage = NativeProtocolAdapter.native_usage_to_openai(NativeProtocolAdapter.GEMINI, response_json)
+            elif isinstance(response_json.get("usage"), dict):
+                claude_usage = response_json["usage"]
+                if any(key in claude_usage for key in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")):
+                    usage = NativeProtocolAdapter.native_usage_to_openai(NativeProtocolAdapter.CLAUDE_MESSAGES, response_json)
         if not isinstance(usage, dict):
             return {
                 "prompt_tokens": None,
@@ -8918,6 +9213,19 @@ class ProxyService:
         if isinstance(output_text, str):
             append_text(output_text)
 
+        candidates = response_json.get("candidates")
+        if isinstance(candidates, list):
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                content = candidate.get("content")
+                if isinstance(content, dict):
+                    parts_value = content.get("parts")
+                    if isinstance(parts_value, list):
+                        for block in parts_value:
+                            if isinstance(block, dict) and isinstance(block.get("text"), str):
+                                append_text(block["text"])
+
         output = response_json.get("output")
         if isinstance(output, list):
             for item in output:
@@ -8931,6 +9239,12 @@ class ProxyService:
                         text_value = block.get("text")
                         if isinstance(text_value, str):
                             append_text(text_value)
+
+        content = response_json.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and isinstance(block.get("text"), str):
+                    append_text(block["text"])
 
         return "".join(parts) or None
 

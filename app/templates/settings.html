@@ -108,6 +108,14 @@
                     </span>
                     <input class="field-input" id="setting-recovery-probe-interval-sec" type="number">
                 </label>
+                <label>
+                    <span>挂载总探针限制（RPM）</span>
+                    <input class="field-input" id="setting-probe-rate-limit-per-minute" type="number" min="0" max="120" step="1" placeholder="默认 4，0 表示不限制">
+                </label>
+                <label>
+                    <span>单类探针限制（RPM）</span>
+                    <input class="field-input" id="setting-probe-type-rate-limit-per-minute" type="number" min="0" max="120" step="1" placeholder="默认 4，0 表示不限制">
+                </label>
             </div>
         </div>
         <div class="form-span-2 settings-group" aria-labelledby="settings-token-group-title">

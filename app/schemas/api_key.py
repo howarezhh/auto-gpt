@@ -1,4 +1,5 @@
 from datetime import datetime
+from decimal import Decimal
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -373,8 +374,8 @@ class ApiKeyBillingRecordOut(BaseModel):
     api_client_key_id: int
     request_log_id: int | None
     record_type: str
-    amount: float
-    balance_after: float | None
+    amount: str
+    balance_after: str | None
     provider_id: int | None
     provider_name: str | None
     model_name: str | None
@@ -383,20 +384,32 @@ class ApiKeyBillingRecordOut(BaseModel):
     total_tokens: int | None
     cache_read_tokens: int | None = None
     cache_write_tokens: int | None = None
-    unit_input_price_per_1k: float | None
-    unit_output_price_per_1k: float | None
-    unit_cache_read_price_per_1k: float | None = None
-    unit_cache_write_price_per_1k: float | None = None
+    unit_input_price_per_1k: str | None
+    unit_output_price_per_1k: str | None
+    unit_cache_read_price_per_1k: str | None = None
+    unit_cache_write_price_per_1k: str | None = None
+    source_currency: str | None = None
+    billing_currency: str | None = None
+    source_amount: str | None = None
+    unit_source_input_price_per_1k: str | None = None
+    unit_source_output_price_per_1k: str | None = None
+    unit_source_cache_read_price_per_1k: str | None = None
+    unit_source_cache_write_price_per_1k: str | None = None
+    exchange_rate_to_billing_currency: str | None = None
+    exchange_rate_source: str | None = None
+    exchange_rate_at: datetime | None = None
+    exchange_rate_version: str | None = None
+    rounding_strategy: str | None = None
     remark: str | None
     created_at: datetime
 
 
 class ApiKeyBillingSummaryOut(BaseModel):
     api_client_key_id: int
-    balance_amount: float | None
-    total_cost_used: float
-    total_recharge_amount: float
-    recent_billed_cost: float = 0
+    balance_amount: str | None
+    total_cost_used: str
+    total_recharge_amount: str
+    recent_billed_cost: str = "0"
     total_billing_records: int = 0
     items: list[ApiKeyBillingRecordOut] = Field(default_factory=list)
 
@@ -416,7 +429,7 @@ class ApiKeyCostInsightResponseOut(BaseModel):
 
 
 class ApiKeyBalanceAdjustmentIn(BaseModel):
-    amount: float
+    amount: Decimal
     remark: str | None = None
 
     @field_validator("remark")

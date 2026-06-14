@@ -37,8 +37,22 @@ if amount == nil or amount <= 0 then
   return {'ok', tonumber(redis.call('GET', active_key) or '0')}
 end
 
-if redis.call('EXISTS', lease_key) == 1 then
-  return {'ok', tonumber(redis.call('GET', active_key) or '0')}
+local existing_amount = tonumber(redis.call('GET', lease_key) or '0')
+if existing_amount > 0 then
+  if amount <= existing_amount then
+    redis.call('EXPIRE', lease_key, ttl)
+    redis.call('EXPIRE', active_key, ttl + 60)
+    return {'ok', tonumber(redis.call('GET', active_key) or '0')}
+  end
+  local delta = amount - existing_amount
+  local current = tonumber(redis.call('GET', active_key) or '0')
+  if available ~= nil and available >= 0 and current + delta > available then
+    return {'insufficient_balance_for_estimated_request', current}
+  end
+  current = redis.call('INCRBY', active_key, delta)
+  redis.call('EXPIRE', active_key, ttl + 60)
+  redis.call('SET', lease_key, amount, 'EX', ttl)
+  return {'ok', current}
 end
 
 local current = tonumber(redis.call('GET', active_key) or '0')

@@ -1,8 +1,8 @@
 # 提供商原生协议与模型分组
 
-摘要：本文记录提供商模型挂载的端点协议、模型分组、Gemini/Claude 原生协议适配、探针边界和日志口径。关键词：`provider`、`ProviderModel`、`protocol_type`、`model_group`、`gemini`、`claude_messages`、`health_probe`、`content_guard_probe`。
+摘要：本文记录提供商模型挂载的模型别名、上游模型 ID、端点协议、模型分组、OpenAI 兼容入口、Gemini/Claude 原生入口、探针边界和日志口径。关键词：`provider`、`ProviderModel`、`model_name`、`upstream_model_name`、`protocol_type`、`model_group`、`gemini`、`claude_messages`、`/v1/chat/completions`、`/v1beta/models`、`/v1/messages`、`health_probe`、`content_guard_probe`。
 
-最后维护时间：2026-06-13
+最后维护时间：2026-06-14
 
 ## 官方依据
 
@@ -19,18 +19,25 @@
 | Gemini | `gemini` | `gemini` | 不直接探测 | 不直接探测 | Gemini `generateContent` / `streamGenerateContent` |
 | Claude | `claude` | `claude_messages` | 不直接探测 | 不直接探测 | Claude Messages API |
 
-新增模型挂载时必须自动推断 `model_group`，同时允许管理员在前端模型挂载编辑中人工调整。若名称无法识别，使用 `unknown`，但新增长期可用模型时应优先补充分组规则。
+新增模型挂载时必须优先根据 `upstream_model_name` 自动推断 `model_group`，同时允许管理员在前端模型挂载编辑中人工调整。若名称无法识别，使用 `unknown`，但新增长期可用模型时应优先补充分组规则。
 
-## 请求适配规则
+## 对外入口与请求适配规则
 
-- 对外入口仍保持 `/v1/chat/completions`、`/v1/responses`、`/v1/completions` 等 OpenAI 兼容路径，外部调用方不直接感知上游原生协议。
-- Gemini/Claude 模型挂载命中后，由 `NativeProtocolAdapter` 把 OpenAI 兼容请求转换为对应官方原生请求，再把上游响应转换回 OpenAI 兼容响应。
+- 对外必须同时支持 OpenAI 兼容入口与主流官方原生入口。OpenAI 兼容入口包括 `/v1/chat/completions`、`/v1/responses`、`/v1/completions`、`/v1/models` 等；Gemini 原生入口包括 `/v1beta/models/{model}:generateContent` 与 `/v1beta/models/{model}:streamGenerateContent`；Claude 原生入口为 `/v1/messages`。
+- OpenAI 兼容入口收到 Gemini/Claude 模型请求时，可以由 `NativeProtocolAdapter` 把 OpenAI 兼容请求转换为对应官方原生请求，并把上游响应转换回 OpenAI 兼容响应。
+- Gemini/Claude 原生入口收到外部原生协议请求时，必须按原生请求体解析、按原生响应格式返回，并且只路由到对应 `protocol_type` 的上游模型；禁止先转 OpenAI 兼容结构再转回原生结构，避免丢失原生协议字段、流式事件语义和 SDK 兼容性。
+- 原生入口仍必须复用本项目统一的 Bearer API Key 鉴权、模型权限、路由、余额/计费、日志、内容防护和错误追踪链路；差异只在入口路径、请求体解析、上游协议和响应格式。
+- Responses→Chat 兼容适配仅用于将 `/v1/responses` 请求转发到只支持 Chat Completions 的 OpenAI 兼容上游。适配器只能转换语义等价字段：`input`/`instructions` 到 `messages`，函数工具到 Chat `tools`，`max_output_tokens` 到 `max_completion_tokens`，`reasoning.effort` 到 `reasoning_effort`，`text.format` 到 Chat `response_format`；Responses 独有且无等价语义的字段必须拒绝，不得静默丢弃。
+- Responses→Chat 流式适配必须在 Chat 上游请求中启用 `stream_options.include_usage`，以保留官方 usage chunk、缓存 token、速率和计费补全所需数据。
+- Responses→Chat 多轮状态通过 `previous_response_id` 读取适配器会话快照；历史 `instructions` 视为不可变前缀，后续请求不得新增或修改不同指令。若上轮存在函数调用，下一轮必须先提交所有 pending `function_call_output`，且转换为 Chat `tool` 消息后再追加新的用户消息。
 - Gemini 鉴权头使用 `x-goog-api-key`，Claude 鉴权头使用 `x-api-key` 与 `anthropic-version: 2023-06-01`；原生协议请求不得叠加 OpenAI `Authorization: Bearer ...` 到上游。
 - 模型挂载可配置 `native_endpoint_path` 作为 Gemini/Claude 原生协议的自定义接口路径模板；为空时使用官方默认路径。模板支持 `{model}`、`{raw_model}`、`{action}`，其中 Gemini 默认非流式 action 为 `generateContent`，流式 action 为 `streamGenerateContent?alt=sse`。历史提供商级 `native_endpoint_path` 只作为兼容兜底读取，不再作为新增/编辑表单的主配置口径。
 - `native_endpoint_path` 只填写路径部分，域名、协议和网关前缀仍由 `base_url` 承载；例如 Gemini 官方兼容路径可为空，自定义网关可填 `/proxy/google/{model}:{action}`，Claude 网关可填 `/anthropic/messages`。
+- Gemini 官方原生请求必须兼容两类 `base_url` 配置：若 `base_url` 已包含 `/v1` 或 `/v1beta`，直接拼接 `/models/{model}:{action}`；若 `base_url` 只到域名或网关根前缀，发送层必须自动补 `/v1beta/models/{model}:{action}`，避免健康探针请求落到无版本前缀的 `/models/*`。
 - “官方原生端点协议”只约束请求结构、鉴权头、路径模板语义和响应适配，不强制使用官方固定域名；实际上游地址必须继续由提供商 `base_url` 决定，并允许通过网关、代理或聚合商地址承载。
-- 原生协议流式响应必须转换为 OpenAI Chat SSE chunk，再按原请求入口需要转换为 Responses 或 Completions 流式结构。
-- 若模型挂载存在上游真实模型名配置，健康检测、内容防护探针和代理转发必须统一使用该上游真实模型名；展示、权限和日志中的本项目模型别名仍保留为 `model_name`。
+- OpenAI 兼容入口命中原生协议上游时，原生协议流式响应必须转换为 OpenAI Chat SSE chunk，再按原请求入口需要转换为 Responses 或 Completions 流式结构；Gemini/Claude 原生入口命中原生协议上游时，流式响应必须保持对应官方 SSE 事件格式直通返回。
+- `model_name` 是本平台展示、权限匹配和外部调用方请求使用的模型别名；`upstream_model_name` 是上游官方模型名或唯一模型 ID。两者可以相同，也可以在需要自定义对外名称时不同。
+- 若模型挂载存在 `upstream_model_name`，健康检测、内容防护探针、端点协议判断、价格目录匹配和代理转发必须统一使用该上游真实模型名；展示、权限和日志中的本项目模型别名仍保留为 `model_name`。
 
 ## Usage、成本与速率映射
 
@@ -45,6 +52,7 @@
 ## Prompt caching 口径
 
 - OpenAI GPT、DeepSeek、智谱 GLM 及多数 OpenAI 兼容国内渠道主要依赖稳定 prompt 前缀自动命中缓存。代理层必须保持客户端提交的 `messages`、`input`、`tools`、`instructions` 等高复用前缀的顺序和内容稳定；除协议兼容必需转换外，禁止重排、拆分、随机注入或改写静态前缀。
+- Responses→Chat 适配器默认不得因内部上下文窗口设置主动改写历史消息前缀；仅当客户端显式请求 `truncation: "auto"` 或 `context_management` compaction，或会话快照超过配置上限时，才允许进行确定性压缩。压缩时必须尽量保留首个 system 消息原文，避免破坏上游前缀缓存。
 - Claude 原生协议支持显式 content block `cache_control` 与顶层自动缓存控制。适配层必须保留客户端显式 `cache_control`；当请求没有显式断点时，允许为 Claude 原生请求补充 `cache_control: {"type": "ephemeral"}`，提升长上下文、多轮会话和重复系统提示的缓存命中率。
 - Gemini 原生协议支持显式 CachedContent 引用。适配层必须透传客户端提交的 `cachedContent` 或 `cached_content` 到 Gemini 原生请求体，禁止在 OpenAI 兼容入参转原生请求时丢弃已创建的缓存引用。
 - DashScope/Qwen 等 OpenAI 兼容渠道如支持 `cache_control`，通用 OpenAI 兼容转发层只负责透传客户端原始字段；禁止在所有 OpenAI 兼容提供商上默认强塞 `cache_control`，避免不支持该扩展字段的聚合渠道或官方兼容端点返回参数错误。
@@ -52,6 +60,7 @@
 
 ## 探针边界
 
+- 健康检测、内容防护可信检测和端点协议检测都必须先经过统一探针限频。默认同一提供商的同一挂载模型每 60 秒最多 4 次真实上游探针请求，单类探针默认每 60 秒最多 4 次；管理员可在路由设置页调整挂载总探针 RPM 和单类探针 RPM，`0` 表示不限制对应维度。
 - 模型端点协议检测只允许检测 OpenAI 兼容挂载的 `/chat/completions` 与 `/responses`，不得对 Gemini/Claude 发起 Chat/Responses 探测，也不得对原生端点写入端点协议沉淀结论。
 - Gemini/Claude 无需端点协议检测。其可用性由原生健康检测维护，内容可信度由原生内容防护/可信探针维护。
 - 原生健康检测使用 `NativeProtocolAdapter.native_text_payload` 与官方原生端点，必须请求 `Accept-Encoding: identity`。
@@ -60,12 +69,22 @@
 
 ## 前端配置口径
 
-- 提供商新增/编辑表单只展示提供商基础信息、`provider_type`、`base_url`、`api_key`、渠道分组和模型挂载列表；`provider_type` 只是提供商分类，下拉应包含 `OpenAI`、`OpenAI-Response`、`Gemini`、`Anthropic`、`Azure OpenAI`、`New API`、`CherryIN`、`Ollama` 等常见类型，不代表具体模型端点能力。
-- 模型挂载行、模型挂载矩阵和模型管理页面必须展示并保存 `protocol_type`、`model_group` 与 `native_endpoint_path`；模型挂载矩阵筛选区必须支持按 `model_group` 过滤挂载记录。
+- 提供商新增/编辑表单只展示提供商基础信息、`provider_type`、`base_url`、`api_key`、渠道分组和模型挂载列表；`provider_type` 只是提供商分类，不代表具体模型端点能力。类型下拉应集中维护国内外主流品牌、官方渠道和网关类别，如 `OpenAI 兼容`、`OpenAI 官方`、`Gemini`、`Claude / Anthropic`、`DeepSeek`、`通义千问`、`阿里云百炼`、`火山方舟`、`OpenRouter`、`New API`、`LiteLLM 网关`、`Ollama` 等。
+- 新增或编辑提供商时，前端允许根据提供商名称、`base_url` 和当前模型挂载的 `model_group` 自动推断 `provider_type`；管理员手动选择后必须保留人工选择，不得被后续模型名或地址变化覆盖。
+- 模型挂载行、模型挂载矩阵和模型管理页面必须展示并保存 `model_name`、`upstream_model_name`、`protocol_type`、`model_group` 与 `native_endpoint_path`；模型挂载矩阵和模型配置聚合列表筛选区必须支持按 `model_group` 过滤挂载记录。
+- 提供商新增/编辑表单中的模型字段必须同时展示 `模型名称` 和 `模型ID`：`模型名称` 对应本平台对外别名，`模型ID` 对应上游官方模型名或唯一 ID。模型块可以完全不填；一旦新增模型行，`模型名称` 与 `模型ID` 必填。
 - 模型挂载分组为 Gemini 或 Claude 时，`protocol_type` 必须分别锁定为 `gemini` 或 `claude_messages`，前端不得允许人工改成 Chat/Responses/双协议，后端保存接口也必须按模型分组强制归一化；管理员只能通过修改模型分组来解除该协议锁定。
 - 模型挂载协议下拉应包含 `双协议`、`Chat`、`Responses`、`Gemini`、`Claude`。
 - 模型分组下拉应包含国内外主流品牌分组，如 `openai`、`deepseek`、`qwen`、`glm`、`doubao`、`kimi`、`gemini`、`claude` 等。
 - 对 Gemini/Claude 的协议检测按钮应跳过端点协议检测，并提示使用原生健康检测和可信检测。
+- 路由设置页的健康治理区应提供统一探针限频配置：挂载总探针限制（RPM）控制同一提供商同一挂载模型所有探针合计额度，单类探针限制（RPM）控制同一探针类型额度。
+
+## 批量导入提供商规则
+
+- 批量导入是提供商级导入，模板不得再要求提供商级 `协议` 或 `模型能力` 字段；提供商保存时保留内部默认兼容口径，具体端点能力由模型挂载字段决定。
+- 模型块整体可不填；不填时只新增提供商，不新增模型挂载。
+- 一旦填写任意模型，单个模型必须填写 `模型名称` 和 `模型ID`。`启用`、`端点协议`、`模型分组`、`倍率`可不填，默认分别按启用、模型ID推断协议、模型ID推断分组和倍率 1 处理。
+- `端点协议` 若填写，必须按模型分组填写：Claude 分组只能保存为 `claude_messages`，Gemini 分组只能保存为 `gemini`，GPT/OpenAI 与国内 OpenAI 兼容模型可按实际上游能力填写 `both`、`chat_completions` 或 `responses`。
 
 ## 缓存与一致性
 

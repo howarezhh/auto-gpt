@@ -814,6 +814,34 @@ SyntaxError: Unexpected token ')'
 
 ---
 
+## [ERR-20260613-002] sqlalchemy_compiled_table_name_assertion
+
+**Logged**: 2026-06-13T00:00:00+08:00
+**Priority**: low
+**Status**: pending
+**Area**: tests
+
+### Summary
+A query compilation regression test failed because the assertion guessed `model_catalog.model_group` instead of the actual table name `model_catalogs.model_group`.
+
+### Error
+```text
+AssertionError: assert 'model_catalog.model_group' in '... WHERE model_catalogs.model_group = :model_group_1'
+```
+
+### Context
+- Added a focused test for model catalog `model_group` filtering.
+- SQLAlchemy compiled SQL uses the mapped database table name, not a singularized model-class-derived name.
+
+### Suggested Fix
+When asserting compiled SQL, inspect the compiled string or ORM table metadata before writing table-name assertions.
+
+### Metadata
+- Reproducible: yes
+- Related Files: tests/test_provider_model_mounts.py, app/services/model_catalog_service.py
+
+---
+
 ## [ERR-20260613-003] postgres_test_drop_table_foreign_key_dependency
 
 **Logged**: 2026-06-13T00:40:00+08:00
@@ -1110,5 +1138,34 @@ Use multiple `rg -F` fixed-string searches or split complex searches into shorte
 ### Metadata
 - Reproducible: yes
 - Related Files: app/static/js/app.js
+
+---
+
+## [ERR-20260613-001] sql_schema_assumption_in_log_audit
+
+**Logged**: 2026-06-13T11:30:00+08:00
+**Priority**: low
+**Status**: pending
+**Area**: backend
+
+### Summary
+Log-audit SQL failed because the query assumed `provider_models.provider_model_id` and `providers.last_error` existed instead of inspecting the live schema first.
+
+### Error
+```text
+psycopg.errors.UndefinedColumn: column pm.provider_model_id does not exist
+psycopg.errors.UndefinedColumn: column p.last_error does not exist
+```
+
+### Context
+- Investigating Gemini health-check logs in PostgreSQL.
+- The codebase uses `provider_model_id` as a Python/result field in some traces, but the database table does not have that column.
+
+### Suggested Fix
+When auditing production-like logs, inspect table columns first with SQLAlchemy inspector or ORM models, then write SQL against the live schema.
+
+### Metadata
+- Reproducible: yes
+- Related Files: app/models/provider_model.py, app/models/provider.py, app/services/health_service.py
 
 ---

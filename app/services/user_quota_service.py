@@ -90,9 +90,9 @@ class UserQuotaService:
                 func.count(RequestLog.id).label("total_requests"),
                 func.sum(case((RequestLog.created_at >= day_start, 1), else_=0)).label("day_requests"),
                 func.sum(case((RequestLog.created_at >= month_start, 1), else_=0)).label("month_requests"),
-                func.sum(RequestLog.total_tokens).label("total_tokens"),
-                func.sum(case((RequestLog.created_at >= day_start, RequestLog.total_tokens), else_=0)).label("day_tokens"),
-                func.sum(case((RequestLog.created_at >= month_start, RequestLog.total_tokens), else_=0)).label("month_tokens"),
+                func.sum(case((RequestLog.success.is_(True), RequestLog.total_tokens), else_=0)).label("total_tokens"),
+                func.sum(case(((RequestLog.success.is_(True)) & (RequestLog.created_at >= day_start), RequestLog.total_tokens), else_=0)).label("day_tokens"),
+                func.sum(case(((RequestLog.success.is_(True)) & (RequestLog.created_at >= month_start), RequestLog.total_tokens), else_=0)).label("month_tokens"),
             ).where(
                 RequestLog.api_client_key_id.in_(key_ids),
                 LogService._route_traffic_expr(),

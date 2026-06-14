@@ -1,0 +1,58 @@
+# 计费模块
+
+摘要：计费模块负责模型价格解析、请求成本计算、余额预占、账单落库、用户用量统计和后台额度用量展示。关键词：billing、source_currency、billing_currency、exchange_rate_snapshot、cache_write_price_per_1k、fee_components、request_charge、quota、reservation。
+
+## 职责边界
+
+- `ModelPricingService` 负责把模型目录价格标准化为可计费价格，支持固定价、阶梯价、原币种价格、账户币种价格、汇率快照、缓存命中价、缓存写入价和非 token 费用组件。
+- `BillingService` 负责按请求日志计算成本并写入 `request_logs`、API Key 账单和用户账户账单；金额运算必须全程使用 `Decimal` 与数据库 `Numeric`。
+- `BillingReservationService` 负责正式路由前的余额预占；同一请求在多候选路由中若后续候选预估费用更高，必须按差额补足预占。
+- `ProxyService` 负责生产路由前的余额预检和未定价模型拦截；若可估算 token 但缺少正式价格，必须以 `model_price_unset` 阻止候选进入正式路由。
+- `UserPortalService` 负责后台用户列表的额度用量汇总，展示每个用户今日、月度、累计请求、成功 token、费用、可用余额占比和风险状态。
+
+## 多币种计费事实
+
+生产计费以原始定价币种为事实来源，展示币种只用于界面和报表换算，不得覆盖计费事实。模型目录、提供商模型、请求日志、API Key 账单和用户账单必须保留以下信息：
+
+- `source_currency`：官方或人工录入价格的原始币种，例如 `CNY`、`USD`。
+- `source_*_price_per_1k`：原币种 token 单价，包括输入、输出、缓存命中和缓存写入。
+- `billing_currency`：账户结算币种，默认 `USD`，用户账户通过 `UserAccount.currency_code` 明确保存。
+- `exchange_rate_to_billing_currency`、`exchange_rate_source`、`exchange_rate_at`、`exchange_rate_version`、`rounding_strategy`：请求计费时使用的汇率快照和舍入口径。
+- `source_amount` 与 `amount`：账单记录同时保存原币种金额与账户币种金额，便于历史账单追溯和展示币种换算。
+
+人民币模型价格不得在导入阶段一次性硬转美元后丢失原价。官方价格同步脚本只允许写入人民币原价、账户币种换算价和汇率快照；后续汇率变化不能改写历史账单快照。
+
+## 价格结构
+
+模型目录的固定价和阶梯价均支持以下字段：
+
+- `input_price_per_1k`、`output_price_per_1k`、`cache_price_per_1k`、`cache_write_price_per_1k`：账户币种单价。
+- `source_input_price_per_1k`、`source_output_price_per_1k`、`source_cache_price_per_1k`、`source_cache_write_price_per_1k`：原币种单价。
+- `fee_components`：非 token 费用组件，当前支持 `per_request`、`per_image`、`per_file`、`per_second`。每个组件应保存 `amount`、`currency`、`source_amount`、`source_currency` 和 `unit`。
+
+缓存命中价允许在缺失时按输入价兜底；缓存写入价不得按输入价兜底。只要请求存在缓存写入 token 且缺少缓存写入单价，计费状态必须进入 `price_unset`，防止把缓存创建成本错误算成普通输入成本。
+
+## 请求计费流程
+
+1. 代理路由在候选执行前根据请求体估算输入 token 和输出 token 上限。
+2. 价格解析优先读取模型目录，按 provider 挂载倍率生成候选价格，并按用户账户币种换算。
+3. 若 token 可估算但价格缺失，候选以 `model_price_unset` 被拒绝，不进入正式上游请求。
+4. 若价格完整，余额预占按账户可用余额和当前在途请求计算；同一 `lease_key` 遇到更高估算金额时按差额补足。
+5. 请求完成后，`BillingService.compute_log_cost()` 根据真实 token、缓存 token、费用组件和汇率快照计算原币种成本与账户币种成本。
+6. `sync_request_billing()` 写入 API Key 账单和用户账户账单，并更新账户余额。重复处理同一请求必须幂等。
+
+## 用量统计与展示
+
+用户端额度统计和后台用户列表必须使用同一类服务层汇总口径。token 用量只统计成功请求，避免失败日志中的估算 token 抬高用户用量。后台用户列表的“额度用量”列展示用户今日、月度、累计请求、成功 token、费用、可用余额占比和风险状态。
+
+余额状态必须使用可用余额口径：`balance_amount - frozen_amount`。后台 API Key 状态、正式鉴权和用户风险展示不得只看账户余额总额。
+
+## 前端展示契约
+
+后台模型管理、提供商模型挂载、日志详情、账单表格、API Key 详情和用户模型目录都必须显示账户币种价格；当原币种与账户币种不一致时，必须同时显示原币种价格或原币种金额，并展示汇率快照来源、版本或时间。前端格式化金额和单价时必须传入 `billing_currency` 或 `source_currency`，禁止继续使用隐式美元口径。
+
+模型价格表单必须支持录入缓存写入价、原币种、账户币种、原币种单价、汇率快照和 `fee_components` 费用组件。缓存写入价缺失时界面展示为未设置，不得回退展示输入价。
+
+## 数据迁移
+
+多币种计费字段由 `migrations/2026-06-13_multicurrency_billing_snapshots.sql` 维护。计费金额审计字段必须使用 `NUMERIC(24, 9)`，单价字段使用 `NUMERIC(24, 12)`。旧 typed logging 迁移中的计费金额列也必须保持 `NUMERIC`；仅内容防护置信度等非金额字段允许继续使用浮点类型。

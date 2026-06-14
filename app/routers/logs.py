@@ -1,7 +1,7 @@
 from app.utils.timezone import now_beijing
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
@@ -62,6 +62,8 @@ async def list_logs(
     content_guard_category: str | None = None,
     content_guard_switched_provider: bool | None = None,
     content_guard_adaptation_skipped: bool | None = None,
+    start_at: datetime | None = None,
+    end_at: datetime | None = None,
     exclude_health_checks: bool = Query(default=True),
     wait_for_latest: bool = Query(default=False),
     wait_timeout_ms: int = Query(default=2000, ge=0, le=10000),
@@ -103,6 +105,8 @@ async def list_logs(
         content_guard_category=content_guard_category,
         content_guard_switched_provider=content_guard_switched_provider,
         content_guard_adaptation_skipped=content_guard_adaptation_skipped,
+        start_at=start_at,
+        end_at=end_at,
     )
     return LogListResponse(
         total=total,
@@ -151,6 +155,123 @@ async def clear_logs(request: Request, db: Session = Depends(get_db)) -> dict:
     }
 
 
+@router.delete("/filtered")
+async def delete_filtered_logs(
+    request: Request,
+    log_type: str | None = None,
+    provider_id: int | None = None,
+    provider_trust_level: str | None = None,
+    model_name: str | None = None,
+    model_query: str | None = None,
+    conversation_key: str | None = None,
+    api_client_key_id: int | None = None,
+    api_client_key_query: str | None = None,
+    user_account_id: int | None = None,
+    user_account_query: str | None = None,
+    tenant_name: str | None = None,
+    project_name: str | None = None,
+    app_name: str | None = None,
+    environment_name: str | None = None,
+    success: bool | None = None,
+    content_guard_result: str | None = None,
+    content_guard_risk_level: str | None = None,
+    content_guard_action: str | None = None,
+    content_guard_final_strategy: str | None = None,
+    content_guard_retry_count: int | None = Query(default=None, ge=0),
+    content_guard_guard_stage: str | None = None,
+    content_guard_category: str | None = None,
+    content_guard_switched_provider: bool | None = None,
+    content_guard_adaptation_skipped: bool | None = None,
+    start_at: datetime | None = None,
+    end_at: datetime | None = None,
+    exclude_health_checks: bool = Query(default=True),
+    db: Session = Depends(get_db),
+) -> dict:
+    filter_snapshot = {
+        "log_type": log_type,
+        "provider_id": provider_id,
+        "provider_trust_level": provider_trust_level,
+        "model_name": model_name,
+        "model_query": model_query,
+        "conversation_key": conversation_key,
+        "api_client_key_id": api_client_key_id,
+        "api_client_key_query": api_client_key_query,
+        "user_account_id": user_account_id,
+        "user_account_query": user_account_query,
+        "tenant_name": tenant_name,
+        "project_name": project_name,
+        "app_name": app_name,
+        "environment_name": environment_name,
+        "success": success,
+        "content_guard_result": content_guard_result,
+        "content_guard_risk_level": content_guard_risk_level,
+        "content_guard_action": content_guard_action,
+        "content_guard_final_strategy": content_guard_final_strategy,
+        "content_guard_retry_count": content_guard_retry_count,
+        "content_guard_guard_stage": content_guard_guard_stage,
+        "content_guard_category": content_guard_category,
+        "content_guard_switched_provider": content_guard_switched_provider,
+        "content_guard_adaptation_skipped": content_guard_adaptation_skipped,
+        "start_at": start_at.isoformat() if start_at else None,
+        "end_at": end_at.isoformat() if end_at else None,
+    }
+    if not _has_log_delete_scope(filter_snapshot):
+        raise HTTPException(status_code=400, detail="删除日志必须至少指定一个筛选条件或时间范围")
+    queue_status = await RequestLogQueueService.wait_until_idle(
+        timeout_seconds=2,
+        poll_interval_seconds=0.05,
+    )
+    deleted = LogService.delete_logs_by_filters(
+        db,
+        log_type=log_type,
+        log_types=None,
+        provider_id=provider_id,
+        provider_trust_level=provider_trust_level,
+        model_name=model_name,
+        model_query=model_query,
+        conversation_key=conversation_key,
+        api_client_key_id=api_client_key_id,
+        api_client_key_query=api_client_key_query,
+        user_account_id=user_account_id,
+        user_account_query=user_account_query,
+        tenant_name=tenant_name,
+        project_name=project_name,
+        app_name=app_name,
+        environment_name=environment_name,
+        success=success,
+        exclude_health_checks=exclude_health_checks,
+        content_guard_result=content_guard_result,
+        content_guard_risk_level=content_guard_risk_level,
+        content_guard_action=content_guard_action,
+        content_guard_final_strategy=content_guard_final_strategy,
+        content_guard_retry_count=content_guard_retry_count,
+        content_guard_guard_stage=content_guard_guard_stage,
+        content_guard_category=content_guard_category,
+        content_guard_switched_provider=content_guard_switched_provider,
+        content_guard_adaptation_skipped=content_guard_adaptation_skipped,
+        start_at=start_at,
+        end_at=end_at,
+    )
+    _record_log_admin_audit(
+        db,
+        request=request,
+        action="delete_filtered_logs",
+        summary=f"按筛选删除请求日志 {deleted} 条",
+        detail={
+            "deleted": deleted,
+            "filters": filter_snapshot,
+            "exclude_health_checks": exclude_health_checks,
+            "queue_idle_before_delete": bool(queue_status.get("idle")),
+        },
+        risk_level="high",
+    )
+    return {
+        "deleted": deleted,
+        "queue_idle_before_delete": bool(queue_status.get("idle")),
+        "queue_timed_out": bool(queue_status.get("timed_out")),
+    }
+
+
 @router.get("/export")
 async def export_logs(
     request: Request,
@@ -178,6 +299,8 @@ async def export_logs(
     content_guard_category: str | None = None,
     content_guard_switched_provider: bool | None = None,
     content_guard_adaptation_skipped: bool | None = None,
+    start_at: datetime | None = None,
+    end_at: datetime | None = None,
     exclude_health_checks: bool = Query(default=True),
     wait_for_latest: bool = Query(default=False),
     wait_timeout_ms: int = Query(default=2000, ge=0, le=10000),
@@ -217,6 +340,8 @@ async def export_logs(
         content_guard_category=content_guard_category,
         content_guard_switched_provider=content_guard_switched_provider,
         content_guard_adaptation_skipped=content_guard_adaptation_skipped,
+        start_at=start_at,
+        end_at=end_at,
         limit=limit,
     )
     filename = f"logs-export-{now_beijing().strftime('%Y%m%d-%H%M%S')}.csv"
@@ -268,3 +393,13 @@ def _record_log_admin_audit(
         source_ip=request.client.host if request.client else None,
         risk_level=risk_level,
     )
+
+
+def _has_log_delete_scope(filters: dict) -> bool:
+    for value in filters.values():
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return True
+    return False

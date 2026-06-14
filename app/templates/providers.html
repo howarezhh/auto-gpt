@@ -35,16 +35,52 @@
         </div>
     </div>
     <div class="provider-toolbar provider-toolbar-stacked">
-        <div class="table-toolbar filter-toolbar provider-toolbar-actions">
+        <div class="table-toolbar filter-toolbar provider-directory-filters">
             <label class="visually-hidden" for="provider-search">搜索提供商对象</label>
             <input class="field-input search-input provider-search-input" id="provider-search" type="search" placeholder="搜索名称、URL、模型、地区、备注">
-        </div>
-        <div class="provider-filter-chips" role="group" aria-label="提供商状态筛选">
-            <button class="provider-filter-chip is-active" type="button" data-provider-status-filter="all">全部</button>
-            <button class="provider-filter-chip" type="button" data-provider-status-filter="healthy">全部可用</button>
-            <button class="provider-filter-chip" type="button" data-provider-status-filter="degraded">部分可用</button>
-            <button class="provider-filter-chip" type="button" data-provider-status-filter="unhealthy">全部不可用</button>
-            <button class="provider-filter-chip" type="button" data-provider-status-filter="circuit_open">熔断中</button>
+            <label class="visually-hidden" for="provider-health-filter">可用性</label>
+            <select class="field-input" id="provider-health-filter">
+                <option value="">全部可用性</option>
+                <option value="healthy">全部可用</option>
+                <option value="degraded">部分可用</option>
+                <option value="unhealthy">全部不可用</option>
+                <option value="unknown">未检测</option>
+            </select>
+            <label class="visually-hidden" for="provider-enabled-filter">启用状态</label>
+            <select class="field-input" id="provider-enabled-filter">
+                <option value="">全部启用状态</option>
+                <option value="true">已启用</option>
+                <option value="false">已停用</option>
+            </select>
+            <label class="visually-hidden" for="provider-trust-filter">可信状态</label>
+            <select class="field-input" id="provider-trust-filter">
+                <option value="">全部可信状态</option>
+                <option value="trusted">可信</option>
+                <option value="partially_trusted">部分可信</option>
+                <option value="untrusted">不可信</option>
+                <option value="unknown">未检测</option>
+            </select>
+            <label class="visually-hidden" for="provider-circuit-filter">熔断状态</label>
+            <select class="field-input" id="provider-circuit-filter">
+                <option value="">全部熔断状态</option>
+                <option value="closed">闭合</option>
+                <option value="open">已熔断</option>
+                <option value="half_open">半开探测</option>
+            </select>
+            <label class="visually-hidden" for="provider-type-filter">提供商类型</label>
+            <select class="field-input" id="provider-type-filter">
+                <option value="">全部类型</option>
+            </select>
+            <label class="visually-hidden" for="provider-group-filter">分组</label>
+            <select class="field-input" id="provider-group-filter">
+                <option value="">全部分组</option>
+            </select>
+            <label class="visually-hidden" for="provider-page-size">每页数量</label>
+            <select class="field-input" id="provider-page-size">
+                <option value="20">20 条/页</option>
+                <option value="50">50 条/页</option>
+                <option value="100">100 条/页</option>
+            </select>
         </div>
     </div>
     <div class="table-shell provider-table-shell">
@@ -59,12 +95,23 @@
                     <th>模型</th>
                     <th>容量</th>
                     <th>质量</th>
-                    <th>优先级</th>
+                    <th>
+                        <span class="provider-priority-heading" tabindex="0" data-settings-tooltip-trigger="true" data-settings-tooltip-title="优先级说明" data-settings-tooltip-copy="优先级用于控制同等条件下的路由排序，数字越小越靠前。建议核心稳定提供商设置 0-20，常规主力设置 21-60，备用提供商设置 61-100，低优先级或兜底提供商设置 101 以上。">
+                            优先级
+                        </span>
+                    </th>
                     <th>操作</th>
                 </tr>
             </thead>
             <tbody id="provider-table-body"></tbody>
         </table>
+    </div>
+    <div class="provider-directory-pagination">
+        <span id="provider-page-meta">第 1 页，共 1 页 · 共 0 条</span>
+        <div class="pagination-actions">
+            <button class="topbar-btn interactive-btn" id="provider-prev-page-btn" type="button" disabled>上一页</button>
+            <button class="topbar-btn interactive-btn" id="provider-next-page-btn" type="button" disabled>下一页</button>
+        </div>
     </div>
 </section>
 
@@ -94,24 +141,36 @@
             <label for="provider-type">
                 <span>提供商类型</span>
                 <select class="field-input" id="provider-type">
-                    <option value="openai_compatible">OpenAI</option>
+                    <option value="openai_compatible">OpenAI 兼容</option>
+                    <option value="openai_official">OpenAI 官方</option>
                     <option value="openai_response">OpenAI-Response</option>
                     <option value="google_gemini">Gemini</option>
-                    <option value="anthropic_official">Anthropic</option>
+                    <option value="anthropic_official">Claude / Anthropic</option>
                     <option value="azure_openai">Azure OpenAI</option>
-                    <option value="new_api">New API</option>
-                    <option value="cherryin">CherryIN</option>
-                    <option value="ollama">Ollama</option>
-                    <option value="openai_official">OpenAI 官方</option>
+                    <option value="deepseek">DeepSeek</option>
+                    <option value="qwen">通义千问</option>
                     <option value="dashscope">阿里云百炼</option>
                     <option value="volcengine_ark">火山方舟</option>
+                    <option value="doubao">豆包</option>
                     <option value="tencent_hunyuan">腾讯混元</option>
                     <option value="baidu_qianfan">百度千帆</option>
                     <option value="zhipu_bigmodel">智谱 BigModel</option>
                     <option value="moonshot">Moonshot / Kimi</option>
-                    <option value="deepseek">DeepSeek</option>
+                    <option value="baichuan">百川</option>
+                    <option value="minimax">MiniMax</option>
+                    <option value="step">阶跃星辰</option>
+                    <option value="spark">讯飞星火</option>
+                    <option value="yi">零一万物</option>
+                    <option value="mistral">Mistral</option>
+                    <option value="llama">Llama</option>
+                    <option value="grok">Grok</option>
+                    <option value="cohere">Cohere</option>
+                    <option value="perplexity">Perplexity</option>
                     <option value="openrouter">OpenRouter</option>
+                    <option value="new_api">New API</option>
+                    <option value="cherryin">CherryIN</option>
                     <option value="litellm_gateway">LiteLLM 网关</option>
+                    <option value="ollama">Ollama</option>
                     <option value="other">其它</option>
                 </select>
             </label>
@@ -322,16 +381,23 @@
                     </div>
                 </div>
                 <div class="provider-model-custom-row">
-                    <label class="visually-hidden" for="provider-custom-model-name">输入自定义模型名</label>
-                    <input class="field-input" id="provider-custom-model-name" placeholder="输入自定义模型名，例如 gpt-4.1-mini" type="text">
+                    <label for="provider-custom-model-name">
+                        <span>模型名称</span>
+                        <input class="field-input" id="provider-custom-model-name" placeholder="平台对外别名，例如 gemini-pro" type="text">
+                    </label>
+                    <label for="provider-custom-model-id">
+                        <span>模型ID</span>
+                        <input class="field-input" id="provider-custom-model-id" placeholder="上游官方模型名，例如 gemini-2.5-pro" type="text">
+                    </label>
                     <button class="btn btn-ghost interactive-btn" id="provider-add-custom-model" type="button">添加自定义模型</button>
                 </div>
                 <div class="provider-model-config-head" aria-hidden="true">
-                    <span>模型名称 *</span>
-                    <span>启用</span>
-                    <span>端点协议</span>
-                    <span>模型分组</span>
-                    <span>倍率</span>
+                    <span>模型名称 * <small>对外别名</small></span>
+                    <span>模型ID * <small>上游官方名</small></span>
+                    <span>启用 <small>默认是</small></span>
+                    <span>端点协议 <small>自动推断</small></span>
+                    <span>模型分组 <small>自动推断</small></span>
+                    <span>倍率 <small>默认 1</small></span>
                     <span>操作</span>
                 </div>
                 <div class="provider-model-config-list" id="provider-model-config-list" aria-live="polite"></div>

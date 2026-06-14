@@ -7,7 +7,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
-from sqlalchemy import case, desc, func, literal, or_, select, union_all
+from sqlalchemy import case, delete, desc, func, literal, or_, select, union_all
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -35,6 +35,7 @@ from app.models.logging_events import (
     UserOperationAuditLog,
 )
 from app.models.provider import Provider
+from app.models.provider_model import ProviderModel
 from app.models.request_log import RequestLog
 from app.schemas.log import RequestLogOut
 from app.services.admin_audit_service import AdminAuditService
@@ -73,6 +74,8 @@ REQUEST_TIMELINE_PER_MODEL_LIMIT = 50
 REQUEST_TIMELINE_TOTAL_LIMIT = 200
 HEALTH_PROBE_DETAIL_LIMIT = 500
 TYPED_LOG_FILTER_VALUE_LIMIT = 50
+TYPED_LOG_DELETE_BATCH_SIZE = 1000
+TYPED_LOG_DELETE_MAX_BATCHES = 100
 
 BILLING_RESULT_STATUS_ALIASES: dict[str, tuple[str, ...]] = {
     "success": ("billed", "no_charge", "internal_request"),
@@ -241,8 +244,8 @@ TYPED_LOG_EXPORT_FIELD_LABELS: dict[str, str] = {
     "provider_id": "提供商 ID",
     "provider_name": "提供商",
     "health_probe_provider_names": "检测提供商名称",
-    "health_probe_model_ids": "检测模型 ID",
-    "provider_model_id": "提供商模型 ID",
+    "health_probe_model_ids": "检测模型",
+    "provider_model_id": "挂载 ID",
     "model_name": "实际模型",
     "requested_model": "请求模型",
     "request_path": "请求路径",
@@ -547,6 +550,7 @@ def get_health_run(
         .limit(normalized_limit + 1)
     ).all()
     probe_items = [_model_to_dict(item) for item in probes[:normalized_limit]]
+    _enrich_health_probe_items(db, probe_items)
     return {
         "run": _model_to_dict(run),
         "probes": probe_items,
@@ -651,16 +655,13 @@ def _enrich_health_run_probe_context(db: Session, items: list[dict[str, Any]]) -
         for probe in probes
         if probe.provider_id is not None
     ])
-    provider_name_by_id: dict[str, str] = {}
-    if provider_ids:
-        provider_rows = db.execute(
-            select(Provider.id, Provider.name).where(Provider.id.in_([int(item) for item in provider_ids]))
-        ).all()
-        provider_name_by_id = {
-            str(provider_id): provider_name
-            for provider_id, provider_name in provider_rows
-            if provider_name
-        }
+    provider_name_by_id = _provider_name_lookup(db, provider_ids)
+    provider_model_ids = _ordered_unique([
+        probe.provider_model_id
+        for probe in probes
+        if probe.provider_model_id is not None
+    ])
+    provider_model_name_by_id = _provider_model_display_lookup(db, provider_model_ids)
     context_by_run_id: dict[str, dict[str, list[str]]] = {
         run_id: {"provider_names": [], "model_ids": []}
         for run_id in run_ids
@@ -675,9 +676,12 @@ def _enrich_health_run_probe_context(db: Session, items: list[dict[str, Any]]) -
                 provider_name_by_id.get(provider_key) or f"提供商 {provider_key}"
             )
         if probe.provider_model_id is not None:
-            context_by_run_id[run_id]["model_ids"].append(str(probe.provider_model_id))
+            model_key = str(probe.provider_model_id)
+            context_by_run_id[run_id]["model_ids"].append(
+                provider_model_name_by_id.get(model_key) or probe.model_name or f"挂载 {model_key}"
+            )
         elif probe.model_name:
-            context_by_run_id[run_id]["model_ids"].append(f"未记录 ID：{probe.model_name}")
+            context_by_run_id[run_id]["model_ids"].append(probe.model_name)
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -689,6 +693,60 @@ def _enrich_health_run_probe_context(db: Session, items: list[dict[str, Any]]) -
         item["health_probe_model_ids"] = model_ids
         item["health_probe_provider_count"] = len(provider_names)
         item["health_probe_model_count"] = len(model_ids)
+    return items
+
+
+def _provider_name_lookup(db: Session, provider_ids: list[str]) -> dict[str, str]:
+    if not provider_ids:
+        return {}
+    provider_rows = db.execute(
+        select(Provider.id, Provider.name).where(Provider.id.in_([int(item) for item in provider_ids]))
+    ).all()
+    return {
+        str(provider_id): provider_name
+        for provider_id, provider_name in provider_rows
+        if provider_name
+    }
+
+
+def _provider_model_display_lookup(db: Session, provider_model_ids: list[str]) -> dict[str, str]:
+    if not provider_model_ids:
+        return {}
+    model_rows = db.execute(
+        select(ProviderModel.id, ProviderModel.model_name, ProviderModel.upstream_model_name)
+        .where(ProviderModel.id.in_([int(item) for item in provider_model_ids]))
+    ).all()
+    return {
+        str(model_id): (upstream_model_name or model_name)
+        for model_id, model_name, upstream_model_name in model_rows
+        if upstream_model_name or model_name
+    }
+
+
+def _enrich_health_probe_items(db: Session, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    provider_name_by_id = _provider_name_lookup(
+        db,
+        _ordered_unique([item.get("provider_id") for item in items if item.get("provider_id") is not None]),
+    )
+    provider_model_name_by_id = _provider_model_display_lookup(
+        db,
+        _ordered_unique([item.get("provider_model_id") for item in items if item.get("provider_model_id") is not None]),
+    )
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        provider_id = item.get("provider_id")
+        provider_model_id = item.get("provider_model_id")
+        if not item.get("provider_name") and provider_id is not None:
+            item["provider_name"] = provider_name_by_id.get(str(provider_id)) or f"提供商 {provider_id}"
+        if provider_model_id is not None:
+            item["model_display_id"] = (
+                provider_model_name_by_id.get(str(provider_model_id))
+                or item.get("model_name")
+                or f"挂载 {provider_model_id}"
+            )
+        else:
+            item["model_display_id"] = item.get("model_name")
     return items
 
 
@@ -1003,6 +1061,7 @@ def export_typed_logs(
     severity: str | None = None,
     error_code: str | None = None,
     path: str | None = None,
+    request_path: str | None = None,
     trace_id: str | None = None,
     request_log_id: int | None = None,
     trigger_type: str | None = None,
@@ -1043,7 +1102,7 @@ def export_typed_logs(
             page_size=limit,
             keyword=keyword,
             keyword_columns=("trace_id", "exception_type", "message", "request_path", "error_code"),
-            filters={"severity": severity, "error_code": error_code, "request_path": path, "trace_id": trace_id},
+            filters={"severity": severity, "error_code": error_code, "request_path": request_path or path, "trace_id": trace_id},
             order_column=ExceptionEvent.occurred_at,
             start_at=start_at,
             end_at=end_at,
@@ -1185,6 +1244,128 @@ def export_typed_logs(
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@router.delete("/typed-events/{typed_log_type}")
+def delete_typed_logs(
+    typed_log_type: str,
+    request: Request,
+    keyword: str | None = None,
+    severity: str | None = None,
+    error_code: str | None = None,
+    path: str | None = None,
+    request_path: str | None = None,
+    trace_id: str | None = None,
+    request_log_id: int | None = None,
+    trigger_type: str | None = None,
+    overall_result: str | None = None,
+    event_family: str | None = None,
+    result: str | None = None,
+    billing_status: str | None = None,
+    status: str | None = None,
+    job_name: str | None = None,
+    lock_status: str | None = None,
+    guard_stage: str | None = None,
+    guard_result: str | None = None,
+    risk_level: str | None = None,
+    action: str | None = None,
+    matched_rule: str | None = None,
+    provider_id: int | None = None,
+    model_name: str | None = None,
+    is_stream: bool | None = None,
+    actor_type: str | None = None,
+    user_account_id: int | None = None,
+    entity_type: str | None = None,
+    alert_type: str | None = None,
+    storage_scope: str | None = None,
+    start_at: datetime | None = None,
+    end_at: datetime | None = None,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    filter_snapshot = {
+        "keyword": keyword,
+        "severity": severity,
+        "error_code": error_code,
+        "path": path,
+        "request_path": request_path,
+        "trace_id": trace_id,
+        "request_log_id": request_log_id,
+        "trigger_type": trigger_type,
+        "overall_result": overall_result,
+        "event_family": event_family,
+        "result": result,
+        "billing_status": billing_status,
+        "status": status,
+        "job_name": job_name,
+        "lock_status": lock_status,
+        "guard_stage": guard_stage,
+        "guard_result": guard_result,
+        "risk_level": risk_level,
+        "action": action,
+        "matched_rule": matched_rule,
+        "provider_id": provider_id,
+        "model_name": model_name,
+        "is_stream": is_stream,
+        "actor_type": actor_type,
+        "user_account_id": user_account_id,
+        "entity_type": entity_type,
+        "alert_type": alert_type,
+        "storage_scope": storage_scope,
+        "start_at": start_at.isoformat() if start_at else None,
+        "end_at": end_at.isoformat() if end_at else None,
+    }
+    if not _has_typed_log_delete_scope(typed_log_type, filter_snapshot):
+        raise HTTPException(status_code=400, detail="删除类型化日志必须至少指定一个筛选条件或时间范围")
+
+    result_payload = _delete_typed_logs_by_filter(
+        db,
+        typed_log_type=typed_log_type,
+        keyword=keyword,
+        severity=severity,
+        error_code=error_code,
+        path=path,
+        request_path=request_path,
+        trace_id=trace_id,
+        request_log_id=request_log_id,
+        trigger_type=trigger_type,
+        overall_result=overall_result,
+        event_family=event_family,
+        result=result,
+        billing_status=billing_status,
+        status=status,
+        job_name=job_name,
+        lock_status=lock_status,
+        guard_stage=guard_stage,
+        guard_result=guard_result,
+        risk_level=risk_level,
+        action=action,
+        matched_rule=matched_rule,
+        provider_id=provider_id,
+        model_name=model_name,
+        is_stream=is_stream,
+        actor_type=actor_type,
+        user_account_id=user_account_id,
+        entity_type=entity_type,
+        alert_type=alert_type,
+        storage_scope=storage_scope,
+        start_at=start_at,
+        end_at=end_at,
+    )
+    deleted = int(result_payload.get("deleted") or 0)
+    _record_logging_admin_audit(
+        db,
+        request=request,
+        action="delete_typed_logs",
+        summary=f"按筛选删除类型化日志：{typed_log_type}，共 {deleted} 条",
+        detail={
+            "typed_log_type": typed_log_type,
+            "deleted": deleted,
+            "filters": filter_snapshot,
+            "details": result_payload,
+        },
+        risk_level="high",
+    )
+    return result_payload
 
 
 @router.post("/typed-events/backfill")
@@ -1760,6 +1941,410 @@ def _expand_filter_values(field_name: str, value: Any) -> list[Any]:
         if not append_value(part):
             return values
     return values
+
+
+def _delete_model_by_conditions(db: Session, model: type, conditions: list[Any]) -> int:
+    total_deleted = 0
+    for _ in range(TYPED_LOG_DELETE_MAX_BATCHES):
+        ids = list(
+            db.scalars(
+                select(model.id)
+                .where(*conditions)
+                .order_by(model.id.asc())
+                .limit(TYPED_LOG_DELETE_BATCH_SIZE)
+            )
+        )
+        if not ids:
+            break
+        result = db.execute(delete(model).where(model.id.in_(ids)))
+        db.commit()
+        deleted_count = int(result.rowcount or 0)
+        total_deleted += deleted_count
+        if len(ids) < TYPED_LOG_DELETE_BATCH_SIZE or deleted_count <= 0:
+            break
+    return total_deleted
+
+
+def _delete_content_guard_events_by_conditions(db: Session, conditions: list[Any]) -> int:
+    total_deleted = 0
+    for _ in range(TYPED_LOG_DELETE_MAX_BATCHES):
+        ids = list(
+            db.scalars(
+                select(RequestContentGuardEvent.id)
+                .outerjoin(RequestLog, RequestLog.id == RequestContentGuardEvent.request_log_id)
+                .where(*conditions)
+                .order_by(RequestContentGuardEvent.id.asc())
+                .limit(TYPED_LOG_DELETE_BATCH_SIZE)
+            )
+        )
+        if not ids:
+            break
+        result = db.execute(delete(RequestContentGuardEvent).where(RequestContentGuardEvent.id.in_(ids)))
+        db.commit()
+        deleted_count = int(result.rowcount or 0)
+        total_deleted += deleted_count
+        if len(ids) < TYPED_LOG_DELETE_BATCH_SIZE or deleted_count <= 0:
+            break
+    return total_deleted
+
+
+def _content_guard_event_conditions(
+    *,
+    keyword: str | None,
+    guard_stage: str | None,
+    guard_result: str | None,
+    risk_level: str | None,
+    action: str | None,
+    matched_rule: str | None,
+    provider_id: int | None,
+    model_name: str | None,
+    request_path: str | None,
+    is_stream: bool | None,
+    request_log_id: int | None,
+    trace_id: str | None,
+    start_at: datetime | None,
+    end_at: datetime | None,
+) -> list[Any]:
+    conditions: list[Any] = []
+    if keyword:
+        conditions.append(
+            or_(
+                _contains(RequestContentGuardEvent.trace_id, keyword),
+                _contains(RequestContentGuardEvent.guard_stage, keyword),
+                _contains(RequestContentGuardEvent.guard_result, keyword),
+                _contains(RequestContentGuardEvent.risk_level, keyword),
+                _contains(RequestContentGuardEvent.provider_name, keyword),
+                _contains(RequestContentGuardEvent.model_name, keyword),
+                _contains(RequestContentGuardEvent.requested_model, keyword),
+                _contains(RequestContentGuardEvent.request_path, keyword),
+                _contains(RequestContentGuardEvent.reason, keyword),
+                _contains(RequestContentGuardEvent.action, keyword),
+                _contains(RequestContentGuardEvent.excerpt, keyword),
+                _contains(RequestLog.trace_id, keyword),
+                _contains(RequestLog.provider_name, keyword),
+                _contains(RequestLog.model_name, keyword),
+                _contains(RequestLog.requested_model, keyword),
+                _contains(RequestLog.request_path, keyword),
+            )
+        )
+    if matched_rule:
+        conditions.append(
+            or_(
+                _contains(RequestContentGuardEvent.matched_rules_json, matched_rule),
+                _contains(RequestContentGuardEvent.matched_categories_json, matched_rule),
+                _contains(RequestContentGuardEvent.reason, matched_rule),
+                _contains(RequestContentGuardEvent.excerpt, matched_rule),
+            )
+        )
+    if model_name:
+        conditions.append(
+            or_(
+                _contains(RequestContentGuardEvent.model_name, model_name),
+                _contains(RequestContentGuardEvent.requested_model, model_name),
+                _contains(RequestLog.model_name, model_name),
+                _contains(RequestLog.requested_model, model_name),
+            )
+        )
+    direct_filters = {
+        "guard_stage": guard_stage,
+        "guard_result": guard_result,
+        "risk_level": risk_level,
+        "action": action,
+        "request_log_id": request_log_id,
+    }
+    for field_name, value in direct_filters.items():
+        if value is None or value == "":
+            continue
+        conditions.append(getattr(RequestContentGuardEvent, field_name) == value)
+    if provider_id is not None and provider_id != "":
+        conditions.append(or_(RequestContentGuardEvent.provider_id == provider_id, RequestLog.provider_id == provider_id))
+    if request_path:
+        conditions.append(or_(RequestContentGuardEvent.request_path == request_path, RequestLog.request_path == request_path))
+    if is_stream is not None and is_stream != "":
+        conditions.append(or_(RequestContentGuardEvent.is_stream == is_stream, RequestLog.is_stream == is_stream))
+    if trace_id:
+        conditions.append(or_(RequestContentGuardEvent.trace_id == trace_id, RequestLog.trace_id == trace_id))
+    if start_at is not None:
+        conditions.append(RequestContentGuardEvent.created_at >= start_at)
+    if end_at is not None:
+        conditions.append(RequestContentGuardEvent.created_at <= end_at)
+    return conditions
+
+
+def _background_job_db_conditions(
+    *,
+    keyword: str | None,
+    status: str | None,
+    job_name: str | None,
+    trigger_type: str | None,
+    lock_status: str | None,
+    start_at: datetime | None,
+    end_at: datetime | None,
+) -> list[Any]:
+    conditions: list[Any] = []
+    if keyword:
+        conditions.append(
+            or_(
+                _contains(BackgroundJobEvent.job_run_id, keyword),
+                _contains(BackgroundJobEvent.job_name, keyword),
+                _contains(BackgroundJobEvent.lock_key, keyword),
+                _contains(BackgroundJobEvent.error, keyword),
+                _contains(BackgroundJobEvent.result_summary_json, keyword),
+            )
+        )
+    if status:
+        if status == "skipped":
+            conditions.append(BackgroundJobEvent.status.in_(("skipped", "skipped_locked", "skipped_lock_unavailable")))
+        elif status == "stale_running":
+            stale_before = now_beijing() - BACKGROUND_JOB_STALE_AFTER
+            conditions.append(BackgroundJobEvent.status == "running")
+            conditions.append(BackgroundJobEvent.started_at.is_not(None))
+            conditions.append(BackgroundJobEvent.started_at <= stale_before)
+        else:
+            conditions.append(BackgroundJobEvent.status == status)
+    if job_name:
+        conditions.append(_contains(BackgroundJobEvent.job_name, job_name))
+    if trigger_type:
+        conditions.append(BackgroundJobEvent.trigger_type == trigger_type)
+    if lock_status:
+        conditions.append(BackgroundJobEvent.lock_status == lock_status)
+    if start_at is not None:
+        conditions.append(BackgroundJobEvent.started_at >= start_at)
+    if end_at is not None:
+        conditions.append(BackgroundJobEvent.started_at <= end_at)
+    return conditions
+
+
+def _delete_typed_logs_by_filter(
+    db: Session,
+    *,
+    typed_log_type: str,
+    keyword: str | None,
+    severity: str | None,
+    error_code: str | None,
+    path: str | None,
+    request_path: str | None,
+    trace_id: str | None,
+    request_log_id: int | None,
+    trigger_type: str | None,
+    overall_result: str | None,
+    event_family: str | None,
+    result: str | None,
+    billing_status: str | None,
+    status: str | None,
+    job_name: str | None,
+    lock_status: str | None,
+    guard_stage: str | None,
+    guard_result: str | None,
+    risk_level: str | None,
+    action: str | None,
+    matched_rule: str | None,
+    provider_id: int | None,
+    model_name: str | None,
+    is_stream: bool | None,
+    actor_type: str | None,
+    user_account_id: int | None,
+    entity_type: str | None,
+    alert_type: str | None,
+    storage_scope: str | None,
+    start_at: datetime | None,
+    end_at: datetime | None,
+) -> dict[str, Any]:
+    details: dict[str, int] = {}
+    if typed_log_type == "exceptions":
+        details["exception_events_deleted"] = _delete_model_by_conditions(
+            db,
+            ExceptionEvent,
+            _model_conditions(
+                ExceptionEvent,
+                keyword=keyword,
+                keyword_columns=("trace_id", "exception_type", "message", "request_path", "error_code"),
+                filters={"severity": severity, "error_code": error_code, "request_path": request_path or path, "trace_id": trace_id},
+                order_column=ExceptionEvent.occurred_at,
+                start_at=start_at,
+                end_at=end_at,
+            ),
+        )
+    elif typed_log_type == "health-runs":
+        run_conditions = _model_conditions(
+            HealthCheckRun,
+            keyword=keyword,
+            keyword_columns=("run_id", "scope_type", "scope_id"),
+            filters={"trigger_type": trigger_type, "overall_result": overall_result},
+            order_column=HealthCheckRun.started_at,
+            start_at=start_at,
+            end_at=end_at,
+        )
+        run_id_query = select(HealthCheckRun.run_id).where(*run_conditions)
+        details["health_probe_events_deleted"] = _delete_model_by_conditions(
+            db,
+            HealthProbeEvent,
+            [HealthProbeEvent.run_id.in_(run_id_query)],
+        )
+        details["health_runs_deleted"] = _delete_model_by_conditions(db, HealthCheckRun, run_conditions)
+    elif typed_log_type == "billing-events":
+        normalized_family = (event_family or "").strip()
+        include_token = normalized_family in ("", "token_finalize")
+        include_billing = normalized_family in ("", "billing_process")
+        if billing_status and normalized_family in ("", "token_finalize"):
+            include_token = False
+        if include_token:
+            token_result = result if normalized_family in ("", "token_finalize") else None
+            details["token_finalize_events_deleted"] = _delete_model_by_conditions(
+                db,
+                TokenFinalizeEvent,
+                _model_conditions(
+                    TokenFinalizeEvent,
+                    keyword=keyword,
+                    keyword_columns=("queue_source", "token_source", "result", "error"),
+                    filters={"request_log_id": request_log_id, "result": token_result},
+                    order_column=TokenFinalizeEvent.created_at,
+                    start_at=start_at,
+                    end_at=end_at,
+                ),
+            )
+        if include_billing:
+            billing_status_values: tuple[str, ...] | None = None
+            if billing_status:
+                billing_status_values = tuple(_expand_filter_values("billing_status", billing_status))
+            elif result:
+                mapped_values: list[str] = []
+                for value in _expand_filter_values("result", result):
+                    mapped_values.extend(BILLING_RESULT_STATUS_ALIASES.get(value, ()))
+                billing_status_values = tuple(dict.fromkeys(mapped_values)) if mapped_values else None
+            billing_conditions = _model_conditions(
+                BillingProcessEvent,
+                keyword=keyword,
+                keyword_columns=("pricing_source", "billing_status", "error"),
+                filters={"request_log_id": request_log_id},
+                order_column=BillingProcessEvent.created_at,
+                start_at=start_at,
+                end_at=end_at,
+            )
+            if billing_status_values:
+                billing_conditions.append(BillingProcessEvent.billing_status.in_(billing_status_values))
+            details["billing_process_events_deleted"] = _delete_model_by_conditions(db, BillingProcessEvent, billing_conditions)
+    elif typed_log_type == "content-guard-events":
+        conditions = _content_guard_event_conditions(
+            keyword=keyword,
+            guard_stage=guard_stage,
+            guard_result=guard_result,
+            risk_level=risk_level,
+            action=action,
+            matched_rule=matched_rule,
+            provider_id=provider_id,
+            model_name=model_name,
+            request_path=request_path or path,
+            is_stream=is_stream,
+            request_log_id=request_log_id,
+            trace_id=trace_id,
+            start_at=start_at,
+            end_at=end_at,
+        )
+        details["request_content_guard_events_deleted"] = _delete_content_guard_events_by_conditions(db, conditions)
+    elif typed_log_type == "background-jobs":
+        details["background_job_events_deleted"] = _delete_model_by_conditions(
+            db,
+            BackgroundJobEvent,
+            _background_job_db_conditions(
+                keyword=keyword,
+                status=status,
+                job_name=job_name,
+                trigger_type=trigger_type,
+                lock_status=lock_status,
+                start_at=start_at,
+                end_at=end_at,
+            ),
+        )
+    elif typed_log_type == "asset-events":
+        details["asset_events_deleted"] = _delete_model_by_conditions(
+            db,
+            AssetEvent,
+            _model_conditions(
+                AssetEvent,
+                keyword=keyword,
+                keyword_columns=("filename", "content_type", "sha256_prefix", "sha256_hex", "trace_id", "error"),
+                filters={"actor_type": actor_type, "storage_scope": storage_scope, "result": result, "trace_id": trace_id, "request_log_id": request_log_id},
+                order_column=AssetEvent.created_at,
+                start_at=start_at,
+                end_at=end_at,
+            ),
+        )
+    elif typed_log_type == "admin-audits":
+        details["admin_audit_logs_deleted"] = _delete_model_by_conditions(
+            db,
+            AdminAuditLog,
+            _model_conditions(
+                AdminAuditLog,
+                keyword=keyword,
+                keyword_columns=("actor_username", "action", "entity_type", "entity_name", "summary", "request_trace_id"),
+                filters={"action": action, "entity_type": entity_type, "risk_level": risk_level},
+                order_column=AdminAuditLog.created_at,
+                start_at=start_at,
+                end_at=end_at,
+            ),
+        )
+    elif typed_log_type == "user-operations":
+        details["user_operation_audit_logs_deleted"] = _delete_model_by_conditions(
+            db,
+            UserOperationAuditLog,
+            _model_conditions(
+                UserOperationAuditLog,
+                keyword=keyword,
+                keyword_columns=("username", "action", "entity_type", "entity_name", "summary", "trace_id"),
+                filters={"user_account_id": user_account_id, "action": action, "result": result},
+                order_column=UserOperationAuditLog.created_at,
+                start_at=start_at,
+                end_at=end_at,
+            ),
+        )
+    elif typed_log_type == "alert-events":
+        details["alert_events_deleted"] = _delete_model_by_conditions(
+            db,
+            AlertEvent,
+            _model_conditions(
+                AlertEvent,
+                keyword=keyword,
+                keyword_columns=("alert_key", "alert_type", "title", "message", "payload_json"),
+                filters={"alert_type": alert_type, "severity": severity, "status": status},
+                order_column=AlertEvent.last_seen_at,
+                start_at=start_at,
+                end_at=end_at,
+            ),
+        )
+    else:
+        raise HTTPException(status_code=400, detail="unsupported typed log delete")
+    deleted = sum(int(value or 0) for value in details.values())
+    return {"success": True, "typed_log_type": typed_log_type, "deleted": deleted, "details": details}
+
+
+def _has_typed_log_delete_scope(typed_log_type: str | dict[str, Any], filters: dict[str, Any] | None = None) -> bool:
+    if filters is None and isinstance(typed_log_type, dict):
+        filters = typed_log_type
+        allowed_keys = set(filters.keys())
+    else:
+        allowed_keys_by_type = {
+            "exceptions": {"keyword", "severity", "error_code", "path", "request_path", "trace_id", "start_at", "end_at"},
+            "health-runs": {"keyword", "trigger_type", "overall_result", "start_at", "end_at"},
+            "billing-events": {"keyword", "event_family", "result", "billing_status", "request_log_id", "start_at", "end_at"},
+            "content-guard-events": {"keyword", "guard_stage", "guard_result", "risk_level", "action", "matched_rule", "provider_id", "model_name", "path", "request_path", "is_stream", "request_log_id", "trace_id", "start_at", "end_at"},
+            "background-jobs": {"keyword", "status", "job_name", "trigger_type", "lock_status", "start_at", "end_at"},
+            "asset-events": {"keyword", "actor_type", "storage_scope", "result", "trace_id", "request_log_id", "start_at", "end_at"},
+            "admin-audits": {"keyword", "action", "entity_type", "risk_level", "start_at", "end_at"},
+            "user-operations": {"keyword", "user_account_id", "action", "result", "start_at", "end_at"},
+            "alert-events": {"keyword", "alert_type", "severity", "status", "start_at", "end_at"},
+        }
+        filters = filters or {}
+        allowed_keys = allowed_keys_by_type.get(str(typed_log_type), set())
+    for key, value in filters.items():
+        if key not in allowed_keys:
+            continue
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return True
+    return False
 
 
 def _enrich_typed_log_response(

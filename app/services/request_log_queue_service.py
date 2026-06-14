@@ -14,7 +14,7 @@ from sqlalchemy.orm import load_only
 
 from app.config import get_settings
 from app.database import SessionLocal
-from app.services.proxy_request_context import get_current_request_headers_json
+from app.services.proxy_request_context import get_current_ip_management_event_id, get_current_request_headers_json
 from app.services.redis_service import RedisService
 from app.utils.json_utils import dumps_json, loads_json
 
@@ -57,6 +57,7 @@ class RequestLogQueueService:
         if not cls.enabled():
             return False
         kwargs = cls._with_dedupe_key(dict(kwargs))
+        kwargs.setdefault("ip_management_event_id", get_current_ip_management_event_id())
         kwargs.setdefault("request_headers_json", get_current_request_headers_json())
         kwargs.setdefault("_queue_enqueued_at", time.time())
         loop = RedisService.event_loop()
@@ -389,9 +390,19 @@ class RequestLogQueueService:
             if finalize_jobs:
                 db.flush()
                 from app.logging.adapters.request_adapter import RequestLogRecorder
+                from app.services.ip_management_event_service import IpManagementEventService
 
                 for log in created_logs:
                     RequestLogRecorder.record_events_from_summary(db, log, auto_commit=False)
+                for log, kwargs in finalize_jobs:
+                    IpManagementEventService.attach_request_context(
+                        db,
+                        event_id=kwargs.get("ip_management_event_id"),
+                        request_log_id=getattr(log, "id", None),
+                        api_client_key_id=kwargs.get("api_client_key_id"),
+                        api_client_key_prefix=kwargs.get("api_client_key_prefix"),
+                        user_account_id=kwargs.get("user_account_id"),
+                    )
             db.commit()
             RequestLogQueueService._enqueue_finalize_jobs(finalize_jobs)
         except Exception:

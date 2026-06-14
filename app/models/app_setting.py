@@ -55,6 +55,8 @@ class AppSetting(Base):
     auto_health_check: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     health_check_interval_sec: Mapped[int] = mapped_column(Integer, nullable=False, default=300)
     recovery_probe_interval_sec: Mapped[int] = mapped_column(Integer, nullable=False, default=30)
+    probe_rate_limit_per_minute: Mapped[int] = mapped_column(Integer, nullable=False, default=4)
+    probe_type_rate_limit_per_minute: Mapped[int] = mapped_column(Integer, nullable=False, default=4)
     enable_token_logging: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     enable_payload_logging: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     enable_stream_response_persist: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

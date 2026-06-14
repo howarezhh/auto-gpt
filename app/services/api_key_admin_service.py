@@ -82,7 +82,10 @@ class ApiKeyAdminService:
 
     @staticmethod
     def _api_key_balance_exhausted_expr():
-        return and_(UserAccount.id.is_not(None), UserAccount.balance_amount <= 0)
+        return and_(
+            UserAccount.id.is_not(None),
+            func.coalesce(UserAccount.balance_amount, 0) - func.coalesce(UserAccount.frozen_amount, 0) <= 0,
+        )
 
     @staticmethod
     def get_summary(db: Session) -> ApiKeySummaryOut:
@@ -758,6 +761,7 @@ class ApiKeyAdminService:
             else None
         )
         owner_balance_amount = BillingService.to_decimal(api_key.owner_user.balance_amount) if api_key.owner_user is not None else None
+        owner_frozen_amount = BillingService.to_decimal(api_key.owner_user.frozen_amount) if api_key.owner_user is not None else Decimal("0")
         owner_total_recharge_amount = BillingService.to_decimal(api_key.owner_user.total_recharge_amount) if api_key.owner_user is not None else None
         allowed_providers = [
             {
@@ -776,7 +780,7 @@ class ApiKeyAdminService:
             status = "disabled"
         elif api_key.expires_at is not None and api_key.expires_at <= now_beijing():
             status = "expired"
-        elif owner_balance_amount is not None and owner_balance_amount <= Decimal("0"):
+        elif owner_balance_amount is not None and owner_balance_amount - owner_frozen_amount <= Decimal("0"):
             status = "balance_exhausted"
         elif not allowed_providers:
             status = "unbound"

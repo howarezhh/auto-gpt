@@ -20,6 +20,7 @@ from app.schemas.provider import (
     ProviderDiscoverModelsIn,
     ProviderDiscoverModelsResponse,
     ProviderEndpointProtocolDetectionRequest,
+    ProviderListResponse,
     ProviderModelEndpointProtocolDetectionRequest,
     ProviderModelMountListResponse,
     ProviderModelConfigOut,
@@ -196,6 +197,35 @@ async def _stream_health_check_events(
 @router.get("", response_model=list[ProviderOut])
 def list_providers(db: Session = Depends(get_db)) -> list[ProviderOut]:
     return [ProviderOut(**item) for item in ProviderService.list_provider_dicts(db)]
+
+
+@router.get("/directory", response_model=ProviderListResponse)
+def list_provider_directory(
+    keyword: str | None = Query(default=None),
+    enabled: bool | None = Query(default=None),
+    health_status: str | None = Query(default=None),
+    trust_status: str | None = Query(default=None),
+    circuit_state: str | None = Query(default=None),
+    provider_type: str | None = Query(default=None),
+    group_name: str | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+) -> ProviderListResponse:
+    return ProviderListResponse(
+        **ProviderService.list_provider_directory(
+            db,
+            keyword=keyword,
+            enabled=enabled,
+            health_status=health_status,
+            trust_status=trust_status,
+            circuit_state=circuit_state,
+            provider_type=provider_type,
+            group_name=group_name,
+            page=page,
+            page_size=page_size,
+        )
+    )
 
 
 @router.get("/overview", response_model=ProviderPageContentOut)

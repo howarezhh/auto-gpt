@@ -18,6 +18,7 @@ from app.services.ip_management_resolver_service import ClientIpResolution, Clie
 from app.services.ip_management_rule_service import IpManagementRuleService
 from app.services.rate_limit_service import RateLimitExceededError
 from app.utils.json_utils import dumps_json, loads_json, safeJsonParse
+from app.utils.timezone import now_beijing
 
 
 @dataclass(frozen=True)
@@ -147,6 +148,8 @@ class IpManagementService:
     @staticmethod
     def resolve_scope(path: str) -> str | None:
         if path == "/v1" or path.startswith("/v1/"):
+            return "external_v1"
+        if path == "/v1beta" or path.startswith("/v1beta/"):
             return "external_v1"
         if path == "/api" or path.startswith("/api/"):
             return "internal_api"
@@ -383,6 +386,10 @@ class IpManagementService:
             "decision_reason": event.decision_reason,
             "enforced": event.enforced,
             "status_code": event.status_code,
+            "request_log_id": event.request_log_id,
+            "api_client_key_id": event.api_client_key_id,
+            "api_client_key_prefix": event.api_client_key_prefix,
+            "user_account_id": event.user_account_id,
             "created_at": event.created_at,
         }
 
@@ -455,5 +462,3 @@ class IpManagementService:
                 "recent_invalid_header_ignored_count": int(event_row.invalid_ignored or 0),
             },
         }
-
-from app.utils.timezone import now_beijing

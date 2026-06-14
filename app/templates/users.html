@@ -217,12 +217,14 @@
                     <th>账号</th>
                     <th>角色与状态</th>
                     <th>账户概览</th>
+                    <th>额度用量</th>
                     <th>时间信息</th>
                     <th>运维动作</th>
                 </tr>
             </thead>
             <tbody>
                 {% for user in users %}
+                {% set usage = usage_map.get(user.id, {}) %}
                 <tr>
                     <td data-label="批量">
                         <label class="users-select-card users-select-card-inline" for="users-batch-{{ user.id }}">
@@ -249,8 +251,20 @@
                     <td data-label="账户概览">
                         <div class="users-cell-stack">
                             <strong>API Key {{ key_counts.get(user.id, 0) }}</strong>
-                            <div class="table-muted">余额 {{ (user.balance_amount or 0)|display_money }}</div>
-                            <div class="table-muted">冻结 {{ (user.frozen_amount or 0)|display_money }}</div>
+                            <div class="table-muted">余额 {{ (user.balance_amount or 0)|display_money('不限', usage.get('currency_code', 'USD')) }}</div>
+                            <div class="table-muted">冻结 {{ (user.frozen_amount or 0)|display_money('不限', usage.get('currency_code', 'USD')) }}</div>
+                            <div class="table-muted">可用 {{ usage.get('available_balance', 0)|display_money('不限', usage.get('currency_code', 'USD')) }}</div>
+                        </div>
+                    </td>
+                    <td data-label="额度用量">
+                        <div class="users-cell-stack">
+                            <div class="users-registry-pills">
+                                <span class="status-badge status-{{ 'healthy' if usage.get('risk_status') == 'normal' else ('warning' if usage.get('risk_status') in ['low', 'no_key'] else 'unhealthy') }}">{{ usage.get('risk_label', '正常') }}</span>
+                                <span class="users-inline-badge">可用 {{ usage.get('available_ratio_percent', 0) }}%</span>
+                            </div>
+                            <strong>今日 {{ usage.get('day_requests', 0) }} 次 / {{ usage.get('day_tokens', 0)|display_tokens }}</strong>
+                            <div class="table-muted">本月 {{ usage.get('month_requests', 0) }} 次 / {{ usage.get('month_tokens', 0)|display_tokens }} / {{ usage.get('month_cost', 0)|display_money('不限', usage.get('currency_code', 'USD')) }}</div>
+                            <div class="table-muted">累计 {{ usage.get('total_requests', 0) }} 次 / {{ usage.get('total_tokens', 0)|display_tokens }} / {{ usage.get('total_cost', 0)|display_money('不限', usage.get('currency_code', 'USD')) }}</div>
                         </div>
                     </td>
                     <td data-label="时间信息">

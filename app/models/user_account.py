@@ -23,6 +23,7 @@ class UserAccount(Base):
     balance_amount: Mapped[Decimal] = mapped_column(Numeric(DB_MONEY_PRECISION, DB_MONEY_SCALE), nullable=False, default=Decimal("0"))
     frozen_amount: Mapped[Decimal] = mapped_column(Numeric(DB_MONEY_PRECISION, DB_MONEY_SCALE), nullable=False, default=Decimal("0"))
     total_recharge_amount: Mapped[Decimal] = mapped_column(Numeric(DB_MONEY_PRECISION, DB_MONEY_SCALE), nullable=False, default=Decimal("0"))
+    currency_code: Mapped[str] = mapped_column(Text, nullable=False, default="USD")
     request_limit_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
     request_limit_daily: Mapped[int | None] = mapped_column(Integer, nullable=True)
     request_limit_monthly: Mapped[int | None] = mapped_column(Integer, nullable=True)

@@ -584,6 +584,15 @@ def test_single_endpoint_mode_uses_native_stream_probe_for_gemini_group(monkeypa
     assert called["native_stream"][1] is provider_model
 
 
+def test_health_probe_extracts_status_code_from_httpx_status_error() -> None:
+    request = httpx.Request("POST", "https://example.test/v1/models/gemini:streamGenerateContent")
+    response = httpx.Response(503, request=request, text='{"error":"temporarily unavailable"}')
+    exc = httpx.HTTPStatusError("server error", request=request, response=response)
+
+    assert HealthService._exception_status_code(exc) == 503
+    assert "temporarily unavailable" in HealthService._exception_message(exc)
+
+
 def test_endpoint_protocol_detection_rate_limit_does_not_send_or_update(monkeypatch) -> None:
     sent = False
 

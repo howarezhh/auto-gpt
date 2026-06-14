@@ -12,6 +12,10 @@ _CURRENT_REQUEST_HEADERS_JSON: ContextVar[str | None] = ContextVar(
     "proxy_current_request_headers_json",
     default=None,
 )
+_CURRENT_IP_MANAGEMENT_EVENT_ID: ContextVar[int | None] = ContextVar(
+    "proxy_current_ip_management_event_id",
+    default=None,
+)
 
 
 def clear_current_provider_candidate() -> None:
@@ -20,6 +24,10 @@ def clear_current_provider_candidate() -> None:
 
 def clear_current_request_headers_json() -> None:
     _CURRENT_REQUEST_HEADERS_JSON.set(None)
+
+
+def clear_current_ip_management_event_id() -> None:
+    _CURRENT_IP_MANAGEMENT_EVENT_ID.set(None)
 
 
 def get_current_provider_candidate() -> dict[str, Any] | None:
@@ -32,6 +40,11 @@ def get_current_provider_candidate() -> dict[str, Any] | None:
 def get_current_request_headers_json() -> str | None:
     value = _CURRENT_REQUEST_HEADERS_JSON.get()
     return value if isinstance(value, str) and value else None
+
+
+def get_current_ip_management_event_id() -> int | None:
+    value = _CURRENT_IP_MANAGEMENT_EVENT_ID.get()
+    return int(value) if isinstance(value, int) and value > 0 else None
 
 
 def set_current_provider_candidate(*, provider: Any, provider_model: Any) -> None:
@@ -47,3 +60,7 @@ def set_current_provider_candidate(*, provider: Any, provider_model: Any) -> Non
 
 def set_current_request_headers_json(value: str | None) -> None:
     _CURRENT_REQUEST_HEADERS_JSON.set(value if isinstance(value, str) and value else None)
+
+
+def set_current_ip_management_event_id(value: int | None) -> None:
+    _CURRENT_IP_MANAGEMENT_EVENT_ID.set(int(value) if isinstance(value, int) and value > 0 else None)

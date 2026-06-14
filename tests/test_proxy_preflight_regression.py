@@ -180,6 +180,137 @@ def test_prepare_gemini_native_request_uses_generate_content_and_inline_data():
     assert NativeProtocolAdapter.headers("gemini", "gemini-key") == {"x-goog-api-key": "gemini-key"}
 
 
+def test_gemini_native_request_url_adds_default_v1beta_only_when_base_url_has_no_version():
+    prepared = PreparedUpstreamRequest(
+        request_path="/models/gemini-2.5-pro:generateContent",
+        request_payload={"contents": [{"role": "user", "parts": [{"text": "ping"}]}]},
+        upstream_protocol_type="gemini",
+    )
+
+    root_provider = SimpleNamespace(base_url="https://generativelanguage.googleapis.com")
+    versioned_provider = SimpleNamespace(base_url="https://generativelanguage.googleapis.com/v1beta")
+    gateway_provider = SimpleNamespace(base_url="https://gateway.example.com/google")
+
+    assert (
+        ProxyService._prepared_request_url(root_provider, prepared)
+        == "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent"
+    )
+    assert (
+        ProxyService._prepared_request_url(versioned_provider, prepared)
+        == "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent"
+    )
+    assert (
+        ProxyService._prepared_request_url(gateway_provider, prepared)
+        == "https://gateway.example.com/google/v1beta/models/gemini-2.5-pro:generateContent"
+    )
+
+
+def test_prepare_external_gemini_native_request_preserves_payload_and_response():
+    provider = SimpleNamespace(
+        protocol_type="gemini",
+        api_key="gemini-key",
+        base_url="https://generativelanguage.googleapis.com/v1beta",
+    )
+    provider_model = SimpleNamespace(
+        model_name="平台Gemini别名",
+        upstream_model_name="gemini-2.5-pro",
+        protocol_type="gemini",
+        supports_chat_completions=False,
+        supports_responses=False,
+    )
+    native_payload = {
+        "model": "平台Gemini别名",
+        "contents": [{"role": "user", "parts": [{"text": "你好"}]}],
+        "generationConfig": {"temperature": 0.2},
+        "stream": True,
+    }
+
+    prepared = ProxyService._prepare_upstream_request(
+        provider,
+        provider_model=provider_model,
+        endpoint_path="/native/gemini",
+        payload=native_payload,
+        preserve_native_payload=True,
+        preserve_native_response=True,
+    )
+
+    assert prepared.request_path == "/models/gemini-2.5-pro:streamGenerateContent?alt=sse"
+    assert prepared.upstream_protocol_type == "gemini"
+    assert prepared.preserve_native_response is True
+    assert prepared.request_payload == {
+        "contents": [{"role": "user", "parts": [{"text": "你好"}]}],
+        "generationConfig": {"temperature": 0.2},
+    }
+
+
+def test_prepare_external_claude_native_request_preserves_payload_and_response():
+    provider = SimpleNamespace(
+        protocol_type="claude_messages",
+        api_key="claude-key",
+        base_url="https://api.anthropic.com",
+    )
+    provider_model = SimpleNamespace(
+        model_name="平台Claude别名",
+        upstream_model_name="claude-3-5-sonnet-latest",
+        protocol_type="claude_messages",
+        supports_chat_completions=False,
+        supports_responses=False,
+    )
+    native_payload = {
+        "model": "平台Claude别名",
+        "messages": [{"role": "user", "content": "你好"}],
+        "max_tokens": 32,
+        "stream": False,
+    }
+
+    prepared = ProxyService._prepare_upstream_request(
+        provider,
+        provider_model=provider_model,
+        endpoint_path="/native/claude_messages",
+        payload=native_payload,
+        preserve_native_payload=True,
+        preserve_native_response=True,
+    )
+
+    assert prepared.request_path == "/v1/messages"
+    assert prepared.upstream_protocol_type == "claude_messages"
+    assert prepared.preserve_native_response is True
+    assert prepared.request_payload == {
+        "model": "claude-3-5-sonnet-latest",
+        "messages": [{"role": "user", "content": "你好"}],
+        "max_tokens": 32,
+    }
+
+
+def test_native_usage_and_display_text_are_extracted_from_original_responses():
+    gemini_usage = ProxyService._extract_usage_info(
+        {
+            "candidates": [{"content": {"parts": [{"text": "Gemini 原生响应"}]}}],
+            "usageMetadata": {"promptTokenCount": 3, "candidatesTokenCount": 5, "totalTokenCount": 8},
+        }
+    )
+    claude_usage = ProxyService._extract_usage_info(
+        {
+            "content": [{"type": "text", "text": "Claude 原生响应"}],
+            "usage": {"input_tokens": 4, "output_tokens": 6},
+        }
+    )
+
+    assert gemini_usage["prompt_tokens"] == 3
+    assert gemini_usage["completion_tokens"] == 5
+    assert gemini_usage["total_tokens"] == 8
+    assert claude_usage["prompt_tokens"] == 4
+    assert claude_usage["completion_tokens"] == 6
+    assert ProxyService._extract_response_display_text(
+        {"candidates": [{"content": {"parts": [{"text": "Gemini 原生响应"}]}}]},
+        limit_bytes=1024,
+    ) == "Gemini 原生响应"
+    assert ProxyService._extract_response_display_text(
+        {"content": [{"type": "text", "text": "Claude 原生响应"}]},
+        limit_bytes=1024,
+    ) == "Claude 原生响应"
+
+
 def test_prepare_claude_native_request_uses_messages_api_headers_and_body():
     provider = SimpleNamespace(
         protocol_type="claude_messages",
@@ -589,3 +720,45 @@ def test_native_request_path_supports_custom_gateway_templates():
         "claude-3-5-sonnet-latest",
         endpoint_path_template="anthropic/messages",
     ) == "/anthropic/messages"
+
+
+def test_responses_to_chat_fallback_maps_text_format_and_stream_usage():
+    payload = ProxyService._build_chat_payload_from_responses_payload(
+        {
+            "model": "gpt-4o",
+            "input": "return json",
+            "stream": True,
+            "stream_options": {"existing": "value"},
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "answer",
+                    "schema": {"type": "object", "properties": {"ok": {"type": "boolean"}}},
+                    "strict": True,
+                }
+            },
+        }
+    )
+
+    assert payload["stream_options"] == {"existing": "value", "include_usage": True}
+    assert payload["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "answer",
+            "schema": {"type": "object", "properties": {"ok": {"type": "boolean"}}},
+            "strict": True,
+        },
+    }
+
+
+def test_responses_to_chat_fallback_rejects_unmapped_text_options():
+    safety = ProxyService._assess_responses_to_chat_conversion_safety(
+        {
+            "model": "gpt-4o",
+            "input": "ping",
+            "text": {"format": {"type": "text"}, "verbosity": "high"},
+        }
+    )
+
+    assert safety.safe is False
+    assert "text" in (safety.unsafe_fields or [])

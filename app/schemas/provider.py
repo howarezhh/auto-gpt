@@ -1,5 +1,6 @@
 import re
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
@@ -72,6 +73,16 @@ MAINTENANCE_WINDOW_WEEKLY_RE = re.compile(r"^每周([一二三四五六日])\s+(
 MAINTENANCE_WINDOW_ONCE_RE = re.compile(
     r"^单次\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})-(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})\s+Asia/Shanghai$"
 )
+PROVIDER_NAME_RE = re.compile(r"^[\u4e00-\u9fffA-Za-z0-9]+$")
+
+
+def normalize_provider_name(value: str | None) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError("提供商名称不能为空")
+    if not PROVIDER_NAME_RE.fullmatch(text):
+        raise ValueError("提供商名称只能包含中文、英文字母或数字，不能包含标点符号或空格")
+    return text
 
 
 def _validate_maintenance_time_range(start: str, end: str) -> None:
@@ -290,6 +301,7 @@ def normalize_model_group(value: str | None) -> str:
 
 class ProviderModelConfigBase(BaseModel):
     model_name: str = Field(..., min_length=1)
+    upstream_model_name: str | None = None
     model_group: str | None = None
     enabled: bool = True
     priority: int = 100
@@ -309,15 +321,21 @@ class ProviderModelConfigBase(BaseModel):
     max_qps: int | None = Field(default=None, ge=0)
     max_rpm: int | None = Field(default=None, ge=0)
     price_multiplier: float = Field(default=1.0, gt=0)
-    input_price_per_1k: float | None = Field(default=None, ge=0)
-    output_price_per_1k: float | None = Field(default=None, ge=0)
-    cache_price_per_1k: float | None = Field(default=None, ge=0)
-    cache_write_price_per_1k: float | None = Field(default=None, ge=0)
+    input_price_per_1k: Decimal | None = Field(default=None, ge=0)
+    output_price_per_1k: Decimal | None = Field(default=None, ge=0)
+    cache_price_per_1k: Decimal | None = Field(default=None, ge=0)
+    cache_write_price_per_1k: Decimal | None = Field(default=None, ge=0)
 
     @field_validator("model_name")
     @classmethod
     def normalize_model_name(cls, value: str) -> str:
         return value.strip()
+
+    @field_validator("upstream_model_name")
+    @classmethod
+    def normalize_upstream_model_name(cls, value: str | None) -> str | None:
+        text = str(value or "").strip()
+        return text or None
 
     @field_validator("protocol_type")
     @classmethod
@@ -416,6 +434,8 @@ class ProviderModelMountListResponse(BaseModel):
 
 
 class ProviderModelConfigUpdate(BaseModel):
+    model_name: str | None = None
+    upstream_model_name: str | None = None
     model_group: str | None = None
     enabled: bool | None = None
     priority: int | None = None
@@ -435,10 +455,10 @@ class ProviderModelConfigUpdate(BaseModel):
     max_qps: int | None = Field(default=None, ge=0)
     max_rpm: int | None = Field(default=None, ge=0)
     price_multiplier: float | None = Field(default=None, gt=0)
-    input_price_per_1k: float | None = Field(default=None, ge=0)
-    output_price_per_1k: float | None = Field(default=None, ge=0)
-    cache_price_per_1k: float | None = Field(default=None, ge=0)
-    cache_write_price_per_1k: float | None = Field(default=None, ge=0)
+    input_price_per_1k: Decimal | None = Field(default=None, ge=0)
+    output_price_per_1k: Decimal | None = Field(default=None, ge=0)
+    cache_price_per_1k: Decimal | None = Field(default=None, ge=0)
+    cache_write_price_per_1k: Decimal | None = Field(default=None, ge=0)
     content_integrity_status: str | None = None
 
     @field_validator("protocol_type")
@@ -447,6 +467,18 @@ class ProviderModelConfigUpdate(BaseModel):
         if value is None:
             return None
         return normalize_provider_protocol_type(value)
+
+    @field_validator("upstream_model_name")
+    @classmethod
+    def normalize_upstream_model_name(cls, value: str | None) -> str | None:
+        text = str(value or "").strip()
+        return text or None
+
+    @field_validator("model_name")
+    @classmethod
+    def normalize_model_name(cls, value: str | None) -> str | None:
+        text = str(value or "").strip()
+        return text or None
 
     @field_validator("native_endpoint_path")
     @classmethod
@@ -554,6 +586,11 @@ class ProviderBase(BaseModel):
     model_configs: list[ProviderModelConfigInput] = Field(default_factory=list)
     remark: str | None = None
 
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        return normalize_provider_name(value)
+
     @field_validator("models")
     @classmethod
     def normalize_models(cls, value: list[str]) -> list[str]:
@@ -633,6 +670,13 @@ class ProviderUpdate(BaseModel):
     models: list[str] | None = None
     model_configs: list[ProviderModelConfigInput] | None = None
     remark: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return normalize_provider_name(value)
 
     @field_validator("models")
     @classmethod
@@ -776,6 +820,15 @@ class ProviderPageContentOut(BaseModel):
     providers: list[ProviderOut]
     summary: dict[str, int | float]
     telemetry_cards: list[ProviderTelemetryCardOut]
+
+
+class ProviderListResponse(BaseModel):
+    items: list[ProviderOut]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+    filter_options: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class ProviderOptionOut(BaseModel):

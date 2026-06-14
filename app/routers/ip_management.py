@@ -20,6 +20,7 @@ from app.services.ip_management_resolver_service import ClientIpResolver
 from app.services.ip_management_rule_service import IpManagementRuleService
 from app.services.ip_management_service import IpManagementService
 from app.services.user_auth_service import require_admin_api_user
+from app.utils.timezone import now_beijing
 
 router = APIRouter(prefix="/api/ip-management", tags=["ip-management"])
 
@@ -182,15 +183,16 @@ def list_ip_events(
     decision: str | None = None,
     scope: str | None = None,
     status_code: int | None = None,
+    api_key: str | None = None,
+    request_log_id: int | None = None,
+    user_account_id: int | None = None,
     started_at: datetime | None = None,
     ended_at: datetime | None = None,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
     db: Session = Depends(get_db),
 ) -> dict:
-    if "api_key" in request.query_params:
-        raise HTTPException(status_code=422, detail="IP 管理事件暂不支持 API Key 前缀筛选")
-    if started_at is None and ended_at is None and not any((keyword, ip, decision, scope, status_code is not None)):
+    if started_at is None and ended_at is None and not any((keyword, ip, decision, scope, status_code is not None, api_key, request_log_id is not None, user_account_id is not None)):
         started_at = now_beijing() - timedelta(days=7)
     total, rows = IpManagementEventService.list_events(
         db,
@@ -199,6 +201,9 @@ def list_ip_events(
         decision=decision,
         scope=scope,
         status_code=status_code,
+        api_key=api_key,
+        request_log_id=request_log_id,
+        user_account_id=user_account_id,
         started_at=started_at,
         ended_at=ended_at,
         page=page,
@@ -255,5 +260,3 @@ def test_ip_rule(payload: IpRuleTestRequest, db: Session = Depends(get_db)) -> d
             "rule": IpManagementService.serialize_rule(match.rule) if match.rule is not None else None,
         }
     }
-
-from app.utils.timezone import now_beijing

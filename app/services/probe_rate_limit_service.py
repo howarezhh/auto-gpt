@@ -9,6 +9,7 @@ from app.config import get_settings
 from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
 from app.services.redis_service import RedisService
+from app.services.setting_service import SettingService
 
 
 @dataclass(frozen=True)
@@ -95,9 +96,11 @@ return {1, aggregate_current, ttl_ms, 'ok'}
             fallback=getattr(provider_model, "model_name", "unknown"),
         )
         normalized_probe_type = cls._normalize_probe_type(probe_type)
-        limit = int(limit_per_minute or cls.DEFAULT_LIMIT_PER_MINUTE)
+        aggregate_limit = cls._aggregate_limit_per_minute()
+        type_default_limit = cls._type_limit_per_minute()
+        limit = int(limit_per_minute if limit_per_minute is not None else type_default_limit)
         window = int(window_seconds or cls.DEFAULT_WINDOW_SECONDS)
-        if limit <= 0:
+        if aggregate_limit <= 0 and limit <= 0:
             return cls._allowed_result(
                 provider_id=provider_id,
                 provider_model_id=provider_model_id,
@@ -118,7 +121,7 @@ return {1, aggregate_current, ttl_ms, 'ok'}
         )
         try:
             client = RedisService.get_client()
-            result = await client.eval(cls._LUA, 2, aggregate_key, type_key, cls.DEFAULT_LIMIT_PER_MINUTE, limit, window)
+            result = await client.eval(cls._LUA, 2, aggregate_key, type_key, aggregate_limit, limit, window)
             allowed = bool(int(result[0])) if isinstance(result, list) and result else False
             current_count = int(result[1] if isinstance(result, list) and len(result) > 1 else 0)
             ttl_ms = int(result[2] if isinstance(result, list) and len(result) > 2 else window * 1000)
@@ -136,7 +139,7 @@ return {1, aggregate_current, ttl_ms, 'ok'}
                 provider_id=provider_id,
                 provider_model_id=provider_model_id,
                 probe_type=normalized_probe_type,
-                limit=limit,
+                limit=aggregate_limit if isinstance(result, list) and len(result) > 3 and str(result[3]) == "aggregate" else limit,
                 window_seconds=window,
                 current_count=current_count,
                 retry_after_seconds=retry_after,
@@ -160,7 +163,7 @@ return {1, aggregate_current, ttl_ms, 'ok'}
                 provider_model_id=provider_model_id,
                 probe_type=normalized_probe_type,
                 limit=limit,
-                aggregate_limit=cls.DEFAULT_LIMIT_PER_MINUTE,
+                aggregate_limit=aggregate_limit,
                 window_seconds=window,
             )
 
@@ -224,7 +227,7 @@ return {1, aggregate_current, ttl_ms, 'ok'}
         for window in (aggregate_window, type_window):
             while window and now - window[0] >= window_seconds:
                 window.popleft()
-        if len(aggregate_window) >= aggregate_limit:
+        if aggregate_limit > 0 and len(aggregate_window) >= aggregate_limit:
             retry_after = max(1, int(window_seconds - (now - aggregate_window[0])))
             return cls._limited_result(
                 provider_id=provider_id,
@@ -235,7 +238,7 @@ return {1, aggregate_current, ttl_ms, 'ok'}
                 current_count=len(aggregate_window),
                 retry_after_seconds=retry_after,
             )
-        if len(type_window) >= limit:
+        if limit > 0 and len(type_window) >= limit:
             retry_after = max(1, int(window_seconds - (now - type_window[0])))
             return cls._limited_result(
                 provider_id=provider_id,
@@ -309,6 +312,20 @@ return {1, aggregate_current, ttl_ms, 'ok'}
             current_count=current_count,
             reason=reason,
         )
+
+    @classmethod
+    def _aggregate_limit_per_minute(cls) -> int:
+        try:
+            return max(0, int(getattr(SettingService.get_cached(), "probe_rate_limit_per_minute", cls.DEFAULT_LIMIT_PER_MINUTE) or 0))
+        except Exception:
+            return cls.DEFAULT_LIMIT_PER_MINUTE
+
+    @classmethod
+    def _type_limit_per_minute(cls) -> int:
+        try:
+            return max(0, int(getattr(SettingService.get_cached(), "probe_type_rate_limit_per_minute", cls.DEFAULT_LIMIT_PER_MINUTE) or 0))
+        except Exception:
+            return cls.DEFAULT_LIMIT_PER_MINUTE
 
     @staticmethod
     def _identity(value: Any, *, fallback: Any) -> int | str:

@@ -253,7 +253,10 @@ class ContentGuardProbeService:
             if native_protocol:
                 from app.services.proxy_service import PreparedUpstreamRequest
 
-                native_model_name = ProviderService.provider_model_upstream_model_name(provider_model)
+                native_model_name = ProviderService.provider_model_upstream_model_name(
+                    provider_model,
+                    include_provider_model_id=True,
+                )
                 native_path = NativeProtocolAdapter.request_path(
                     native_protocol,
                     native_model_name,
@@ -654,7 +657,10 @@ class ContentGuardProbeService:
         prompt = ContentGuardProbeService.fixed_answer_prompt()
         native_protocol = ContentGuardProbeService._native_protocol_from_probe_endpoint(endpoint_path)
         if native_protocol:
-            model_name = ProviderService.provider_model_upstream_model_name(provider_model)
+            model_name = ProviderService.provider_model_upstream_model_name(
+                provider_model,
+                include_provider_model_id=True,
+            )
             return NativeProtocolAdapter.native_text_payload(
                 native_protocol,
                 model_name=model_name,
@@ -686,7 +692,10 @@ class ContentGuardProbeService:
     def build_pollution_probe_payload(provider_model: ProviderModel, *, endpoint_path: str, prompt: str) -> dict[str, Any]:
         native_protocol = ContentGuardProbeService._native_protocol_from_probe_endpoint(endpoint_path)
         if native_protocol:
-            model_name = ProviderService.provider_model_upstream_model_name(provider_model)
+            model_name = ProviderService.provider_model_upstream_model_name(
+                provider_model,
+                include_provider_model_id=True,
+            )
             return NativeProtocolAdapter.native_text_payload(
                 native_protocol,
                 model_name=model_name,
@@ -840,7 +849,10 @@ class ContentGuardProbeService:
         marker = f"content_guard_pollution_probe:{scenario_key}"
         native_protocol = ContentGuardProbeService._native_protocol_from_probe_endpoint(endpoint_path)
         if native_protocol:
-            model_name = ProviderService.provider_model_upstream_model_name(provider_model)
+            model_name = ProviderService.provider_model_upstream_model_name(
+                provider_model,
+                include_provider_model_id=True,
+            )
             return NativeProtocolAdapter.native_text_payload(
                 native_protocol,
                 model_name=model_name,
@@ -867,7 +879,10 @@ class ContentGuardProbeService:
         )
         native_protocol = ContentGuardProbeService._native_protocol_from_probe_endpoint(endpoint_path)
         if native_protocol:
-            model_name = ProviderService.provider_model_upstream_model_name(provider_model)
+            model_name = ProviderService.provider_model_upstream_model_name(
+                provider_model,
+                include_provider_model_id=True,
+            )
             return NativeProtocolAdapter.native_text_payload(
                 native_protocol,
                 model_name=model_name,
@@ -897,7 +912,10 @@ class ContentGuardProbeService:
         prompt = f"只输出严格 JSON，不能有 Markdown、解释、前后缀或额外字段。JSON 必须完全等于：{expected}"
         native_protocol = ContentGuardProbeService._native_protocol_from_probe_endpoint(endpoint_path)
         if native_protocol:
-            model_name = ProviderService.provider_model_upstream_model_name(provider_model)
+            model_name = ProviderService.provider_model_upstream_model_name(
+                provider_model,
+                include_provider_model_id=True,
+            )
             return NativeProtocolAdapter.native_text_payload(
                 native_protocol,
                 model_name=model_name,
@@ -940,7 +958,10 @@ class ContentGuardProbeService:
         prompt = "请识别图片中像素块的主色，只输出颜色名，不要解释。"
         native_protocol = ContentGuardProbeService._native_protocol_from_probe_endpoint(endpoint_path)
         if native_protocol:
-            model_name = ProviderService.provider_model_upstream_model_name(provider_model)
+            model_name = ProviderService.provider_model_upstream_model_name(
+                provider_model,
+                include_provider_model_id=True,
+            )
             return NativeProtocolAdapter.openai_to_native_payload(
                 native_protocol,
                 "/chat/completions",
@@ -1265,7 +1286,10 @@ class ContentGuardProbeService:
             if native_protocol:
                 from app.services.proxy_service import PreparedUpstreamRequest
 
-                native_model_name = ProviderService.provider_model_upstream_model_name(provider_model)
+                native_model_name = ProviderService.provider_model_upstream_model_name(
+                    provider_model,
+                    include_provider_model_id=True,
+                )
                 native_path = NativeProtocolAdapter.request_path(
                     native_protocol,
                     native_model_name,

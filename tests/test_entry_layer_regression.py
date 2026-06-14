@@ -69,6 +69,28 @@ def test_api_key_source_ip_uses_trusted_ip_management_resolution() -> None:
     assert ApiKeyService.extract_source_ip(request) == "203.0.113.9"
 
 
+def test_external_native_protocol_paths_are_treated_as_external_api() -> None:
+    import app.main as main
+    from app.services.ip_management_service import IpManagementService
+
+    assert main._is_external_v1_path("/v1beta/models/gemini-2.5-pro:generateContent") is True
+    assert main._is_external_v1_path("/v1/messages") is True
+    assert IpManagementService.resolve_scope("/v1beta/models/gemini-2.5-pro:generateContent") == "external_v1"
+    assert IpManagementService.resolve_scope("/v1/messages") == "external_v1"
+
+
+def test_api_key_endpoint_allowlist_accepts_native_protocol_paths() -> None:
+    gemini_key = SimpleNamespace(allowed_endpoint_paths_json='["/v1beta/models"]')
+    claude_key = SimpleNamespace(allowed_endpoint_paths_json='["/v1/messages"]')
+    openai_key = SimpleNamespace(allowed_endpoint_paths_json='["/v1/chat/completions"]')
+
+    assert ApiKeyService.is_endpoint_allowed(gemini_key, "/v1beta/models/gemini-2.5-pro:generateContent") is True
+    assert ApiKeyService.is_endpoint_allowed(gemini_key, "/v1beta/models/gemini-2.5-pro:streamGenerateContent") is True
+    assert ApiKeyService.is_endpoint_allowed(claude_key, "/v1/messages") is True
+    assert ApiKeyService.is_endpoint_allowed(openai_key, "/v1/messages") is True
+    assert ApiKeyService.is_endpoint_allowed(gemini_key, "/v1/responses") is False
+
+
 def test_invalid_api_key_negative_cache_skips_database_lookup(monkeypatch) -> None:
     raw_key = "sk-aotu-abcdefghijklmnopqrstuvwxyz"
     key_hash = ApiKeyService.hash_api_key(raw_key)

@@ -141,7 +141,7 @@
             <div>
                 <div class="panel-kicker">挂载编辑</div>
                 <h2 id="provider-model-edit-title">编辑模型挂载</h2>
-                <div class="table-muted" id="provider-model-edit-subtitle">调整可信度、端点协议、倍率、价格和容量。</div>
+                <div class="table-muted" id="provider-model-edit-subtitle">调整模型名称、模型ID、可信度、端点协议、倍率、价格和容量。</div>
             </div>
             <button class="icon-btn interactive-btn" id="provider-model-edit-close" type="button" aria-label="关闭模型挂载编辑">×</button>
         </div>
@@ -156,6 +156,16 @@
                         <option value="degraded">异常</option>
                         <option value="unknown">未检测</option>
                     </select>
+                </label>
+                <label>
+                    <span>模型名称</span>
+                    <input class="field-input" id="provider-model-edit-model-name" placeholder="本平台对外别名，例如 自定义 GPT">
+                    <small>用于本平台展示和用户请求。</small>
+                </label>
+                <label>
+                    <span>模型ID</span>
+                    <input class="field-input" id="provider-model-edit-upstream-model-name" placeholder="上游官方模型名，例如 gpt-4.1">
+                    <small>用于实际请求上游提供商。</small>
                 </label>
                 <label>
                     <span>端点协议</span>
@@ -203,20 +213,20 @@
                     <input class="field-input" id="provider-model-edit-multiplier" type="number" min="0.0001" step="0.0001" placeholder="例如 1">
                 </label>
                 <label>
-                    <span>输入单价 $/1M</span>
+                    <span>账户输入价/1M</span>
                     <input class="field-input" id="provider-model-edit-input-price" type="number" min="0" step="0.0001" placeholder="留空表示未设置">
                 </label>
                 <label>
-                    <span>输出单价 $/1M</span>
+                    <span>账户输出价/1M</span>
                     <input class="field-input" id="provider-model-edit-output-price" type="number" min="0" step="0.0001" placeholder="留空表示未设置">
                 </label>
                 <label>
-                    <span>缓存单价 $/1M</span>
+                    <span>账户缓存价/1M</span>
                     <input class="field-input" id="provider-model-edit-cache-price" type="number" min="0" step="0.0001" placeholder="留空表示未设置">
                 </label>
                 <label>
-                    <span>缓存写入单价 $/1M</span>
-                    <input class="field-input" id="provider-model-edit-cache-write-price" type="number" min="0" step="0.0001" placeholder="留空表示沿用输入单价">
+                    <span>账户缓存写价/1M</span>
+                    <input class="field-input" id="provider-model-edit-cache-write-price" type="number" min="0" step="0.0001" placeholder="留空表示未设置">
                 </label>
                 <label>
                     <span>最大活跃请求</span>

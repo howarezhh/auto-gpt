@@ -26,11 +26,16 @@ def _trim_decimal(value: Decimal, *, max_decimals: int = 9, min_decimals: int = 
     return text
 
 
-def display_money(value: Any, none_label: str = "不限") -> str:
+def _currency_symbol(currency: str | None) -> str:
+    normalized = str(currency or "USD").strip().upper() or "USD"
+    return {"USD": "$", "CNY": "¥"}.get(normalized, normalized)
+
+
+def display_money(value: Any, none_label: str = "不限", currency: str = "USD") -> str:
     numeric = _to_decimal(value)
     if numeric is None:
         return none_label
-    return f"{_trim_decimal(numeric, max_decimals=9)} $"
+    return f"{_trim_decimal(numeric, max_decimals=9)} {_currency_symbol(currency)}"
 
 
 def display_tokens(value: Any, none_label: str = "-") -> str:
@@ -45,11 +50,11 @@ def display_tokens(value: Any, none_label: str = "-") -> str:
     return f"{(token_value / Decimal(1000000)).quantize(Decimal('0.01'))}m"
 
 
-def display_price_per_1m_from_per_1k(value: Any, none_label: str = "-") -> str:
+def display_price_per_1m_from_per_1k(value: Any, none_label: str = "-", currency: str = "USD") -> str:
     numeric = _to_decimal(value)
     if numeric is None:
         return none_label
-    return f"{_trim_decimal(numeric * Decimal(1000), max_decimals=9)} $/1M"
+    return f"{_trim_decimal(numeric * Decimal(1000), max_decimals=9)} {_currency_symbol(currency)}/1M"
 
 
 def register_display_filters(templates: Jinja2Templates) -> None:

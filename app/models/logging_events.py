@@ -1,5 +1,6 @@
 from app.utils.timezone import now_beijing
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, Numeric, Text
 from sqlalchemy.orm import Mapped, mapped_column
@@ -20,7 +21,7 @@ class RequestAuthEvent(Base):
     user_account_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     remaining_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     remaining_requests_daily: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    remaining_cost_daily: Mapped[float | None] = mapped_column(Float, nullable=True)
+    remaining_cost_daily: Mapped[Decimal | None] = mapped_column(Numeric(DB_MONEY_PRECISION, DB_MONEY_SCALE), nullable=True)
     policy_snapshot_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_code: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing, index=True)
@@ -193,11 +194,11 @@ class RequestBillingEvent(Base):
     completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     cache_read_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     cache_write_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    prompt_cost: Mapped[float | None] = mapped_column(Float, nullable=True)
-    completion_cost: Mapped[float | None] = mapped_column(Float, nullable=True)
-    total_cost: Mapped[float | None] = mapped_column(Float, nullable=True)
-    balance_before: Mapped[float | None] = mapped_column(Float, nullable=True)
-    balance_after: Mapped[float | None] = mapped_column(Float, nullable=True)
+    prompt_cost: Mapped[Decimal | None] = mapped_column(Numeric(DB_MONEY_PRECISION, DB_MONEY_SCALE), nullable=True)
+    completion_cost: Mapped[Decimal | None] = mapped_column(Numeric(DB_MONEY_PRECISION, DB_MONEY_SCALE), nullable=True)
+    total_cost: Mapped[Decimal | None] = mapped_column(Numeric(DB_MONEY_PRECISION, DB_MONEY_SCALE), nullable=True)
+    balance_before: Mapped[Decimal | None] = mapped_column(Numeric(DB_MONEY_PRECISION, DB_MONEY_SCALE), nullable=True)
+    balance_after: Mapped[Decimal | None] = mapped_column(Numeric(DB_MONEY_PRECISION, DB_MONEY_SCALE), nullable=True)
     attempt_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing, index=True)
@@ -298,8 +299,8 @@ class BillingProcessEvent(Base):
     pricing_source: Mapped[str | None] = mapped_column(Text, nullable=True)
     pricing_snapshot_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     cost_snapshot_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    balance_delta: Mapped[float | None] = mapped_column(Float, nullable=True)
-    balance_after: Mapped[float | None] = mapped_column(Float, nullable=True)
+    balance_delta: Mapped[Decimal | None] = mapped_column(Numeric(DB_MONEY_PRECISION, DB_MONEY_SCALE), nullable=True)
+    balance_after: Mapped[Decimal | None] = mapped_column(Numeric(DB_MONEY_PRECISION, DB_MONEY_SCALE), nullable=True)
     billing_status: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     billing_record_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)

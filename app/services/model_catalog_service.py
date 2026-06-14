@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
@@ -119,6 +120,7 @@ class ModelCatalogService:
         keyword: str | None = None,
         enabled: bool | None = None,
         health_status: str | None = None,
+        model_group: str | None = None,
         provider_id: int | None = None,
         page: int = 1,
         page_size: int = 20,
@@ -134,6 +136,7 @@ class ModelCatalogService:
                     ModelCatalogService._model_filter_query(
                         keyword=keyword,
                         enabled=enabled,
+                        model_group=model_group,
                         provider_id=provider_id,
                     ).order_by(ModelCatalog.model_name.asc())
                     .limit(ModelCatalogService.MODEL_HEALTH_FILTER_SCAN_LIMIT)
@@ -150,7 +153,7 @@ class ModelCatalogService:
             page = min(page, total_pages)
             items = filtered_items[(page - 1) * page_size : page * page_size]
         else:
-            query = ModelCatalogService._model_filter_query(keyword=keyword, enabled=enabled, provider_id=provider_id)
+            query = ModelCatalogService._model_filter_query(keyword=keyword, enabled=enabled, model_group=model_group, provider_id=provider_id)
             total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
             total_pages = max((total + page_size - 1) // page_size, 1)
             page = min(page, total_pages)
@@ -239,13 +242,20 @@ class ModelCatalogService:
         """创建模型目录项并同步 provider 绑定。"""
         if ModelCatalogService.get_catalog(db, payload.model_name) is not None:
             raise ValueError("模型已存在")
+        pricing_json = ModelCatalogService._pricing_json_with_top_level_fields(
+            payload.pricing_json,
+            payload.model_dump(),
+            fallback_billing_currency=payload.billing_currency,
+        )
         normalized_pricing = ModelPricingService.normalize_catalog_pricing(
             pricing_mode=payload.pricing_mode,
-            pricing_json=payload.pricing_json,
+            pricing_json=pricing_json,
             input_price_per_1k=payload.input_price_per_1k,
             output_price_per_1k=payload.output_price_per_1k,
             cache_price_per_1k=payload.cache_price_per_1k,
+            cache_write_price_per_1k=payload.cache_write_price_per_1k,
         )
+        exchange_snapshot = normalized_pricing["exchange_rate_snapshot"]
         catalog = ModelCatalog(
             model_name=payload.model_name,
             display_name=payload.display_name,
@@ -264,6 +274,18 @@ class ModelCatalogService:
             input_price_per_1k=normalized_pricing["input_price_per_1k"],
             output_price_per_1k=normalized_pricing["output_price_per_1k"],
             cache_price_per_1k=normalized_pricing["cache_price_per_1k"],
+            cache_write_price_per_1k=normalized_pricing["cache_write_price_per_1k"],
+            source_currency=normalized_pricing["source_currency"],
+            billing_currency=normalized_pricing["billing_currency"],
+            source_input_price_per_1k=normalized_pricing["source_input_price_per_1k"],
+            source_output_price_per_1k=normalized_pricing["source_output_price_per_1k"],
+            source_cache_price_per_1k=normalized_pricing["source_cache_price_per_1k"],
+            source_cache_write_price_per_1k=normalized_pricing["source_cache_write_price_per_1k"],
+            exchange_rate_to_billing_currency=exchange_snapshot.exchange_rate,
+            exchange_rate_source=exchange_snapshot.exchange_rate_source,
+            exchange_rate_at=ModelCatalogService._parse_snapshot_datetime(exchange_snapshot.exchange_rate_at),
+            exchange_rate_version=exchange_snapshot.exchange_rate_version,
+            rounding_strategy=exchange_snapshot.rounding_strategy,
             speed_label=payload.speed_label,
             remark=payload.remark,
         )
@@ -286,20 +308,51 @@ class ModelCatalogService:
             "input_price_per_1k",
             "output_price_per_1k",
             "cache_price_per_1k",
+            "cache_write_price_per_1k",
+            "source_currency",
+            "billing_currency",
+            "source_input_price_per_1k",
+            "source_output_price_per_1k",
+            "source_cache_price_per_1k",
+            "source_cache_write_price_per_1k",
+            "exchange_rate_to_billing_currency",
+            "exchange_rate_source",
+            "exchange_rate_at",
+            "exchange_rate_version",
+            "rounding_strategy",
         }
         if pricing_field_names & set(data):
+            pricing_json = ModelCatalogService._pricing_json_with_top_level_fields(
+                data.get("pricing_json", ModelPricingService.parse_pricing_json(catalog.pricing_json)),
+                data,
+                fallback_billing_currency=data.get("billing_currency", catalog.billing_currency),
+            )
             normalized_pricing = ModelPricingService.normalize_catalog_pricing(
                 pricing_mode=data.get("pricing_mode", catalog.pricing_mode),
-                pricing_json=data.get("pricing_json", ModelPricingService.parse_pricing_json(catalog.pricing_json)),
+                pricing_json=pricing_json,
                 input_price_per_1k=data.get("input_price_per_1k", catalog.input_price_per_1k),
                 output_price_per_1k=data.get("output_price_per_1k", catalog.output_price_per_1k),
                 cache_price_per_1k=data.get("cache_price_per_1k", catalog.cache_price_per_1k),
+                cache_write_price_per_1k=data.get("cache_write_price_per_1k", catalog.cache_write_price_per_1k),
             )
+            exchange_snapshot = normalized_pricing["exchange_rate_snapshot"]
             data["pricing_mode"] = normalized_pricing["pricing_mode"]
             data["pricing_json"] = ModelPricingService.pricing_json_to_db_value(normalized_pricing["pricing_json"])
             data["input_price_per_1k"] = normalized_pricing["input_price_per_1k"]
             data["output_price_per_1k"] = normalized_pricing["output_price_per_1k"]
             data["cache_price_per_1k"] = normalized_pricing["cache_price_per_1k"]
+            data["cache_write_price_per_1k"] = normalized_pricing["cache_write_price_per_1k"]
+            data["source_currency"] = normalized_pricing["source_currency"]
+            data["billing_currency"] = normalized_pricing["billing_currency"]
+            data["source_input_price_per_1k"] = normalized_pricing["source_input_price_per_1k"]
+            data["source_output_price_per_1k"] = normalized_pricing["source_output_price_per_1k"]
+            data["source_cache_price_per_1k"] = normalized_pricing["source_cache_price_per_1k"]
+            data["source_cache_write_price_per_1k"] = normalized_pricing["source_cache_write_price_per_1k"]
+            data["exchange_rate_to_billing_currency"] = exchange_snapshot.exchange_rate
+            data["exchange_rate_source"] = exchange_snapshot.exchange_rate_source
+            data["exchange_rate_at"] = ModelCatalogService._parse_snapshot_datetime(exchange_snapshot.exchange_rate_at)
+            data["exchange_rate_version"] = exchange_snapshot.exchange_rate_version
+            data["rounding_strategy"] = exchange_snapshot.rounding_strategy
         if "model_group" in data:
             data["model_group"] = ProviderService.normalize_model_group(
                 data.get("model_group") or ProviderService.infer_model_group(catalog.model_name)
@@ -467,11 +520,14 @@ class ModelCatalogService:
                 changed = True
 
             for item in items:
-                inferred_group = item.model_group or ProviderService.infer_model_group(item.model_name)
-                if not item.model_group or item.model_group == "unknown":
+                model_identity = item.upstream_model_name or item.model_name
+                inferred_group = ProviderService.infer_model_group(model_identity)
+                if inferred_group == "unknown":
+                    inferred_group = ProviderService.infer_model_group(item.model_name)
+                if (not item.model_group or item.model_group == "unknown") and inferred_group != "unknown":
                     item.model_group = ProviderService.normalize_model_group(inferred_group)
                     changed = True
-                if (not catalog.model_group or catalog.model_group == "unknown") and inferred_group:
+                if (not catalog.model_group or catalog.model_group == "unknown") and inferred_group != "unknown":
                     catalog.model_group = ProviderService.normalize_model_group(inferred_group)
                     changed = True
                 for field in ("context_window_tokens", "max_input_tokens", "max_output_tokens"):
@@ -580,8 +636,18 @@ class ModelCatalogService:
                     "cache_write_price_per_1k": (
                         min(filtered_cache_write_prices)
                         if filtered_cache_write_prices
-                        else catalog.input_price_per_1k
+                        else catalog.cache_write_price_per_1k
                     ),
+                    "source_currency": catalog.source_currency,
+                    "billing_currency": catalog.billing_currency,
+                    "source_input_price_per_1k": catalog.source_input_price_per_1k,
+                    "source_output_price_per_1k": catalog.source_output_price_per_1k,
+                    "source_cache_price_per_1k": catalog.source_cache_price_per_1k,
+                    "source_cache_write_price_per_1k": catalog.source_cache_write_price_per_1k,
+                    "exchange_rate_to_billing_currency": catalog.exchange_rate_to_billing_currency,
+                    "exchange_rate_source": catalog.exchange_rate_source,
+                    "exchange_rate_at": catalog.exchange_rate_at,
+                    "exchange_rate_version": catalog.exchange_rate_version,
                     "available_provider_names": filtered_names,
                     "enabled_provider_count": len(filtered_names),
                 }
@@ -672,6 +738,7 @@ class ModelCatalogService:
         *,
         keyword: str | None = None,
         enabled: bool | None = None,
+        model_group: str | None = None,
         provider_id: int | None = None,
     ):
         query = select(ModelCatalog)
@@ -692,6 +759,9 @@ class ModelCatalogService:
             )
         if enabled is not None:
             query = query.where(ModelCatalog.enabled.is_(enabled))
+        if model_group:
+            normalized_model_group = ProviderService.normalize_model_group(model_group)
+            query = query.where(ModelCatalog.model_group == normalized_model_group)
         if provider_id is not None and provider_id > 0:
             query = query.where(
                 ModelCatalog.model_name.in_(
@@ -742,7 +812,7 @@ class ModelCatalogService:
                 price_multiplier=provider_model.price_multiplier if provider_model else 1.0,
             )
             effective_cache_write = ModelCatalogService._effective_price_per_1k(
-                base_price_per_1k=catalog.input_price_per_1k,
+                base_price_per_1k=catalog.cache_write_price_per_1k,
                 direct_price_per_1k=provider_model.cache_write_price_per_1k if provider_model else None,
                 price_multiplier=provider_model.price_multiplier if provider_model else 1.0,
             )
@@ -819,6 +889,18 @@ class ModelCatalogService:
             "input_price_per_1k": catalog.input_price_per_1k,
             "output_price_per_1k": catalog.output_price_per_1k,
             "cache_price_per_1k": catalog.cache_price_per_1k,
+            "cache_write_price_per_1k": catalog.cache_write_price_per_1k,
+            "source_currency": catalog.source_currency,
+            "billing_currency": catalog.billing_currency,
+            "source_input_price_per_1k": catalog.source_input_price_per_1k,
+            "source_output_price_per_1k": catalog.source_output_price_per_1k,
+            "source_cache_price_per_1k": catalog.source_cache_price_per_1k,
+            "source_cache_write_price_per_1k": catalog.source_cache_write_price_per_1k,
+            "exchange_rate_to_billing_currency": catalog.exchange_rate_to_billing_currency,
+            "exchange_rate_source": catalog.exchange_rate_source,
+            "exchange_rate_at": catalog.exchange_rate_at,
+            "exchange_rate_version": catalog.exchange_rate_version,
+            "rounding_strategy": catalog.rounding_strategy,
             "speed_label": catalog.speed_label,
             "remark": catalog.remark,
             "provider_count": len(active_bindings),
@@ -840,7 +922,7 @@ class ModelCatalogService:
                     else catalog.input_price_per_1k
                 )
             ),
-            "lowest_cache_write_price_per_1k": min(cache_write_prices) if cache_write_prices else catalog.input_price_per_1k,
+            "lowest_cache_write_price_per_1k": min(cache_write_prices) if cache_write_prices else catalog.cache_write_price_per_1k,
             "avg_price_multiplier": avg_bound_price_multiplier,
             "avg_bound_price_multiplier": avg_bound_price_multiplier,
             "avg_routable_price_multiplier": avg_routable_price_multiplier,
@@ -927,16 +1009,10 @@ class ModelCatalogService:
                 input_price_per_1k=catalog.input_price_per_1k,
                 output_price_per_1k=catalog.output_price_per_1k,
                 cache_price_per_1k=catalog.cache_price_per_1k,
+                cache_write_price_per_1k=catalog.cache_write_price_per_1k,
                 price_multiplier=provider_model.price_multiplier,
             )
-            provider_model.input_price_per_1k = resolved_prices["input_price_per_1k"]
-            provider_model.output_price_per_1k = resolved_prices["output_price_per_1k"]
-            provider_model.cache_price_per_1k = resolved_prices["cache_price_per_1k"]
-            provider_model.cache_write_price_per_1k = (
-                resolved_prices.get("cache_write_price_per_1k")
-                if resolved_prices.get("cache_write_price_per_1k") is not None
-                else provider_model.input_price_per_1k
-            )
+            ModelCatalogService._apply_resolved_pricing_to_provider_model(provider_model, resolved_prices)
             ProviderService.refresh_provider_state(provider)
 
         for provider in providers:
@@ -963,16 +1039,10 @@ class ModelCatalogService:
                 input_price_per_1k=catalog.input_price_per_1k,
                 output_price_per_1k=catalog.output_price_per_1k,
                 cache_price_per_1k=catalog.cache_price_per_1k,
+                cache_write_price_per_1k=catalog.cache_write_price_per_1k,
                 price_multiplier=provider_model.price_multiplier,
             )
-            provider_model.input_price_per_1k = resolved_prices["input_price_per_1k"]
-            provider_model.output_price_per_1k = resolved_prices["output_price_per_1k"]
-            provider_model.cache_price_per_1k = resolved_prices["cache_price_per_1k"]
-            provider_model.cache_write_price_per_1k = (
-                resolved_prices.get("cache_write_price_per_1k")
-                if resolved_prices.get("cache_write_price_per_1k") is not None
-                else provider_model.input_price_per_1k
-            )
+            ModelCatalogService._apply_resolved_pricing_to_provider_model(provider_model, resolved_prices)
 
     @staticmethod
     def _sync_provider_model_shared_fields(provider_model: ProviderModel, catalog: ModelCatalog) -> bool:
@@ -991,18 +1061,84 @@ class ModelCatalogService:
             input_price_per_1k=catalog.input_price_per_1k,
             output_price_per_1k=catalog.output_price_per_1k,
             cache_price_per_1k=catalog.cache_price_per_1k,
+            cache_write_price_per_1k=catalog.cache_write_price_per_1k,
             price_multiplier=provider_model.price_multiplier,
         )
         for field, expected in (
             ("input_price_per_1k", resolved_prices["input_price_per_1k"]),
             ("output_price_per_1k", resolved_prices["output_price_per_1k"]),
             ("cache_price_per_1k", resolved_prices["cache_price_per_1k"]),
+            ("cache_write_price_per_1k", resolved_prices["cache_write_price_per_1k"]),
+            ("source_input_price_per_1k", resolved_prices["source_input_price_per_1k"]),
+            ("source_output_price_per_1k", resolved_prices["source_output_price_per_1k"]),
+            ("source_cache_price_per_1k", resolved_prices["source_cache_price_per_1k"]),
+            ("source_cache_write_price_per_1k", resolved_prices["source_cache_write_price_per_1k"]),
         ):
             current = getattr(provider_model, field)
             if not ModelCatalogService._nullable_decimal_equal(current, expected, quant=PRICE_QUANT):
                 setattr(provider_model, field, expected)
                 changed = True
+        snapshot = resolved_prices["exchange_rate_snapshot"]
+        metadata_fields = {
+            "source_currency": resolved_prices["source_currency"],
+            "billing_currency": resolved_prices["billing_currency"],
+            "exchange_rate_to_billing_currency": snapshot.exchange_rate,
+            "exchange_rate_source": snapshot.exchange_rate_source,
+            "exchange_rate_at": ModelCatalogService._parse_snapshot_datetime(snapshot.exchange_rate_at),
+            "exchange_rate_version": snapshot.exchange_rate_version,
+            "rounding_strategy": snapshot.rounding_strategy,
+        }
+        for field, expected in metadata_fields.items():
+            if getattr(provider_model, field) != expected:
+                setattr(provider_model, field, expected)
+                changed = True
         return changed
+
+    @staticmethod
+    def _apply_resolved_pricing_to_provider_model(provider_model: ProviderModel, resolved_prices: dict[str, Any]) -> None:
+        provider_model.input_price_per_1k = resolved_prices["input_price_per_1k"]
+        provider_model.output_price_per_1k = resolved_prices["output_price_per_1k"]
+        provider_model.cache_price_per_1k = resolved_prices["cache_price_per_1k"]
+        provider_model.cache_write_price_per_1k = resolved_prices.get("cache_write_price_per_1k")
+        provider_model.source_currency = resolved_prices["source_currency"]
+        provider_model.billing_currency = resolved_prices["billing_currency"]
+        provider_model.source_input_price_per_1k = resolved_prices["source_input_price_per_1k"]
+        provider_model.source_output_price_per_1k = resolved_prices["source_output_price_per_1k"]
+        provider_model.source_cache_price_per_1k = resolved_prices["source_cache_price_per_1k"]
+        provider_model.source_cache_write_price_per_1k = resolved_prices["source_cache_write_price_per_1k"]
+        snapshot = resolved_prices["exchange_rate_snapshot"]
+        provider_model.exchange_rate_to_billing_currency = snapshot.exchange_rate
+        provider_model.exchange_rate_source = snapshot.exchange_rate_source
+        provider_model.exchange_rate_at = ModelCatalogService._parse_snapshot_datetime(snapshot.exchange_rate_at)
+        provider_model.exchange_rate_version = snapshot.exchange_rate_version
+        provider_model.rounding_strategy = snapshot.rounding_strategy
+
+    @staticmethod
+    def _pricing_json_with_top_level_fields(
+        pricing_json: str | dict | None,
+        data: dict[str, Any],
+        *,
+        fallback_billing_currency: str | None = None,
+    ) -> dict[str, Any]:
+        metadata = ModelPricingService.parse_pricing_json(pricing_json)
+        for source_field in (
+            "source_currency",
+            "billing_currency",
+            "source_input_price_per_1k",
+            "source_output_price_per_1k",
+            "source_cache_price_per_1k",
+            "source_cache_write_price_per_1k",
+            "exchange_rate_source",
+            "exchange_rate_at",
+            "exchange_rate_version",
+            "rounding_strategy",
+        ):
+            if source_field in data:
+                metadata[source_field] = data[source_field]
+        if "exchange_rate_to_billing_currency" in data:
+            billing_currency = str(data.get("billing_currency") or metadata.get("billing_currency") or fallback_billing_currency or "USD").lower()
+            metadata[f"exchange_rate_to_{billing_currency}"] = data["exchange_rate_to_billing_currency"]
+        return metadata
 
     @staticmethod
     def _collect_catalog_test_targets(
@@ -1269,6 +1405,15 @@ class ModelCatalogService:
         if left is None or right is None:
             return left is None and right is None
         return decimals_equal(left, right, quant=quant)
+
+    @staticmethod
+    def _parse_snapshot_datetime(value: str | None) -> datetime | None:
+        if value in (None, ""):
+            return None
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(tzinfo=None)
+        except ValueError:
+            return None
 
     @staticmethod
     def _pick_base_price(provider_models: list[ProviderModel], *, field_name: str):

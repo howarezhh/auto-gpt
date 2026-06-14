@@ -19,6 +19,9 @@ class _FakeQuery:
     def order_by(self, *_args):
         return self
 
+    def limit(self, *_args):
+        return self
+
 
 class _FakeDb:
     def __init__(self, catalogs: list[_FakeCatalog]) -> None:

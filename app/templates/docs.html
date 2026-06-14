@@ -3,24 +3,24 @@
 <section class="hero-panel hero-panel-compact cockpit-hero docs-cockpit-hero">
     <div class="cockpit-hero-copy docs-hero-copy">
         <div class="eyebrow">开发者接入</div>
-        <h2>开发者接入页</h2>
-        <p>先复制 Base URL 和 API Key，跑通最短自检，再按客户端类型补充模型名与能力参数。</p>
+        <h2>使用文档</h2>
+        <p>这里只保留正式接入必须知道的通用信息：接入地址、鉴权方式、标准路径、最短自检和常见客户端配置。</p>
         <div class="hero-actions">
-            <a class="btn btn-accent interactive-btn" href="#docs-step-flow">先看步骤流</a>
-            <a class="btn btn-ghost interactive-btn" href="#docs-copy-flow">直接复制接入信息</a>
+            <a class="btn btn-accent interactive-btn" href="#docs-copy-flow">复制接入信息</a>
+            <a class="btn btn-ghost interactive-btn" href="#docs-example-flow">查看最短示例</a>
         </div>
         <div class="docs-hero-strip" aria-label="接入摘要">
             <article>
-                <span>正式入口</span>
+                <span>Base URL</span>
                 <strong><code>{{ external_v1_base_url }}</code></strong>
             </article>
             <article>
-                <span>推荐起手</span>
-                <strong>先测 <code>/v1/models</code></strong>
+                <span>鉴权方式</span>
+                <strong>Bearer API Key</strong>
             </article>
             <article>
-                <span>图片策略</span>
-                <strong>优先走 <code>/v1/responses</code></strong>
+                <span>路由策略</span>
+                <strong>健康优先</strong>
             </article>
         </div>
     </div>
@@ -31,113 +31,31 @@
             <code>{{ external_v1_base_url }}</code>
             <button class="btn btn-accent btn-sm interactive-btn" type="button" data-copy-text="{{ external_v1_base_url }}">复制入口</button>
         </div>
-        <div class="cockpit-aside-copy">该地址由配置或当前访问地址生成，避免写死域名、IP 或协议。</div>
+        <div class="cockpit-aside-copy">外部系统接入标准模型代理路径：OpenAI 兼容走 <code>/v1/*</code>，Gemini 走 <code>/v1beta/models/*</code>，Claude 走 <code>/v1/messages</code>，不使用后台页面地址或内部调试接口。</div>
         <div class="docs-hero-meta">
-            <span>OpenAI 兼容子集</span>
-            <span>只走 <code>/v1/*</code></span>
+            <span>OpenAI 模型名以 <code>/v1/models</code> 返回为准</span>
+            <span>Gemini / Claude 按原生入口调用</span>
             <span>支持一键复制</span>
         </div>
     </div>
 </section>
 
 <nav class="page-anchor-bar">
-    <a class="page-anchor-link" href="#docs-step-flow">步骤流</a>
-    <a class="page-anchor-link" href="#docs-copy-flow">复制流</a>
-    <a class="page-anchor-link" href="#docs-example-flow">示例流</a>
-    <a class="page-anchor-link" href="#docs-image-flow">生图流</a>
-    <a class="page-anchor-link" href="#docs-error-flow">错误返回</a>
-    <a class="page-anchor-link" href="#docs-client-flow">客户端配置流</a>
+    <a class="page-anchor-link" href="#docs-copy-flow">接入信息</a>
+    <a class="page-anchor-link" href="#docs-example-flow">最短示例</a>
+    <a class="page-anchor-link" href="#docs-client-flow">客户端配置</a>
+    <a class="page-anchor-link" href="#docs-error-flow">错误格式</a>
 </nav>
-
-<section class="docs-help-grid anchor-section-offset" id="docs-step-flow">
-    <div class="panel-card section-shell docs-main-panel">
-        <div class="section-subhead">
-            <div>
-                <div class="panel-kicker">步骤流</div>
-                <h3>从拿到密钥到正式接入</h3>
-                <p class="section-subcopy">先跑通最短链路，再扩展到具体客户端和具体能力。不要一上来就从最长请求开始排查。</p>
-            </div>
-        </div>
-        <div class="docs-flow-list docs-flow-list-stack">
-            <article class="docs-flow-card">
-                <div class="docs-flow-index">1</div>
-                <div>
-                    <h4>拿到平台 API Key</h4>
-                    <p>从管理员或用户侧密钥控制台获取平台 API Key。外部请求统一使用平台密钥，不直接暴露后台调试接口。</p>
-                </div>
-            </article>
-            <article class="docs-flow-card">
-                <div class="docs-flow-index">2</div>
-                <div>
-                    <h4>复制 Base URL 和正式入口</h4>
-                    <p>把 OpenAI 兼容入口设为 <code>{{ external_v1_base_url }}</code>。正式只使用当前已支持的 <code>/v1/*</code> 路径，不把后台页地址或 playground 地址当成对外接口。</p>
-                </div>
-            </article>
-            <article class="docs-flow-card">
-                <div class="docs-flow-index">3</div>
-                <div>
-                    <h4>先跑一条最短请求</h4>
-                    <p>优先调用 <code>/v1/models</code> 或一条最短文本请求，验证鉴权、模型可见性和路由链路是否都已经跑通。</p>
-                </div>
-            </article>
-            <article class="docs-flow-card">
-                <div class="docs-flow-index">4</div>
-                <div>
-                    <h4>按客户端类型填配置</h4>
-                    <p>支持 OpenAI 兼容 Base URL 的客户端，统一按 Base URL、API Key 和模型名三项配置；模型名以 <code>/v1/models</code> 返回结果为准。</p>
-                </div>
-            </article>
-            <article class="docs-flow-card">
-                <div class="docs-flow-index">5</div>
-                <div>
-                    <h4>图片生成优先走 Responses</h4>
-                    <p>正式推荐 <code>POST {{ external_v1_base_url }}/responses</code> + <code>tools=[{"type":"image_generation"}]</code>。旧版 <code>/v1/images/*</code> 只作为兼容层保留。</p>
-                </div>
-            </article>
-        </div>
-    </div>
-
-    <div class="docs-help-side docs-help-side-sticky">
-        <div class="panel-card section-shell docs-side-panel">
-            <div class="panel-head">
-                <div>
-                    <div class="panel-kicker">生产约束</div>
-                    <h3>先记住这四条</h3>
-                </div>
-            </div>
-            <div class="docs-rule-stack">
-                <div><span>入口</span><strong>只使用 <code>{{ external_v1_base_url }}</code></strong></div>
-                <div><span>鉴权</span><strong><code>Authorization: Bearer YOUR_PLATFORM_API_KEY</code></strong></div>
-                <div><span>模型名</span><strong>以 <code>/v1/models</code> 返回结果为准</strong></div>
-                <div><span>禁止</span><strong>不要把后台页面地址或 playground 地址当成正式接口</strong></div>
-            </div>
-        </div>
-        <div class="panel-card section-shell docs-side-panel">
-            <div class="panel-head">
-                <div>
-                    <div class="panel-kicker">最短自检</div>
-                    <h3>先复制这一条</h3>
-                </div>
-            </div>
-            <div class="doc-code-block compact docs-code-block-tight"><pre><code>curl {{ external_v1_base_url }}/models \
-  -H "Authorization: Bearer YOUR_PLATFORM_API_KEY"</code></pre></div>
-            <div class="hero-actions">
-                <button class="btn btn-accent btn-sm interactive-btn" type="button" data-copy-text="curl {{ external_v1_base_url }}/models &#10;  -H &quot;Authorization: Bearer YOUR_PLATFORM_API_KEY&quot;">复制最短请求</button>
-            </div>
-        </div>
-    </div>
-</section>
 
 <section class="docs-help-grid anchor-section-offset" id="docs-copy-flow">
     <div class="panel-card section-shell docs-main-panel">
         <div class="section-subhead">
             <div>
-                <div class="panel-kicker">复制流</div>
-                <h3>直接可复制的接入信息</h3>
-                <p class="section-subcopy">先拿核心接入信息，扩展路径按需展开。这样比整页大卡片堆满更适合真实接入时快速定位。</p>
+                <div class="panel-kicker">接入信息</div>
+                <h3>复制这几项即可开始接入</h3>
+                <p class="section-subcopy">平台对外同时提供 OpenAI 兼容与 Gemini / Claude 原生入口。客户端通常只需要 Base URL、API Key 和模型名或模型 ID。</p>
             </div>
         </div>
-
         <div class="docs-copy-grid">
             <article class="docs-copy-card">
                 <h4>平台地址</h4>
@@ -145,158 +63,37 @@
                 <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="{{ external_base_url }}">复制地址</button>
             </article>
             <article class="docs-copy-card">
-                <h4>OpenAI 兼容入口</h4>
+                <h4>OpenAI Base URL</h4>
                 <strong><code>{{ external_v1_base_url }}</code></strong>
-                <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="{{ external_v1_base_url }}">复制 /v1 入口</button>
+                <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="{{ external_v1_base_url }}">复制入口</button>
             </article>
             <article class="docs-copy-card">
-                <h4>鉴权头</h4>
+                <h4>鉴权 Header</h4>
                 <strong><code>Authorization: Bearer YOUR_PLATFORM_API_KEY</code></strong>
                 <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="Authorization: Bearer YOUR_PLATFORM_API_KEY">复制 Header</button>
             </article>
             <article class="docs-copy-card">
-                <h4>Models</h4>
-                <strong><code>{{ external_v1_base_url }}/models</code></strong>
-                <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="{{ external_v1_base_url }}/models">复制 models</button>
-            </article>
-            <article class="docs-copy-card">
-                <h4>Chat Completions</h4>
-                <strong><code>{{ external_v1_base_url }}/chat/completions</code></strong>
-                <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="{{ external_v1_base_url }}/chat/completions">复制 chat/completions</button>
-            </article>
-            <article class="docs-copy-card">
-                <h4>Responses</h4>
-                <strong><code>{{ external_v1_base_url }}/responses</code></strong>
-                <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="{{ external_v1_base_url }}/responses">复制 responses</button>
+                <h4>环境变量</h4>
+                <strong><code>OPENAI_BASE_URL={{ external_v1_base_url }}</code></strong>
+                <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="OPENAI_API_KEY=YOUR_PLATFORM_API_KEY&#10;OPENAI_BASE_URL={{ external_v1_base_url }}">复制变量</button>
             </article>
         </div>
-
-        <details class="docs-collapse">
-            <summary>展开扩展路径速查</summary>
-            <div class="docs-collapse-body">
-                <div class="docs-copy-groups">
-                    <article class="docs-copy-group-card">
-                        <div class="docs-copy-group-head">
-                            <h4>模型与文本入口</h4>
-                            <p>文本请求和模型发现的常用路径。</p>
-                        </div>
-                        <div class="docs-copy-row">
-                            <span>Model Retrieve</span>
-                            <strong><code>{{ external_v1_base_url }}/models/{model}</code></strong>
-                            <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="{{ external_v1_base_url }}/models/{model}">复制</button>
-                        </div>
-                        <div class="docs-copy-row">
-                            <span>Completions</span>
-                            <strong><code>{{ external_v1_base_url }}/completions</code></strong>
-                            <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="{{ external_v1_base_url }}/completions">复制</button>
-                        </div>
-                        <div class="docs-copy-row">
-                            <span>Embeddings</span>
-                            <strong><code>{{ external_v1_base_url }}/embeddings</code></strong>
-                            <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="{{ external_v1_base_url }}/embeddings">复制</button>
-                        </div>
-                        <div class="docs-copy-row">
-                            <span>Moderations</span>
-                            <strong><code>{{ external_v1_base_url }}/moderations</code></strong>
-                            <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="{{ external_v1_base_url }}/moderations">复制</button>
-                        </div>
-                    </article>
-
-                    <article class="docs-copy-group-card">
-                        <div class="docs-copy-group-head">
-                            <h4>Responses 管理路径</h4>
-                            <p>只在需要查询、取消或删除响应对象时使用。</p>
-                        </div>
-                        <div class="docs-copy-row">
-                            <span>Responses Retrieve</span>
-                            <strong><code>{{ external_v1_base_url }}/responses/{response_id}</code></strong>
-                            <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="{{ external_v1_base_url }}/responses/{response_id}">复制</button>
-                        </div>
-                        <div class="docs-copy-row">
-                            <span>Responses Input Items</span>
-                            <strong><code>{{ external_v1_base_url }}/responses/{response_id}/input_items</code></strong>
-                            <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="{{ external_v1_base_url }}/responses/{response_id}/input_items">复制</button>
-                        </div>
-                        <div class="docs-copy-row">
-                            <span>Responses Cancel</span>
-                            <strong><code>{{ external_v1_base_url }}/responses/{response_id}/cancel</code></strong>
-                            <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="{{ external_v1_base_url }}/responses/{response_id}/cancel">复制</button>
-                        </div>
-                        <div class="docs-copy-row">
-                            <span>Responses Delete</span>
-                            <strong><code>{{ external_v1_base_url }}/responses/{response_id}</code></strong>
-                            <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="DELETE {{ external_v1_base_url }}/responses/{response_id}">复制</button>
-                        </div>
-                    </article>
-
-                    <article class="docs-copy-group-card">
-                        <div class="docs-copy-group-head">
-                            <h4>Chat 兼容管理路径</h4>
-                            <p>旧式 chat/completions 对象的查询和补充接口。</p>
-                        </div>
-                        <div class="docs-copy-row">
-                            <span>Chat Retrieve</span>
-                            <strong><code>{{ external_v1_base_url }}/chat/completions/{completion_id}</code></strong>
-                            <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="{{ external_v1_base_url }}/chat/completions/{completion_id}">复制</button>
-                        </div>
-                        <div class="docs-copy-row">
-                            <span>Chat Messages</span>
-                            <strong><code>{{ external_v1_base_url }}/chat/completions/{completion_id}/messages</code></strong>
-                            <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="{{ external_v1_base_url }}/chat/completions/{completion_id}/messages">复制</button>
-                        </div>
-                        <div class="docs-copy-row">
-                            <span>Chat Delete</span>
-                            <strong><code>{{ external_v1_base_url }}/chat/completions/{completion_id}</code></strong>
-                            <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="DELETE {{ external_v1_base_url }}/chat/completions/{completion_id}">复制</button>
-                        </div>
-                    </article>
-
-                    <article class="docs-copy-group-card">
-                        <div class="docs-copy-group-head">
-                            <h4>文件与图片兼容路径</h4>
-                            <p>上传和旧版图片客户端兼容时使用。</p>
-                        </div>
-                        <div class="docs-copy-row">
-                            <span>Files</span>
-                            <strong><code>{{ external_v1_base_url }}/files</code></strong>
-                            <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="{{ external_v1_base_url }}/files">复制</button>
-                        </div>
-                        <div class="docs-copy-row">
-                            <span>images/generations</span>
-                            <strong><code>{{ external_v1_base_url }}/images/generations</code></strong>
-                            <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="{{ external_v1_base_url }}/images/generations">复制</button>
-                        </div>
-                        <div class="docs-copy-row">
-                            <span>images/edits</span>
-                            <strong><code>{{ external_v1_base_url }}/images/edits</code></strong>
-                            <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="{{ external_v1_base_url }}/images/edits">复制</button>
-                        </div>
-                        <div class="docs-copy-row">
-                            <span>images/variations</span>
-                            <strong><code>{{ external_v1_base_url }}/images/variations</code></strong>
-                            <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="{{ external_v1_base_url }}/images/variations">复制</button>
-                        </div>
-                    </article>
-                </div>
-            </div>
-        </details>
     </div>
 
     <div class="docs-help-side docs-help-side-sticky">
         <div class="panel-card section-shell docs-side-panel">
             <div class="panel-head">
                 <div>
-                    <div class="panel-kicker">环境变量流</div>
-                    <h3>环境变量直接落地</h3>
+                    <div class="panel-kicker">标准路径</div>
+                    <h3>常用入口</h3>
                 </div>
             </div>
-            <div class="doc-code-block compact docs-code-block-tight"><pre><code>OPENAI_API_KEY=YOUR_PLATFORM_API_KEY
-OPENAI_BASE_URL={{ external_v1_base_url }}</code></pre></div>
-            <div class="hero-actions">
-                <button class="btn btn-accent btn-sm interactive-btn" type="button" data-copy-text="OPENAI_API_KEY=YOUR_PLATFORM_API_KEY&#10;OPENAI_BASE_URL={{ external_v1_base_url }}">复制环境变量</button>
-            </div>
-            <div class="docs-side-note">
-                <span>建议先用这两个变量跑通客户端，再补模型名和能力参数。</span>
+            <div class="docs-rule-stack">
+                <div><span>模型列表</span><strong><code>GET /v1/models</code></strong></div>
+                <div><span>OpenAI 文本入口</span><strong><code>POST /v1/responses</code></strong></div>
+                <div><span>Chat 兼容入口</span><strong><code>POST /v1/chat/completions</code></strong></div>
+                <div><span>Gemini 原生</span><strong><code>POST /v1beta/models/{model}:generateContent</code></strong></div>
+                <div><span>Claude 原生</span><strong><code>POST /v1/messages</code></strong></div>
             </div>
         </div>
     </div>
@@ -305,410 +102,97 @@ OPENAI_BASE_URL={{ external_v1_base_url }}</code></pre></div>
 <section class="panel-card section-shell anchor-section-offset" id="docs-example-flow">
     <div class="section-subhead">
         <div>
-            <div class="panel-kicker">示例流</div>
-            <h3>先发现模型，再发起请求</h3>
-            <p class="section-subcopy">把高频正式示例放在前面，扩展接口示例按需展开，不再让整页一上来就全是大代码块。</p>
+            <div class="panel-kicker">最短示例</div>
+            <h3>先自检，再发起正式请求</h3>
+            <p class="section-subcopy">先确认鉴权和模型可见性，再按业务选择 Responses、Chat Completions 或原生入口。</p>
         </div>
     </div>
     <div class="docs-client-grid docs-client-grid-core">
         <article class="docs-module-card docs-example-card">
             <div class="docs-example-head">
-                <span>Step A</span>
+                <span>自检</span>
                 <h4>获取模型列表</h4>
-                <p>先验证鉴权和模型可见性。</p>
+                <p>用于确认 API Key、访问地址和可用模型。</p>
             </div>
             <div class="doc-code-block compact"><pre><code>curl {{ external_v1_base_url }}/models \
   -H "Authorization: Bearer YOUR_PLATFORM_API_KEY"</code></pre></div>
             <div class="hero-actions">
-                <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="curl {{ external_v1_base_url }}/models &#10;  -H &quot;Authorization: Bearer YOUR_PLATFORM_API_KEY&quot;">复制 models 示例</button>
+                <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="curl {{ external_v1_base_url }}/models &#10;  -H &quot;Authorization: Bearer YOUR_PLATFORM_API_KEY&quot;">复制自检请求</button>
             </div>
         </article>
         <article class="docs-module-card docs-example-card">
             <div class="docs-example-head">
-                <span>Step B</span>
-                <h4>chat/completions</h4>
-                <p>最常见的对话式 OpenAI 兼容入口。</p>
+                <span>推荐</span>
+                <h4>Responses 文本请求</h4>
+                <p>OpenAI 兼容新接入优先使用该入口。</p>
+            </div>
+            <div class="doc-code-block compact"><pre><code>curl {{ external_v1_base_url }}/responses \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_PLATFORM_API_KEY" \
+  -d '{
+    "model": "YOUR_MODEL",
+    "input": "用一句话介绍这个服务"
+  }'</code></pre></div>
+            <div class="hero-actions">
+                <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="curl {{ external_v1_base_url }}/responses &#10;  -H &quot;Content-Type: application/json&quot; &#10;  -H &quot;Authorization: Bearer YOUR_PLATFORM_API_KEY&quot; &#10;  -d '{&#10;    &quot;model&quot;: &quot;YOUR_MODEL&quot;,&#10;    &quot;input&quot;: &quot;用一句话介绍这个服务&quot;&#10;  }'">复制 Responses 示例</button>
+            </div>
+        </article>
+        <article class="docs-module-card docs-example-card">
+            <div class="docs-example-head">
+                <span>兼容</span>
+                <h4>Chat Completions 请求</h4>
+                <p>用于仍依赖 Chat Completions 协议的客户端。</p>
             </div>
             <div class="doc-code-block compact"><pre><code>curl {{ external_v1_base_url }}/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer YOUR_PLATFORM_API_KEY" \
   -d '{
-    "model": "gpt-4o-mini",
+    "model": "YOUR_MODEL",
     "messages": [
-      {"role": "user", "content": "你好，请介绍一下你自己"}
+      {"role": "user", "content": "用一句话介绍这个服务"}
     ]
   }'</code></pre></div>
             <div class="hero-actions">
-                <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="curl {{ external_v1_base_url }}/chat/completions &#10;  -H &quot;Content-Type: application/json&quot; &#10;  -H &quot;Authorization: Bearer YOUR_PLATFORM_API_KEY&quot; &#10;  -d '{&#10;    &quot;model&quot;: &quot;gpt-4o-mini&quot;,&#10;    &quot;messages&quot;: [&#10;      {&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;你好，请介绍一下你自己&quot;}&#10;    ]&#10;  }'">复制 chat 示例</button>
+                <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="curl {{ external_v1_base_url }}/chat/completions &#10;  -H &quot;Content-Type: application/json&quot; &#10;  -H &quot;Authorization: Bearer YOUR_PLATFORM_API_KEY&quot; &#10;  -d '{&#10;    &quot;model&quot;: &quot;YOUR_MODEL&quot;,&#10;    &quot;messages&quot;: [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;用一句话介绍这个服务&quot;}]&#10;  }'">复制 Chat 示例</button>
             </div>
         </article>
         <article class="docs-module-card docs-example-card">
             <div class="docs-example-head">
-                <span>Step C</span>
-                <h4>responses</h4>
-                <p>正式 Responses 协议入口，不自动改写为 chat/completions。</p>
+                <span>Gemini</span>
+                <h4>generateContent 原生请求</h4>
+                <p>用于 Gemini SDK 或按 Gemini 原生协议接入的客户端。</p>
             </div>
-            <div class="doc-code-block compact"><pre><code>curl {{ external_v1_base_url }}/responses \
+            <div class="doc-code-block compact"><pre><code>curl {{ external_base_url }}/v1beta/models/YOUR_GEMINI_MODEL:generateContent \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer YOUR_PLATFORM_API_KEY" \
   -d '{
-    "model": "gpt-4o-mini",
-    "input": "你好，请用一句话介绍本平台"
-  }'</code></pre></div>
-            <div class="docs-card-note">
-                <p><code>/v1/chat/completions</code> 与 <code>/v1/responses</code> 两种入口相对独立，请按客户端实际使用的协议入口接入。</p>
-            </div>
-            <div class="hero-actions">
-                <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="curl {{ external_v1_base_url }}/responses &#10;  -H &quot;Content-Type: application/json&quot; &#10;  -H &quot;Authorization: Bearer YOUR_PLATFORM_API_KEY&quot; &#10;  -d '{&#10;    &quot;model&quot;: &quot;gpt-4o-mini&quot;,&#10;    &quot;input&quot;: &quot;你好，请用一句话介绍本平台&quot;&#10;  }'">复制 responses 示例</button>
-            </div>
-        </article>
-        <article class="docs-module-card docs-example-card">
-            <div class="docs-example-head">
-                <span>Step D</span>
-                <h4>completions</h4>
-                <p>旧版文本补全兼容入口，按需使用。</p>
-            </div>
-            <div class="doc-code-block compact"><pre><code>curl {{ external_v1_base_url }}/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_PLATFORM_API_KEY" \
-  -d '{
-    "model": "YOUR_COMPLETIONS_MODEL",
-    "prompt": "用一句话介绍本平台"
+    "contents": [
+      {"role": "user", "parts": [{"text": "用一句话介绍这个服务"}]}
+    ]
   }'</code></pre></div>
             <div class="hero-actions">
-                <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="curl {{ external_v1_base_url }}/completions &#10;  -H &quot;Content-Type: application/json&quot; &#10;  -H &quot;Authorization: Bearer YOUR_PLATFORM_API_KEY&quot; &#10;  -d '{&#10;    &quot;model&quot;: &quot;YOUR_COMPLETIONS_MODEL&quot;,&#10;    &quot;prompt&quot;: &quot;用一句话介绍本平台&quot;&#10;  }'">复制 completions 示例</button>
-            </div>
-        </article>
-    </div>
-
-    <details class="docs-collapse">
-        <summary>展开扩展接口示例</summary>
-        <div class="docs-collapse-body">
-            <div class="docs-client-grid docs-client-grid-core">
-                <article class="docs-module-card docs-example-card">
-                    <div class="docs-example-head">
-                        <span>Step E</span>
-                        <h4>embeddings</h4>
-                        <p>向量检索和嵌入场景使用。</p>
-                    </div>
-                    <div class="doc-code-block compact"><pre><code>curl {{ external_v1_base_url }}/embeddings \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_PLATFORM_API_KEY" \
-  -d '{
-    "model": "YOUR_EMBEDDING_MODEL",
-    "input": "用于向量检索的文本"
-  }'</code></pre></div>
-                    <div class="hero-actions">
-                        <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="curl {{ external_v1_base_url }}/embeddings &#10;  -H &quot;Content-Type: application/json&quot; &#10;  -H &quot;Authorization: Bearer YOUR_PLATFORM_API_KEY&quot; &#10;  -d '{&#10;    &quot;model&quot;: &quot;YOUR_EMBEDDING_MODEL&quot;,&#10;    &quot;input&quot;: &quot;用于向量检索的文本&quot;&#10;  }'">复制 embeddings 示例</button>
-                    </div>
-                </article>
-                <article class="docs-module-card docs-example-card">
-                    <div class="docs-example-head">
-                        <span>Step F</span>
-                        <h4>moderations</h4>
-                        <p>审核文本或多模态内容时使用。</p>
-                    </div>
-                    <div class="doc-code-block compact"><pre><code>curl {{ external_v1_base_url }}/moderations \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_PLATFORM_API_KEY" \
-  -d '{
-    "model": "YOUR_MODERATION_MODEL",
-    "input": "需要审核的文本或多模态内容"
-  }'</code></pre></div>
-                    <div class="hero-actions">
-                        <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="curl {{ external_v1_base_url }}/moderations &#10;  -H &quot;Content-Type: application/json&quot; &#10;  -H &quot;Authorization: Bearer YOUR_PLATFORM_API_KEY&quot; &#10;  -d '{&#10;    &quot;model&quot;: &quot;YOUR_MODERATION_MODEL&quot;,&#10;    &quot;input&quot;: &quot;需要审核的文本或多模态内容&quot;&#10;  }'">复制 moderations 示例</button>
-                    </div>
-                </article>
-                <article class="docs-module-card docs-example-card">
-                    <div class="docs-example-head">
-                        <span>Step G</span>
-                        <h4>files</h4>
-                        <p>上传、详情、内容下载和删除透传入口。</p>
-                    </div>
-                    <div class="doc-code-block compact"><pre><code>curl {{ external_v1_base_url }}/files \
-  -H "Authorization: Bearer YOUR_PLATFORM_API_KEY" \
-  -F "purpose=assistants" \
-  -F "file=@./payload.jsonl"</code></pre></div>
-                    <div class="hero-actions">
-                        <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="curl {{ external_v1_base_url }}/files &#10;  -H &quot;Authorization: Bearer YOUR_PLATFORM_API_KEY&quot; &#10;  -F &quot;purpose=assistants&quot; &#10;  -F &quot;file=@./payload.jsonl&quot;">复制 files 示例</button>
-                    </div>
-                </article>
-            </div>
-        </div>
-    </details>
-</section>
-
-<section class="panel-card section-shell anchor-section-offset" id="docs-image-flow">
-    <div class="section-subhead">
-        <div>
-            <div class="panel-kicker">生图流</div>
-            <h3>官方 Responses 生图工作流</h3>
-            <p class="section-subcopy">正式推荐路径优先展示，旧版 Images API 兼容细节后置展开，避免把用户带进低频兼容分支。</p>
-        </div>
-    </div>
-
-    <article class="docs-image-priority-card">
-        <div class="docs-image-priority-head">
-            <h4>先记住这一条</h4>
-            <span>正式推荐路径</span>
-        </div>
-        <p>本平台当前正式兼容的是 OpenAI 官方 <code>Responses + image_generation</code> 工作流。客户端统一使用 <code>{{ external_v1_base_url }}</code>，图片生成和图片编辑都优先发到 <code>/v1/responses</code>。</p>
-        <ul class="docs-inline-list">
-            <li>外层 <code>model</code> 选择可路由的 Responses 模型</li>
-            <li>工具层显式写 <code>{"type":"image_generation","model":"gpt-image-2"}</code></li>
-            <li>编辑图时再补 <code>"action":"edit"</code>，并把源图放进 <code>input</code></li>
-        </ul>
-    </article>
-
-    <div class="docs-client-grid docs-client-grid-core">
-        <article class="docs-module-card docs-example-card">
-            <div class="docs-example-head">
-                <span>官方示例</span>
-                <h4>文生图 · 非流式</h4>
-                <p>适合直接一次性拿最终图片。</p>
-            </div>
-            <div class="doc-code-block compact"><pre><code>curl {{ external_v1_base_url }}/responses \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_PLATFORM_API_KEY" \
-  -d '{
-    "model": "gpt-5.4",
-    "input": "生成一张极简风格的蓝色纸鸢图标，白底，单主体",
-    "tools": [
-      {
-        "type": "image_generation",
-        "model": "gpt-image-2",
-        "action": "generate",
-        "background": "opaque",
-        "output_format": "png",
-        "size": "1024x1024",
-        "quality": "high"
-      }
-    ],
-    "tool_choice": {"type": "image_generation"}
-  }'</code></pre></div>
-            <div class="docs-card-note">
-                <p>成功响应里重点看 <code>output</code> 数组中的 <code>image_generation_call</code>；最终图片通常在 <code>item.result</code>。</p>
+                <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="curl {{ external_base_url }}/v1beta/models/YOUR_GEMINI_MODEL:generateContent &#10;  -H &quot;Content-Type: application/json&quot; &#10;  -H &quot;Authorization: Bearer YOUR_PLATFORM_API_KEY&quot; &#10;  -d '{&#10;    &quot;contents&quot;: [{&quot;role&quot;: &quot;user&quot;, &quot;parts&quot;: [{&quot;text&quot;: &quot;用一句话介绍这个服务&quot;}]}]&#10;  }'">复制 Gemini 示例</button>
             </div>
         </article>
         <article class="docs-module-card docs-example-card">
             <div class="docs-example-head">
-                <span>官方示例</span>
-                <h4>文生图 · 流式</h4>
-                <p>适合监听中间事件和最终产物。</p>
+                <span>Claude</span>
+                <h4>Messages 原生请求</h4>
+                <p>用于 Claude SDK 或按 Claude Messages API 接入的客户端。</p>
             </div>
-            <div class="doc-code-block compact"><pre><code>curl {{ external_v1_base_url }}/responses \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_PLATFORM_API_KEY" \
-  -N \
-  -d '{
-    "model": "gpt-5.4",
-    "stream": true,
-    "input": "生成一张暖色调的产品海报背景，不要文字",
-    "tools": [
-      {
-        "type": "image_generation",
-        "model": "gpt-image-2",
-        "action": "auto",
-        "output_format": "png"
-      }
-    ],
-    "tool_choice": {"type": "image_generation"}
-  }'</code></pre></div>
-            <div class="docs-card-note">
-                <p>优先监听 <code>response.output_item.done</code>；若 <code>item.type == "image_generation_call"</code> 且 <code>item.result</code> 存在，即说明拿到了最终图片。</p>
-            </div>
-        </article>
-        <article class="docs-module-card docs-example-card">
-            <div class="docs-example-head">
-                <span>官方示例</span>
-                <h4>图片编辑 · Responses</h4>
-                <p>编辑图不要切回旧版 Images API。</p>
-            </div>
-            <div class="doc-code-block compact"><pre><code>curl {{ external_v1_base_url }}/responses \
+            <div class="doc-code-block compact"><pre><code>curl {{ external_base_url }}/v1/messages \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer YOUR_PLATFORM_API_KEY" \
   -d '{
-    "model": "gpt-5.4",
-    "input": [
-      {
-        "role": "user",
-        "content": [
-          {"type": "input_text", "text": "只修改背景，把背景换成干净的浅灰摄影棚，主体不要变化"},
-          {"type": "input_image", "image_url": "data:image/png;base64,REPLACE_WITH_BASE64"}
-        ]
-      }
-    ],
-    "tools": [
-      {
-        "type": "image_generation",
-        "model": "gpt-image-2",
-        "action": "edit",
-        "output_format": "png",
-        "quality": "high"
-      }
-    ],
-    "tool_choice": {"type": "image_generation"}
+    "model": "YOUR_CLAUDE_MODEL",
+    "max_tokens": 256,
+    "messages": [
+      {"role": "user", "content": "用一句话介绍这个服务"}
+    ]
   }'</code></pre></div>
-            <div class="docs-card-note">
-                <p>源图作为 <code>input_image</code> 放进 <code>/v1/responses</code>，并把工具动作固定成 <code>edit</code> 即可。</p>
+            <div class="hero-actions">
+                <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="curl {{ external_base_url }}/v1/messages &#10;  -H &quot;Content-Type: application/json&quot; &#10;  -H &quot;Authorization: Bearer YOUR_PLATFORM_API_KEY&quot; &#10;  -d '{&#10;    &quot;model&quot;: &quot;YOUR_CLAUDE_MODEL&quot;,&#10;    &quot;max_tokens&quot;: 256,&#10;    &quot;messages&quot;: [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;用一句话介绍这个服务&quot;}]&#10;  }'">复制 Claude 示例</button>
             </div>
-        </article>
-    </div>
-
-    <details class="docs-collapse">
-        <summary>展开旧客户端兼容流</summary>
-        <div class="docs-collapse-body">
-            <div class="docs-client-grid docs-client-grid-core">
-                <article class="docs-module-card docs-example-card">
-                    <div class="docs-example-head">
-                        <span>兼容层</span>
-                        <h4>images/generations</h4>
-                        <p>旧客户端文生图兼容入口。</p>
-                    </div>
-                    <div class="doc-code-block compact"><pre><code>curl {{ external_v1_base_url }}/images/generations \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_PLATFORM_API_KEY" \
-  -d '{
-    "model": "gpt-image-2",
-    "prompt": "生成一张极简风格的蓝色纸鸢图标，白底，单主体",
-    "response_format": "b64_json"
-  }'</code></pre></div>
-                    <div class="docs-card-note">
-                        <p>内部会自动改写成 <code>/v1/responses + image_generation</code>，但正式推荐口径仍然是 <code>/v1/responses</code>。</p>
-                    </div>
-                </article>
-                <article class="docs-module-card docs-example-card">
-                    <div class="docs-example-head">
-                        <span>兼容层</span>
-                        <h4>images/edits</h4>
-                        <p>旧版编辑图兼容入口。</p>
-                    </div>
-                    <div class="doc-code-block compact"><pre><code>curl {{ external_v1_base_url }}/images/edits \
-  -H "Authorization: Bearer YOUR_PLATFORM_API_KEY" \
-  -F "model=gpt-image-2" \
-  -F "prompt=只修改背景，把背景换成干净的浅灰摄影棚，主体不要变化" \
-  -F "response_format=b64_json" \
-  -F "image=@/path/to/source.png"</code></pre></div>
-                    <div class="docs-card-note">
-                        <p>支持 <code>multipart/form-data</code>，也兼容 JSON 里直接传 data URL。</p>
-                    </div>
-                </article>
-                <article class="docs-module-card docs-example-card">
-                    <div class="docs-example-head">
-                        <span>兼容层</span>
-                        <h4>images/variations</h4>
-                        <p>相近变体的旧式兼容入口。</p>
-                    </div>
-                    <div class="doc-code-block compact"><pre><code>curl {{ external_v1_base_url }}/images/variations \
-  -H "Authorization: Bearer YOUR_PLATFORM_API_KEY" \
-  -F "model=gpt-image-2" \
-  -F "response_format=b64_json" \
-  -F "image=@/path/to/source.png"</code></pre></div>
-                    <div class="docs-card-note">
-                        <p>语义上仍属于兼容适配，不应替代你在 <code>/v1/responses</code> 里显式控制的正式做法。</p>
-                    </div>
-                </article>
-                <article class="docs-module-card docs-example-card">
-                    <div class="docs-example-head">
-                        <span>兼容细节</span>
-                        <h4>response_format=url</h4>
-                        <p>旧版 Images API 的 URL 返回值说明。</p>
-                    </div>
-                    <div class="docs-card-note docs-card-note-block">
-                        <p>当旧版 Images API 请求使用 <code>response_format=url</code> 时，平台当前返回的是 <code>data:image/...;base64,...</code> 形式的 data URL 兼容值，而不是临时 CDN 文件地址。</p>
-                        <p>如果你的客户端需要真实可下载的公网 URL，请优先自己把返回图片保存到对象存储，或直接走 <code>/v1/responses</code> 后自行落地文件。</p>
-                    </div>
-                </article>
-            </div>
-
-            <article class="docs-module-card docs-example-card docs-example-card-wide">
-                <div class="docs-example-head">
-                    <span>SDK 示例</span>
-                    <h4>OpenAI Python SDK</h4>
-                    <p>适合支持 Responses 的 Python 客户端。</p>
-                </div>
-                <div class="doc-code-block compact"><pre><code>from openai import OpenAI
-
-client = OpenAI(
-    base_url="{{ external_v1_base_url }}",
-    api_key="YOUR_PLATFORM_API_KEY",
-)
-
-resp = client.responses.create(
-    model="gpt-5.4",
-    input="生成一张极简风格的蓝色纸鸢图标，白底，单主体",
-    tools=[
-        {
-            "type": "image_generation",
-            "model": "gpt-image-2",
-            "action": "generate",
-            "output_format": "png",
-        }
-    ],
-    tool_choice={"type": "image_generation"},
-)
-
-for item in resp.output:
-    if getattr(item, "type", None) == "image_generation_call" and getattr(item, "result", None):
-        image_base64 = item.result
-        break</code></pre></div>
-            </article>
-        </div>
-    </details>
-</section>
-
-<section class="panel-card section-shell anchor-section-offset" id="docs-error-flow">
-    <div class="section-subhead">
-        <div>
-            <div class="panel-kicker">错误返回</div>
-            <h3>外部请求一定返回可读结果</h3>
-            <p class="section-subcopy">正常返回正常响应，失败返回结构化错误。接入时优先保留错误码、说明和 <code>trace_id</code>。</p>
-        </div>
-    </div>
-    <div class="docs-client-grid docs-client-grid-core">
-        <article class="docs-module-card docs-example-card">
-            <div class="docs-example-head">
-                <span>错误体</span>
-                <h4>JSON 请求错误体</h4>
-                <p>失败请求会返回可读错误结构。</p>
-            </div>
-            <div class="doc-code-block compact"><pre><code>{
-  "error": {
-    "message": "具体错误说明",
-    "type": "server_error",
-    "code": "upstream_request_failed",
-    "trace_id": "请求追踪 ID",
-    "retryable": true
-  }
-}</code></pre></div>
-        </article>
-        <article class="docs-module-card docs-example-card">
-            <div class="docs-example-head">
-                <span>SSE</span>
-                <h4>流式请求错误事件</h4>
-                <p>SSE 建立后出错，会发 error 事件并以 DONE 收尾。</p>
-            </div>
-            <div class="doc-code-block compact"><pre><code>event: error
-data: {"error":{"message":"具体错误说明","code":"stream_interrupted"}}
-
-data: [DONE]</code></pre></div>
-        </article>
-        <article class="docs-module-card docs-example-card">
-            <div class="docs-example-head">
-                <span>能力校验</span>
-                <h4>端点能力错误</h4>
-                <p>模型或渠道没有原生支持所请求入口时返回。</p>
-            </div>
-            <div class="doc-code-block compact"><pre><code>{
-  "error": {
-    "message": "No available provider for requested model",
-    "code": "model_not_available",
-    "detail": {
-      "requires_tools": true,
-      "route_diagnostics": {"summary": "没有满足原生端点能力的候选"}
-    }
-  }
-}</code></pre></div>
         </article>
     </div>
 </section>
@@ -716,56 +200,88 @@ data: [DONE]</code></pre></div>
 <section class="panel-card section-shell anchor-section-offset" id="docs-client-flow">
     <div class="section-subhead">
         <div>
-            <div class="panel-kicker">客户端配置流</div>
-            <h3>按客户端类型填配置</h3>
-            <p class="section-subcopy">只要客户端支持 OpenAI 兼容 Base URL，就先按同一套入口、Key 和模型名接入；复杂能力再按模型原生支持情况补充。</p>
+            <div class="panel-kicker">客户端配置</div>
+            <h3>通用接入配置</h3>
+            <p class="section-subcopy">OpenAI 兼容客户端填 Base URL 和 API Key；Gemini 与 Claude 原生客户端按各自 SDK 使用原生路径。</p>
         </div>
     </div>
     <div class="docs-client-grid docs-client-grid-core">
         <article class="docs-module-card docs-example-card">
             <div class="docs-example-head">
-                <span>客户端</span>
-                <h4>Chatbox</h4>
-                <p>新增自定义 OpenAI / OpenAI 兼容提供商时直接填写。</p>
+                <span>图形客户端</span>
+                <h4>OpenAI Compatible</h4>
+                <p>新增自定义 OpenAI 兼容提供商时填写。</p>
             </div>
-            <div class="doc-code-block compact"><pre><code>接口类型: OpenAI API / OpenAI Compatible
+            <div class="doc-code-block compact"><pre><code>类型: OpenAI Compatible
 Base URL: {{ external_v1_base_url }}
 API Key: YOUR_PLATFORM_API_KEY
-模型: 选择平台已开通的模型名</code></pre></div>
+模型: 使用 /v1/models 返回的模型名</code></pre></div>
             <div class="hero-actions">
-                <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="Base URL: {{ external_v1_base_url }}&#10;API Key: YOUR_PLATFORM_API_KEY">复制 Chatbox 配置</button>
+                <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="Base URL: {{ external_v1_base_url }}&#10;API Key: YOUR_PLATFORM_API_KEY">复制客户端配置</button>
             </div>
         </article>
-
         <article class="docs-module-card docs-example-card">
             <div class="docs-example-head">
-                <span>客户端</span>
-                <h4>Cherry Studio</h4>
-                <p>核心就是同一套 Base URL 与平台 API Key。</p>
-            </div>
-            <div class="doc-code-block compact"><pre><code>提供商类型: OpenAI 兼容
-请求地址: {{ external_v1_base_url }}
-密钥: YOUR_PLATFORM_API_KEY
-模型列表: 可先调用 /v1/models 获取</code></pre></div>
-            <div class="hero-actions">
-                <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="Provider: OpenAI Compatible&#10;Base URL: {{ external_v1_base_url }}&#10;API Key: YOUR_PLATFORM_API_KEY">复制 Cherry Studio 配置</button>
-            </div>
-        </article>
-
-        <article class="docs-module-card docs-example-card">
-            <div class="docs-example-head">
-                <span>开发链路</span>
-                <h4>Codex / CLI / 自建服务</h4>
-                <p>本地工具链、服务端代理和脚本任务的通用接入方式。</p>
+                <span>开发环境</span>
+                <h4>环境变量</h4>
+                <p>服务端脚本、CLI 和 SDK 可优先用环境变量。</p>
             </div>
             <div class="doc-code-block compact"><pre><code>OPENAI_API_KEY=YOUR_PLATFORM_API_KEY
 OPENAI_BASE_URL={{ external_v1_base_url }}</code></pre></div>
-            <div class="docs-card-note">
-                <p>若客户端最终依赖工具调用、状态上下文、reasoning 或多模态，请再确认目标模型和命中的提供商是否原生支持。</p>
-            </div>
             <div class="hero-actions">
-                <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="OPENAI_API_KEY=YOUR_PLATFORM_API_KEY&#10;OPENAI_BASE_URL={{ external_v1_base_url }}">复制 CLI 配置</button>
+                <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="OPENAI_API_KEY=YOUR_PLATFORM_API_KEY&#10;OPENAI_BASE_URL={{ external_v1_base_url }}">复制环境变量</button>
             </div>
+        </article>
+        <article class="docs-module-card docs-example-card">
+            <div class="docs-example-head">
+                <span>注意</span>
+                <h4>模型与能力</h4>
+                <p>模型名、视觉、工具调用、图片生成等能力以平台授权和实际路由结果为准。</p>
+            </div>
+            <div class="docs-card-note docs-card-note-block">
+                <p>外部请求统一由平台按健康优先策略选择可用提供商。业务侧不要传内部提供商名称、后台调试参数或非标准路由字段。</p>
+            </div>
+        </article>
+    </div>
+</section>
+
+<section class="panel-card section-shell anchor-section-offset" id="docs-error-flow">
+    <div class="section-subhead">
+        <div>
+            <div class="panel-kicker">错误格式</div>
+            <h3>失败时保留错误码和 trace_id</h3>
+            <p class="section-subcopy">对外错误采用 OpenAI 兼容的 <code>error</code> 对象，便于定位鉴权、余额、模型、容量或上游问题。</p>
+        </div>
+    </div>
+    <div class="docs-client-grid docs-client-grid-core">
+        <article class="docs-module-card docs-example-card">
+            <div class="docs-example-head">
+                <span>JSON</span>
+                <h4>普通错误响应</h4>
+                <p>接入方排障时优先记录这些字段。</p>
+            </div>
+            <div class="doc-code-block compact"><pre><code>{
+  "error": {
+    "message": "具体错误说明",
+    "type": "server_error",
+    "code": "upstream_request_failed",
+    "trace_id": "请求追踪 ID",
+    "retryable": true,
+    "recoverable": true,
+    "category": "upstream"
+  }
+}</code></pre></div>
+        </article>
+        <article class="docs-module-card docs-example-card">
+            <div class="docs-example-head">
+                <span>SSE</span>
+                <h4>流式错误事件</h4>
+                <p>流式连接建立后出错，会尽量发送 error 事件并以 DONE 收尾。</p>
+            </div>
+            <div class="doc-code-block compact"><pre><code>event: error
+data: {"error":{"message":"具体错误说明","code":"stream_interrupted"}}
+
+data: [DONE]</code></pre></div>
         </article>
     </div>
 </section>

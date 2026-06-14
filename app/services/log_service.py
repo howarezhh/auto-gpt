@@ -2,6 +2,7 @@ from app.utils.timezone import now_beijing
 import csv
 import hashlib
 import io
+from decimal import Decimal, InvalidOperation
 from typing import Any
 from datetime import datetime, timedelta
 
@@ -15,7 +16,7 @@ from app.models.request_log import RequestLog
 from app.services.cache_service import CacheService
 from app.services.error_catalog_service import ErrorCatalogService
 from app.services.openai_error_service import OpenAIErrorService
-from app.services.proxy_request_context import get_current_provider_candidate
+from app.services.proxy_request_context import get_current_ip_management_event_id, get_current_provider_candidate
 from app.services.redis_service import RedisService
 from app.services.runtime_state_service import RuntimeStateService
 from app.utils.json_utils import dumps_json, safeJsonParse
@@ -30,13 +31,21 @@ class LogService:
     def format_money_display(value) -> str:
         if value is None:
             return ""
-        return f"{float(value):.9f}".rstrip("0").rstrip(".") + " $"
+        try:
+            decimal_value = Decimal(str(value))
+        except (InvalidOperation, ValueError):
+            return ""
+        return f"{decimal_value:.9f}".rstrip("0").rstrip(".") + " $"
 
     @staticmethod
     def format_price_display(value) -> str:
         if value is None:
             return ""
-        return f"{float(value) * 1000:.9f}".rstrip("0").rstrip(".") + " $/1M"
+        try:
+            decimal_value = Decimal(str(value))
+        except (InvalidOperation, ValueError):
+            return ""
+        return f"{decimal_value * Decimal('1000'):.9f}".rstrip("0").rstrip(".") + " $/1M"
 
     @staticmethod
     def format_token_display(value) -> str:
@@ -250,6 +259,7 @@ class LogService:
         user_account_name: str | None = None,
         api_client_auth_result: str | None = None,
         api_client_policy_snapshot_json: str | None = None,
+        ip_management_event_id: int | None = None,
         billing_multiplier: float | None = None,
         channel_price_input_per_1k: float | None = None,
         channel_price_output_per_1k: float | None = None,
@@ -487,8 +497,17 @@ class LogService:
             db.flush()
         if log.id is not None:
             from app.logging.adapters.request_adapter import RequestLogRecorder
+            from app.services.ip_management_event_service import IpManagementEventService
 
             RequestLogRecorder.record_events_from_summary(db, log, auto_commit=False)
+            IpManagementEventService.attach_request_context(
+                db,
+                event_id=ip_management_event_id or get_current_ip_management_event_id(),
+                request_log_id=log.id,
+                api_client_key_id=api_client_key_id,
+                api_client_key_prefix=api_client_key_prefix,
+                user_account_id=user_account_id,
+            )
             if auto_commit:
                 db.commit()
         elif auto_commit:
@@ -931,6 +950,8 @@ class LogService:
         content_guard_switched_provider: bool | None = None,
         content_guard_adaptation_skipped: bool | None = None,
         api_client_key_ids: list[int] | None = None,
+        start_at: datetime | None = None,
+        end_at: datetime | None = None,
     ) -> tuple[int, list[RequestLog], dict[str, int]]:
         stmt = select(RequestLog).options(*LogService._lightweight_log_load_options())
         count_stmt = select(func.count()).select_from(RequestLog)
@@ -973,6 +994,8 @@ class LogService:
             content_guard_switched_provider=content_guard_switched_provider,
             content_guard_adaptation_skipped=content_guard_adaptation_skipped,
             api_client_key_ids=api_client_key_ids,
+            start_at=start_at,
+            end_at=end_at,
         )
         count_stmt = LogService._apply_log_filters(
             count_stmt,
@@ -1003,6 +1026,8 @@ class LogService:
             content_guard_switched_provider=content_guard_switched_provider,
             content_guard_adaptation_skipped=content_guard_adaptation_skipped,
             api_client_key_ids=api_client_key_ids,
+            start_at=start_at,
+            end_at=end_at,
         )
         summary_stmt = LogService._apply_log_filters(
             summary_stmt,
@@ -1033,6 +1058,8 @@ class LogService:
             content_guard_switched_provider=content_guard_switched_provider,
             content_guard_adaptation_skipped=content_guard_adaptation_skipped,
             api_client_key_ids=api_client_key_ids,
+            start_at=start_at,
+            end_at=end_at,
         )
         total = db.scalar(count_stmt) or 0
         summary_row = db.execute(summary_stmt).one()
@@ -1084,7 +1111,13 @@ class LogService:
         content_guard_switched_provider: bool | None = None,
         content_guard_adaptation_skipped: bool | None = None,
         api_client_key_ids: list[int] | None = None,
+        start_at: datetime | None = None,
+        end_at: datetime | None = None,
     ):
+        if start_at is not None:
+            stmt = stmt.where(RequestLog.created_at >= start_at)
+        if end_at is not None:
+            stmt = stmt.where(RequestLog.created_at <= end_at)
         if exclude_health_checks:
             stmt = stmt.where(LogService._non_health_check_expr())
         needs_user_traffic_scope = (
@@ -2048,6 +2081,89 @@ class LogService:
         return total_deleted
 
     @staticmethod
+    def delete_logs_by_filters(
+        db: Session,
+        *,
+        log_type: str | None = None,
+        log_types: list[str] | None = None,
+        provider_id: int | None = None,
+        model_name: str | None = None,
+        model_query: str | None = None,
+        conversation_key: str | None = None,
+        api_client_key_id: int | None = None,
+        api_client_key_query: str | None = None,
+        user_account_id: int | None = None,
+        user_account_query: str | None = None,
+        tenant_name: str | None = None,
+        project_name: str | None = None,
+        app_name: str | None = None,
+        environment_name: str | None = None,
+        success: bool | None = None,
+        provider_trust_level: str | None = None,
+        exclude_health_checks: bool = False,
+        content_guard_result: str | None = None,
+        content_guard_risk_level: str | None = None,
+        content_guard_action: str | None = None,
+        content_guard_final_strategy: str | None = None,
+        content_guard_retry_count: int | None = None,
+        content_guard_guard_stage: str | None = None,
+        content_guard_category: str | None = None,
+        content_guard_switched_provider: bool | None = None,
+        content_guard_adaptation_skipped: bool | None = None,
+        api_client_key_ids: list[int] | None = None,
+        start_at: datetime | None = None,
+        end_at: datetime | None = None,
+    ) -> int:
+        total_deleted = 0
+        for _ in range(LogService.CLEAR_LOGS_MAX_BATCHES):
+            id_stmt = LogService._apply_log_filters(
+                select(RequestLog.id),
+                log_type=log_type,
+                log_types=log_types,
+                provider_id=provider_id,
+                provider_trust_level=provider_trust_level,
+                model_name=model_name,
+                model_query=model_query,
+                conversation_key=conversation_key,
+                api_client_key_id=api_client_key_id,
+                api_client_key_query=api_client_key_query,
+                user_account_id=user_account_id,
+                user_account_query=user_account_query,
+                tenant_name=tenant_name,
+                project_name=project_name,
+                app_name=app_name,
+                environment_name=environment_name,
+                success=success,
+                exclude_health_checks=exclude_health_checks,
+                content_guard_result=content_guard_result,
+                content_guard_risk_level=content_guard_risk_level,
+                content_guard_action=content_guard_action,
+                content_guard_final_strategy=content_guard_final_strategy,
+                content_guard_retry_count=content_guard_retry_count,
+                content_guard_guard_stage=content_guard_guard_stage,
+                content_guard_category=content_guard_category,
+                content_guard_switched_provider=content_guard_switched_provider,
+                content_guard_adaptation_skipped=content_guard_adaptation_skipped,
+                api_client_key_ids=api_client_key_ids,
+                start_at=start_at,
+                end_at=end_at,
+            )
+            ids = list(
+                db.scalars(
+                    id_stmt.order_by(RequestLog.id.asc()).limit(LogService.CLEAR_LOGS_BATCH_SIZE)
+                )
+            )
+            if not ids:
+                break
+            result = db.execute(delete(RequestLog).where(RequestLog.id.in_(ids)))
+            db.commit()
+            deleted_count = int(result.rowcount or 0)
+            total_deleted += deleted_count
+            if len(ids) < LogService.CLEAR_LOGS_BATCH_SIZE or deleted_count <= 0:
+                break
+        return total_deleted
+
+    @staticmethod
     def metric_summary(
         db: Session,
         *,
@@ -2439,7 +2555,7 @@ class LogService:
         window_seconds: int = 5,
         max_rows: int | None = None,
     ) -> dict[str, Any]:
-        """返回指定提供商模型 ID 最近短窗口的正式路由运行指标。
+        """返回指定模型挂载 ID 最近短窗口的正式路由运行指标。
 
         注意：provider_model_id 是唯一模型挂载 ID；model_name 只是自定义展示/请求名，不用于唯一定位。
         """
@@ -2708,6 +2824,8 @@ class LogService:
         content_guard_switched_provider: bool | None = None,
         content_guard_adaptation_skipped: bool | None = None,
         api_client_key_ids: list[int] | None = None,
+        start_at: datetime | None = None,
+        end_at: datetime | None = None,
         limit: int = 5000,
     ) -> str:
         stmt = select(RequestLog).options(*LogService._lightweight_log_load_options())
@@ -2740,6 +2858,8 @@ class LogService:
             content_guard_switched_provider=content_guard_switched_provider,
             content_guard_adaptation_skipped=content_guard_adaptation_skipped,
             api_client_key_ids=api_client_key_ids,
+            start_at=start_at,
+            end_at=end_at,
         )
         rows = list(
             db.scalars(
@@ -2904,7 +3024,7 @@ class LogService:
         input_price = item.channel_price_input_per_1k
         output_price = item.channel_price_output_per_1k
         cache_price = item.channel_price_cache_per_1k if item.channel_price_cache_per_1k is not None else input_price
-        cache_write_price = item.channel_price_cache_write_per_1k if item.channel_price_cache_write_per_1k is not None else input_price
+        cache_write_price = item.channel_price_cache_write_per_1k
         cache_read_tokens = int(item.cache_read_tokens or 0)
         cache_write_tokens = int(item.cache_write_tokens or 0)
         regular_input_tokens = max(0, int(item.prompt_tokens or 0) - cache_read_tokens - cache_write_tokens)

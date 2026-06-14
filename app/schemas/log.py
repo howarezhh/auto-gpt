@@ -1,4 +1,5 @@
 from datetime import datetime
+from decimal import Decimal
 
 from pydantic import BaseModel
 
@@ -35,9 +36,12 @@ class RequestLogOut(BaseModel):
     reasoning_level: str | None
     model_reasoning_effort: str | None
     attempt_count: int | None
-    prompt_cost: float | None
-    completion_cost: float | None
-    total_cost: float | None
+    prompt_cost: Decimal | None
+    completion_cost: Decimal | None
+    total_cost: Decimal | None
+    source_prompt_cost: Decimal | None = None
+    source_completion_cost: Decimal | None = None
+    source_total_cost: Decimal | None = None
     billing_status: str | None
     billing_finalized_at: datetime | None = None
     billing_event_id: str | None = None
@@ -46,11 +50,22 @@ class RequestLogOut(BaseModel):
     token_finalize_attempt_count: int = 0
     token_finalize_error: str | None = None
     billing_multiplier: float | None
-    channel_price_input_per_1k: float | None
-    channel_price_output_per_1k: float | None
-    channel_price_cache_per_1k: float | None = None
-    channel_price_cache_write_per_1k: float | None = None
-    api_client_balance_after: float | None
+    channel_price_input_per_1k: Decimal | None
+    channel_price_output_per_1k: Decimal | None
+    channel_price_cache_per_1k: Decimal | None = None
+    channel_price_cache_write_per_1k: Decimal | None = None
+    source_currency: str | None = None
+    billing_currency: str | None = None
+    source_price_input_per_1k: Decimal | None = None
+    source_price_output_per_1k: Decimal | None = None
+    source_price_cache_per_1k: Decimal | None = None
+    source_price_cache_write_per_1k: Decimal | None = None
+    exchange_rate_to_billing_currency: Decimal | None = None
+    exchange_rate_source: str | None = None
+    exchange_rate_at: datetime | None = None
+    exchange_rate_version: str | None = None
+    rounding_strategy: str | None = None
+    api_client_balance_after: Decimal | None
     prompt_tokens: int | None
     completion_tokens: int | None
     total_tokens: int | None

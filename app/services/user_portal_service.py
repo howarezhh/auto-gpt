@@ -470,6 +470,106 @@ class UserPortalService:
         return {int(row[0]): int(row[1]) for row in rows if row[0] is not None}
 
     @staticmethod
+    def get_admin_user_usage_map(db: Session, *, users: list[UserAccount]) -> dict[int, dict]:
+        user_ids = [int(user.id) for user in users if user.id is not None]
+        if not user_ids:
+            return {}
+        now = now_beijing()
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+        log_rows = db.execute(
+            select(
+                RequestLog.user_account_id.label("user_id"),
+                func.count(RequestLog.id).label("total_requests"),
+                func.sum(case((RequestLog.created_at >= day_start, 1), else_=0)).label("day_requests"),
+                func.sum(case((RequestLog.created_at >= month_start, 1), else_=0)).label("month_requests"),
+                func.sum(case((RequestLog.success.is_(True), RequestLog.total_tokens), else_=0)).label("total_tokens"),
+                func.sum(case(((RequestLog.success.is_(True)) & (RequestLog.created_at >= day_start), RequestLog.total_tokens), else_=0)).label("day_tokens"),
+                func.sum(case(((RequestLog.success.is_(True)) & (RequestLog.created_at >= month_start), RequestLog.total_tokens), else_=0)).label("month_tokens"),
+            ).where(
+                RequestLog.user_account_id.in_(user_ids),
+                LogService._route_traffic_expr(),
+                LogService._non_model_list_request_expr(),
+            ).group_by(RequestLog.user_account_id)
+        ).all()
+        cost_rows = db.execute(
+            select(
+                UserAccountBillingRecord.user_account_id.label("user_id"),
+                func.sum(
+                    case(
+                        (UserAccountBillingRecord.record_type == "request_charge", func.abs(UserAccountBillingRecord.amount)),
+                        else_=0,
+                    )
+                ).label("total_cost"),
+                func.sum(
+                    case(
+                        (
+                            (UserAccountBillingRecord.record_type == "request_charge")
+                            & (UserAccountBillingRecord.created_at >= day_start),
+                            func.abs(UserAccountBillingRecord.amount),
+                        ),
+                        else_=0,
+                    )
+                ).label("day_cost"),
+                func.sum(
+                    case(
+                        (
+                            (UserAccountBillingRecord.record_type == "request_charge")
+                            & (UserAccountBillingRecord.created_at >= month_start),
+                            func.abs(UserAccountBillingRecord.amount),
+                        ),
+                        else_=0,
+                    )
+                ).label("month_cost"),
+            ).where(UserAccountBillingRecord.user_account_id.in_(user_ids)).group_by(UserAccountBillingRecord.user_account_id)
+        ).all()
+        log_map = {int(row.user_id): row for row in log_rows if row.user_id is not None}
+        cost_map = {int(row.user_id): row for row in cost_rows if row.user_id is not None}
+        usage: dict[int, dict] = {}
+        key_counts = UserPortalService.count_user_key_map(db, user_ids=user_ids)
+        for user in users:
+            balance = BillingService.to_decimal(user.balance_amount)
+            frozen = BillingService.to_decimal(user.frozen_amount)
+            available = balance - frozen
+            ratio = (available / balance) if balance > 0 else Decimal("0")
+            if not user.enabled:
+                risk_status = "disabled"
+                risk_label = "账号禁用"
+            elif available <= 0:
+                risk_status = "exhausted"
+                risk_label = "可用耗尽"
+            elif balance > 0 and ratio <= Decimal("0.2"):
+                risk_status = "low"
+                risk_label = "余额偏低"
+            elif key_counts.get(user.id, 0) <= 0:
+                risk_status = "no_key"
+                risk_label = "无密钥"
+            else:
+                risk_status = "normal"
+                risk_label = "正常"
+            log_row = log_map.get(user.id)
+            cost_row = cost_map.get(user.id)
+            usage[user.id] = {
+                "currency_code": getattr(user, "currency_code", None) or "USD",
+                "available_balance": available,
+                "available_ratio": ratio,
+                "available_ratio_percent": max(0, min(100, int((ratio * Decimal("100")).to_integral_value()))),
+                "risk_status": risk_status,
+                "risk_label": risk_label,
+                "total_requests": int(getattr(log_row, "total_requests", 0) or 0),
+                "day_requests": int(getattr(log_row, "day_requests", 0) or 0),
+                "month_requests": int(getattr(log_row, "month_requests", 0) or 0),
+                "total_tokens": int(getattr(log_row, "total_tokens", 0) or 0),
+                "day_tokens": int(getattr(log_row, "day_tokens", 0) or 0),
+                "month_tokens": int(getattr(log_row, "month_tokens", 0) or 0),
+                "total_cost": BillingService.to_decimal(getattr(cost_row, "total_cost", 0) or 0),
+                "day_cost": BillingService.to_decimal(getattr(cost_row, "day_cost", 0) or 0),
+                "month_cost": BillingService.to_decimal(getattr(cost_row, "month_cost", 0) or 0),
+            }
+        return usage
+
+    @staticmethod
     def format_billing_amount(value: Decimal | float | None) -> float:
         return float(value or 0)
 

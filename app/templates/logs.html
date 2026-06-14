@@ -41,6 +41,7 @@
             <div class="hero-actions">
                 <button class="btn btn-ghost interactive-btn" id="logs-export-btn" type="button">导出请求日志</button>
                 <button class="btn btn-ghost interactive-btn" id="logs-refresh-btn" type="button">刷新</button>
+                <button class="btn btn-danger-soft interactive-btn" id="logs-delete-filtered-btn" type="button">删除筛选</button>
                 <button class="btn btn-danger-soft interactive-btn" id="logs-clear-btn" type="button">清空请求日志</button>
             </div>
         </div>
@@ -97,6 +98,14 @@
         <details class="logs-advanced-filter">
             <summary>高级筛选</summary>
             <div class="filter-grid compact-filter-grid">
+                <label>
+                    <span>开始时间</span>
+                    <input class="field-input" id="logs-start-at" type="datetime-local">
+                </label>
+                <label>
+                    <span>结束时间</span>
+                    <input class="field-input" id="logs-end-at" type="datetime-local">
+                </label>
                 <label>
                     <span>提供商信任等级</span>
                     <select class="field-input" id="logs-provider-trust-level">
@@ -273,6 +282,7 @@
             <div class="table-muted" id="typed-logs-last-refresh" aria-live="polite">最近刷新：-</div>
             <button class="btn btn-ghost interactive-btn" id="typed-logs-export-btn" type="button">导出当前类型</button>
             <button class="btn btn-ghost interactive-btn" id="typed-logs-refresh-btn" type="button">刷新</button>
+            <button class="btn btn-danger-soft interactive-btn" id="typed-logs-delete-filtered-btn" type="button">删除筛选</button>
         </div>
     </div>
     <div class="data-workspace-card">

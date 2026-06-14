@@ -60,6 +60,8 @@ class SettingUpdate(BaseModel):
     auto_health_check: bool = False
     health_check_interval_sec: int = Field(default=300, ge=300)
     recovery_probe_interval_sec: int = Field(default=30, ge=0)
+    probe_rate_limit_per_minute: int = Field(default=4, ge=0, le=120)
+    probe_type_rate_limit_per_minute: int = Field(default=4, ge=0, le=120)
     enable_token_logging: bool = True
     enable_payload_logging: bool = False
     enable_stream_response_persist: bool = False

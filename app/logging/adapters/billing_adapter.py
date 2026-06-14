@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -32,7 +33,7 @@ class BillingLogRecorder:
         return LoggingDispatcher.record(event, db=db, auto_commit=auto_commit)
 
     @staticmethod
-    def record_billing_process(db: Session, *, request_log_id: int | None, api_client_key_id: int | None, user_account_id: int | None, pricing_source: str | None = None, pricing_snapshot: Any = None, cost_snapshot: Any = None, balance_delta: float | None = None, balance_after: float | None = None, billing_status: str, billing_record_id: int | None = None, error: str | None = None, auto_commit: bool = True):
+    def record_billing_process(db: Session, *, request_log_id: int | None, api_client_key_id: int | None, user_account_id: int | None, pricing_source: str | None = None, pricing_snapshot: Any = None, cost_snapshot: Any = None, balance_delta: Decimal | str | None = None, balance_after: Decimal | str | None = None, billing_status: str, billing_record_id: int | None = None, error: str | None = None, auto_commit: bool = True):
         event = LoggingDispatcher.build_event(
             event_type="billing",
             event_name="billing_process",

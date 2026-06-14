@@ -54,7 +54,8 @@
             <article class="api-key-chip-card"><strong>方法</strong><span>{{ log.http_method or '-' }}</span></article>
             <article class="api-key-chip-card"><strong>会话号</strong><span>{{ log.session_id or log.conversation_key or '-' }}</span></article>
             <article class="api-key-chip-card"><strong>状态</strong><span>{{ '成功' if log.success else '失败' }}{% if log.status_code %} · {{ log.status_code }}{% endif %}</span></article>
-            <article class="api-key-chip-card"><strong>计费过程</strong><span>倍率 {{ '%.2f'|format(log.billing_multiplier or 1) }}x；输入 {{ (log.prompt_tokens or 0)|display_tokens }} × {{ log.channel_price_input_per_1k|display_price_per_1m }} + 输出 {{ (log.completion_tokens or 0)|display_tokens }} × {{ log.channel_price_output_per_1k|display_price_per_1m }}</span></article>
+            <article class="api-key-chip-card"><strong>计费过程</strong><span>倍率 {{ '%.2f'|format(log.billing_multiplier or 1) }}x；输入 {{ (log.prompt_tokens or 0)|display_tokens }} × {{ log.channel_price_input_per_1k|display_price_per_1m('-', log.billing_currency or 'USD') }} + 缓存写 {{ (log.cache_write_tokens or 0)|display_tokens }} × {{ log.channel_price_cache_write_per_1k|display_price_per_1m('-', log.billing_currency or 'USD') }} + 输出 {{ (log.completion_tokens or 0)|display_tokens }} × {{ log.channel_price_output_per_1k|display_price_per_1m('-', log.billing_currency or 'USD') }}</span></article>
+            <article class="api-key-chip-card"><strong>原币种快照</strong><span>{{ log.source_total_cost|display_money('-', log.source_currency or log.billing_currency or 'USD') }} · 汇率 {{ log.exchange_rate_to_billing_currency or '-' }} · {{ log.exchange_rate_version or log.exchange_rate_source or '-' }}</span></article>
             <article class="api-key-chip-card"><strong>错误 / 消息</strong><span>{{ log.message or '无' }}</span></article>
         </div>
     </div>

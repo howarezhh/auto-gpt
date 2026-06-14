@@ -16,22 +16,42 @@ from app.main import init_database  # noqa: E402
 from app.models.model_catalog import ModelCatalog  # noqa: E402
 from app.services.model_catalog_service import ModelCatalogService  # noqa: E402
 from app.services.model_pricing_service import ModelPricingService  # noqa: E402
+from app.services.provider_service import ProviderService  # noqa: E402
 from app.utils.decimal_utils import PRICE_QUANT, to_price_decimal  # noqa: E402
 from app.utils.timezone import now_beijing  # noqa: E402
 
 
-USD_CNY_RATE = Decimal("6.7948")
+DEFAULT_BILLING_CURRENCY = "USD"
+CNY_EXCHANGE_SNAPSHOT = {
+    "exchange_rate_to_usd": "0.1471713577725329730343978813",
+    "exchange_rate_source": "official_pricing_import_snapshot",
+    "exchange_rate_at": "2026-06-01T00:00:00+08:00",
+    "exchange_rate_version": "official_pricing_2026_06_01_usd_cny_6_7948",
+    "rounding_strategy": "ROUND_HALF_UP",
+}
 PRICE_FIELDS = {
     "pricing_mode",
     "pricing_json",
     "input_price_per_1k",
     "output_price_per_1k",
     "cache_price_per_1k",
+    "cache_write_price_per_1k",
+    "source_currency",
+    "billing_currency",
+    "source_input_price_per_1k",
+    "source_output_price_per_1k",
+    "source_cache_price_per_1k",
+    "source_cache_write_price_per_1k",
+    "exchange_rate_to_billing_currency",
+    "exchange_rate_source",
+    "exchange_rate_at",
+    "exchange_rate_version",
+    "rounding_strategy",
 }
 UPDATED_AT = "2026-06-05T12:30:00+08:00"
 CHINA_PRICE_NOTE = (
-    "官方原价单位为人民币，当前展示口径统一折算为美元；"
-    "按 2026-06-01 USD/CNY=6.7948 折算。"
+    "官方原价单位为人民币；系统保存人民币原价和 2026-06-01 汇率快照，"
+    "当前默认账户币种为 USD 时按快照换算扣费。"
 )
 
 
@@ -41,10 +61,10 @@ def usd_per_1m(value: str | int | float | Decimal | None) -> Decimal | None:
     return to_price_decimal(Decimal(str(value)) / Decimal("1000"))
 
 
-def cny_per_1m_to_usd_per_1k(value: str | int | float | Decimal | None) -> Decimal | None:
+def cny_per_1m_to_source_per_1k(value: str | int | float | Decimal | None) -> Decimal | None:
     if value in (None, ""):
         return None
-    return to_price_decimal(Decimal(str(value)) / USD_CNY_RATE / Decimal("1000"))
+    return to_price_decimal(Decimal(str(value)) / Decimal("1000"))
 
 
 def build_fixed_payload(
@@ -63,11 +83,18 @@ def build_fixed_payload(
             "source_url": source_url,
             "note": note,
             "updated_at": UPDATED_AT,
+            "source_currency": "USD",
+            "billing_currency": DEFAULT_BILLING_CURRENCY,
+            "rounding_strategy": "ROUND_HALF_UP",
+            "source_input_price_per_1k": usd_per_1m(input_usd_per_1m),
+            "source_output_price_per_1k": usd_per_1m(output_usd_per_1m),
+            "source_cache_price_per_1k": usd_per_1m(cache_usd_per_1m),
             "tiers": [],
         },
         "input_price_per_1k": usd_per_1m(input_usd_per_1m),
         "output_price_per_1k": usd_per_1m(output_usd_per_1m),
         "cache_price_per_1k": usd_per_1m(cache_usd_per_1m),
+        "cache_write_price_per_1k": None,
     }
 
 
@@ -84,11 +111,15 @@ def build_unpriced_payload(
             "source_url": source_url,
             "note": note,
             "updated_at": UPDATED_AT,
+            "source_currency": "USD",
+            "billing_currency": DEFAULT_BILLING_CURRENCY,
+            "rounding_strategy": "ROUND_HALF_UP",
             "tiers": [],
         },
         "input_price_per_1k": None,
         "output_price_per_1k": None,
         "cache_price_per_1k": None,
+        "cache_write_price_per_1k": None,
     }
 
 
@@ -114,11 +145,11 @@ def build_cny_tier(
         "max_prompt_tokens": max_prompt_tokens,
         "min_completion_tokens": min_completion_tokens,
         "max_completion_tokens": max_completion_tokens,
-        "input_price_per_1k": cny_per_1m_to_usd_per_1k(input_cny_per_1m),
-        "output_price_per_1k": cny_per_1m_to_usd_per_1k(output_cny_per_1m),
-        "cache_price_per_1k": cny_per_1m_to_usd_per_1k(cache_cny_per_1m),
-        "cache_write_price_per_1k": cny_per_1m_to_usd_per_1k(cache_write_cny_per_1m),
-        "cache_storage_price_per_1k": cny_per_1m_to_usd_per_1k(cache_storage_cny_per_1m),
+        "source_input_price_per_1k": cny_per_1m_to_source_per_1k(input_cny_per_1m),
+        "source_output_price_per_1k": cny_per_1m_to_source_per_1k(output_cny_per_1m),
+        "source_cache_price_per_1k": cny_per_1m_to_source_per_1k(cache_cny_per_1m),
+        "source_cache_write_price_per_1k": cny_per_1m_to_source_per_1k(cache_write_cny_per_1m),
+        "source_cache_storage_price_per_1k": cny_per_1m_to_source_per_1k(cache_storage_cny_per_1m),
         "source_note": source_note,
     }
 
@@ -137,11 +168,15 @@ def build_tiered_payload(
             "source_url": source_url,
             "note": note,
             "updated_at": UPDATED_AT,
+            "source_currency": "CNY",
+            "billing_currency": DEFAULT_BILLING_CURRENCY,
+            **CNY_EXCHANGE_SNAPSHOT,
             "tiers": tiers,
         },
         input_price_per_1k=None,
         output_price_per_1k=None,
         cache_price_per_1k=None,
+        cache_write_price_per_1k=None,
     )
     return normalized
 
@@ -359,7 +394,7 @@ MODEL_SPECS = [
         "context_window_tokens": 1_000_000,
         "max_output_tokens": 64_000,
         "pricing": build_tiered_payload(
-            source_label="阿里云百炼官方价格（人民币折美元）",
+            source_label="阿里云百炼官方价格（人民币原价）",
             source_url="https://help.aliyun.com/zh/model-studio/model-pricing",
             note=f"{CHINA_PRICE_NOTE} 默认缓存价按显式缓存命中口径保存；显式缓存写入按输入价 125% 记录。",
             tiers=[
@@ -376,7 +411,7 @@ MODEL_SPECS = [
                 ),
             ],
         ),
-        "remark": "人民币官方价按美元折算录入。",
+        "remark": "人民币官方原价与汇率快照同步录入。",
     },
     {
         "model_name": "qwen3.6-plus",
@@ -388,7 +423,7 @@ MODEL_SPECS = [
         "context_window_tokens": 1_000_000,
         "max_output_tokens": 64_000,
         "pricing": build_tiered_payload(
-            source_label="阿里云百炼官方价格（人民币折美元）",
+            source_label="阿里云百炼官方价格（人民币原价）",
             source_url="https://help.aliyun.com/zh/model-studio/model-pricing",
             note=f"{CHINA_PRICE_NOTE} 默认缓存价按显式缓存命中口径保存；显式缓存写入按输入价 125% 记录。",
             tiers=[
@@ -416,7 +451,7 @@ MODEL_SPECS = [
                 ),
             ],
         ),
-        "remark": "人民币官方价按美元折算录入。",
+        "remark": "人民币官方原价与汇率快照同步录入。",
     },
     {
         "model_name": "qwen3.6-flash",
@@ -428,7 +463,7 @@ MODEL_SPECS = [
         "context_window_tokens": 1_000_000,
         "max_output_tokens": 64_000,
         "pricing": build_tiered_payload(
-            source_label="阿里云百炼官方价格（人民币折美元）",
+            source_label="阿里云百炼官方价格（人民币原价）",
             source_url="https://help.aliyun.com/zh/model-studio/model-pricing",
             note=f"{CHINA_PRICE_NOTE} 默认缓存价按显式缓存命中口径保存；显式缓存写入按输入价 125% 记录。",
             tiers=[
@@ -456,7 +491,7 @@ MODEL_SPECS = [
                 ),
             ],
         ),
-        "remark": "人民币官方价按美元折算录入。",
+        "remark": "人民币官方原价与汇率快照同步录入。",
     },
     {
         "model_name": "glm-5.1",
@@ -468,7 +503,7 @@ MODEL_SPECS = [
         "context_window_tokens": 200_000,
         "max_output_tokens": 128_000,
         "pricing": build_tiered_payload(
-            source_label="智谱官方价格（人民币折美元）",
+            source_label="智谱官方价格（人民币原价）",
             source_url="https://bigmodel.cn/pricing",
             note=CHINA_PRICE_NOTE,
             tiers=[
@@ -493,7 +528,7 @@ MODEL_SPECS = [
                 ),
             ],
         ),
-        "remark": "人民币官方价按美元折算录入。",
+        "remark": "人民币官方原价与汇率快照同步录入。",
     },
     {
         "model_name": "glm-5-turbo",
@@ -505,7 +540,7 @@ MODEL_SPECS = [
         "context_window_tokens": 200_000,
         "max_output_tokens": 128_000,
         "pricing": build_tiered_payload(
-            source_label="智谱官方价格（人民币折美元）",
+            source_label="智谱官方价格（人民币原价）",
             source_url="https://bigmodel.cn/pricing",
             note=CHINA_PRICE_NOTE,
             tiers=[
@@ -530,7 +565,7 @@ MODEL_SPECS = [
                 ),
             ],
         ),
-        "remark": "人民币官方价按美元折算录入。",
+        "remark": "人民币官方原价与汇率快照同步录入。",
     },
     {
         "model_name": "glm-5",
@@ -542,7 +577,7 @@ MODEL_SPECS = [
         "context_window_tokens": 200_000,
         "max_output_tokens": 128_000,
         "pricing": build_tiered_payload(
-            source_label="智谱官方价格（人民币折美元）",
+            source_label="智谱官方价格（人民币原价）",
             source_url="https://bigmodel.cn/pricing",
             note=CHINA_PRICE_NOTE,
             tiers=[
@@ -567,7 +602,7 @@ MODEL_SPECS = [
                 ),
             ],
         ),
-        "remark": "人民币官方价按美元折算录入。",
+        "remark": "人民币官方原价与汇率快照同步录入。",
     },
     {
         "model_name": "glm-4.7",
@@ -579,7 +614,7 @@ MODEL_SPECS = [
         "context_window_tokens": 200_000,
         "max_output_tokens": 128_000,
         "pricing": build_tiered_payload(
-            source_label="智谱官方价格（人民币折美元）",
+            source_label="智谱官方价格（人民币原价）",
             source_url="https://bigmodel.cn/pricing",
             note=CHINA_PRICE_NOTE,
             tiers=[
@@ -620,7 +655,7 @@ MODEL_SPECS = [
                 ),
             ],
         ),
-        "remark": "人民币官方价按美元折算录入。",
+        "remark": "人民币官方原价与汇率快照同步录入。",
     },
     {
         "model_name": "glm-4.5-air",
@@ -632,7 +667,7 @@ MODEL_SPECS = [
         "context_window_tokens": 128_000,
         "max_output_tokens": 96_000,
         "pricing": build_tiered_payload(
-            source_label="智谱官方价格（人民币折美元）",
+            source_label="智谱官方价格（人民币原价）",
             source_url="https://bigmodel.cn/pricing",
             note=CHINA_PRICE_NOTE,
             tiers=[
@@ -673,7 +708,7 @@ MODEL_SPECS = [
                 ),
             ],
         ),
-        "remark": "人民币官方价按美元折算录入。",
+        "remark": "人民币官方原价与汇率快照同步录入。",
     },
     {
         "model_name": "kimi-k2.6",
@@ -685,7 +720,7 @@ MODEL_SPECS = [
         "context_window_tokens": 256_000,
         "max_output_tokens": 96_000,
         "pricing": build_tiered_payload(
-            source_label="Kimi 官方价格（人民币折美元）",
+            source_label="Kimi 官方价格（人民币原价）",
             source_url="https://platform.moonshot.cn/",
             note=f"{CHINA_PRICE_NOTE} 上下文窗口与最大输出按月之暗面官网与阿里云百炼官方托管条目交叉对齐。",
             tiers=[
@@ -699,7 +734,7 @@ MODEL_SPECS = [
                 ),
             ],
         ),
-        "remark": "人民币官方价按美元折算录入；上下文窗口与输出上限按月之暗面官网与阿里云百炼官方托管条目对齐。",
+        "remark": "人民币官方原价与汇率快照同步录入；上下文窗口与输出上限按月之暗面官网与阿里云百炼官方托管条目对齐。",
     },
     {
         "model_name": "kimi-k2.5",
@@ -711,7 +746,7 @@ MODEL_SPECS = [
         "context_window_tokens": 262_144,
         "max_output_tokens": 98_304,
         "pricing": build_tiered_payload(
-            source_label="Kimi 官方价格（人民币折美元）",
+            source_label="Kimi 官方价格（人民币原价）",
             source_url="https://platform.moonshot.cn/",
             note=f"{CHINA_PRICE_NOTE} 上下文窗口与最大输出按月之暗面官网与阿里云百炼官方托管条目交叉对齐。",
             tiers=[
@@ -725,7 +760,7 @@ MODEL_SPECS = [
                 ),
             ],
         ),
-        "remark": "人民币官方价按美元折算录入；上下文窗口与输出上限按月之暗面官网与阿里云百炼官方托管条目对齐。",
+        "remark": "人民币官方原价与汇率快照同步录入；上下文窗口与输出上限按月之暗面官网与阿里云百炼官方托管条目对齐。",
     },
 ]
 
@@ -739,11 +774,14 @@ def ensure_catalog(db, spec: dict) -> tuple[str, ModelCatalog]:
         input_price_per_1k=pricing["input_price_per_1k"],
         output_price_per_1k=pricing["output_price_per_1k"],
         cache_price_per_1k=pricing["cache_price_per_1k"],
+        cache_write_price_per_1k=pricing.get("cache_write_price_per_1k"),
     )
+    exchange_snapshot = normalized_pricing["exchange_rate_snapshot"]
     if catalog is None:
         catalog = ModelCatalog(
             model_name=spec["model_name"],
             display_name=spec.get("display_name"),
+            model_group=ProviderService.infer_model_group(spec["model_name"]),
             enabled=True,
             supports_stream=bool(spec.get("supports_stream", True)),
             supports_vision=bool(spec.get("supports_vision", False)),
@@ -758,6 +796,18 @@ def ensure_catalog(db, spec: dict) -> tuple[str, ModelCatalog]:
             input_price_per_1k=normalized_pricing["input_price_per_1k"],
             output_price_per_1k=normalized_pricing["output_price_per_1k"],
             cache_price_per_1k=normalized_pricing["cache_price_per_1k"],
+            cache_write_price_per_1k=normalized_pricing["cache_write_price_per_1k"],
+            source_currency=normalized_pricing["source_currency"],
+            billing_currency=normalized_pricing["billing_currency"],
+            source_input_price_per_1k=normalized_pricing["source_input_price_per_1k"],
+            source_output_price_per_1k=normalized_pricing["source_output_price_per_1k"],
+            source_cache_price_per_1k=normalized_pricing["source_cache_price_per_1k"],
+            source_cache_write_price_per_1k=normalized_pricing["source_cache_write_price_per_1k"],
+            exchange_rate_to_billing_currency=exchange_snapshot.exchange_rate,
+            exchange_rate_source=exchange_snapshot.exchange_rate_source,
+            exchange_rate_at=ModelCatalogService._parse_snapshot_datetime(exchange_snapshot.exchange_rate_at),
+            exchange_rate_version=exchange_snapshot.exchange_rate_version,
+            rounding_strategy=exchange_snapshot.rounding_strategy,
             speed_label=spec.get("speed_label"),
             remark=spec.get("remark"),
         )
@@ -765,6 +815,7 @@ def ensure_catalog(db, spec: dict) -> tuple[str, ModelCatalog]:
         db.flush()
         action = "created"
     else:
+        catalog.model_group = ProviderService.infer_model_group(spec["model_name"])
         if spec.get("display_name"):
             catalog.display_name = spec["display_name"]
         catalog.supports_stream = bool(spec.get("supports_stream", catalog.supports_stream))
@@ -789,6 +840,18 @@ def ensure_catalog(db, spec: dict) -> tuple[str, ModelCatalog]:
         catalog.input_price_per_1k = normalized_pricing["input_price_per_1k"]
         catalog.output_price_per_1k = normalized_pricing["output_price_per_1k"]
         catalog.cache_price_per_1k = normalized_pricing["cache_price_per_1k"]
+        catalog.cache_write_price_per_1k = normalized_pricing["cache_write_price_per_1k"]
+        catalog.source_currency = normalized_pricing["source_currency"]
+        catalog.billing_currency = normalized_pricing["billing_currency"]
+        catalog.source_input_price_per_1k = normalized_pricing["source_input_price_per_1k"]
+        catalog.source_output_price_per_1k = normalized_pricing["source_output_price_per_1k"]
+        catalog.source_cache_price_per_1k = normalized_pricing["source_cache_price_per_1k"]
+        catalog.source_cache_write_price_per_1k = normalized_pricing["source_cache_write_price_per_1k"]
+        catalog.exchange_rate_to_billing_currency = exchange_snapshot.exchange_rate
+        catalog.exchange_rate_source = exchange_snapshot.exchange_rate_source
+        catalog.exchange_rate_at = ModelCatalogService._parse_snapshot_datetime(exchange_snapshot.exchange_rate_at)
+        catalog.exchange_rate_version = exchange_snapshot.exchange_rate_version
+        catalog.rounding_strategy = exchange_snapshot.rounding_strategy
         action = "updated"
     ModelCatalogService._sync_provider_prices_from_catalog(db, catalog, price_fields=PRICE_FIELDS)
     ModelCatalogService._sync_provider_capabilities_from_catalog(db, catalog)

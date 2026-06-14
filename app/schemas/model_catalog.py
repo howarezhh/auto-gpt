@@ -1,4 +1,5 @@
 from datetime import datetime
+from decimal import Decimal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -25,14 +26,14 @@ class ModelProviderBindingOut(ModelProviderBindingBase):
     provider_maintenance_mode_enabled: bool = False
     model_health_status: str | None = None
     model_circuit_state: str | None = None
-    effective_input_price_per_1k: float | None = None
-    effective_output_price_per_1k: float | None = None
-    effective_cache_price_per_1k: float | None = None
-    effective_cache_write_price_per_1k: float | None = None
-    direct_input_price_per_1k: float | None = None
-    direct_output_price_per_1k: float | None = None
-    direct_cache_price_per_1k: float | None = None
-    direct_cache_write_price_per_1k: float | None = None
+    effective_input_price_per_1k: Decimal | None = None
+    effective_output_price_per_1k: Decimal | None = None
+    effective_cache_price_per_1k: Decimal | None = None
+    effective_cache_write_price_per_1k: Decimal | None = None
+    direct_input_price_per_1k: Decimal | None = None
+    direct_output_price_per_1k: Decimal | None = None
+    direct_cache_price_per_1k: Decimal | None = None
+    direct_cache_write_price_per_1k: Decimal | None = None
 
 
 class ModelCatalogBase(BaseModel):
@@ -50,9 +51,21 @@ class ModelCatalogBase(BaseModel):
     max_output_tokens: int | None = Field(default=None, ge=1)
     pricing_mode: str = Field(default="fixed", max_length=20)
     pricing_json: dict | None = None
-    input_price_per_1k: float | None = Field(default=None, ge=0)
-    output_price_per_1k: float | None = Field(default=None, ge=0)
-    cache_price_per_1k: float | None = Field(default=None, ge=0)
+    input_price_per_1k: Decimal | None = Field(default=None, ge=0)
+    output_price_per_1k: Decimal | None = Field(default=None, ge=0)
+    cache_price_per_1k: Decimal | None = Field(default=None, ge=0)
+    cache_write_price_per_1k: Decimal | None = Field(default=None, ge=0)
+    source_currency: str = "USD"
+    billing_currency: str = "USD"
+    source_input_price_per_1k: Decimal | None = Field(default=None, ge=0)
+    source_output_price_per_1k: Decimal | None = Field(default=None, ge=0)
+    source_cache_price_per_1k: Decimal | None = Field(default=None, ge=0)
+    source_cache_write_price_per_1k: Decimal | None = Field(default=None, ge=0)
+    exchange_rate_to_billing_currency: Decimal | None = Field(default=None, ge=0)
+    exchange_rate_source: str | None = None
+    exchange_rate_at: datetime | None = None
+    exchange_rate_version: str | None = None
+    rounding_strategy: str = "ROUND_HALF_UP"
     speed_label: str | None = Field(default=None, max_length=50)
     remark: str | None = None
 
@@ -95,9 +108,21 @@ class ModelCatalogUpdate(BaseModel):
     max_output_tokens: int | None = Field(default=None, ge=1)
     pricing_mode: str | None = Field(default=None, max_length=20)
     pricing_json: dict | None = None
-    input_price_per_1k: float | None = Field(default=None, ge=0)
-    output_price_per_1k: float | None = Field(default=None, ge=0)
-    cache_price_per_1k: float | None = Field(default=None, ge=0)
+    input_price_per_1k: Decimal | None = Field(default=None, ge=0)
+    output_price_per_1k: Decimal | None = Field(default=None, ge=0)
+    cache_price_per_1k: Decimal | None = Field(default=None, ge=0)
+    cache_write_price_per_1k: Decimal | None = Field(default=None, ge=0)
+    source_currency: str | None = None
+    billing_currency: str | None = None
+    source_input_price_per_1k: Decimal | None = Field(default=None, ge=0)
+    source_output_price_per_1k: Decimal | None = Field(default=None, ge=0)
+    source_cache_price_per_1k: Decimal | None = Field(default=None, ge=0)
+    source_cache_write_price_per_1k: Decimal | None = Field(default=None, ge=0)
+    exchange_rate_to_billing_currency: Decimal | None = Field(default=None, ge=0)
+    exchange_rate_source: str | None = None
+    exchange_rate_at: datetime | None = None
+    exchange_rate_version: str | None = None
+    rounding_strategy: str | None = None
     speed_label: str | None = Field(default=None, max_length=50)
     remark: str | None = None
     provider_bindings: list[ModelProviderBindingIn] | None = None
@@ -140,10 +165,10 @@ class ModelCatalogOut(ModelCatalogBase):
     health_status: str = "unhealthy"
     healthy_provider_count: int = 0
     unhealthy_provider_count: int = 0
-    lowest_input_price_per_1k: float | None = None
-    lowest_output_price_per_1k: float | None = None
-    lowest_cache_price_per_1k: float | None = None
-    lowest_cache_write_price_per_1k: float | None = None
+    lowest_input_price_per_1k: Decimal | None = None
+    lowest_output_price_per_1k: Decimal | None = None
+    lowest_cache_price_per_1k: Decimal | None = None
+    lowest_cache_write_price_per_1k: Decimal | None = None
     avg_price_multiplier: float | None = None
     avg_bound_price_multiplier: float | None = None
     avg_routable_price_multiplier: float | None = None
@@ -215,9 +240,19 @@ class UserModelOut(BaseModel):
     max_output_tokens: int | None = Field(default=None, ge=1)
     pricing_mode: str = "fixed"
     pricing_json: dict | None = None
-    input_price_per_1k: float | None = None
-    output_price_per_1k: float | None = None
-    cache_price_per_1k: float | None = None
-    cache_write_price_per_1k: float | None = None
+    input_price_per_1k: Decimal | None = None
+    output_price_per_1k: Decimal | None = None
+    cache_price_per_1k: Decimal | None = None
+    cache_write_price_per_1k: Decimal | None = None
+    source_currency: str | None = None
+    billing_currency: str | None = None
+    source_input_price_per_1k: Decimal | None = None
+    source_output_price_per_1k: Decimal | None = None
+    source_cache_price_per_1k: Decimal | None = None
+    source_cache_write_price_per_1k: Decimal | None = None
+    exchange_rate_to_billing_currency: Decimal | None = None
+    exchange_rate_source: str | None = None
+    exchange_rate_at: datetime | None = None
+    exchange_rate_version: str | None = None
     available_provider_names: list[str] = Field(default_factory=list)
     enabled_provider_count: int = 0

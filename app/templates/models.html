@@ -43,6 +43,12 @@
             </select>
         </label>
         <label>
+            <span>模型分组</span>
+            <select class="field-input" id="models-model-group">
+                <option value="">全部分组</option>
+            </select>
+        </label>
+        <label>
             <span>启用</span>
             <select class="field-input" id="models-enabled">
                 <option value="">全部启用状态</option>
@@ -213,16 +219,70 @@
                 <input class="field-input" id="model-max-output-tokens" type="number" min="1" placeholder="留空表示不单独限制">
             </label>
             <label>
-                <span>输入单价 $/1M</span>
+                <span>账户输入价/1M</span>
                 <input class="field-input" id="model-input-price" type="number" min="0" step="0.0001" placeholder="例如 3">
             </label>
             <label>
-                <span>输出单价 $/1M</span>
+                <span>账户输出价/1M</span>
                 <input class="field-input" id="model-output-price" type="number" min="0" step="0.0001" placeholder="例如 12">
             </label>
             <label>
-                <span>缓存单价 $/1M</span>
+                <span>账户缓存价/1M</span>
                 <input class="field-input" id="model-cache-price" type="number" min="0" step="0.0001" placeholder="例如 0.3">
+            </label>
+            <label>
+                <span>账户缓存写价/1M</span>
+                <input class="field-input" id="model-cache-write-price" type="number" min="0" step="0.0001" placeholder="留空表示未设置">
+            </label>
+            <label>
+                <span>原始币种</span>
+                <select class="field-input" id="model-source-currency">
+                    <option value="USD">USD</option>
+                    <option value="CNY">CNY</option>
+                </select>
+            </label>
+            <label>
+                <span>账户币种</span>
+                <select class="field-input" id="model-billing-currency">
+                    <option value="USD">USD</option>
+                    <option value="CNY">CNY</option>
+                </select>
+            </label>
+            <label>
+                <span>原输入价/1M</span>
+                <input class="field-input" id="model-source-input-price" type="number" min="0" step="0.0001" placeholder="按原始币种">
+            </label>
+            <label>
+                <span>原输出价/1M</span>
+                <input class="field-input" id="model-source-output-price" type="number" min="0" step="0.0001" placeholder="按原始币种">
+            </label>
+            <label>
+                <span>原缓存价/1M</span>
+                <input class="field-input" id="model-source-cache-price" type="number" min="0" step="0.0001" placeholder="按原始币种">
+            </label>
+            <label>
+                <span>原缓存写价/1M</span>
+                <input class="field-input" id="model-source-cache-write-price" type="number" min="0" step="0.0001" placeholder="按原始币种">
+            </label>
+            <label>
+                <span>汇率</span>
+                <input class="field-input" id="model-exchange-rate" type="number" min="0" step="0.000000000001" placeholder="原币种到账户币种">
+            </label>
+            <label>
+                <span>汇率来源</span>
+                <input class="field-input" id="model-exchange-rate-source" placeholder="例如 official_snapshot">
+            </label>
+            <label>
+                <span>汇率时间</span>
+                <input class="field-input" id="model-exchange-rate-at" type="datetime-local">
+            </label>
+            <label>
+                <span>汇率版本</span>
+                <input class="field-input" id="model-exchange-rate-version" placeholder="例如 pricing_2026_06">
+            </label>
+            <label class="form-span-2">
+                <span>费用组件 JSON</span>
+                <textarea class="field-input" id="model-fee-components" rows="3" placeholder='[{"unit":"per_image","source_amount":"0.1","source_currency":"CNY"}]'></textarea>
             </label>
             <div class="settings-note form-span-2" id="model-pricing-summary">
                 <strong>价格形态</strong>

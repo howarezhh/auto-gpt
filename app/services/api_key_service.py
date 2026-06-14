@@ -533,6 +533,14 @@ class ApiKeyService:
         normalized_path = request_path.strip()
         if normalized_path in allowed_paths:
             return True
+        if normalized_path.startswith("/v1beta/models/") and (
+            "/v1beta/models" in allowed_paths or "/v1beta/models/{model}:generateContent" in allowed_paths
+        ):
+            return True
+        if normalized_path == "/v1/messages" and (
+            "/v1/messages" in allowed_paths or "/v1/chat/completions" in allowed_paths
+        ):
+            return True
         if normalized_path.startswith("/v1/chat/completions/") and "/v1/chat/completions" in allowed_paths:
             return True
         if normalized_path.startswith("/v1/responses/") and "/v1/responses" in allowed_paths:

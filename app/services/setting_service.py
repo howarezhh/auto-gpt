@@ -55,6 +55,8 @@ DEFAULT_SETTING = {
     "auto_health_check": False,
     "health_check_interval_sec": 300,
     "recovery_probe_interval_sec": 30,
+    "probe_rate_limit_per_minute": 4,
+    "probe_type_rate_limit_per_minute": 4,
     "enable_token_logging": True,
     "enable_payload_logging": False,
     "enable_stream_response_persist": False,

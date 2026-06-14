@@ -505,9 +505,8 @@ class HealthService:
                     "message": "未返回工具调用",
                 }
             except Exception as exc:
-                status_code = getattr(exc, "status_code", None)
-                detail = getattr(exc, "detail", None)
-                message = ProxyService._error_message_for_log(detail) if detail is not None else str(exc)
+                status_code = HealthService._exception_status_code(exc)
+                message = HealthService._exception_message(exc)
                 last_error = {
                     "endpoint_path": endpoint_path,
                     "status_code": status_code,
@@ -605,9 +604,8 @@ class HealthService:
             }
         except Exception as exc:
             latency_ms = int((time.perf_counter() - started) * 1000)
-            status_code = getattr(exc, "status_code", None)
-            detail = getattr(exc, "detail", None)
-            message = ProxyService._error_message_for_log(detail) if detail is not None else str(exc)
+            status_code = HealthService._exception_status_code(exc)
+            message = HealthService._exception_message(exc)
             return {
                 "endpoint_path": endpoint_path,
                 "endpoint_label": endpoint_label,
@@ -685,9 +683,8 @@ class HealthService:
             }
         except Exception as exc:
             latency_ms = int((time.perf_counter() - started) * 1000)
-            status_code = getattr(exc, "status_code", None)
-            detail = getattr(exc, "detail", None)
-            message = ProxyService._error_message_for_log(detail) if detail is not None else str(exc)
+            status_code = HealthService._exception_status_code(exc)
+            message = HealthService._exception_message(exc)
             return {
                 "endpoint_path": "/responses",
                 "endpoint_label": endpoint_label,
@@ -1194,9 +1191,9 @@ class HealthService:
         setting: Any,
         progress_callback: HealthProgressCallback | None = None,
     ) -> list[dict[str, Any]]:
-        results: list[dict[str, Any]] = []
         total_providers = len(providers)
         remaining_model_budget = HealthService.SCHEDULED_CONTENT_INTEGRITY_MODEL_LIMIT
+        provider_targets: list[tuple[int, Provider, list[ProviderModel]]] = []
         for provider_index, provider in enumerate(providers, start=1):
             if remaining_model_budget <= 0:
                 break
@@ -1212,6 +1209,15 @@ class HealthService:
             ]
             if len(models_to_check) > remaining_model_budget:
                 models_to_check = models_to_check[:remaining_model_budget]
+            remaining_model_budget -= len(models_to_check)
+
+            provider_targets.append((provider_index, provider, models_to_check))
+
+        async def run_provider_content_trust(
+            provider_index: int,
+            provider: Provider,
+            models_to_check: list[ProviderModel],
+        ) -> dict[str, Any]:
             semaphore = asyncio.Semaphore(
                 max(1, min(HealthService.SCHEDULED_CONTENT_INTEGRITY_CONCURRENCY, len(models_to_check)))
             )
@@ -1251,8 +1257,10 @@ class HealthService:
                 )
                 return model_result
 
-            model_results = await asyncio.gather(*(run_model_probe(provider_model) for provider_model in models_to_check))
-            remaining_model_budget -= len(model_results)
+            model_results = await HealthService._gather_staggered_by_previous_completion(
+                models_to_check,
+                run_model_probe,
+            )
             for provider_model, model_result in zip(models_to_check, model_results, strict=False):
                 if not model_result.get("model_name"):
                     model_result["model_name"] = provider_model.model_name
@@ -1287,7 +1295,6 @@ class HealthService:
                 "models_failed": models_failed,
                 "model_results": model_results,
             }
-            results.append(provider_result)
             await HealthService._emit_progress(
                 progress_callback,
                 {
@@ -1303,7 +1310,16 @@ class HealthService:
                     "models_failed": models_failed,
                 },
             )
-        return results
+            return provider_result
+
+        return list(
+            await asyncio.gather(
+                *(
+                    run_provider_content_trust(provider_index, provider, models_to_check)
+                    for provider_index, provider, models_to_check in provider_targets
+                )
+            )
+        )
 
     @staticmethod
     async def _run_scheduled_content_trust_probe_for_model(
@@ -1881,6 +1897,34 @@ class HealthService:
         normalized = str(message or "").lower()
         hints = ("cannot post", "not found", "unknown url", "unknown endpoint", "unsupported", "no route")
         return status_code in {400, 404, 405} and any(hint in normalized for hint in hints)
+
+    @staticmethod
+    def _exception_status_code(exc: Exception) -> int | None:
+        for value in (
+            getattr(exc, "status_code", None),
+            getattr(getattr(exc, "response", None), "status_code", None),
+        ):
+            if value is None:
+                continue
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    @staticmethod
+    def _exception_message(exc: Exception) -> str:
+        detail = getattr(exc, "detail", None)
+        if detail is not None:
+            return ProxyService._error_message_for_log(detail)
+        response = getattr(exc, "response", None)
+        response_text = getattr(response, "text", None)
+        if response_text:
+            text = str(response_text)
+            if len(text) > 1200:
+                text = text[:1200] + "...[truncated]"
+            return f"{exc}\n{text}"
+        return str(exc)
 
     @staticmethod
     def _protocol_type_from_supports(supports_chat: bool, supports_responses: bool, fallback: str) -> str:
@@ -2790,6 +2834,7 @@ class HealthService:
                     probe_factory,
                     interactive_mode=interactive_mode,
                 )
+                endpoint_result.setdefault("provider_model_id", provider_model.id)
                 HealthService._apply_probe_error_policy(endpoint_result)
                 return provider_model, endpoint_result
 
@@ -2991,6 +3036,7 @@ class HealthService:
             for item in endpoint_results
         ) or "当前未执行任何探针"
         return {
+            "provider_model_id": provider_model.id,
             "model_name": provider_model.model_name,
             "success": success,
             "provider_success": provider_success,
@@ -3038,6 +3084,7 @@ class HealthService:
             log_type="health_check_model",
             provider_id=provider.id,
             provider_name=provider.name,
+            resolved_provider_model_id=provider_model.id,
             model_name=provider_model.model_name,
             request_path=request_path,
             success=success,
@@ -3314,7 +3361,10 @@ class HealthService:
         max_tokens: int,
         stream: bool = False,
     ) -> PreparedUpstreamRequest:
-        model_name = ProviderService.provider_model_upstream_model_name(provider_model)
+        model_name = ProviderService.provider_model_upstream_model_name(
+            provider_model,
+            include_provider_model_id=True,
+        )
         return PreparedUpstreamRequest(
             request_path=NativeProtocolAdapter.request_path(
                 protocol_type,
@@ -3419,9 +3469,8 @@ class HealthService:
             }
         except Exception as exc:
             latency_ms = int((time.perf_counter() - started) * 1000)
-            status_code = getattr(exc, "status_code", None)
-            detail = getattr(exc, "detail", None)
-            message = ProxyService._error_message_for_log(detail) if detail is not None else str(exc)
+            status_code = HealthService._exception_status_code(exc)
+            message = HealthService._exception_message(exc)
             return {
                 "endpoint_path": prepared.request_path,
                 "endpoint_type": protocol_type,
@@ -3546,9 +3595,8 @@ class HealthService:
         except Exception as exc:
             exc_type, exc_value, exc_traceback = type(exc), exc, exc.__traceback__
             latency_ms = int((time.perf_counter() - started) * 1000)
-            status_code = getattr(exc, "status_code", None)
-            detail = getattr(exc, "detail", None)
-            message = ProxyService._error_message_for_log(detail) if detail is not None else str(exc)
+            status_code = HealthService._exception_status_code(exc)
+            message = HealthService._exception_message(exc)
             return {
                 "endpoint_path": prepared.request_path,
                 "endpoint_type": protocol_type,
@@ -3690,9 +3738,8 @@ class HealthService:
             }
         except Exception as exc:
             latency_ms = int((time.perf_counter() - started) * 1000)
-            status_code = getattr(exc, "status_code", None)
-            detail = getattr(exc, "detail", None)
-            message = ProxyService._error_message_for_log(detail) if detail is not None else str(exc)
+            status_code = HealthService._exception_status_code(exc)
+            message = HealthService._exception_message(exc)
             support_mode, support_label = HealthService._probe_failure_support_state(
                 endpoint_label=endpoint_label,
                 unsupported_label=unsupported_label,
@@ -3856,9 +3903,8 @@ class HealthService:
         except Exception as exc:
             exc_type, exc_value, exc_traceback = type(exc), exc, exc.__traceback__
             latency_ms = int((time.perf_counter() - started) * 1000)
-            status_code = getattr(exc, "status_code", None)
-            detail = getattr(exc, "detail", None)
-            message = ProxyService._error_message_for_log(detail) if detail is not None else str(exc)
+            status_code = HealthService._exception_status_code(exc)
+            message = HealthService._exception_message(exc)
             decompression_error = any(
                 hint in message.lower()
                 for hint in ("decompress", "incorrect header check", "content-encoding", "压缩")

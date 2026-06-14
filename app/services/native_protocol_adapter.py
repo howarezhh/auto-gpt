@@ -113,6 +113,16 @@ class NativeProtocolAdapter:
         return chat_payload
 
     @staticmethod
+    def native_usage_to_openai(protocol_type: str, response_payload: dict[str, Any]) -> dict[str, Any] | None:
+        if protocol_type == NativeProtocolAdapter.GEMINI:
+            usage_metadata = response_payload.get("usageMetadata") if isinstance(response_payload, dict) else None
+            return NativeProtocolAdapter._gemini_usage_to_openai(usage_metadata) if isinstance(usage_metadata, dict) else None
+        if protocol_type == NativeProtocolAdapter.CLAUDE_MESSAGES:
+            usage_payload = response_payload.get("usage") if isinstance(response_payload, dict) else None
+            return NativeProtocolAdapter._claude_usage_to_openai(usage_payload) if isinstance(usage_payload, dict) else None
+        return None
+
+    @staticmethod
     def native_stream_chunk_to_chat_chunks(
         protocol_type: str,
         chunk: bytes,

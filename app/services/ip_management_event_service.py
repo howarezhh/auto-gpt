@@ -8,7 +8,9 @@ from sqlalchemy.orm import Session
 
 from app.models.ip_management import IpManagementEvent, IpManagementSetting
 from app.services.ip_management_resolver_service import ClientIpResolution
+from app.services.proxy_request_context import set_current_ip_management_event_id
 from app.utils.json_utils import dumps_json
+from app.utils.timezone import now_beijing
 
 
 class IpManagementEventService:
@@ -116,7 +118,32 @@ class IpManagementEventService:
         db.add(event)
         db.commit()
         db.refresh(event)
+        set_current_ip_management_event_id(event.id)
         return event
+
+    @staticmethod
+    def attach_request_context(
+        db: Session,
+        *,
+        event_id: int | None,
+        request_log_id: int | None,
+        api_client_key_id: int | None = None,
+        api_client_key_prefix: str | None = None,
+        user_account_id: int | None = None,
+    ) -> bool:
+        if not event_id or not request_log_id:
+            return False
+        event = db.get(IpManagementEvent, int(event_id))
+        if event is None:
+            return False
+        if event.request_log_id is not None and event.request_log_id != request_log_id:
+            return False
+        event.request_log_id = int(request_log_id)
+        event.api_client_key_id = api_client_key_id
+        event.api_client_key_prefix = api_client_key_prefix
+        event.user_account_id = user_account_id
+        db.flush()
+        return True
 
     @staticmethod
     def list_events(
@@ -127,6 +154,9 @@ class IpManagementEventService:
         decision: str | None = None,
         scope: str | None = None,
         status_code: int | None = None,
+        api_key: str | None = None,
+        request_log_id: int | None = None,
+        user_account_id: int | None = None,
         started_at: datetime | None = None,
         ended_at: datetime | None = None,
         page: int = 1,
@@ -152,6 +182,13 @@ class IpManagementEventService:
             filters.append(IpManagementEvent.scope == scope.strip())
         if status_code is not None:
             filters.append(IpManagementEvent.status_code == status_code)
+        if api_key:
+            like_value = f"%{api_key.strip().lower()}%"
+            filters.append(func.lower(IpManagementEvent.api_client_key_prefix).like(like_value))
+        if request_log_id is not None:
+            filters.append(IpManagementEvent.request_log_id == request_log_id)
+        if user_account_id is not None:
+            filters.append(IpManagementEvent.user_account_id == user_account_id)
         if started_at is not None:
             filters.append(IpManagementEvent.created_at >= started_at)
         if ended_at is not None:
@@ -190,5 +227,3 @@ class IpManagementEventService:
             if len(ids) < IpManagementEventService.CLEANUP_BATCH_SIZE:
                 break
         return total_deleted
-
-from app.utils.timezone import now_beijing

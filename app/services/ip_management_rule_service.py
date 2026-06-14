@@ -5,6 +5,7 @@ from datetime import datetime
 import ipaddress
 
 from app.models.ip_management import IpAccessRule
+from app.utils.timezone import now_beijing
 
 
 @dataclass(frozen=True)
@@ -98,5 +99,3 @@ class IpManagementRuleService:
         except ValueError:
             return False
         return False
-
-from app.utils.timezone import now_beijing

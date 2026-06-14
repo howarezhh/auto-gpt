@@ -1,14 +1,10 @@
 {% extends "base.html" %}
 {% block content %}
-<section class="hero-panel hero-panel-compact cockpit-hero">
+<section class="hero-panel hero-panel-compact cockpit-hero playground-hero">
     <div class="cockpit-hero-copy">
         <div class="eyebrow">在线调试</div>
         <h2>调用测试</h2>
-        <p>把 playground 拆成两个任务模式：单请求调试负责看一次真实请求的命中线路和响应结果，批量连通性测试负责看渠道与模型的整体可用性。</p>
-        <div class="hero-actions">
-            <a class="btn btn-accent interactive-btn" href="#playground-single">单请求调试</a>
-            <a class="btn btn-ghost interactive-btn" href="#playground-batch">批量连通性测试</a>
-        </div>
+        <p>把 playground 收敛成两个明确任务：单请求调试用于观察一次真实调用的路由、响应和 Token；批量连通性测试用于快速判断提供商与挂载模型的整体可用性。</p>
     </div>
     <div class="cockpit-hero-aside">
         <div class="cockpit-aside-label">使用范围</div>
@@ -22,13 +18,19 @@
     </div>
 </section>
 
-<nav class="page-anchor-bar">
-    <a class="page-anchor-link" href="#playground-single">单请求调试</a>
-    <a class="page-anchor-link" href="#playground-batch">批量连通性测试</a>
+<nav class="playground-mode-tabs" aria-label="调用测试模式">
+    <button class="playground-mode-tab is-active interactive-btn" type="button" data-playground-tab="single" aria-controls="playground-single" aria-selected="true">
+        <span>模式 A</span>
+        <strong>单请求调试</strong>
+    </button>
+    <button class="playground-mode-tab interactive-btn" type="button" data-playground-tab="batch" aria-controls="playground-batch" aria-selected="false">
+        <span>模式 B</span>
+        <strong>批量连通性测试</strong>
+    </button>
 </nav>
 
-<section class="dashboard-command-grid anchor-section-offset" id="playground-single">
-    <div class="panel-card section-shell">
+<section class="playground-mode-panel playground-workbench anchor-section-offset" id="playground-single" data-playground-panel="single">
+    <div class="panel-card section-shell playground-config-panel">
         <div class="section-subhead">
             <div>
                 <div class="panel-kicker">任务模式 A</div>
@@ -55,14 +57,10 @@
                     <option value="">请先选择一个已配置模型</option>
                 </select>
             </label>
-            <label class="toggle-row">
+            <label class="toggle-row playground-stream-toggle">
                 <input id="playground-stream" type="checkbox">
                 <span>stream</span>
             </label>
-            <div class="form-span-2 settings-note">
-                <strong>适用场景</strong>
-                <span>当你要验证某个具体模型、某条具体消息、某个指定提供商是否跑通时，用单请求调试，不要先做全量测试。</span>
-            </div>
             <label class="form-span-2">
                 <span>用户消息</span>
                 <textarea class="field-input" id="playground-message" rows="8" placeholder="你好"></textarea>
@@ -95,14 +93,14 @@
             <div class="form-span-2 playground-image-note" id="playground-image-note">
                 当前只发送文本。若切换为图片链路，将按所选内部接口自动拼装视觉请求。支持 PNG/JPEG/WEBP/GIF，单图最大 10 MB。
             </div>
-            <div class="form-actions form-span-2">
+            <div class="form-actions form-span-2 playground-primary-actions">
                 <button class="btn btn-ghost interactive-btn" id="playground-clear" type="button">清空</button>
                 <button class="btn btn-accent interactive-btn" id="playground-submit-btn" type="submit">发送测试请求</button>
             </div>
         </form>
     </div>
 
-    <div class="panel-card section-shell">
+    <div class="panel-card section-shell playground-result-panel">
         <div class="section-subhead">
             <div>
                 <div class="panel-kicker">调试结果</div>
@@ -115,32 +113,38 @@
     </div>
 </section>
 
-<section class="panel-card section-shell anchor-section-offset" id="playground-batch">
-    <div class="section-subhead">
-        <div>
-            <div class="panel-kicker">任务模式 B</div>
-            <h3>批量连通性测试</h3>
+<section class="playground-mode-panel playground-batch-workbench anchor-section-offset" id="playground-batch" data-playground-panel="batch" hidden>
+    <div class="panel-card section-shell playground-batch-config">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">任务模式 B</div>
+                <h3>批量连通性测试</h3>
+            </div>
         </div>
+        <form id="playground-batch-form" class="form-grid">
+            <div class="form-span-2 playground-provider-toolbar">
+                <button class="btn btn-ghost interactive-btn" id="playground-batch-select-enabled" type="button">选中启用提供商</button>
+                <button class="btn btn-ghost interactive-btn" id="playground-batch-select-all" type="button">选中全部提供商</button>
+                <button class="btn btn-ghost interactive-btn" id="playground-batch-clear" type="button">清空选择</button>
+            </div>
+            <div class="form-span-2 playground-provider-picker" id="playground-provider-picker">
+                <div class="playground-provider-list-empty">正在加载提供商列表...</div>
+            </div>
+            <div class="form-actions form-span-2 playground-primary-actions">
+                <button class="btn btn-accent interactive-btn" id="playground-batch-submit-btn" type="submit">批量测试所选提供商</button>
+            </div>
+        </form>
     </div>
-    <form id="playground-batch-form" class="form-grid">
-        <div class="form-span-2 settings-note">
-            <strong>适用场景</strong>
-            <span>当你要判断哪些渠道整体可用、每个渠道下哪些模型可连通时，再使用批量测试，不和单请求结果混在同一块阅读。</span>
+    <div class="panel-card section-shell playground-batch-result">
+        <div class="section-subhead">
+            <div>
+                <div class="panel-kicker">连通结果</div>
+                <h3>批量测试返回结果</h3>
+            </div>
         </div>
-        <div class="form-span-2 playground-provider-toolbar">
-            <button class="btn btn-ghost interactive-btn" id="playground-batch-select-enabled" type="button">选中启用渠道</button>
-            <button class="btn btn-ghost interactive-btn" id="playground-batch-select-all" type="button">选中全部渠道</button>
-            <button class="btn btn-ghost interactive-btn" id="playground-batch-clear" type="button">清空选择</button>
-        </div>
-        <div class="form-span-2 playground-provider-picker" id="playground-provider-picker">
-            <div class="playground-provider-list-empty">正在加载渠道列表...</div>
-        </div>
-        <div class="form-actions form-span-2">
-            <button class="btn btn-accent interactive-btn" id="playground-batch-submit-btn" type="submit">批量测试所选渠道</button>
-        </div>
-    </form>
-    <div class="result-meta" id="playground-batch-meta"></div>
-    <div class="playground-output-empty" id="playground-batch-output-empty">等待批量测试...</div>
-    <div class="playground-output-view hidden" id="playground-batch-output"></div>
+        <div class="result-meta" id="playground-batch-meta"></div>
+        <div class="playground-output-empty" id="playground-batch-output-empty">等待批量测试...</div>
+        <div class="playground-output-view hidden" id="playground-batch-output"></div>
+    </div>
 </section>
 {% endblock %}

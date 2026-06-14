@@ -767,6 +767,152 @@ async def chat_completions(
     return result
 
 
+@router.post("/v1beta/models/{model_name}:generateContent", response_model=None)
+async def gemini_generate_content(
+    model_name: str,
+    request: Request,
+    response: Response,
+    api_client_auth: ApiClientAuthContext = Depends(require_api_client_auth),
+):
+    source_ip = ApiKeyService.extract_source_ip(request)
+    request_path_for_log = f"/v1beta/models/{model_name}:generateContent"
+    payload = await _read_limited_v1_json_payload(request, endpoint_path="/v1beta/generateContent")
+    payload = ProxyService.gemini_external_payload(model_name, payload, stream=False)
+    lease = await _acquire_request_concurrency(request=request, api_client_auth=api_client_auth, is_stream=False)
+    try:
+        result, provider, trace, latency_ms = await ProxyService.forward_json_request(
+            endpoint_path="/native/gemini",
+            payload=payload,
+            log_type="gemini",
+            route_context=api_client_auth.route_context,
+            api_client_auth=api_client_auth,
+            trace_id=getattr(request.state, "trace_id", None),
+            source_ip=source_ip,
+            request_path_for_log=request_path_for_log,
+            public_endpoint_path="/native/gemini",
+            required_upstream_protocol_type="gemini",
+        )
+    finally:
+        await _release_request_concurrency(lease)
+    for key, value in build_proxy_response_headers(
+        provider_id=provider.id,
+        provider_name=provider.name,
+        latency_ms=latency_ms,
+        trace_length=len(trace),
+        trace_id=getattr(request.state, "trace_id", None),
+    ).items():
+        response.headers[key] = value
+    return result
+
+
+@router.post("/v1beta/models/{model_name}:streamGenerateContent", response_model=None)
+async def gemini_stream_generate_content(
+    model_name: str,
+    request: Request,
+    api_client_auth: ApiClientAuthContext = Depends(require_api_client_auth),
+):
+    source_ip = ApiKeyService.extract_source_ip(request)
+    request_path_for_log = f"/v1beta/models/{model_name}:streamGenerateContent"
+    payload = await _read_limited_v1_json_payload(request, endpoint_path="/v1beta/streamGenerateContent")
+    payload = ProxyService.gemini_external_payload(model_name, payload, stream=True)
+    lease = await _acquire_request_concurrency(request=request, api_client_auth=api_client_auth, is_stream=True)
+    try:
+        stream, provider, trace, latency_ms = await ProxyService.forward_stream_request(
+            endpoint_path="/native/gemini",
+            payload=payload,
+            log_type="gemini",
+            route_context=api_client_auth.route_context,
+            api_client_auth=api_client_auth,
+            trace_id=getattr(request.state, "trace_id", None),
+            source_ip=source_ip,
+            request_path_for_log=request_path_for_log,
+            public_endpoint_path="/native/gemini",
+            required_upstream_protocol_type="gemini",
+        )
+        headers = build_proxy_response_headers(
+            provider_id=provider.id,
+            provider_name=provider.name,
+            latency_ms=latency_ms,
+            trace_length=len(trace),
+            trace_id=getattr(request.state, "trace_id", None),
+        )
+        return StreamingResponse(
+            _release_after_stream(stream, lease, trace_id=getattr(request.state, "trace_id", None)),
+            media_type="text/event-stream",
+            headers=headers,
+        )
+    except Exception:
+        await _release_request_concurrency(lease)
+        raise
+
+
+@router.post("/v1/messages", response_model=None)
+async def claude_messages(
+    request: Request,
+    response: Response,
+    api_client_auth: ApiClientAuthContext = Depends(require_api_client_auth),
+):
+    source_ip = ApiKeyService.extract_source_ip(request)
+    payload = await _read_limited_v1_json_payload(request, endpoint_path="/messages")
+    payload = ProxyService.claude_external_payload(payload)
+    if payload.get("stream") is True:
+        lease = await _acquire_request_concurrency(request=request, api_client_auth=api_client_auth, is_stream=True)
+        try:
+            stream, provider, trace, latency_ms = await ProxyService.forward_stream_request(
+                endpoint_path="/native/claude_messages",
+                payload=payload,
+                log_type="claude_messages",
+                route_context=api_client_auth.route_context,
+                api_client_auth=api_client_auth,
+                trace_id=getattr(request.state, "trace_id", None),
+                source_ip=source_ip,
+                request_path_for_log="/v1/messages",
+                public_endpoint_path="/native/claude_messages",
+                required_upstream_protocol_type="claude_messages",
+            )
+            headers = build_proxy_response_headers(
+                provider_id=provider.id,
+                provider_name=provider.name,
+                latency_ms=latency_ms,
+                trace_length=len(trace),
+                trace_id=getattr(request.state, "trace_id", None),
+            )
+            return StreamingResponse(
+                _release_after_stream(stream, lease, trace_id=getattr(request.state, "trace_id", None)),
+                media_type="text/event-stream",
+                headers=headers,
+            )
+        except Exception:
+            await _release_request_concurrency(lease)
+            raise
+
+    lease = await _acquire_request_concurrency(request=request, api_client_auth=api_client_auth, is_stream=False)
+    try:
+        result, provider, trace, latency_ms = await ProxyService.forward_json_request(
+            endpoint_path="/native/claude_messages",
+            payload=payload,
+            log_type="claude_messages",
+            route_context=api_client_auth.route_context,
+            api_client_auth=api_client_auth,
+            trace_id=getattr(request.state, "trace_id", None),
+            source_ip=source_ip,
+            request_path_for_log="/v1/messages",
+            public_endpoint_path="/native/claude_messages",
+            required_upstream_protocol_type="claude_messages",
+        )
+    finally:
+        await _release_request_concurrency(lease)
+    for key, value in build_proxy_response_headers(
+        provider_id=provider.id,
+        provider_name=provider.name,
+        latency_ms=latency_ms,
+        trace_length=len(trace),
+        trace_id=getattr(request.state, "trace_id", None),
+    ).items():
+        response.headers[key] = value
+    return result
+
+
 @router.post("/v1/completions", response_model=None)
 async def completions(
     request: Request,

@@ -120,6 +120,7 @@
                     <th>类型</th>
                     <th>API Key</th>
                     <th>金额</th>
+                    <th>原币种</th>
                     <th>余额后</th>
                     <th>模型</th>
                     <th>Token</th>
@@ -139,15 +140,19 @@
                             {% endif %}
                         </td>
                         <td>{{ item.api_client_key_name or item.api_client_key_id }}</td>
-                        <td>{{ item.amount|display_money }}</td>
-                        <td>{{ item.balance_after|display_money('-') }}</td>
+                        <td>{{ item.amount|display_money('不限', item.billing_currency or 'USD') }}</td>
+                        <td>
+                            {{ item.source_amount|display_money('-', item.source_currency or item.billing_currency or 'USD') }}
+                            <div class="table-muted">{{ item.exchange_rate_to_billing_currency or '-' }} · {{ item.exchange_rate_version or item.exchange_rate_source or '-' }}</div>
+                        </td>
+                        <td>{{ item.balance_after|display_money('-', item.billing_currency or 'USD') }}</td>
                         <td>{{ item.provider_name or item.model_name or '-' }}</td>
                         <td>{{ (item.total_tokens or 0)|display_tokens }}</td>
                         <td>{{ item.remark or '-' }}</td>
                     </tr>
                     {% endfor %}
                 {% else %}
-                    <tr><td colspan="8"><div class="empty-state">暂无账单记录。</div></td></tr>
+                    <tr><td colspan="9"><div class="empty-state">暂无账单记录。</div></td></tr>
                 {% endif %}
             </tbody>
         </table>

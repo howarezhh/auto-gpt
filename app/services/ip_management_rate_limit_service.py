@@ -6,6 +6,7 @@ from datetime import datetime
 
 from app.services.rate_limit_service import RateLimitExceededError
 from app.services.redis_service import RedisService
+from app.utils.timezone import now_beijing
 
 
 class IpManagementRateLimitService:
@@ -85,5 +86,3 @@ return {'ok', ''}
         if code != "ok":
             key = str(result[1] if isinstance(result, list) and len(result) > 1 else "")
             raise RateLimitExceededError(messages.get(key, "来源 IP 超过限制"), code=str(code), key=key)
-
-from app.utils.timezone import now_beijing
