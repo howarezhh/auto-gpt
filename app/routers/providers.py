@@ -4,7 +4,7 @@ import json
 from collections.abc import Awaitable, Callable
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -12,6 +12,8 @@ from sqlalchemy.orm import Session
 from app.database import SessionLocal, get_db
 from app.schemas.provider import (
     ProviderBatchConnectivityTestRequest,
+    ProviderBatchGovernanceRequest,
+    ProviderBatchGovernanceResponse,
     ProviderBatchImportRequest,
     ProviderBatchImportResponse,
     ProviderAvailabilityResponse,
@@ -22,6 +24,8 @@ from app.schemas.provider import (
     ProviderEndpointProtocolDetectionRequest,
     ProviderListResponse,
     ProviderModelEndpointProtocolDetectionRequest,
+    ProviderModelBatchImportRequest,
+    ProviderModelBatchImportResponse,
     ProviderModelMountListResponse,
     ProviderModelConfigOut,
     ProviderPageContentOut,
@@ -253,6 +257,16 @@ def get_provider_batch_import_template() -> dict:
     return {"template": ProviderService.BATCH_IMPORT_TEMPLATE}
 
 
+@router.get("/export")
+def export_providers(db: Session = Depends(get_db)) -> PlainTextResponse:
+    text = ProviderService.export_providers_import_text(db)
+    return PlainTextResponse(
+        text,
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="providers-import-template.txt"'},
+    )
+
+
 @router.post("/batch-import", response_model=ProviderBatchImportResponse)
 def batch_import_providers(
     payload: ProviderBatchImportRequest,
@@ -268,6 +282,44 @@ def batch_import_providers(
             entity_id=None,
             entity_name="批量导入提供商",
             summary=f"批量导入提供商，创建 {result.created_count} 条，失败 {result.failed_count} 条",
+            detail=result.model_dump(),
+            risk_level="medium",
+        )
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/models/batch-import-template")
+def get_provider_model_batch_import_template() -> dict:
+    return {"template": ProviderService.MODEL_BATCH_IMPORT_TEMPLATE}
+
+
+@router.get("/models/export")
+def export_provider_models(db: Session = Depends(get_db)) -> PlainTextResponse:
+    text = ProviderService.export_provider_models_import_text(db)
+    return PlainTextResponse(
+        text,
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="provider-models-import-template.txt"'},
+    )
+
+
+@router.post("/models/batch-import", response_model=ProviderModelBatchImportResponse)
+def batch_import_provider_models(
+    payload: ProviderModelBatchImportRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> ProviderModelBatchImportResponse:
+    try:
+        result = ProviderService.batch_import_provider_models(db, payload)
+        _record_provider_audit(
+            db,
+            request=request,
+            action="batch_import_provider_models",
+            entity_id=None,
+            entity_name="批量导入模型挂载",
+            summary=f"批量导入模型挂载，新增 {result.created_count} 条，更新 {result.updated_count} 条，失败 {result.failed_count} 条",
             detail=result.model_dump(),
             risk_level="medium",
         )
@@ -462,6 +514,33 @@ async def update_provider(provider_id: int, payload: ProviderUpdate, request: Re
     return ProviderOut(**after)
 
 
+@router.post("/batch/governance", response_model=ProviderBatchGovernanceResponse)
+def batch_governance_providers(
+    payload: ProviderBatchGovernanceRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> ProviderBatchGovernanceResponse:
+    try:
+        result = ProviderService.batch_update_provider_governance(
+            db,
+            provider_ids=payload.provider_ids,
+            action=payload.action,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _record_provider_audit(
+        db,
+        request=request,
+        action=f"batch_governance_{payload.action}",
+        entity_id="selected",
+        entity_name="批量提供商",
+        summary=f"批量执行提供商治理动作：{payload.action}",
+        detail={"provider_ids": payload.provider_ids, "result": result},
+        risk_level="medium",
+    )
+    return ProviderBatchGovernanceResponse(**result)
+
+
 @router.put("/{provider_id}/models/{provider_model_id}", response_model=ProviderModelConfigOut)
 def update_provider_model(
     provider_id: int,
@@ -614,7 +693,7 @@ async def test_provider(provider_id: int, request: Request, payload: dict | None
         action="health_check_provider",
         entity_id=provider.id,
         entity_name=provider.name,
-        summary=f"触发提供商健康检查：{provider.name}",
+        summary=f"触发提供商可用性检测：{provider.name}",
         detail={"features": features},
         risk_level="medium",
     )
@@ -650,7 +729,7 @@ async def test_provider_stream(provider_id: int, request: Request, payload: dict
         action="health_check_provider_stream",
         entity_id=provider.id,
         entity_name=provider.name,
-        summary=f"触发提供商流式健康检查：{provider.name}",
+        summary=f"触发提供商流式可用性检测：{provider.name}",
         detail={"features": features},
         risk_level="medium",
     )
@@ -712,7 +791,7 @@ async def test_provider_model(
         action="health_check_provider_model",
         entity_id=provider_model.id,
         entity_name=provider_model.model_name,
-        summary=f"触发模型健康检查：{provider.name} / {provider_model.model_name}",
+        summary=f"触发模型可用性检测：{provider.name} / {provider_model.model_name}",
         detail={"provider_id": provider.id, "features": features},
         risk_level="medium",
     )
@@ -745,7 +824,7 @@ async def test_all_providers(request: Request, payload: dict | None = None, db: 
         action="health_check_all",
         entity_id="all",
         entity_name="全部提供商",
-        summary="触发全部提供商健康检查",
+        summary="触发全部提供商可用性检测",
         detail={"features": features},
         risk_level="medium",
     )
@@ -778,7 +857,7 @@ async def test_all_providers_stream(request: Request, payload: dict | None = Non
         action="health_check_all_stream",
         entity_id="all",
         entity_name="全部提供商",
-        summary="触发全部提供商流式健康检查",
+        summary="触发全部提供商流式可用性检测",
         detail={"features": features},
         risk_level="medium",
     )

@@ -349,6 +349,7 @@ class ApiKeyAuthCache:
         route_context = RoutePolicyContext(
             allowed_provider_ids=allowed_provider_ids,
             require_trusted_provider=bool(getattr(route_setting, "trusted_providers_only", False)),
+            health_gate_mode=str(getattr(route_setting, "route_health_gate_mode", "permissive") or "permissive"),
             preferred_provider_ids=loads_json(api_key.preferred_provider_ids_json, []),
             preferred_region_tags=loads_json(api_key.preferred_region_tags_json, []),
             latency_bias=api_key.latency_bias,

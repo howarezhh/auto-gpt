@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from types import SimpleNamespace
+from uuid import uuid4
 
+from app.database import SessionLocal
+from app.models.model_catalog import ModelCatalog
+from app.models.provider import Provider
+from app.models.provider_model import ProviderModel
+from app.schemas.model_catalog import ModelCatalogOptionOut, ModelCatalogOut
 from app.services.model_catalog_service import ModelCatalogService
 from app.services.provider_service import ProviderService
+from app.utils.timezone import now_beijing
 
 
 def test_provider_name_rejects_spaces_and_punctuation() -> None:
@@ -106,6 +114,253 @@ def test_model_catalog_list_filters_by_model_group() -> None:
 
     assert "model_catalogs.model_group" in str(compiled)
     assert compiled.params["model_group_1"] == "claude"
+
+
+def test_model_catalog_list_and_options_keep_provider_bindings_for_testing() -> None:
+    now = now_beijing()
+    catalog = ModelCatalog(
+        id=101,
+        model_name="绑定测试模型",
+        display_name="绑定测试模型",
+        model_group="openai",
+        enabled=True,
+        supports_stream=True,
+        supports_vision=False,
+        supports_tools=True,
+        supports_chat_completions=True,
+        supports_responses=True,
+        context_window_tokens=128000,
+        max_input_tokens=64000,
+        max_output_tokens=8192,
+        pricing_mode="fixed",
+        pricing_json=None,
+        input_price_per_1k=None,
+        output_price_per_1k=None,
+        cache_price_per_1k=None,
+        cache_write_price_per_1k=None,
+        source_currency="USD",
+        billing_currency="USD",
+        source_input_price_per_1k=None,
+        source_output_price_per_1k=None,
+        source_cache_price_per_1k=None,
+        source_cache_write_price_per_1k=None,
+        exchange_rate_to_billing_currency=None,
+        exchange_rate_source=None,
+        exchange_rate_at=None,
+        exchange_rate_version=None,
+        rounding_strategy="ROUND_HALF_UP",
+        speed_label=None,
+        remark=None,
+        created_at=now,
+        updated_at=now,
+    )
+    provider = Provider(
+        id=11,
+        name="绑定测试提供商",
+        base_url="https://provider.example.com/v1",
+        api_key="sk-test",
+        enabled=True,
+        priority=10,
+        health_status="healthy",
+        circuit_state="closed",
+        maintenance_mode_enabled=False,
+    )
+    provider_model = ProviderModel(
+        id=22,
+        provider_id=11,
+        model_name="绑定测试模型",
+        enabled=True,
+        priority=20,
+        health_status="healthy",
+        circuit_state="closed",
+        supports_stream=True,
+        supports_vision=False,
+        supports_tools=True,
+        supports_image_generation=False,
+        supports_chat_completions=True,
+        supports_responses=True,
+        protocol_type="both",
+        model_group="openai",
+        content_integrity_status="trusted",
+        content_probe_results_json=None,
+        price_multiplier=Decimal("1.25"),
+        created_at=now,
+        updated_at=now,
+    )
+    provider.provider_models = [provider_model]
+    provider_model.provider = provider
+
+    list_payload = ModelCatalogService._serialize_catalog(catalog, [provider])
+    list_item = ModelCatalogOut(**list_payload).model_dump()
+    option_payload = ModelCatalogService._serialize_catalog_option(catalog, [provider])
+    option_item = ModelCatalogOptionOut(**option_payload).model_dump()
+
+    for item in (list_item, option_item):
+        assert item["bound_provider_count"] == 1
+        assert item["enabled_provider_count"] == 1
+        assert item["provider_bindings"][0]["provider_id"] == 11
+        assert item["provider_bindings"][0]["provider_model_id"] == 22
+        assert item["provider_bindings"][0]["bound"] is True
+        assert item["provider_bindings"][0]["enabled"] is True
+
+
+def test_load_providers_for_catalogs_refreshes_filtered_provider_models_in_same_session() -> None:
+    suffix = uuid4().hex[:8]
+    model_a = f"绑定缓存模型甲-{suffix}"
+    model_b = f"绑定缓存模型乙-{suffix}"
+    db = SessionLocal()
+    try:
+        catalog_a = ModelCatalog(model_name=model_a, model_group="openai", enabled=True)
+        catalog_b = ModelCatalog(model_name=model_b, model_group="openai", enabled=True)
+        provider = Provider(
+            name=f"绑定缓存测试提供商{suffix}",
+            base_url="https://provider.example.com/v1",
+            api_key="sk-test",
+            enabled=True,
+            health_status="healthy",
+            circuit_state="closed",
+        )
+        provider.provider_models = [
+            ProviderModel(
+                model_name=model_a,
+                enabled=True,
+                health_status="healthy",
+                circuit_state="closed",
+                price_multiplier=Decimal("1"),
+            ),
+            ProviderModel(
+                model_name=model_b,
+                enabled=True,
+                health_status="healthy",
+                circuit_state="closed",
+                price_multiplier=Decimal("1"),
+            ),
+        ]
+        db.add_all([catalog_a, catalog_b, provider])
+        db.flush()
+
+        first_providers = ModelCatalogService._load_providers_for_catalogs(db, [catalog_a])
+        assert [item.model_name for item in first_providers[0].provider_models] == [model_a]
+
+        second_providers = ModelCatalogService._load_providers_for_catalogs(db, [catalog_b])
+        assert [item.model_name for item in second_providers[0].provider_models] == [model_b]
+    finally:
+        db.rollback()
+        db.close()
+
+
+def test_model_catalog_health_is_aggregated_from_provider_mounts() -> None:
+    now = now_beijing()
+    catalog = ModelCatalog(
+        id=102,
+        model_name="聚合可用模型",
+        display_name="聚合可用模型",
+        model_group="openai",
+        enabled=True,
+        supports_stream=True,
+        supports_vision=False,
+        supports_tools=False,
+        supports_chat_completions=True,
+        supports_responses=True,
+        context_window_tokens=128000,
+        max_input_tokens=64000,
+        max_output_tokens=8192,
+        pricing_mode="fixed",
+        pricing_json=None,
+        input_price_per_1k=None,
+        output_price_per_1k=None,
+        cache_price_per_1k=None,
+        cache_write_price_per_1k=None,
+        source_currency="USD",
+        billing_currency="USD",
+        source_input_price_per_1k=None,
+        source_output_price_per_1k=None,
+        source_cache_price_per_1k=None,
+        source_cache_write_price_per_1k=None,
+        exchange_rate_to_billing_currency=None,
+        exchange_rate_source=None,
+        exchange_rate_at=None,
+        exchange_rate_version=None,
+        rounding_strategy="ROUND_HALF_UP",
+        speed_label=None,
+        remark=None,
+        created_at=now,
+        updated_at=now,
+    )
+    healthy_provider = Provider(
+        id=21,
+        name="可用提供商",
+        base_url="https://healthy.example.com/v1",
+        api_key="sk-test",
+        enabled=True,
+        priority=10,
+        health_status="healthy",
+        circuit_state="closed",
+        maintenance_mode_enabled=False,
+    )
+    unhealthy_provider = Provider(
+        id=22,
+        name="异常提供商",
+        base_url="https://unhealthy.example.com/v1",
+        api_key="sk-test",
+        enabled=True,
+        priority=20,
+        health_status="healthy",
+        circuit_state="closed",
+        maintenance_mode_enabled=False,
+    )
+    healthy_model = ProviderModel(
+        id=31,
+        provider_id=21,
+        model_name="聚合可用模型",
+        enabled=True,
+        priority=10,
+        health_status="healthy",
+        circuit_state="closed",
+        price_multiplier=Decimal("1"),
+        created_at=now,
+        updated_at=now,
+    )
+    unhealthy_model = ProviderModel(
+        id=32,
+        provider_id=22,
+        model_name="聚合可用模型",
+        enabled=True,
+        priority=20,
+        health_status="unhealthy",
+        circuit_state="closed",
+        price_multiplier=Decimal("1"),
+        created_at=now,
+        updated_at=now,
+    )
+    healthy_provider.provider_models = [healthy_model]
+    unhealthy_provider.provider_models = [unhealthy_model]
+    healthy_model.provider = healthy_provider
+    unhealthy_model.provider = unhealthy_provider
+
+    payload = ModelCatalogService._serialize_catalog(catalog, [healthy_provider, unhealthy_provider])
+
+    assert payload["health_status"] == "healthy"
+    assert payload["healthy_provider_count"] == 1
+    assert payload["unhealthy_provider_count"] == 1
+    assert "可用提供商" in payload["health_reason"]
+
+    healthy_model.health_status = "unhealthy"
+    payload = ModelCatalogService._serialize_catalog(catalog, [healthy_provider, unhealthy_provider])
+
+    assert payload["health_status"] == "unhealthy"
+    assert payload["healthy_provider_count"] == 0
+    assert payload["unhealthy_provider_count"] == 2
+    assert "所有已绑定提供商均不可用" in payload["health_reason"]
+    assert "可用提供商 的挂载不可用" in payload["health_reason"]
+
+    healthy_model.health_status = "healthy"
+    healthy_provider.health_status = "unhealthy"
+    payload = ModelCatalogService._serialize_catalog(catalog, [healthy_provider, unhealthy_provider])
+
+    assert payload["health_status"] == "unhealthy"
+    assert payload["healthy_provider_count"] == 0
+    assert "可用提供商 自身不可用" in payload["health_reason"]
 
 
 def test_provider_native_endpoint_path_is_normalized_and_serialized() -> None:
@@ -223,6 +478,24 @@ def test_provider_batch_import_defaults_optional_model_fields() -> None:
     assert model_config["model_group"] == "qwen"
     assert model_config["protocol_type"] == "chat_completions"
     assert model_config["price_multiplier"] == 1.0
+
+
+def test_provider_export_keeps_api_key_plaintext() -> None:
+    db = SessionLocal()
+    try:
+        provider = db.query(Provider).order_by(Provider.id.asc()).first()
+        assert provider is not None
+        text = ProviderService.export_providers_import_text(db)
+        assert f"名称: {provider.name}" in text
+        assert f"API Key: {provider.api_key}" in text
+    finally:
+        db.close()
+
+
+def test_provider_model_export_template_mentions_batch_import_fields() -> None:
+    assert "模型挂载批量导入模板" in ProviderService.MODEL_BATCH_IMPORT_TEMPLATE
+    assert "提供商名称" in ProviderService.MODEL_BATCH_IMPORT_TEMPLATE
+    assert "账户输入价/1M" in ProviderService.MODEL_BATCH_IMPORT_TEMPLATE
 
 
 def test_protocol_lock_uses_upstream_model_id_for_custom_alias() -> None:

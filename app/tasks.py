@@ -589,7 +589,7 @@ def _apply_runtime_healthy_signal(
         metrics=metrics,
         success=True,
         message=(
-            "短窗口正式请求成功信号已恢复模型健康状态；"
+            "短窗口正式请求成功信号已恢复模型可用状态；"
             f"模型唯一ID={provider_model.id}，模型名={provider_model.model_name}"
         ),
         status_code=200,
@@ -609,7 +609,7 @@ def _apply_runtime_probe_unavailable_unhealthy_signal(
     previous_circuit = str(provider_model.circuit_state or "closed")
     now = now_beijing()
     message = (
-        "短窗口正式请求异常信号需要健康探针确认，但探针未能触发或执行失败；"
+        "短窗口正式请求异常信号需要可用性探针确认，但探针未能触发或执行失败；"
         "为避免继续路由到疑似异常上游，已默认更新为异常状态。"
         f"模型唯一ID={provider_model.id}，模型名={provider_model.model_name}；原因={reason[:300]}"
     )
@@ -722,7 +722,7 @@ async def scheduled_recent_runtime_health_state_refresh() -> dict[str, int]:
                     success=bool(result.get("success")),
                     status_code=result.get("status_code"),
                     message=(
-                        "短窗口正式请求异常信号已触发健康探针并完成状态确认；"
+                        "短窗口正式请求异常信号已触发可用性探针并完成状态确认；"
                         f"模型唯一ID={provider_model.id}，模型名={provider_model.model_name}；"
                         f"探针结果={result.get('health_status') or provider_model.health_status}"
                     ),
@@ -738,7 +738,7 @@ async def scheduled_recent_runtime_health_state_refresh() -> dict[str, int]:
                             provider=provider,
                             provider_model=provider_model,
                             metrics=metrics,
-                            reason=str(result.get("message") or "自动健康探针被频率限制"),
+                            reason=str(result.get("message") or "自动可用性探针被频率限制"),
                         ):
                             status_update_count += 1
             except Exception as exc:
@@ -756,7 +756,7 @@ async def scheduled_recent_runtime_health_state_refresh() -> dict[str, int]:
                     metrics=metrics,
                     success=False,
                     message=(
-                        "短窗口正式请求异常信号触发健康探针，但探针执行失败；"
+                        "短窗口正式请求异常信号触发可用性探针，但探针执行失败；"
                         f"模型唯一ID={provider_model.id}，模型名={provider_model.model_name}；错误={str(exc)[:300]}"
                     ),
                 )
@@ -878,6 +878,7 @@ def scheduled_data_retention_cleanup() -> dict[str, int]:
             background_job_log_retention_days=setting.background_job_log_retention_days,
             user_operation_log_retention_days=setting.user_operation_log_retention_days,
             asset_log_retention_days=setting.asset_log_retention_days,
+            alert_event_retention_days=setting.alert_event_retention_days,
         )
     finally:
         db.close()

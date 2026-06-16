@@ -82,7 +82,7 @@ data-settings-tooltip-trigger="true" data-settings-tooltip-title="{{ title }}" d
             <label class="content-guard-label">{{ field_title("可信代理 CIDR", "可信代理 CIDR 说明", "填写允许被信任的反向代理、负载均衡、CDN 或网关直连 IP 段，一行一个 CIDR。只有直连来源命中这里，系统才会读取转发头解析真实客户端 IP；不要填写普通用户网段。") }}<textarea class="field-input" id="ip-setting-trusted-proxy-cidrs" rows="4" placeholder="127.0.0.1/32&#10;10.0.0.0/8"></textarea></label>
             <label class="content-guard-label">{{ field_title("可信头优先级", "可信头优先级说明", "设置在可信代理命中后读取真实客户端 IP 的头字段顺序。上游代理明确写入 Forwarded 时优先选 Forwarded；Cloudflare 场景可把 CF-Connecting-IP 放前；不确定时保持默认顺序并用解析测试验证。") }}<select class="field-input" id="ip-setting-trusted-header-order" multiple size="3"><option value="forwarded">Forwarded</option><option value="x_forwarded_for">X-Forwarded-For</option><option value="cf_connecting_ip">CF-Connecting-IP</option></select></label>
             <label class="content-guard-label">{{ field_title("事件采样 %", "事件采样说明", "控制事件记录比例，0 表示不采样，100 表示全部记录。排查阶段建议 100；高流量生产可降低以减少日志写入，但阻断和限流决策仍按规则执行。") }}<input class="field-input" id="ip-setting-event-sample-rate" type="number" min="0" max="100"></label>
-            <label class="content-guard-label">{{ field_title("事件保留 d", "事件保留说明", "设置 IP 管理事件保留天数，单位 d。值越大越便于审计追溯，也会占用更多数据库空间；常规可设 30 d，合规或排障期可延长。") }}<input class="field-input" id="ip-setting-event-retention-days" type="number" min="1" max="3650"></label>
+            <label class="content-guard-label">{{ field_title("事件保留 d", "事件保留说明", "设置 IP 管理事件保留天数，单位 d。可在 1-7 d 内调整，避免事件日志撑爆数据库。") }}<input class="field-input" id="ip-setting-event-retention-days" type="number" min="1" max="7"></label>
         </div>
     </form>
 </section>

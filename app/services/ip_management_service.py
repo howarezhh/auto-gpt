@@ -66,6 +66,12 @@ class IpManagementService:
             db.add(setting)
             db.commit()
             db.refresh(setting)
+        else:
+            normalized_retention_days = min(7, max(1, int(setting.event_retention_days or 7)))
+            if setting.event_retention_days != normalized_retention_days:
+                setting.event_retention_days = normalized_retention_days
+                db.commit()
+                db.refresh(setting)
         return setting
 
     @staticmethod
@@ -121,7 +127,7 @@ class IpManagementService:
             "rate_limit_enabled": bool(setting.rate_limit_enabled),
             "event_logging_enabled": bool(setting.event_logging_enabled),
             "event_sample_rate": int(setting.event_sample_rate or 0),
-            "event_retention_days": int(setting.event_retention_days or 30),
+            "event_retention_days": int(setting.event_retention_days or 7),
             "store_raw_headers_enabled": bool(setting.store_raw_headers_enabled),
             "ip_masking_enabled": bool(setting.ip_masking_enabled),
             "fail_open_enabled": bool(setting.fail_open_enabled),

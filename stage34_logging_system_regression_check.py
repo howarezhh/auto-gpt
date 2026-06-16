@@ -104,7 +104,7 @@ def main() -> None:
                         "event_result": "success",
                         "payload": {
                             "route_round": 1,
-                            "route_policy": "健康优先",
+                            "route_policy": "可用性优先",
                             "candidate_count": 1,
                             "selected_provider_id": 1,
                         },

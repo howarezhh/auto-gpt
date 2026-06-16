@@ -222,4 +222,5 @@ data/
 *.pid
 *.lock
 tmp_*.html
+.run/
 .idea/claudeCodeTabState.xml

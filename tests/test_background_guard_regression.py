@@ -13,6 +13,7 @@ from app.models.provider import Provider
 from app.models.request_log import RequestLog
 from app.routers.content_guard import content_guard_runtime_events
 from app.routers.logging_api import list_content_guard_events
+from app.schemas.setting import SettingUpdate
 from app.services.log_service import LogService
 from app.services.token_usage_service import TokenUsageService
 
@@ -188,15 +189,16 @@ def test_configure_scheduler_removes_health_jobs_when_auto_health_check_disabled
         content_guard_enabled=False,
         content_guard_precheck_auto_enabled=False,
         content_guard_probe_interval_sec=3600,
-        request_log_retention_days=90,
-        admin_audit_log_retention_days=365,
-        request_child_log_retention_days=90,
-        exception_log_retention_days=180,
-        health_log_retention_days=90,
-        billing_log_retention_days=365,
-        background_job_log_retention_days=90,
-        user_operation_log_retention_days=180,
-        asset_log_retention_days=90,
+        request_log_retention_days=7,
+        admin_audit_log_retention_days=7,
+        request_child_log_retention_days=7,
+        exception_log_retention_days=7,
+        health_log_retention_days=7,
+        billing_log_retention_days=7,
+        background_job_log_retention_days=7,
+        user_operation_log_retention_days=7,
+        asset_log_retention_days=7,
+        alert_event_retention_days=7,
     )
 
     monkeypatch.setattr(tasks, "scheduler", fake_scheduler)
@@ -211,6 +213,15 @@ def test_configure_scheduler_removes_health_jobs_when_auto_health_check_disabled
     assert "model_l2_capability_health_check" in fake_scheduler.removed
     assert "provider_l0_health_check" not in fake_scheduler.added
     assert "model_l1_text_health_check" not in fake_scheduler.added
+
+
+def test_setting_update_rejects_log_retention_above_seven_days() -> None:
+    try:
+        SettingUpdate(request_log_retention_days=8)
+    except Exception as exc:
+        assert "request_log_retention_days" in str(exc)
+    else:
+        raise AssertionError("request_log_retention_days above 7 should be rejected")
 
 
 def test_token_backfill_empty_result_can_suppress_success_log() -> None:

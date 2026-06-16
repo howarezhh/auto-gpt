@@ -10,13 +10,20 @@ from app.utils.json_utils import dumps_json, loads_json
 
 
 class ProviderHealthStateService:
-    """维护 provider/model 路由热路径可直接读取的 Redis 健康状态。"""
+    """维护 provider/model 路由热路径可直接读取的 Redis 可用状态。"""
 
+    FIXED_SUCCESS_RESPONSE_ERROR_CODE = "fixed_success_response_detected"
     STATE_TTL_SECONDS = 60 * 60
     CAPABILITY_STATE_TTL_SECONDS = 60 * 60
     ROUTE_METRIC_TTL_SECONDS = 10 * 60
     ROUTE_METRIC_WINDOW_MINUTES = 5
     EWMA_ALPHA = 0.3
+    HEALTH_TO_AVAILABILITY = {
+        "healthy": "available",
+        "degraded": "degraded",
+        "unknown": "unknown",
+        "unhealthy": "unavailable",
+    }
 
     @staticmethod
     def provider_key(provider_id: int) -> str:
@@ -41,6 +48,18 @@ class ProviderHealthStateService:
     @classmethod
     def get_model_capability_state(cls, provider_id: int, provider_model_id: int) -> dict[str, Any] | None:
         return cls._get_json(cls.capability_key(provider_id, provider_model_id))
+
+    @classmethod
+    def clear_provider_runtime_state(cls, provider: Provider) -> None:
+        """清理手动治理后可能覆盖数据库状态的运行时可用性缓存。"""
+        keys = [cls.provider_key(provider.id)]
+        for provider_model in getattr(provider, "provider_models", []) or []:
+            keys.append(cls.model_key(provider.id, provider_model.id))
+            keys.append(cls.capability_key(provider.id, provider_model.id))
+        try:
+            RedisService.get_sync_client().delete(*keys)
+        except Exception:
+            return
 
     @classmethod
     def effective_provider_health(cls, provider: Provider) -> dict[str, Any]:
@@ -112,6 +131,7 @@ class ProviderHealthStateService:
             "updated_at": now,
         }
         payload["health_score"] = cls._health_score(payload)
+        cls._attach_availability_aliases(payload)
         cls._set_json(cls.model_key(provider.id, provider_model.id), payload, ttl_seconds=cls.STATE_TTL_SECONDS)
 
     @classmethod
@@ -231,6 +251,47 @@ class ProviderHealthStateService:
         if status_update_reason:
             payload["last_runtime_state_update_reason"] = status_update_reason
         payload["health_score"] = cls._health_score(payload)
+        cls._attach_availability_aliases(payload)
+        cls._set_json(cls.model_key(provider.id, provider_model.id), payload, ttl_seconds=cls.STATE_TTL_SECONDS)
+        return payload
+
+    @classmethod
+    def record_fixed_success_response_failure(
+        cls,
+        provider: Provider,
+        provider_model: ProviderModel,
+        *,
+        latency_ms: int,
+        detection: dict[str, Any],
+    ) -> dict[str, Any]:
+        cls._increment_route_bucket(provider.id, provider_model.id, success=False)
+        rates = cls._route_rates(provider.id, provider_model.id)
+        now = cls._now()
+        payload = cls.get_model_state(provider.id, provider_model.id) or {}
+        payload.update(
+            {
+                "health_status": "unhealthy",
+                "runtime_health_status": "unhealthy",
+                "availability_status": "unavailable",
+                "runtime_availability_status": "unavailable",
+                "circuit_state": "open",
+                "runtime_circuit_state": "open",
+                "success_rate_5m": rates["success_rate_5m"],
+                "failure_rate_5m": rates["failure_rate_5m"],
+                "ewma_latency_ms": cls._ewma(payload.get("ewma_latency_ms"), latency_ms),
+                "last_error": cls.FIXED_SUCCESS_RESPONSE_ERROR_CODE,
+                "last_error_code": cls.FIXED_SUCCESS_RESPONSE_ERROR_CODE,
+                "last_error_category": "pseudo_success_response",
+                "last_status_code": 200,
+                "last_runtime_error_at": now,
+                "last_runtime_state_update_at": now,
+                "last_runtime_state_update_reason": cls.FIXED_SUCCESS_RESPONSE_ERROR_CODE,
+                "fixed_success_response_detection": detection,
+                "updated_at": now,
+            }
+        )
+        payload["health_score"] = cls._health_score(payload)
+        cls._attach_availability_aliases(payload)
         cls._set_json(cls.model_key(provider.id, provider_model.id), payload, ttl_seconds=cls.STATE_TTL_SECONDS)
         return payload
 
@@ -292,6 +353,7 @@ class ProviderHealthStateService:
             }
         )
         payload["health_score"] = cls._health_score(payload)
+        cls._attach_availability_aliases(payload)
         cls._set_json(cls.model_key(provider.id, provider_model.id), payload, ttl_seconds=cls.STATE_TTL_SECONDS)
 
     @classmethod
@@ -370,9 +432,13 @@ class ProviderHealthStateService:
             "db_health": db_value,
             "runtime_health": runtime_health,
             "effective_health": effective_health,
+            "db_availability": ProviderHealthStateService.health_to_availability(db_value),
+            "runtime_availability": ProviderHealthStateService.health_to_availability(runtime_health) if runtime_health else None,
+            "effective_availability": ProviderHealthStateService.health_to_availability(effective_health),
             "state_source": "runtime" if runtime_health else "db",
             "updated_at": updated_at,
             "health_state_updated_at": updated_at,
+            "availability_state_updated_at": updated_at,
         }
 
     @staticmethod
@@ -395,9 +461,25 @@ class ProviderHealthStateService:
     @classmethod
     def _set_json(cls, key: str, payload: dict[str, Any], *, ttl_seconds: int) -> None:
         try:
+            cls._attach_availability_aliases(payload)
             RedisService.get_sync_client().setex(key, ttl_seconds, dumps_json(payload))
         except Exception:
             return
+
+    @classmethod
+    def health_to_availability(cls, value: Any) -> str:
+        return cls.HEALTH_TO_AVAILABILITY.get(str(value or "unknown"), "unknown")
+
+    @classmethod
+    def _attach_availability_aliases(cls, payload: dict[str, Any]) -> dict[str, Any]:
+        health_status = str(payload.get("health_status") or "unknown")
+        runtime_health = payload.get("runtime_health_status") or payload.get("health_status")
+        payload["availability_status"] = cls.health_to_availability(health_status)
+        if runtime_health:
+            payload["runtime_availability_status"] = cls.health_to_availability(runtime_health)
+        if "health_score" in payload:
+            payload["availability_score"] = payload.get("health_score")
+        return payload
 
     @classmethod
     def _ewma(cls, previous_value: Any, current_value: int | None) -> int | None:

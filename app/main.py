@@ -497,16 +497,16 @@ def _migrate_app_setting_concurrency_columns(db) -> None:
         "responses_chat_adapter_context_window_tokens": f"ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_context_window_tokens INTEGER DEFAULT {runtime_settings.responses_chat_adapter_context_window_tokens}",
         "responses_chat_adapter_snapshot_max_bytes": f"ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_snapshot_max_bytes INTEGER DEFAULT {runtime_settings.responses_chat_adapter_snapshot_max_bytes}",
         "responses_chat_adapter_db_cleanup_interval_seconds": f"ALTER TABLE app_settings ADD COLUMN responses_chat_adapter_db_cleanup_interval_seconds INTEGER DEFAULT {runtime_settings.responses_chat_adapter_db_cleanup_interval_seconds}",
-        "request_log_retention_days": "ALTER TABLE app_settings ADD COLUMN request_log_retention_days INTEGER DEFAULT 90",
-        "admin_audit_log_retention_days": "ALTER TABLE app_settings ADD COLUMN admin_audit_log_retention_days INTEGER DEFAULT 180",
-        "request_child_log_retention_days": "ALTER TABLE app_settings ADD COLUMN request_child_log_retention_days INTEGER DEFAULT 90",
-        "exception_log_retention_days": "ALTER TABLE app_settings ADD COLUMN exception_log_retention_days INTEGER DEFAULT 180",
+        "request_log_retention_days": "ALTER TABLE app_settings ADD COLUMN request_log_retention_days INTEGER DEFAULT 7",
+        "admin_audit_log_retention_days": "ALTER TABLE app_settings ADD COLUMN admin_audit_log_retention_days INTEGER DEFAULT 7",
+        "request_child_log_retention_days": "ALTER TABLE app_settings ADD COLUMN request_child_log_retention_days INTEGER DEFAULT 7",
+        "exception_log_retention_days": "ALTER TABLE app_settings ADD COLUMN exception_log_retention_days INTEGER DEFAULT 7",
         "health_log_retention_days": "ALTER TABLE app_settings ADD COLUMN health_log_retention_days INTEGER DEFAULT 7",
-        "billing_log_retention_days": "ALTER TABLE app_settings ADD COLUMN billing_log_retention_days INTEGER DEFAULT 365",
-        "background_job_log_retention_days": "ALTER TABLE app_settings ADD COLUMN background_job_log_retention_days INTEGER DEFAULT 90",
-        "user_operation_log_retention_days": "ALTER TABLE app_settings ADD COLUMN user_operation_log_retention_days INTEGER DEFAULT 180",
-        "asset_log_retention_days": "ALTER TABLE app_settings ADD COLUMN asset_log_retention_days INTEGER DEFAULT 180",
-        "alert_event_retention_days": "ALTER TABLE app_settings ADD COLUMN alert_event_retention_days INTEGER DEFAULT 180",
+        "billing_log_retention_days": "ALTER TABLE app_settings ADD COLUMN billing_log_retention_days INTEGER DEFAULT 7",
+        "background_job_log_retention_days": "ALTER TABLE app_settings ADD COLUMN background_job_log_retention_days INTEGER DEFAULT 7",
+        "user_operation_log_retention_days": "ALTER TABLE app_settings ADD COLUMN user_operation_log_retention_days INTEGER DEFAULT 7",
+        "asset_log_retention_days": "ALTER TABLE app_settings ADD COLUMN asset_log_retention_days INTEGER DEFAULT 7",
+        "alert_event_retention_days": "ALTER TABLE app_settings ADD COLUMN alert_event_retention_days INTEGER DEFAULT 7",
     }
     changed = False
     added_columns: set[str] = set()
@@ -687,6 +687,8 @@ def _migrate_cache_price_columns(db) -> None:
             "upstream_usage_missing": "ALTER TABLE request_logs ADD COLUMN upstream_usage_missing BOOLEAN",
             "usage_details_json": "ALTER TABLE request_logs ADD COLUMN usage_details_json TEXT",
             "request_headers_json": "ALTER TABLE request_logs ADD COLUMN request_headers_json TEXT",
+            "billable": f"ALTER TABLE request_logs ADD COLUMN billable BOOLEAN NOT NULL DEFAULT {false_default}",
+            "billable_reason": "ALTER TABLE request_logs ADD COLUMN billable_reason TEXT",
             **content_guard_compat["request_logs"],
         },
         "api_client_billing_records": {
@@ -1320,6 +1322,10 @@ async def api_client_auth_error_handler(request: Request, exc: ApiClientAuthErro
         status_code=exc.status_code,
         detail={"message": exc.message, "code": exc.code},
     )
+    headers = {"X-Trace-Id": trace_id or "", "X-Request-Id": trace_id or ""}
+    retry_after_seconds = getattr(exc, "retry_after_seconds", None)
+    if retry_after_seconds is not None and int(retry_after_seconds or 0) > 0:
+        headers["Retry-After"] = str(int(retry_after_seconds))
     return JSONResponse(
         status_code=exc.status_code,
         content=OpenAIErrorService.build_error_payload(
@@ -1331,8 +1337,9 @@ async def api_client_auth_error_handler(request: Request, exc: ApiClientAuthErro
             recoverable=bool(classified["recoverable"]),
             category=str(classified["category"]),
             status_code=exc.status_code,
+            retry_after_ms=(int(retry_after_seconds) * 1000 if retry_after_seconds is not None else None),
         ),
-        headers={"X-Trace-Id": trace_id or "", "X-Request-Id": trace_id or ""},
+        headers=headers,
     )
 
 

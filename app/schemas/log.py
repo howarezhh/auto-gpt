@@ -27,6 +27,8 @@ class RequestLogOut(BaseModel):
     is_stream: bool
     has_image: bool
     success: bool
+    billable: bool = False
+    billable_reason: str | None = None
     status_code: int | None
     latency_ms: int | None
     first_token_latency_ms: int | None
@@ -128,6 +130,7 @@ class LogSummaryOut(BaseModel):
     total_requests: int = 0
     success_requests: int = 0
     failed_requests: int = 0
+    billable_requests: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0

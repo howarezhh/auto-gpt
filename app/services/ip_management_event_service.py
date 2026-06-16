@@ -208,7 +208,8 @@ class IpManagementEventService:
 
     @staticmethod
     def cleanup_old_events(db: Session, *, retention_days: int) -> int:
-        cutoff = now_beijing() - timedelta(days=max(1, int(retention_days or 30)))
+        normalized_retention_days = min(7, max(1, int(retention_days or 7)))
+        cutoff = now_beijing() - timedelta(days=normalized_retention_days)
         total_deleted = 0
         for _ in range(IpManagementEventService.CLEANUP_MAX_BATCHES):
             ids = list(

@@ -577,7 +577,7 @@ class RequestLogQueueService:
     @classmethod
     def discard_pending(cls) -> dict[str, int]:
         """清空尚未落库的请求日志队列，供管理员执行日志清空时避免旧日志回流。"""
-        discarded = {"ingress": 0, "queued": 0, "processing": 0, "dead_letter": 0}
+        discarded = {"ingress": 0, "queued": 0, "processing": 0, "dead_letter": 0, "failure_count": 0}
         queue = cls._ingress_queue
         if queue is not None:
             while True:
@@ -593,7 +593,8 @@ class RequestLogQueueService:
             discarded["queued"] = int(client.llen(cls.QUEUE_KEY) or 0)
             discarded["processing"] = int(client.llen(cls.PROCESSING_KEY) or 0)
             discarded["dead_letter"] = int(client.llen(cls.DEAD_LETTER_KEY) or 0)
-            client.delete(cls.QUEUE_KEY, cls.PROCESSING_KEY, cls.DEAD_LETTER_KEY)
+            discarded["failure_count"] = int(client.get(cls.FAILURE_COUNT_KEY) or 0)
+            client.delete(cls.QUEUE_KEY, cls.PROCESSING_KEY, cls.DEAD_LETTER_KEY, cls.FAILURE_COUNT_KEY)
         except (RedisError, RuntimeError, TypeError, ValueError) as exc:
             logger.warning("Failed to discard pending request log queue before clearing logs: %s", exc)
         return discarded

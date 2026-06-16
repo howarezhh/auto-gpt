@@ -279,6 +279,64 @@ class LoggingQueue:
         }
 
     @classmethod
+    def discard_pending(cls, *, event_names: set[str] | None = None) -> dict[str, int]:
+        """清理尚未落库或已进入死信的类型化日志，避免删除后旧事件回流。"""
+        discarded = {"queued": 0, "processing": 0, "dead_letter": 0, "failure_count": 0}
+        if not cls.enabled():
+            return discarded
+        try:
+            client = RedisService.get_sync_client()
+            if event_names is None:
+                discarded["queued"] = int(client.llen(cls.QUEUE_KEY) or 0)
+                discarded["processing"] = int(client.llen(cls.PROCESSING_KEY) or 0)
+                discarded["dead_letter"] = int(client.llen(cls.DEAD_LETTER_KEY) or 0)
+                discarded["failure_count"] = int(client.get(cls.FAILURE_COUNT_KEY) or 0)
+                client.delete(cls.QUEUE_KEY, cls.PROCESSING_KEY, cls.DEAD_LETTER_KEY, cls.FAILURE_COUNT_KEY)
+                return discarded
+
+            event_names = {str(name) for name in event_names if str(name).strip()}
+            discarded["queued"] = cls._discard_matching_list_items(client, cls.QUEUE_KEY, event_names)
+            discarded["processing"] = cls._discard_matching_list_items(client, cls.PROCESSING_KEY, event_names)
+            discarded["dead_letter"] = cls._discard_matching_list_items(client, cls.DEAD_LETTER_KEY, event_names)
+        except (RedisError, RuntimeError, TypeError, ValueError) as exc:
+            logger.warning("Failed to discard pending typed log queue before deleting logs: %s", exc)
+        return discarded
+
+    @classmethod
+    def _discard_matching_list_items(cls, client: Any, key: str, event_names: set[str]) -> int:
+        raw_items = list(client.lrange(key, 0, -1) or [])
+        if not raw_items:
+            return 0
+        kept_items: list[str] = []
+        discarded_count = 0
+        for raw_item in raw_items:
+            item_text = raw_item.decode("utf-8", errors="ignore") if isinstance(raw_item, bytes) else str(raw_item)
+            if cls._raw_item_matches_event_names(item_text, event_names):
+                discarded_count += 1
+            else:
+                kept_items.append(item_text)
+        pipe = client.pipeline(transaction=True)
+        pipe.delete(key)
+        if kept_items:
+            pipe.rpush(key, *kept_items)
+        pipe.execute()
+        return discarded_count
+
+    @staticmethod
+    def _raw_item_matches_event_names(raw_item: str, event_names: set[str]) -> bool:
+        payload = loads_json(raw_item, {})
+        if isinstance(payload, dict) and "item" in payload and "envelope" not in payload:
+            nested = payload.get("item")
+            if isinstance(nested, str):
+                payload = loads_json(nested, {})
+        if not isinstance(payload, dict):
+            return False
+        envelope = payload.get("envelope")
+        if not isinstance(envelope, dict):
+            return False
+        return str(envelope.get("event_name") or "") in event_names
+
+    @classmethod
     async def wait_until_idle(
         cls,
         *,

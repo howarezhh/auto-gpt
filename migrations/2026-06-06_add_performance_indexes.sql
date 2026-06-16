@@ -14,13 +14,13 @@ ON provider_models(provider_id, model_name);
 
 -- 1.2 启用状态 + 优先级索引
 -- 用途：快速获取所有启用的模型并按优先级排序
--- 影响：健康检查和模型列表查询提升 5-10 倍
+-- 影响：可用性检测和模型列表查询提升 5-10 倍
 CREATE INDEX IF NOT EXISTS idx_provider_models_enabled_priority
 ON provider_models(enabled, priority)
 WHERE enabled = true;
 
--- 1.3 健康状态索引
--- 用途：快速筛选健康/异常模型
+-- 1.3 可用状态索引
+-- 用途：快速筛选可用/异常模型
 CREATE INDEX IF NOT EXISTS idx_provider_models_health_status
 ON provider_models(health_status, last_health_check_at DESC)
 WHERE enabled = true;
@@ -36,8 +36,8 @@ CREATE INDEX IF NOT EXISTS idx_providers_enabled_priority
 ON providers(enabled, priority)
 WHERE enabled = true;
 
--- 2.2 健康状态索引
--- 用途：健康检查和监控查询
+-- 2.2 可用状态索引
+-- 用途：可用性检测和监控查询
 CREATE INDEX IF NOT EXISTS idx_providers_health_status
 ON providers(health_status, last_health_check_at DESC)
 WHERE enabled = true;
@@ -99,8 +99,8 @@ CREATE INDEX IF NOT EXISTS idx_model_catalog_name_enabled
 ON model_catalog(model_name, enabled)
 WHERE enabled = true;
 
--- 5.2 健康状态索引
--- 用途：健康模型列表查询
+-- 5.2 可用状态索引
+-- 用途：可用模型列表查询
 CREATE INDEX IF NOT EXISTS idx_model_catalog_health_status
 ON model_catalog(health_status, last_health_check_at DESC)
 WHERE enabled = true;

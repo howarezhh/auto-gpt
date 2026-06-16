@@ -127,7 +127,7 @@
                 <article
                     class="user-key-object-card {% if editing_api_key_id == item.id %}is-editing{% endif %}"
                     data-user-key-card
-                    data-filter-text="{{ (item.name ~ ' ' ~ (item.remark or '') ~ ' ' ~ item.key_masked ~ ' 健康优先 ' ~ status_label)|lower }}"
+                    data-filter-text="{{ (item.name ~ ' ' ~ (item.remark or '') ~ ' ' ~ item.key_masked ~ ' 可用性优先 ' ~ status_label)|lower }}"
                     data-status="{{ item.status }}"
                     data-has-raw="{{ 'true' if item.raw_api_key else 'false' }}"
                 >
@@ -170,7 +170,7 @@
                     <div class="user-key-object-meta">
                         <div>
                             <span>路由主策略</span>
-                            <strong>健康优先</strong>
+                            <strong>可用性优先</strong>
                         </div>
                         <div>
                             <span>授权提供商</span>

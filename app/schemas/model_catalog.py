@@ -24,8 +24,13 @@ class ModelProviderBindingOut(ModelProviderBindingBase):
     provider_health_status: str
     provider_circuit_state: str | None = None
     provider_maintenance_mode_enabled: bool = False
+    provider_model_id: int | None = None
     model_health_status: str | None = None
     model_circuit_state: str | None = None
+    supports_stream: bool = False
+    supports_tools: bool = False
+    supports_vision: bool = False
+    supports_image_generation: bool = False
     effective_input_price_per_1k: Decimal | None = None
     effective_output_price_per_1k: Decimal | None = None
     effective_cache_price_per_1k: Decimal | None = None
@@ -34,6 +39,12 @@ class ModelProviderBindingOut(ModelProviderBindingBase):
     direct_output_price_per_1k: Decimal | None = None
     direct_cache_price_per_1k: Decimal | None = None
     direct_cache_write_price_per_1k: Decimal | None = None
+    trust_status: str = "unknown"
+    trust_status_label: str = "未检测"
+    trust_status_reason: str | None = None
+    content_integrity_status: str = "unknown"
+    content_probe_last_passed_at: datetime | None = None
+    content_probe_last_failed_at: datetime | None = None
 
 
 class ModelCatalogBase(BaseModel):
@@ -163,6 +174,7 @@ class ModelCatalogOut(ModelCatalogBase):
     available_provider_count: int = 0
     enabled_provider_count: int = 0
     health_status: str = "unhealthy"
+    health_reason: str | None = None
     healthy_provider_count: int = 0
     unhealthy_provider_count: int = 0
     lowest_input_price_per_1k: Decimal | None = None
@@ -177,6 +189,7 @@ class ModelCatalogOut(ModelCatalogBase):
     min_bound_price_multiplier: float | None = None
     max_bound_price_multiplier: float | None = None
     available_provider_names: list[str] = Field(default_factory=list)
+    provider_bindings: list[ModelProviderBindingOut] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 
@@ -220,6 +233,7 @@ class ModelCatalogOptionOut(BaseModel):
     bound_provider_count: int = 0
     available_provider_count: int = 0
     enabled_provider_count: int = 0
+    provider_bindings: list[ModelProviderBindingOut] = Field(default_factory=list)
 
 
 class UserModelOut(BaseModel):

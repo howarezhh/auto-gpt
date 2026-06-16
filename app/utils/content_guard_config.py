@@ -79,7 +79,7 @@ CONTENT_GUARD_SETTING_GROUPS: dict[str, tuple[str, ...]] = {
 
 CONTENT_GUARD_SETTING_DESCRIPTIONS: dict[str, str] = {
     "content_guard_enabled": "内容防护治理总开关；关闭后运行时检测、自动预检和自动处置同时停用。",
-    "content_guard_precheck_auto_enabled": "内容防护预先防护自动检测开关；仅在总开关启用时生效，不依赖健康检查总开关。",
+    "content_guard_precheck_auto_enabled": "内容防护预先防护自动检测开关；仅在总开关启用时生效，不依赖可用性检测总开关。",
     "content_guard_json_probe_enabled": "严格 JSON 探针开关；默认关闭，仅在内容防护页面启用后才参与可选能力检测。",
     "content_guard_probe_protocol_type": "内容防护可信探针和预检探针的端点协议优先级；默认优先使用 Chat Completions。",
     "content_guard_block_on_high_risk": "高风险命中是否允许阻断、切换提供商或安全错误；record_only 策略下必须关闭。",

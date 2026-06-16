@@ -10,14 +10,19 @@ from app.utils.decimal_utils import money_to_scaled_int
 
 
 class RateLimitExceededError(Exception):
-    def __init__(self, message: str, *, code: str, key: str) -> None:
+    def __init__(self, message: str, *, code: str, key: str, retry_after_seconds: int | None = None) -> None:
         super().__init__(message)
         self.code = code
         self.key = key
         self.message = message
+        self.retry_after_seconds = retry_after_seconds
 
 
 class RateLimitService:
+    RETRY_FAILURE_LIMIT = 5
+    RETRY_FAILURE_WINDOW_SECONDS = 15
+    RETRY_FAILURE_COOLDOWN_SECONDS = 30
+
     _MULTI_WINDOW_LIMIT_LUA = """
 local count = tonumber(ARGV[1])
 local ttl = tonumber(ARGV[2])
@@ -237,10 +242,97 @@ return {'ok', '', max_current}
             await RateLimitService._check_window_limits(entries=rpm_entries, ttl_seconds=120)
         except RateLimitExceededError:
             raise
+
+    @staticmethod
+    async def check_abnormal_retry_cooldown(
+        *,
+        api_key_id: int | None = None,
+        account_id: int | None = None,
+        source_ip: str | None = None,
+    ) -> None:
+        if not any((api_key_id, account_id, source_ip)):
+            return
+        try:
+            client = RedisService.get_client()
+            keys = RateLimitService._retry_cooldown_keys(
+                api_key_id=api_key_id,
+                account_id=account_id,
+                source_ip=source_ip,
+            )
+            if not keys:
+                return
+            values = await client.mget(keys)
+            for key, value in zip(keys, values, strict=True):
+                if value:
+                    ttl = int(await client.ttl(key) or 0)
+                    raise RateLimitExceededError(
+                        "Too many failed retry attempts",
+                        code="retry_backoff_required",
+                        key=key,
+                        retry_after_seconds=max(1, ttl),
+                    )
+        except RateLimitExceededError:
+            raise
         except Exception:
             if RateLimitService._allow_local_fallback():
                 return
             raise
+
+    @staticmethod
+    def record_abnormal_retry_failure(
+        *,
+        api_key_id: int | None = None,
+        account_id: int | None = None,
+        source_ip: str | None = None,
+    ) -> None:
+        if not any((api_key_id, account_id, source_ip)):
+            return
+        try:
+            client = RedisService.get_sync_client()
+            for key, cooldown_key in RateLimitService._retry_failure_key_pairs(
+                api_key_id=api_key_id,
+                account_id=account_id,
+                source_ip=source_ip,
+            ):
+                current = int(client.incr(key) or 0)
+                client.expire(key, RateLimitService.RETRY_FAILURE_WINDOW_SECONDS)
+                if current >= RateLimitService.RETRY_FAILURE_LIMIT:
+                    client.setex(cooldown_key, RateLimitService.RETRY_FAILURE_COOLDOWN_SECONDS, "1")
+        except Exception:
+            return
+
+    @staticmethod
+    def _retry_failure_key_pairs(
+        *,
+        api_key_id: int | None,
+        account_id: int | None,
+        source_ip: str | None,
+    ) -> list[tuple[str, str]]:
+        pairs: list[tuple[str, str]] = []
+        if api_key_id is not None:
+            pairs.append((f"retry_failure:api_key:{api_key_id}", f"retry_cooldown:api_key:{api_key_id}"))
+        if account_id is not None:
+            pairs.append((f"retry_failure:account:{account_id}", f"retry_cooldown:account:{account_id}"))
+        if source_ip:
+            safe_ip = str(source_ip).replace(":", "_").replace("/", "_")
+            pairs.append((f"retry_failure:ip:{safe_ip}", f"retry_cooldown:ip:{safe_ip}"))
+        return pairs
+
+    @staticmethod
+    def _retry_cooldown_keys(
+        *,
+        api_key_id: int | None,
+        account_id: int | None,
+        source_ip: str | None,
+    ) -> list[str]:
+        return [
+            cooldown_key
+            for _failure_key, cooldown_key in RateLimitService._retry_failure_key_pairs(
+                api_key_id=api_key_id,
+                account_id=account_id,
+                source_ip=source_ip,
+            )
+        ]
 
     @staticmethod
     async def _check_window_limits(*, entries: list[tuple[str, int, str, str]], ttl_seconds: int) -> None:

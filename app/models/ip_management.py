@@ -24,7 +24,7 @@ class IpManagementSetting(Base):
     rate_limit_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     event_logging_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     event_sample_rate: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
-    event_retention_days: Mapped[int] = mapped_column(Integer, nullable=False, default=30)
+    event_retention_days: Mapped[int] = mapped_column(Integer, nullable=False, default=7)
     store_raw_headers_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     ip_masking_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     fail_open_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)

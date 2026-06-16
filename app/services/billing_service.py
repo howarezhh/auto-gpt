@@ -60,7 +60,7 @@ class BillingService:
 
     @staticmethod
     def compute_log_cost(db: Session, log: RequestLog, *, billing_currency: str | None = None) -> dict[str, Decimal | str | None]:
-        if not log.success:
+        if not getattr(log, "billable", False):
             return {"prompt_cost": BillingService.to_decimal(0), "completion_cost": BillingService.to_decimal(0), "total_cost": BillingService.to_decimal(0), "billing_status": "no_charge"}
         if log.api_client_key_id is None:
             return {"prompt_cost": BillingService.to_decimal(0), "completion_cost": BillingService.to_decimal(0), "total_cost": BillingService.to_decimal(0), "billing_status": "internal_request"}

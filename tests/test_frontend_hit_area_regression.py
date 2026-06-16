@@ -43,7 +43,7 @@ def test_frontend_protocol_detection_skips_native_protocol_models() -> None:
     app_js = read_text("app/static/js/app.js")
 
     assert '["gemini", "claude_messages"].includes(String(item.protocolType || ""))' in app_js
-    assert "Gemini/Claude 原生协议模型无需端点协议检测，请使用健康检测和可信检测" in app_js
+    assert "Gemini/Claude 原生协议模型无需端点协议检测，请使用可用性检测和可信检测" in app_js
     assert "item.protocolLabel = formatProviderModelProtocolLabel(modelConfig)" not in app_js
     assert "protocolLabel: formatProviderModelProtocolLabel(modelConfig)" in app_js
     assert "protocolLabel: formatProviderModelProtocolLabel(model)" in app_js
@@ -62,6 +62,23 @@ def test_frontend_probe_buttons_use_per_model_live_results() -> None:
     assert '"/api/providers/test-all"' not in app_js
     assert '"/api/models/test-all"' not in app_js
     assert '"/api/providers/models/protocol-detection"' in app_js
+
+
+def test_probe_result_lists_expose_json_detail_and_copy() -> None:
+    app_js = read_text("app/static/js/app.js")
+
+    assert "const probeDetailStore = new Map();" in app_js
+    assert "function renderProbeDetailButton" in app_js
+    assert 'data-probe-detail="' in app_js
+    assert 'data-probe-detail-copy="' in app_js
+    assert "raw_provider_response: raw || null" in app_js
+    assert "await copyText(formatRawProviderResponse(entry), button);" in app_js
+    assert "renderEndpointProbeHtml(endpointResults)" in app_js
+    assert "renderProbeDetailButton(item.detail || item, item.displayName || \"可用性检测\")" in app_js
+    assert "renderProbeDetailButton(item.detail || item, item.displayName || \"可信检测\")" in app_js
+    assert "renderProbeDetailButton(item.detail || item, item.displayName || \"协议检测\")" in app_js
+    assert "renderProbeDetailButton(item, item.provider_name || \"渠道检测\")" in app_js
+    assert "renderProbeDetailButton(model, model.model_name || \"模型检测\")" in app_js
 
 
 def test_playground_uses_mode_workbench_layout_and_provider_terms() -> None:
@@ -131,7 +148,7 @@ def test_billing_frontend_exposes_multicurrency_pricing_fields() -> None:
     assert "exchange_rate_to_billing_currency: parseOptionalRawDecimalField(exchangeRateInput, \"汇率\")" in app_js
     assert "exchange_rate_to_billing_currency: exchangeRateInput.value.trim() ? Number(exchangeRateInput.value) : null" not in app_js
     assert "return toPricePer1K(value);" not in app_js
-    assert "js/app.js') }}?v=20260614-" in base_html
+    assert "js/app.js') }}?v=20260616-" in base_html
 
     assert "<th>原币种</th>" in api_key_detail_html
     assert "<th>原币种</th>" in user_billing_html
@@ -189,7 +206,7 @@ def test_external_native_protocol_entries_are_visible_in_docs_and_user_pages() -
     assert "Claude 原生入口" in user_home_html
     assert "外部代理生效" in ip_management_html
     assert 'external_v1: "外部代理"' in app_js
-    assert "app.js') }}?v=20260614-" in base_html
+    assert "app.js') }}?v=20260616-" in base_html
 
 
 def test_provider_directory_uses_server_pagination_and_same_row_filters() -> None:
@@ -213,9 +230,32 @@ def test_provider_directory_uses_server_pagination_and_same_row_filters() -> Non
     assert 'id="provider-next-page-btn"' in providers_html
     assert "/api/providers/directory" in app_js
     assert "page_size: String(pageSize || 20)" in app_js
+    assert "if (Array.isArray(overview.items)) return overview.items;" in app_js
+    assert "function normalizeProviderDirectoryResponse" in app_js
+    assert "providers = directory.items;" in app_js
+    assert 'api.get("/api/providers")' in app_js
     assert "loadAllProviderDirectoryItemsForCurrentFilters" in app_js
     assert ".provider-directory-filters" in app_css
     assert "repeat(7, minmax(118px, 1fr))" in app_css
+
+
+def test_provider_and_model_import_export_controls_exist() -> None:
+    providers_html = read_text("app/templates/providers.html")
+    provider_models_html = read_text("app/templates/provider_models.html")
+    app_js = read_text("app/static/js/app.js")
+
+    assert 'id="provider-export-btn"' in providers_html
+    assert 'id="provider-model-export-btn"' in provider_models_html
+    assert 'id="provider-model-batch-import-open-btn"' in provider_models_html
+    assert 'id="provider-model-batch-import-modal"' in provider_models_html
+    assert 'id="provider-model-batch-import-template-btn"' in provider_models_html
+    assert 'id="provider-model-batch-import-copy-template-btn"' in provider_models_html
+    assert 'id="provider-model-batch-import-preview-btn"' in provider_models_html
+    assert 'id="provider-model-batch-import-submit-btn"' in provider_models_html
+    assert "window.location.href = \"/api/providers/export\";" in app_js
+    assert "window.location.href = \"/api/providers/models/export\";" in app_js
+    assert "ensureProviderModelBatchImportTemplate" in app_js
+    assert "previewProviderModelBatchImport" in app_js
 
 
 def test_frontend_locks_native_protocol_by_model_group() -> None:
@@ -287,9 +327,39 @@ def test_models_page_has_group_filter_and_immediate_test_progress() -> None:
     assert "model_group=model_group" in models_router
     assert "normalized_model_group = ProviderService.normalize_model_group(model_group)" in model_catalog_service
     assert "ModelCatalog.model_group == normalized_model_group" in model_catalog_service
-    assert "renderSingleModelTestProgressBody({" in app_js
-    assert "请求已提交，正在按模型绑定的提供商执行健康测试。" in app_js
+    assert 'id="models-test-all-btn"' in models_html
+    assert "model-list-actions" in models_html
+    assert "一键测试" in models_html
+    assert "function renderModelBatchTestProgress(batchState)" in app_js
+    assert "function runModelProviderTests(modelOption, batchState, features, refresh)" in app_js
+    assert "Promise.allSettled(providers.map(async (providerItem)" in app_js
+    assert "const MODEL_TEST_START_GAP_MS = 10000" in app_js
+    assert "previousTask.catch(() => undefined)" in app_js
+    assert "model-batch-probe-card" in app_js
+    assert "model-batch-provider-chip" not in app_js
+    assert "openHealthCheckResultModal(" in app_js
     assert "refreshHealthCheckResultModal(" in app_js
+    assert "data-settings-tooltip-title=\"模型可用性原因\"" in app_js
+    assert "health_reason = ModelCatalogService._build_catalog_health_reason" in model_catalog_service
+
+
+def test_batch_probe_results_render_independent_cards_and_live_feedback() -> None:
+    app_js = read_text("app/static/js/app.js")
+    app_css = read_text("app/static/css/app.css")
+
+    assert "flattenBatchConnectivityProbeResults" in app_js
+    assert "formatBatchConnectivityProbeProgress" in app_js
+    assert "playground-batch-probe-item" in app_js
+    assert "model-batch-probe-card" in app_js
+    assert "renderModelBatchProbeStatusBadge" in app_js
+    assert "probe_kind: \"model_batch_provider\"" in app_js
+    assert "renderProbeDetailButton(provider.detail || provider" in app_js
+    assert "renderProbeDetailButton(model," in app_js
+    assert ".model-batch-probe-card[data-status=\"running\"]::before" in app_css
+    assert ".playground-batch-probe-item[data-status=\"running\"]::before" in app_css
+    assert ".status-running::before" in app_css
+    assert "@keyframes probe-running-sheen" in app_css
+    assert "model-batch-provider-chip" not in app_css
 
 
 def test_ip_management_event_log_filters_and_detail_are_wired() -> None:
@@ -321,15 +391,21 @@ def test_log_center_delete_filtered_controls_are_wired() -> None:
 
     assert 'id="logs-delete-filtered-btn"' in logs_html
     assert 'id="typed-logs-delete-filtered-btn"' in logs_html
+    assert 'id="typed-logs-clear-btn"' in logs_html
     assert 'id="logs-start-at"' in logs_html
     assert 'id="logs-end-at"' in logs_html
     assert "/api/logs/filtered" in app_js
     assert "/api/logging/typed-events/" in app_js
     assert "hasScopedDeleteParams" in app_js
     assert "describeScopedDeleteParams" in app_js
+    assert "promptLogDeleteTimeScope" in app_js
     assert "删除筛选出的请求日志" in app_js
     assert "删除筛选出的${config.title}" in app_js
+    assert 'clear_all: "true"' in app_js
     assert '@router.delete("/filtered")' in logs_router
     assert "delete_logs_by_filters" in logs_router
+    assert "discarded_pending_request_logs" in logs_router
     assert '@router.delete("/typed-events/{typed_log_type}")' in logging_router
+    assert "clear_all: bool" in logging_router
+    assert "discarded_pending_typed_logs" in logging_router
     assert "request_path=request_path or path" in logging_router

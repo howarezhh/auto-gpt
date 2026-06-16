@@ -134,18 +134,14 @@ async def clear_logs(request: Request, db: Session = Depends(get_db)) -> dict:
         timeout_seconds=2,
         poll_interval_seconds=0.05,
     )
-    discarded_queue = (
-        RequestLogQueueService.discard_pending()
-        if not bool(queue_status.get("idle"))
-        else {"ingress": 0, "queued": 0, "processing": 0}
-    )
+    discarded_queue = RequestLogQueueService.discard_pending()
     deleted = LogService.clear_logs(db)
     _record_log_admin_audit(
         db,
         request=request,
         action="clear_logs",
         summary=f"清空请求日志 {deleted} 条",
-        detail={"deleted": deleted},
+        detail={"deleted": deleted, "discarded_pending_request_logs": discarded_queue},
         risk_level="high",
     )
     return {
@@ -221,6 +217,7 @@ async def delete_filtered_logs(
         timeout_seconds=2,
         poll_interval_seconds=0.05,
     )
+    discarded_queue = RequestLogQueueService.discard_pending()
     deleted = LogService.delete_logs_by_filters(
         db,
         log_type=log_type,
@@ -262,6 +259,7 @@ async def delete_filtered_logs(
             "filters": filter_snapshot,
             "exclude_health_checks": exclude_health_checks,
             "queue_idle_before_delete": bool(queue_status.get("idle")),
+            "discarded_pending_request_logs": discarded_queue,
         },
         risk_level="high",
     )
@@ -269,6 +267,7 @@ async def delete_filtered_logs(
         "deleted": deleted,
         "queue_idle_before_delete": bool(queue_status.get("idle")),
         "queue_timed_out": bool(queue_status.get("timed_out")),
+        "discarded_pending_request_logs": discarded_queue,
     }
 
 

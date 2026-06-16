@@ -294,7 +294,7 @@ class ContentGuardService:
         has_image: bool = False,
         require_tools: bool = False,
     ) -> bool:
-        """判断请求是否应优先走可信提供商，不执行健康探测。"""
+        """判断请求是否应优先走可信提供商，不执行可用探测。"""
         try:
             if not bool(getattr(SettingService.get_cached(), "content_guard_enabled", True)):
                 return False

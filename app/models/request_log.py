@@ -28,7 +28,7 @@ class RequestLog(Base):
             "id",
             postgresql_where=text(
                 "api_client_key_id IS NOT NULL "
-                "AND success = true "
+                "AND billable = true "
                 "AND log_type IN ('chat','responses','embeddings') "
                 "AND request_path IS NOT NULL "
                 "AND request_path <> '/v1/models' "
@@ -63,6 +63,8 @@ class RequestLog(Base):
     is_stream: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     has_image: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     success: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    billable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    billable_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     first_token_latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)

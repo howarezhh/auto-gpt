@@ -1169,3 +1169,87 @@ When auditing production-like logs, inspect table columns first with SQLAlchemy 
 - Related Files: app/models/provider_model.py, app/models/provider.py, app/services/health_service.py
 
 ---
+
+## [ERR-20260615-001] powershell_here_string_fstring_quote_split
+
+**Logged**: 2026-06-15T18:33:28+08:00
+**Priority**: low
+**Status**: pending
+**Area**: tooling
+
+### Summary
+A Python verification snippet failed because an f-string containing dictionary key quotes was nested inside `pwsh -Command` and PowerShell split the quoted expression before Python received it.
+
+### Error
+```text
+NameError: name 'provider_bindings' is not defined
+```
+
+### Context
+- Attempted to run a PowerShell here-string piped into `.\.venv\Scripts\python.exe -`.
+- The Python f-string included expressions like `len(list_item["provider_bindings"])` inside a nested PowerShell command string.
+
+### Suggested Fix
+For nested PowerShell/Python verification snippets, prefer `json.dumps(...)` or assign dictionary values to local variables before formatting; avoid quoted dictionary-key expressions inside f-strings passed through `pwsh -Command`.
+
+### Metadata
+- Reproducible: yes
+- Related Files: app/schemas/model_catalog.py, app/services/model_catalog_service.py
+
+---
+
+## [ERR-20260616-001] nested_powershell_command_variable_stripped
+
+**Logged**: 2026-06-16T00:00:00+08:00
+**Priority**: low
+**Status**: pending
+**Area**: tooling
+
+### Summary
+A line-range inspection command failed because PowerShell variables inside a nested `pwsh -Command "..."` string were parsed by the outer shell before the inner PowerShell received them.
+
+### Error
+```text
+ParserError: Missing expression after unary operator '++'.
+```
+
+### Context
+- Attempted to read numbered file slices with `$lines`, `$start`, `$end` and a `for` loop inside a nested PowerShell command string.
+- The inner variables arrived stripped, producing fragments like `=11520; =11670; for (=; -le ; ++)`.
+
+### Suggested Fix
+For quick file slices in nested PowerShell, prefer `Get-Content | Select-Object -Skip N -First M`; if variables are required, wrap the inner command as a script block and escape `$` deliberately.
+
+### Metadata
+- Reproducible: yes
+- Related Files: app/static/js/app.js, app/static/css/app.css
+
+---
+
+## [ERR-20260616-002] git_not_available_in_pwsh_path
+
+**Logged**: 2026-06-16T23:45:00+08:00
+**Priority**: low
+**Status**: pending
+**Area**: tooling
+
+### Summary
+`git status -sb` failed in the required PowerShell 7 command environment because `git` was not available on PATH.
+
+### Error
+```text
+git: The term 'git' is not recognized as a name of a cmdlet, function, script file, or executable program.
+```
+
+### Context
+- Attempted to inspect the worktree after a runtime configuration fix.
+- The project requires Windows commands to run through `pwsh -NoLogo -NoProfile -Command ...`; that shell could not resolve `git`.
+
+### Suggested Fix
+Use an absolute Git executable path if available, repair the PowerShell 7 PATH, or skip git status when no repository file edits need staging.
+
+### Metadata
+- Reproducible: unknown
+- Related Files: 项目全局规范.md
+
+---

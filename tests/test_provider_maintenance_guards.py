@@ -109,7 +109,7 @@ def test_manual_endpoint_protocol_detection_allows_maintenance_provider(monkeypa
 
 def test_auto_health_probe_returns_maintenance_result_without_running_phases(monkeypatch) -> None:
     async def fail_if_phase_runs(*args, **kwargs):
-        raise AssertionError("维护模式下自动健康检测不应运行上游探针阶段")
+        raise AssertionError("维护模式下自动可用性检测不应运行上游探针阶段")
 
     provider = SimpleNamespace(
         id=1,

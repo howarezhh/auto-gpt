@@ -56,6 +56,9 @@
             <article class="api-key-chip-card">
                 <strong>调用次数</strong>
                 <span>总计 {{ account_summary.total_requests }}</span>
+                <span>成功 {{ account_summary.success_requests }}</span>
+                <span>失败 {{ account_summary.failed_requests }}</span>
+                <span>可计费 {{ account_summary.billable_requests }}</span>
                 <span>今日 {{ account_summary.day_requests }}</span>
                 <span>本月 {{ account_summary.month_requests }}</span>
             </article>

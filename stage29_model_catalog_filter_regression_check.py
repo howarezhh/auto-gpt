@@ -32,7 +32,7 @@ class _FakeDb:
 
 
 def _model_health_filter_should_not_replace_enabled_filter() -> None:
-    catalogs = [_FakeCatalog("健康停用模型"), _FakeCatalog("异常停用模型"), _FakeCatalog("健康启用模型")]
+    catalogs = [_FakeCatalog("可用停用模型"), _FakeCatalog("异常停用模型"), _FakeCatalog("可用启用模型")]
     filter_calls: list[dict] = []
 
     def fake_filter_query(**kwargs):
@@ -41,9 +41,9 @@ def _model_health_filter_should_not_replace_enabled_filter() -> None:
 
     def fake_serialize(catalog, _providers):
         health_map = {
-            "健康停用模型": "healthy",
+            "可用停用模型": "healthy",
             "异常停用模型": "unhealthy",
-            "健康启用模型": "healthy",
+            "可用启用模型": "healthy",
         }
         return {
             "model_name": catalog.model_name,

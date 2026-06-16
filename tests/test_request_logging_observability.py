@@ -57,6 +57,25 @@ class RequestLoggingObservabilityRegressionTest(unittest.TestCase):
 
         self.assertEqual(LogService.resolve_attempt_count(attempt_count=17, trace=trace), 0)
 
+    def test_serialize_logs_can_include_raw_api_key_for_user_detail(self):
+        log = RequestLog(
+            id=1002,
+            trace_id="trace-user-detail",
+            request_path="/v1/chat/completions",
+            requested_model="gpt-5.4",
+            model_name="gpt-5.4",
+            api_client_key_id=42,
+            success=True,
+        )
+
+        [serialized] = LogService.serialize_logs(
+            [log],
+            raw_api_key_by_id={42: "sk-user-detail-raw"},
+        )
+
+        self.assertEqual(serialized["raw_api_key"], "sk-user-detail-raw")
+        self.assertTrue(hasattr(LogService, "load_raw_api_keys_for_logs"))
+
     def test_success_typed_events_are_deduplicated_across_route_retries(self):
         trace = []
         auth_context = SimpleNamespace(

@@ -142,7 +142,7 @@ def _check_provider_rpm_is_hard_filter() -> None:
 
 def _check_mapping_recent_model_policy() -> None:
     healthy_recent = {
-        "model_name": "健康近期模型",
+        "model_name": "可用近期模型",
         "available": True,
         "health_tier": 0,
         "score": 1,
@@ -151,7 +151,7 @@ def _check_mapping_recent_model_policy() -> None:
         "order": 0,
     }
     healthy_other = {
-        "model_name": "健康高分模型",
+        "model_name": "可用高分模型",
         "available": True,
         "health_tier": 0,
         "score": 999,
@@ -163,9 +163,9 @@ def _check_mapping_recent_model_policy() -> None:
         [healthy_other, healthy_recent],
         strategy="weighted",
         sticky_key="会话-3",
-        recent_model_name="健康近期模型",
+        recent_model_name="可用近期模型",
     )
-    _assert(ordered[0]["model_name"] == "健康近期模型", "mapping should prefer recent model when it remains available")
+    _assert(ordered[0]["model_name"] == "可用近期模型", "mapping should prefer recent model when it remains available")
 
     unhealthy_recent = {
         **healthy_recent,

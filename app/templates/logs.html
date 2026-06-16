@@ -10,7 +10,7 @@
 <nav class="logs-segmented-nav" aria-label="日志类型" role="tablist">
     <button class="logs-segment active" type="button" role="tab" aria-selected="true" aria-controls="logs-request-panel" data-logging-tab="request">请求日志</button>
     <button class="logs-segment" type="button" role="tab" aria-selected="false" aria-controls="logs-typed-panel" data-logging-tab="exceptions">异常事件</button>
-    <button class="logs-segment" type="button" role="tab" aria-selected="false" aria-controls="logs-typed-panel" data-logging-tab="health-runs">健康检查日志</button>
+    <button class="logs-segment" type="button" role="tab" aria-selected="false" aria-controls="logs-typed-panel" data-logging-tab="health-runs">可用性检测日志</button>
     <button class="logs-segment" type="button" role="tab" aria-selected="false" aria-controls="logs-typed-panel" data-logging-tab="billing-events">计费日志</button>
     <button class="logs-segment" type="button" role="tab" aria-selected="false" aria-controls="logs-typed-panel" data-logging-tab="content-guard-events">内容防护日志</button>
     <button class="logs-segment" type="button" role="tab" aria-selected="false" aria-controls="logs-typed-panel" data-logging-tab="background-jobs">调度任务日志</button>
@@ -24,6 +24,7 @@
     <article class="metric-card"><span>当前请求量</span><strong data-log-summary="total_requests">0</strong></article>
     <article class="metric-card"><span>成功请求</span><strong data-log-summary="success_requests">0</strong></article>
     <article class="metric-card metric-card-alert"><span>失败请求</span><strong data-log-summary="failed_requests">0</strong></article>
+    <article class="metric-card"><span>可计费请求</span><strong data-log-summary="billable_requests">0</strong></article>
     <article class="metric-card"><span>关联密钥数</span><strong data-log-summary="matched_api_keys">0</strong></article>
     <article class="metric-card"><span>输入 Token</span><strong data-log-summary="prompt_tokens">0 token</strong></article>
     <article class="metric-card"><span>输出 Token</span><strong data-log-summary="completion_tokens">0 token</strong></article>
@@ -283,6 +284,7 @@
             <button class="btn btn-ghost interactive-btn" id="typed-logs-export-btn" type="button">导出当前类型</button>
             <button class="btn btn-ghost interactive-btn" id="typed-logs-refresh-btn" type="button">刷新</button>
             <button class="btn btn-danger-soft interactive-btn" id="typed-logs-delete-filtered-btn" type="button">删除筛选</button>
+            <button class="btn btn-danger-soft interactive-btn" id="typed-logs-clear-btn" type="button">清空当前类型</button>
         </div>
     </div>
     <div class="data-workspace-card">

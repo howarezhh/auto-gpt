@@ -10,14 +10,14 @@
     const BEIJING_TIME_ZONE = "Asia/Shanghai";
     const BEIJING_DATE_TIME_RE = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?)?$/;
     const LOG_TYPE_LABELS = {
-        health_check: "健康检查",
+        health_check: "可用性检测",
         chat: "对话请求",
         responses: "响应请求",
         moderations: "内容审核请求",
         files: "文件请求",
         embeddings: "历史向量请求（已下线）",
-        health_check_provider: "提供商健康检查",
-        health_check_model: "模型健康检查",
+        health_check_provider: "提供商可用性检测",
+        health_check_model: "模型可用性检测",
         proxy_generic: "通用代理日志",
         api_client_auth: "密钥鉴权失败日志",
         unsupported_endpoint: "不支持端点日志",
@@ -25,10 +25,10 @@
     };
 
     const HEALTH_STATUS_LABELS = {
-        healthy: "健康",
-        degraded: "异常",
+        healthy: "可用",
+        degraded: "降级",
         abnormal: "异常",
-        unhealthy: "异常",
+        unhealthy: "不可用",
         unknown: "未检测",
         skipped: "已跳过",
     };
@@ -1178,7 +1178,7 @@
         }
         const reader = response.body?.getReader();
         if (!reader) {
-            throw new Error("健康检查流式响应不可用");
+            throw new Error("可用性检测流式响应不可用");
         }
         const decoder = new TextDecoder();
         let buffer = "";
@@ -1385,7 +1385,7 @@
         const statusCode = result?.status_code ?? "-";
         const latencyMs = result?.latency_ms ?? "-";
         const statusText = formatHealthCheckOutcomeLabel(result);
-        const healthText = result?.health_status ? `，健康 ${formatHealthStatusLabel(result.health_status)}` : "";
+        const healthText = result?.health_status ? `，可用性 ${formatHealthStatusLabel(result.health_status)}` : "";
         const providerText = typeof result?.provider_success === "boolean"
             ? `，连通${result.provider_success ? "成功" : "失败"}`
             : "";
@@ -1411,6 +1411,7 @@
                     · 耗时 ${escapeHtml(String(item.latency_ms ?? "-"))} ms
                     · ${escapeHtml(item.message || "-")}
                     ${renderEndpointProbePolicyHtml(item)}
+                    · ${renderProbeDetailButton(item, item.endpoint_label || item.endpoint_path || "端点探测")}
                 </div>
             </div>
         `).join("");
@@ -1499,7 +1500,7 @@
         const titleName = options.name || result?.provider_name || result?.model_name || "测试对象";
         const modelResults = Array.isArray(result?.model_results) ? result.model_results : [];
         const endpointResults = Array.isArray(result?.endpoint_results) ? result.endpoint_results : [];
-        const healthLabel = scope === "model" ? "模型健康" : "整体可用性";
+        const healthLabel = scope === "model" ? "模型可用性" : "整体可用性";
         const healthValue = scope === "model"
             ? formatHealthStatusLabel(result?.health_status || "unknown")
             : formatProviderAvailabilityLabel(result?.health_status || "unknown");
@@ -1528,7 +1529,10 @@
                     <article class="provider-test-model-item">
                         <div class="provider-test-model-top">
                             <strong>${escapeHtml(item.model_name || "-")}</strong>
-                            <div>${statusBadge(item.health_status || "unknown")}</div>
+                            <div class="table-actions">
+                                ${renderProbeDetailButton(item, item.model_name || "模型检测")}
+                                ${statusBadge(item.health_status || "unknown")}
+                            </div>
                         </div>
                         <div class="table-muted">状态码 ${item.status_code ?? "-"} · 耗时 ${item.latency_ms ?? "-"} ms</div>
                         <div class="provider-test-model-message">${escapeHtml(item.message || "-")}</div>
@@ -1579,7 +1583,7 @@
     function applyHealthCheckStreamEvent(state, event) {
         if (event.event === "provider_started") {
             state.currentProviderName = event.provider_name || "";
-            state.currentStageLabel = `正在准备 ${event.provider_name || "当前提供商"} 的健康检查`;
+            state.currentStageLabel = `正在准备 ${event.provider_name || "当前提供商"} 的可用性检测`;
             return;
         }
         if (event.event === "stage_started") {
@@ -1615,6 +1619,7 @@
                     status: "running",
                     message: "正在检测，完成后会立即显示结果。",
                     latencyMs: null,
+                    detail: event,
                 });
             }
             return;
@@ -1629,6 +1634,7 @@
                 status: isProbeRateLimitedResult(event.result || event) ? "rate_limited" : (success ? "passed" : "failed"),
                 message: event.message || event.result?.message || "",
                 latencyMs: event.latency_ms ?? event.result?.latency_ms ?? null,
+                detail: event.result || event,
             };
             const existingIndex = state.modelResults.findIndex((item) => item.key === key);
             if (existingIndex >= 0) {
@@ -1646,6 +1652,7 @@
                 modelsTotal: Number(event.models_total || 0),
                 modelsSuccess: Number(event.models_success || 0),
                 modelsFailed: Number(event.models_failed || 0),
+                detail: event.result || event,
             });
             return;
         }
@@ -1657,7 +1664,7 @@
         }
         if (event.event === "error") {
             state.running = false;
-            state.errorMessage = event.message || "健康检查执行失败";
+            state.errorMessage = event.message || "可用性检测执行失败";
         }
     }
 
@@ -1689,7 +1696,10 @@
             <article class="provider-test-model-item">
                 <div class="provider-test-model-top">
                     <strong>${escapeHtml(item.modelName || "-")}</strong>
-                    <div>${renderProviderHealthBatchStatusBadge(item.status || "running")}</div>
+                    <div class="table-actions">
+                        ${renderProbeDetailButton(item.detail || item, item.modelName || "模型检测")}
+                        ${renderProviderHealthBatchStatusBadge(item.status || "running")}
+                    </div>
                 </div>
                 <div class="table-muted">${escapeHtml(item.providerName || "-")}${item.latencyMs != null ? ` · ${formatNumber(item.latencyMs)} ms` : ""}</div>
                 <div class="provider-test-model-message">${escapeHtml(item.message || (item.status === "running" ? "正在检测。" : "检测已完成。"))}</div>
@@ -1705,7 +1715,10 @@
             <article class="provider-test-model-item">
                 <div class="provider-test-model-top">
                     <strong>${escapeHtml(item.providerName)}</strong>
-                    <div>${statusBadge(item.success ? "healthy" : (item.modelsSuccess > 0 ? "degraded" : "unhealthy"))}</div>
+                    <div class="table-actions">
+                        ${renderProbeDetailButton(item.detail || item, item.providerName || "提供商检测")}
+                        ${statusBadge(item.success ? "healthy" : (item.modelsSuccess > 0 ? "degraded" : "unhealthy"))}
+                    </div>
                 </div>
                 <div class="provider-test-model-message">
                     模型通过 ${formatNumber(item.modelsSuccess)}/${formatNumber(item.modelsTotal)}，失败 ${formatNumber(item.modelsFailed)} 个。
@@ -2149,8 +2162,8 @@
         return "status-unknown";
     }
 
-    const contentGuardRawResponseStore = new Map();
-    let contentGuardRawResponseSeq = 0;
+    const probeDetailStore = new Map();
+    let probeDetailSeq = 0;
 
     function formatRawProviderResponse(raw) {
         if (raw == null) return "";
@@ -2162,43 +2175,69 @@
         }
     }
 
-    function renderContentGuardRawResponseButton(item, label = "原始响应") {
+    function buildProbeDetailPayload(item, label = "检测详情") {
+        if (item == null) return null;
         const raw = item?.raw_provider_response;
-        if (!raw) return "-";
-        const key = `content-guard-raw-${Date.now()}-${contentGuardRawResponseSeq += 1}`;
-        contentGuardRawResponseStore.set(key, {
+        return {
             label,
-            raw,
-        });
-        return `<button class="table-action-btn interactive-btn" type="button" data-content-guard-raw-response="${escapeHtml(key)}">查看</button>`;
+            raw_provider_response: raw || null,
+            result: item,
+        };
     }
 
-    function openContentGuardRawResponse(key, trigger = document.activeElement) {
-        const entry = contentGuardRawResponseStore.get(key);
+    function renderProbeDetailButton(item, label = "检测详情") {
+        const payload = buildProbeDetailPayload(item, label);
+        if (!payload) return "-";
+        const key = `probe-detail-${Date.now()}-${probeDetailSeq += 1}`;
+        probeDetailStore.set(key, payload);
+        return `<button class="table-action-btn interactive-btn" type="button" data-probe-detail="${escapeHtml(key)}">详情</button>`;
+    }
+
+    function renderContentGuardRawResponseButton(item, label = "内容防护探针") {
+        return renderProbeDetailButton(item, label);
+    }
+
+    function openProbeDetail(key, trigger = document.activeElement) {
+        const entry = probeDetailStore.get(key);
         if (!entry) {
-            showToast("原始响应已失效，请重新执行探针", "error");
+            showToast("检测详情已失效，请重新执行探针", "error");
             return;
         }
-        const rawText = formatRawProviderResponse(entry.raw);
+        const rawText = formatRawProviderResponse(entry);
         openHealthCheckResultModal(
-            `原始响应 · ${entry.label || "内容防护探针"}`,
+            `检测详情 · ${entry.label || "探针结果"}`,
             `
                 <div class="health-result-summary">
-                    <span class="status-badge status-unknown">原始响应</span>
-                    <strong>${escapeHtml(entry.label || "内容防护探针")}</strong>
-                    <span>来自上游提供商的探针响应内容</span>
+                    <span class="status-badge status-unknown">原始 JSON</span>
+                    <strong>${escapeHtml(entry.label || "探针结果")}</strong>
+                    <span>包含真实上游响应与本次检测结果对象</span>
                 </div>
-                <div class="doc-code-block compact"><pre><code>${escapeHtml(rawText || "无原始响应内容")}</code></pre></div>
+                <div class="table-actions">
+                    <button class="table-action-btn interactive-btn" type="button" data-probe-detail-copy="${escapeHtml(key)}">复制 JSON</button>
+                </div>
+                <div class="doc-code-block compact"><pre><code>${escapeHtml(rawText || "无检测详情内容")}</code></pre></div>
             `,
             trigger,
         );
     }
 
     document.addEventListener("click", (event) => {
-        const button = event.target.closest("[data-content-guard-raw-response]");
+        const button = event.target.closest("[data-probe-detail]");
         if (!button) return;
         event.preventDefault();
-        openContentGuardRawResponse(button.dataset.contentGuardRawResponse, button);
+        openProbeDetail(button.dataset.probeDetail, button);
+    });
+
+    document.addEventListener("click", async (event) => {
+        const button = event.target.closest("[data-probe-detail-copy]");
+        if (!button) return;
+        event.preventDefault();
+        const entry = probeDetailStore.get(button.dataset.probeDetailCopy);
+        if (!entry) {
+            showToast("检测详情已失效，请重新执行探针", "error");
+            return;
+        }
+        await copyText(formatRawProviderResponse(entry), button);
     });
 
     function renderContentGuardProbeModalBody(result, title = "可信检测") {
@@ -2256,7 +2295,7 @@
             ["测试对象", titleName || "模型挂载"],
             ["测试范围", "单模型测试"],
             ["执行状态", statusText],
-            ["当前阶段", message || (status === "failed" ? "测试请求失败" : "正在发起健康测试")],
+            ["当前阶段", message || (status === "failed" ? "测试请求失败" : "正在发起可用性测试")],
         ];
         const summaryHtml = summaryRows.map(([label, value]) => `
             <div class="provider-test-summary-item">
@@ -3130,7 +3169,7 @@
     }
 
     function formatHealthOverview(healthyCount, degradedCount, unhealthyCount) {
-        return `健康 ${healthyCount} / 异常 ${Number(degradedCount || 0) + Number(unhealthyCount || 0)}`;
+        return `可用 ${healthyCount} / 不可用或降级 ${Number(degradedCount || 0) + Number(unhealthyCount || 0)}`;
     }
 
     function formatStatusBadgeLabel(value) {
@@ -3210,7 +3249,7 @@
         const modelConfigs = Array.isArray(provider.model_configs) ? provider.model_configs : [];
         const summary = summarizeEnabledModelHealth(modelConfigs);
         const detail = summary.total
-            ? `启用 ${formatNumber(summary.total)}：健康 ${formatNumber(summary.healthy)} / 异常 ${formatNumber(summary.unhealthy)}${summary.unknown ? ` / 未检测 ${formatNumber(summary.unknown)}` : ""}`
+            ? `启用 ${formatNumber(summary.total)}：可用 ${formatNumber(summary.healthy)} / 不可用或降级 ${formatNumber(summary.unhealthy)}${summary.unknown ? ` / 未检测 ${formatNumber(summary.unknown)}` : ""}`
             : (modelConfigs.length ? "无启用模型" : "未挂载模型");
         return `
             <div class="provider-availability-summary">
@@ -3230,7 +3269,7 @@
             <div class="provider-model-summary">
                 <div class="provider-model-summary-head">
                     <strong>${formatNumber(modelConfigs.length)} 个模型</strong>
-                    <span>${formatNumber(enabledCount)} 启用 · ${formatNumber(healthyCount)} 模型健康 · ${summarizeModelCapabilities(modelConfigs)}</span>
+                    <span>${formatNumber(enabledCount)} 启用 · ${formatNumber(healthyCount)} 模型可用性 · ${summarizeModelCapabilities(modelConfigs)}</span>
                 </div>
                 <div class="provider-model-preview-list">
                     ${visibleModels.map((item) => `
@@ -3342,9 +3381,9 @@
             warning: "警告",
             danger: "危险",
             critical: "严重",
-            healthy: "健康",
+            healthy: "可用",
             degraded: "降级",
-            unhealthy: "异常",
+            unhealthy: "不可用",
             running: "运行中",
             queued: "排队中",
             pending: "等待中",
@@ -3382,12 +3421,12 @@
             api_client: "API Key",
             system: "系统",
             scheduler: "调度器",
-            provider_health_check: "旧版健康检查兼容入口",
+            provider_health_check: "旧版可用性检测兼容入口",
             provider_l0_health_check: "提供商 L0 连通性检查",
             model_l1_text_health_check: "模型 L1 文本检查",
             model_l2_capability_health_check: "模型 L2 能力检查",
             model_l3_content_integrity_health_check: "模型 L3 内容完整性检查",
-            recent_runtime_health_state_refresh: "运行态健康刷新",
+            recent_runtime_health_state_refresh: "运行态可用刷新",
             token_usage_backfill: "Token 用量补全",
             data_retention_cleanup: "数据保留清理",
             responses_chat_adapter_session_cleanup: "响应适配会话清理",
@@ -3469,10 +3508,10 @@
     function buildBackgroundJobDetailGroups(item) {
         const resultSummary = normalizeTypedJsonObject(item.result_summary_json);
         const jobDescription = {
-            provider_health_check: "旧版兼容入口；当前调度器启动时会移除此任务，不再作为新的自动健康检查计划。",
-            provider_l0_health_check: "受“自动健康检查”开关控制，只检查提供商连通性。",
-            model_l1_text_health_check: "受“自动健康检查”开关控制，检查模型基础文本响应。",
-            model_l2_capability_health_check: "受“自动健康检查”开关控制，检查工具、视觉等能力状态。",
+            provider_health_check: "旧版兼容入口；当前调度器启动时会移除此任务，不再作为新的自动可用性检测计划。",
+            provider_l0_health_check: "受“自动可用性检测”开关控制，只检查提供商连通性。",
+            model_l1_text_health_check: "受“自动可用性检测”开关控制，检查模型基础文本响应。",
+            model_l2_capability_health_check: "受“自动可用性检测”开关控制，检查工具、视觉等能力状态。",
             model_l3_content_integrity_health_check: "受“内容防护预先防护自动检测”开关控制，检查固定答案、外链广告识别和流式污染检测。",
         };
         return [
@@ -3600,7 +3639,7 @@
                 ],
             },
             "health-runs": {
-                title: "健康检查日志",
+                title: "可用性检测日志",
                 endpoint: "/api/logging/health-runs",
                 keywordLabel: "关键词",
                 keywordPlaceholder: "运行批次、范围类型或对象标识",
@@ -3631,9 +3670,9 @@
                         type: "select",
                         options: [
                             { value: "", label: "全部" },
-                            { value: "healthy", label: "健康" },
+                            { value: "healthy", label: "可用" },
                             { value: "degraded", label: "降级" },
-                            { value: "unhealthy", label: "异常" },
+                            { value: "unhealthy", label: "不可用" },
                             { value: "running", label: "运行中" },
                             { value: "failed", label: "失败" },
                             { value: "skipped", label: "跳过" },
@@ -4069,6 +4108,29 @@
         `;
     }
 
+    function renderRouteAvailabilityStatus(item = {}) {
+        const status = String(item.route_availability_status || "normal");
+        const label = item.route_availability_status_label || ({ unavailable: "不可路由", normal: "正常", preferred: "偏好" }[status] || status);
+        const reason = String(item.route_availability_reason_text || "").trim();
+        const badgeClass = status === "unavailable" ? "status-unhealthy" : (status === "preferred" ? "status-degraded" : "status-healthy");
+        return `
+            <span class="provider-status-cell">
+                <span class="status-badge ${badgeClass}">${escapeHtml(label)}</span>
+                ${reason ? `
+                    <span class="provider-status-help">
+                        <button class="provider-status-help-btn" type="button" aria-label="查看路由状态原因" data-provider-status-tooltip-trigger="true">
+                            <i class="bi bi-question-circle" aria-hidden="true"></i>
+                        </button>
+                        <div class="provider-status-tooltip-content hidden">
+                            <div class="provider-status-tooltip-title">路由状态原因</div>
+                            <div class="provider-status-tooltip-copy">${escapeHtml(reason)}</div>
+                        </div>
+                    </span>
+                ` : ""}
+            </span>
+        `;
+    }
+
     function setPlaygroundPlaceholder(message) {
         const empty = document.getElementById("playground-output-empty");
         const output = document.getElementById("playground-output");
@@ -4149,18 +4211,74 @@
         };
     }
 
-    function buildBatchConnectivitySearchText(item) {
-        const modelText = (item.model_results || []).map((model) => [
+    function isPlaygroundProbeRunning(probe) {
+        return ["等待中", "检测中"].includes(String(probe?.status_code ?? ""));
+    }
+
+    function flattenBatchConnectivityProbeResults(results = []) {
+        const probes = [];
+        (Array.isArray(results) ? results : []).forEach((provider) => {
+            const modelResults = Array.isArray(provider?.model_results) ? provider.model_results : [];
+            if (!modelResults.length) {
+                probes.push({
+                    provider,
+                    model: {
+                        provider_id: provider?.provider_id,
+                        provider_name: provider?.provider_name,
+                        model_name: "无挂载模型",
+                        success: false,
+                        provider_success: false,
+                        health_status: provider?.health_status || "unhealthy",
+                        status_code: provider?.status_code ?? "-",
+                        latency_ms: provider?.latency_ms ?? "-",
+                        message: provider?.message || "当前提供商没有可测试的挂载模型",
+                        endpoint_results: [],
+                    },
+                });
+                return;
+            }
+            modelResults.forEach((model) => {
+                probes.push({ provider, model });
+            });
+        });
+        return probes;
+    }
+
+    function summarizeBatchConnectivityProbeProgress(results = []) {
+        const probes = flattenBatchConnectivityProbeResults(results);
+        const completed = probes.filter((entry) => !isPlaygroundProbeRunning(entry.model)).length;
+        const passed = probes.filter((entry) => isHealthCheckUsable(entry.model)).length;
+        return {
+            total: probes.length,
+            completed,
+            running: Math.max(probes.length - completed, 0),
+            passed,
+            failed: Math.max(completed - passed, 0),
+        };
+    }
+
+    function formatBatchConnectivityProbeProgress(results = [], done = false) {
+        const progress = summarizeBatchConnectivityProbeProgress(results);
+        const prefix = done ? "批量测试完成" : "批量测试中";
+        return `${prefix}，已完成 ${formatNumber(progress.completed)}/${formatNumber(progress.total)} 个探针`;
+    }
+
+    function buildBatchConnectivitySearchText(entry) {
+        const provider = entry?.provider || entry || {};
+        const model = entry?.model || {};
+        const endpointText = (model.endpoint_results || [])
+            .map((endpoint) => endpoint.endpoint_label || endpoint.endpoint_path || "")
+            .join(" ");
+        return [
+            provider.provider_name || "",
+            provider.message || "",
+            provider.status_code ?? "",
+            provider.health_status || "",
             model.model_name || "",
             model.message || "",
-            (model.endpoint_results || []).map((endpoint) => endpoint.endpoint_label || endpoint.endpoint_path || "").join(" "),
-        ].join(" ")).join(" ");
-        return [
-            item.provider_name || "",
-            item.message || "",
-            item.status_code ?? "",
-            item.health_status || "",
-            modelText,
+            model.status_code ?? "",
+            model.health_status || "",
+            endpointText,
         ].join(" ").toLowerCase();
     }
 
@@ -4171,6 +4289,7 @@
             provider_id: provider?.id,
             provider_name: provider?.name || `提供商 ${provider?.id || "-"}`,
             provider_enabled: provider?.enabled !== false,
+            probe_kind: "playground_batch_provider",
             success: false,
             provider_success: false,
             health_status: modelConfigs.length ? "unknown" : "unhealthy",
@@ -4182,6 +4301,9 @@
             models_failed: modelConfigs.length,
             model_results: modelConfigs.map((modelConfig) => ({
                 provider_model_id: modelConfig.id,
+                provider_id: provider?.id,
+                provider_name: provider?.name || `提供商 ${provider?.id || "-"}`,
+                probe_kind: "playground_batch_model",
                 model_name: modelConfig.model_name || `挂载 ${modelConfig.id}`,
                 success: false,
                 provider_success: false,
@@ -4228,6 +4350,9 @@
         const index = modelResults.findIndex((item) => String(item.provider_model_id) === String(modelConfig.id));
         const nextResult = {
             provider_model_id: modelConfig.id,
+            provider_id: providerResult.provider_id,
+            provider_name: providerResult.provider_name,
+            probe_kind: "playground_batch_model",
             model_name: modelConfig.model_name || result?.model_name || `挂载 ${modelConfig.id}`,
             ...(result || {}),
         };
@@ -4266,8 +4391,11 @@
         const health = String(options.health || "");
         const pageSize = Math.max(1, Number(options.pageSize || 10));
         const summary = summarizeBatchConnectivityResults(results);
-        const filteredResults = results.filter((item) => {
-            const keywordMatched = !keyword || buildBatchConnectivitySearchText(item).includes(keyword);
+        const probeProgress = summarizeBatchConnectivityProbeProgress(results);
+        const probeResults = flattenBatchConnectivityProbeResults(results);
+        const filteredResults = probeResults.filter((entry) => {
+            const model = entry.model || {};
+            const keywordMatched = !keyword || buildBatchConnectivitySearchText(entry).includes(keyword);
             if (!keywordMatched) {
                 return false;
             }
@@ -4275,12 +4403,12 @@
                 return true;
             }
             if (health === "healthy") {
-                return item.success && (item.health_status || "healthy") === "healthy";
+                return isHealthCheckUsable(model) && (model.health_status || "healthy") === "healthy";
             }
             if (health === "abnormal") {
-                return !item.success || (item.health_status || "unknown") !== "healthy";
+                return !isHealthCheckUsable(model) || (model.health_status || "unknown") !== "healthy";
             }
-            return (item.health_status || "unknown") === health;
+            return (model.health_status || "unknown") === health;
         });
         const totalPages = Math.max(1, Math.ceil(filteredResults.length / pageSize));
         const currentPage = Math.min(Math.max(1, Number(options.page || 1)), totalPages);
@@ -4292,9 +4420,9 @@
                 <div class="playground-batch-card-head">
                     <div>
                         <div class="playground-card-title">批量测试概览</div>
-                        <div class="table-muted">本次共测试 ${summary.providerTotal} 个提供商、${summary.modelTotal} 个模型；当前筛选命中 ${filteredResults.length} 个提供商。</div>
+                        <div class="table-muted">本次共测试 ${summary.providerTotal} 个提供商、${summary.modelTotal} 个模型探针；当前筛选命中 ${filteredResults.length} 个探针。</div>
                     </div>
-                    <div>${statusBadge(summary.providerFailed ? "warning" : "healthy")}</div>
+                    <div>${probeProgress.running ? '<span class="status-badge status-running">检测中</span>' : statusBadge(probeProgress.failed ? "degraded" : "healthy")}</div>
                 </div>
                 <div class="playground-batch-summary-grid">
                     <article class="playground-batch-summary-item">
@@ -4318,16 +4446,16 @@
                         <strong>${summary.modelSuccess}</strong>
                     </article>
                     <article class="playground-batch-summary-item">
-                        <span>平均耗时</span>
-                        <strong>${summary.averageLatency} ms</strong>
+                        <span>探针完成</span>
+                        <strong>${probeProgress.completed}/${probeProgress.total}</strong>
                     </article>
                 </div>
             </section>
             <section class="playground-result-card">
                 <div class="playground-batch-card-head">
                     <div>
-                        <div class="playground-card-title">批量测试具体结果</div>
-                        <div class="table-muted">按提供商列表分页查看，并支持关键词与整体可用性筛选。</div>
+                        <div class="playground-card-title">批量测试探针结果</div>
+                        <div class="table-muted">每个提供商/模型探针独立成卡，展示过程、结果与原始详情。</div>
                     </div>
                 </div>
                 <div class="filter-toolbar playground-batch-filter-toolbar">
@@ -4339,48 +4467,40 @@
                         <span>整体可用性</span>
                         <select class="field-input" id="playground-batch-health">
                             <option value="" ${health === "" ? "selected" : ""}>全部</option>
-                            <option value="healthy" ${health === "healthy" ? "selected" : ""}>全部可用</option>
+                            <option value="healthy" ${health === "healthy" ? "selected" : ""}>可用探针</option>
                             <option value="abnormal" ${health === "abnormal" ? "selected" : ""}>存在异常</option>
                         </select>
                     </label>
                 </div>
                 <div class="playground-batch-result-list">
-                    ${pageItems.length ? pageItems.map((item) => `
-                        <article class="playground-batch-list-item">
+                    ${pageItems.length ? pageItems.map((entry) => {
+                        const item = entry.provider || {};
+                        const model = entry.model || {};
+                        const running = isPlaygroundProbeRunning(model);
+                        const rawLatencyText = model.latency_ms == null ? "-" : String(model.latency_ms);
+                        const latencyText = Number.isFinite(Number(rawLatencyText)) ? `${rawLatencyText} ms` : rawLatencyText;
+                        return `
+                        <article class="playground-batch-list-item playground-batch-probe-item" data-status="${running ? "running" : escapeHtml(model.health_status || "unknown")}">
                             <div class="playground-batch-card-head">
                                 <div>
-                                    <div class="playground-card-title">${escapeHtml(item.provider_name || `提供商 ${item.provider_id}`)}</div>
-                                    <div class="table-muted">${item.provider_enabled ? "已启用" : "已停用"} · 模型 ${item.models_success ?? 0}/${item.models_total ?? 0} 正常</div>
+                                    <div class="playground-card-title">${escapeHtml(item.provider_name || `提供商 ${item.provider_id}`)} / ${escapeHtml(model.model_name || "-")}</div>
+                                    <div class="table-muted">${item.provider_enabled ? "提供商已启用" : "提供商已停用"} · ${running ? "探针运行中" : "探针已完成"}</div>
                                 </div>
-                                <div>${providerAvailabilityBadge(item.health_status || "unknown")}</div>
+                                <div class="table-actions">
+                                    ${renderProbeDetailButton(model, model.model_name || "模型检测")}
+                                    ${running ? '<span class="status-badge status-running">检测中</span>' : providerAvailabilityBadge(model.health_status || "unknown")}
+                                </div>
                             </div>
                             <div class="playground-batch-provider-grid">
-                                <div><span>提供商连通</span><strong class="${item.provider_success ? "playground-status-success" : "playground-status-danger"}">${item.provider_success ? "成功" : "失败"}</strong></div>
-                                <div><span>状态码</span><strong>${item.status_code ?? "-"}</strong></div>
-                                <div><span>耗时</span><strong>${item.latency_ms ?? "-"} ms</strong></div>
-                                <div><span>模型健康</span><strong>${item.models_success ?? 0}/${item.models_total ?? 0}</strong></div>
+                                <div><span>探针状态</span><strong class="${isHealthCheckUsable(model) ? "playground-status-success" : "playground-status-danger"}">${running ? "检测中" : (isHealthCheckUsable(model) ? "成功" : "失败")}</strong></div>
+                                <div><span>状态码</span><strong>${escapeHtml(String(model.status_code ?? "-"))}</strong></div>
+                                <div><span>耗时</span><strong>${escapeHtml(String(latencyText))}</strong></div>
+                                <div><span>端点探测</span><strong>${escapeHtml(summarizeEndpointResults(model.endpoint_results))}</strong></div>
                             </div>
-                            <div class="playground-batch-provider-note">${escapeHtml(item.message || "-")}</div>
-                            <div class="playground-batch-model-table">
-                                <div class="playground-batch-model-table-head">
-                                    <span>模型</span>
-                                    <span>健康</span>
-                                    <span>状态 / 耗时</span>
-                                    <span>端点探测</span>
-                                    <span>结果说明</span>
-                                </div>
-                                ${(item.model_results || []).length ? item.model_results.map((model) => `
-                                    <div class="playground-batch-model-row">
-                                        <strong>${escapeHtml(model.model_name || "-")}</strong>
-                                        <div>${statusBadge(model.health_status || "unknown")}</div>
-                                        <span>状态码 ${model.status_code ?? "-"} · ${model.latency_ms ?? "-"} ms</span>
-                                        <span>${escapeHtml(summarizeEndpointResults(model.endpoint_results))}</span>
-                                        <span>${escapeHtml(model.message || "-")}</span>
-                                    </div>
-                                `).join("") : '<div class="playground-provider-list-empty">当前提供商没有可测试模型</div>'}
-                            </div>
+                            <div class="playground-batch-provider-note">${escapeHtml(model.message || item.message || "-")}</div>
                         </article>
-                    `).join("") : `
+                    `;
+                    }).join("") : `
                         <div class="playground-provider-list-empty">当前筛选条件下没有命中的测试结果，请调整关键词或整体可用性。</div>
                     `}
                 </div>
@@ -4394,7 +4514,7 @@
                             <option value="50" ${pageSize === 50 ? "selected" : ""}>50</option>
                         </select>
                     </label>
-                    <div class="logs-page-meta">第 ${currentPage} / ${totalPages} 页，共 ${filteredResults.length} 条</div>
+                    <div class="logs-page-meta">第 ${currentPage} / ${totalPages} 页，共 ${filteredResults.length} 个探针</div>
                     <div class="logs-page-actions">
                         <button class="btn btn-ghost interactive-btn" id="playground-batch-prev-page" type="button" ${currentPage <= 1 ? "disabled" : ""}>上一页</button>
                         <button class="btn btn-ghost interactive-btn" id="playground-batch-next-page" type="button" ${currentPage >= totalPages ? "disabled" : ""}>下一页</button>
@@ -5621,6 +5741,7 @@
                 resultLabel: target.resultLabel || "等待中",
                 latencyMs: target.latencyMs ?? null,
                 message: target.message || "",
+                detail: target.detail || target,
             })),
             startedAt: Date.now(),
         };
@@ -5644,7 +5765,7 @@
     function renderProviderMountedHealthBatchStatusBadge(status) {
         if (status === "passed") return '<span class="status-badge status-healthy">可用</span>';
         if (status === "rate_limited") return '<span class="status-badge status-degraded">已限流</span>';
-        if (status === "failed") return '<span class="status-badge status-unhealthy">异常</span>';
+        if (status === "failed") return '<span class="status-badge status-unhealthy">失败</span>';
         if (status === "running") return '<span class="status-badge status-running">检测中</span>';
         if (status === "skipped") return '<span class="status-badge status-unknown">已跳过</span>';
         return '<span class="status-badge status-unknown">等待中</span>';
@@ -5652,7 +5773,7 @@
 
     function renderProviderMountedHealthBatchProgress(batchState, options = {}) {
         const summary = summarizeProviderMountedHealthBatchState(batchState);
-        const title = options.kicker || "批量健康检测";
+        const title = options.kicker || "批量可用性检测";
         const summaryHtml = [
             ["提供商", formatNumber(summary.providerCount)],
             ["挂载模型", formatNumber(summary.total)],
@@ -5670,14 +5791,17 @@
         const itemHtml = batchState.items.map((item) => {
             const latencyText = item.latencyMs == null ? "-" : `${formatNumber(item.latencyMs)} ms`;
             const disabledText = item.modelId && (!item.providerEnabled || !item.modelEnabled)
-                ? `<div class="table-muted">${!item.providerEnabled ? "提供商已停用" : "模型已停用"}，仍按挂载模型执行手动健康检测。</div>`
+                ? `<div class="table-muted">${!item.providerEnabled ? "提供商已停用" : "模型已停用"}，仍按挂载模型执行手动可用性检测。</div>`
                 : "";
             return `
                 <article class="provider-test-model-item provider-model-batch-item" data-status="${escapeHtml(item.status)}">
-                    <div class="provider-test-model-top">
-                        <strong>${escapeHtml(item.displayName)}</strong>
-                        <div>${renderProviderMountedHealthBatchStatusBadge(item.status)}</div>
-                    </div>
+                        <div class="provider-test-model-top">
+                            <strong>${escapeHtml(item.displayName)}</strong>
+                            <div class="table-actions">
+                                ${renderProbeDetailButton(item.detail || item, item.displayName || "可用性检测")}
+                                ${renderProviderMountedHealthBatchStatusBadge(item.status)}
+                            </div>
+                        </div>
                     <div class="table-muted">${escapeHtml(item.resultLabel)} · 耗时 ${escapeHtml(String(latencyText))}</div>
                     ${disabledText}
                     ${item.message ? `<div class="provider-test-model-message">${escapeHtml(item.message)}</div>` : ""}
@@ -5699,7 +5823,7 @@
     }
 
     async function runProviderMountedHealthBatch(targets, trigger, features, options = {}) {
-        const title = options.title || "全部提供商健康检测";
+        const title = options.title || "全部提供商可用性检测";
         if (!targets.length) {
             showToast("当前没有可执行的挂载模型", "error");
             return [];
@@ -5711,7 +5835,7 @@
             if (item.modelId == null) return;
             item.status = "running";
             item.resultLabel = "检测中";
-            item.message = "正在执行健康测试";
+            item.message = "正在执行可用性测试";
         });
         setButtonLoading(trigger, true);
         openHealthCheckResultModal(title, render(), trigger);
@@ -5726,7 +5850,7 @@
                 await runStaggeredByPreviousCompletion(items, async (item) => {
                     item.status = "running";
                     item.resultLabel = "检测中";
-                    item.message = "正在执行健康测试";
+                    item.message = "正在执行可用性测试";
                     refresh();
                     const startedAt = Date.now();
                     try {
@@ -5740,11 +5864,13 @@
                         item.resultLabel = formatHealthCheckOutcomeLabel(result);
                         item.latencyMs = result?.latency_ms ?? (Date.now() - startedAt);
                         item.message = result?.message || "";
+                        item.detail = result;
                     } catch (error) {
                         item.status = "failed";
                         item.resultLabel = "执行失败";
                         item.latencyMs = Date.now() - startedAt;
-                        item.message = error.message || "健康检测请求失败";
+                        item.message = error.message || "可用性检测请求失败";
+                        item.detail = { ...item, error: item.message };
                     }
                     refresh();
                 });
@@ -5772,11 +5898,11 @@
             providerItems = Array.isArray(fallbackProviders) ? fallbackProviders : [];
         }
         const targets = getProviderMountedBatchTargets(providerItems, {
-            emptyMessage: "该提供商当前没有可执行健康检测的挂载模型。",
+            emptyMessage: "该提供商当前没有可执行可用性检测的挂载模型。",
         });
         await runProviderMountedHealthBatch(targets, trigger, features, {
-            title: "全部提供商健康检测",
-            kicker: "批量健康检测",
+            title: "全部提供商可用性检测",
+            kicker: "批量可用性检测",
         });
     }
 
@@ -6091,33 +6217,40 @@
         const [stats] = await Promise.all([
             api.get("/api/dashboard"),
         ]);
-        document.querySelector('[data-stat="provider_count"]').textContent = stats.provider_count;
-        document.querySelector('[data-stat="healthy_count"]').textContent = stats.healthy_count;
-        document.querySelector('[data-stat="degraded_count"]').textContent = stats.degraded_count;
-        document.querySelector('[data-stat="unhealthy_count"]').textContent = stats.unhealthy_count;
-        document.querySelector('[data-stat="model_count"]').textContent = stats.model_count;
-        document.querySelector('[data-stat="recent_requests"]').textContent = stats.recent_requests;
-        document.querySelector('[data-stat="recent_tokens"]').textContent = formatTokenDisplay(stats.recent_tokens || 0);
-        document.querySelector('[data-stat="total_requests"]').textContent = formatNumber(stats.total_requests || 0);
-        document.querySelector('[data-stat="total_tokens"]').textContent = formatTokenDisplay(stats.total_tokens || 0);
-        document.querySelector('[data-stat="total_cost"]').textContent = formatMoney(stats.total_cost || 0);
-        document.querySelector('[data-stat="conversation_count"]').textContent = stats.conversation_count;
-        document.querySelector('[data-stat="api_key_total"]').textContent = stats.api_key_total;
-        document.querySelector('[data-stat="recent_failure_rate"]').textContent = `${stats.recent_failure_rate}%`;
-        document.querySelector('[data-stat="total_failures"]').textContent = stats.total_failures;
+        const setDashboardStat = (key, value) => {
+            const node = document.querySelector(`[data-stat="${key}"]`);
+            if (node) node.textContent = value;
+        };
+        setDashboardStat("provider_count", stats.provider_count);
+        setDashboardStat("healthy_count", stats.healthy_count);
+        setDashboardStat("degraded_count", stats.degraded_count);
+        setDashboardStat("unhealthy_count", stats.unhealthy_count);
+        setDashboardStat("model_count", stats.model_count);
+        setDashboardStat("recent_requests", stats.recent_requests);
+        setDashboardStat("recent_tokens", formatTokenDisplay(stats.recent_tokens || 0));
+        setDashboardStat("total_requests", formatNumber(stats.total_requests || 0));
+        setDashboardStat("total_tokens", formatTokenDisplay(stats.total_tokens || 0));
+        setDashboardStat("total_cost", formatMoney(stats.total_cost || 0));
+        setDashboardStat("conversation_count", stats.conversation_count);
+        setDashboardStat("api_key_total", stats.api_key_total);
+        setDashboardStat("recent_failure_rate", `${stats.recent_failure_rate}%`);
+        setDashboardStat("total_failures", stats.total_failures);
         renderDashboardUsageOverview(stats.usage_overview || {});
 
         const healthRatio = stats.provider_count ? Math.round((stats.healthy_count / stats.provider_count) * 100) : 0;
-        document.getElementById("dashboard-signal-card").innerHTML = `
-            <div class="cockpit-aside-label">系统信号</div>
-            <div class="cockpit-aside-value">${stats.recent_requests}</div>
-            <div class="cockpit-aside-copy">过去 24 小时代理请求量</div>
-            <div class="cockpit-health-bar"><span style="width:${healthRatio}%"></span></div>
-            <div class="cockpit-aside-meta">
-                <span>路由 健康优先</span>
-                <span>${stats.healthy_count}/${stats.provider_count} 全部可用</span>
-            </div>
-        `;
+        const signalCard = document.getElementById("dashboard-signal-card");
+        if (signalCard) {
+            signalCard.innerHTML = `
+                <div class="cockpit-aside-label">系统信号</div>
+                <div class="cockpit-aside-value">${stats.recent_requests}</div>
+                <div class="cockpit-aside-copy">过去 24 小时代理请求量</div>
+                <div class="cockpit-health-bar"><span style="width:${healthRatio}%"></span></div>
+                <div class="cockpit-aside-meta">
+                    <span>路由 可用性优先</span>
+                    <span>${stats.healthy_count}/${stats.provider_count} 全部可用</span>
+                </div>
+            `;
+        }
     }
 
     async function initProviders() {
@@ -6158,6 +6291,11 @@
         const providerModelPrevPageBtn = document.getElementById("provider-model-prev-page-btn");
         const providerModelNextPageBtn = document.getElementById("provider-model-next-page-btn");
         const checkAllBtn = document.getElementById("providers-check-all-btn");
+        const providerExportBtn = document.getElementById("provider-export-btn");
+        const providersEnableSelectedBtn = document.getElementById("providers-enable-selected-btn");
+        const providersDisableSelectedBtn = document.getElementById("providers-disable-selected-btn");
+        const providersMarkAvailableSelectedBtn = document.getElementById("providers-mark-available-selected-btn");
+        const providersMarkTrustedSelectedBtn = document.getElementById("providers-mark-trusted-selected-btn");
         const providersHealthSelectedBtn = document.getElementById("providers-health-selected-btn");
         const providersProtocolDetectSelectedBtn = document.getElementById("providers-protocol-detect-selected-btn");
         const providersTrustSelectedBtn = document.getElementById("providers-trust-selected-btn");
@@ -7260,6 +7398,10 @@
                 showToast(error.message, "error");
             }
         });
+        providerExportBtn?.addEventListener("click", () => {
+            setButtonTransientFeedback(providerExportBtn, "success", { successText: "准备导出" });
+            window.location.href = "/api/providers/export";
+        });
         batchImportPreviewBtn?.addEventListener("click", async () => {
             await previewProviderBatchImport();
         });
@@ -7298,6 +7440,73 @@
             } finally {
                 setButtonLoading(batchImportSubmitBtn, false);
                 if (importCompleted && batchImportSubmitBtn) batchImportSubmitBtn.disabled = true;
+            }
+        });
+        providerModelBatchImportOpenBtn?.addEventListener("click", () => {
+            openProviderModelBatchImportModal(providerModelBatchImportOpenBtn);
+        });
+        providerModelExportBtn?.addEventListener("click", () => {
+            setButtonTransientFeedback(providerModelExportBtn, "success", { successText: "准备导出" });
+            window.location.href = "/api/providers/models/export";
+        });
+        providerModelBatchImportTemplateBtn?.addEventListener("click", async () => {
+            try {
+                const template = await ensureProviderModelBatchImportTemplate();
+                if (providerModelBatchImportContentInput) {
+                    providerModelBatchImportContentInput.value = template;
+                    providerModelBatchImportContentInput.focus();
+                }
+                if (providerModelBatchImportSubmitBtn) providerModelBatchImportSubmitBtn.disabled = true;
+                providerModelBatchImportPreview = null;
+                renderProviderModelBatchImportResult(null);
+                showToast("已填入模型挂载批量导入模板");
+            } catch (error) {
+                showToast(error.message, "error");
+            }
+        });
+        providerModelBatchImportCopyTemplateBtn?.addEventListener("click", async (event) => {
+            try {
+                const template = await ensureProviderModelBatchImportTemplate();
+                await copyText(template, event.currentTarget);
+            } catch (error) {
+                showToast(error.message, "error");
+            }
+        });
+        providerModelBatchImportPreviewBtn?.addEventListener("click", async () => {
+            await previewProviderModelBatchImport();
+        });
+        providerModelBatchImportContentInput?.addEventListener("input", () => {
+            providerModelBatchImportPreview = null;
+            if (providerModelBatchImportSubmitBtn) providerModelBatchImportSubmitBtn.disabled = true;
+        });
+        providerModelBatchImportForm?.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            const content = String(providerModelBatchImportContentInput?.value || "").trim();
+            if (!content) {
+                showToast("请先粘贴模型挂载导入文本", "error");
+                providerModelBatchImportContentInput?.focus();
+                return;
+            }
+            const preview = providerModelBatchImportPreview || await previewProviderModelBatchImport();
+            if (!preview || Number(preview.valid_count || 0) <= 0 || Number(preview.failed_count || 0) > 0) {
+                showToast("请先修正预览中的问题", "error");
+                return;
+            }
+            try {
+                setButtonLoading(providerModelBatchImportSubmitBtn, true);
+                const result = await api.post("/api/providers/models/batch-import", {
+                    content,
+                    dry_run: false,
+                    skip_missing_providers: true,
+                });
+                providerModelBatchImportPreview = result;
+                renderProviderModelBatchImportResult(result);
+                showToast(`批量导入完成：新增 ${formatNumber(result.created_count || 0)} 个，更新 ${formatNumber(result.updated_count || 0)} 个`);
+                await loadProviderModels({ silent: true });
+            } catch (error) {
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(providerModelBatchImportSubmitBtn, false);
             }
         });
         catalogModelsCheckAll?.addEventListener("change", () => {
@@ -7571,8 +7780,26 @@
             if (Array.isArray(overview)) return overview;
             if (Array.isArray(overview.providers)) return overview.providers;
             if (Array.isArray(overview.items)) return overview.items;
+            if (Array.isArray(overview.directory?.items)) return overview.directory.items;
             if (Array.isArray(overview.data)) return overview.data;
+            if (Array.isArray(overview.data?.items)) return overview.data.items;
             return [];
+        }
+
+        function normalizeProviderDirectoryResponse(directory = {}) {
+            const payload = directory && typeof directory === "object" && !Array.isArray(directory)
+                ? (directory.data && typeof directory.data === "object" && !Array.isArray(directory.data) ? directory.data : directory)
+                : { items: Array.isArray(directory) ? directory : [] };
+            const items = normalizeProviderOverviewItems(payload);
+            const total = Number.isFinite(Number(payload.total)) ? Number(payload.total) : items.length;
+            return {
+                items,
+                total: Math.max(total, items.length),
+                page: Number(payload.page || providerDirectoryState.page || 1),
+                page_size: Number(payload.page_size || payload.pageSize || providerDirectoryState.pageSize || 20),
+                total_pages: Number(payload.total_pages || payload.totalPages || Math.max(1, Math.ceil(Math.max(total, items.length) / (providerDirectoryState.pageSize || 20)))),
+                filter_options: payload.filter_options || payload.filterOptions || {},
+            };
         }
 
         function buildProviderDirectoryParams({ page = providerDirectoryState.page, pageSize = providerDirectoryState.pageSize } = {}) {
@@ -7624,12 +7851,36 @@
         }
 
         async function loadProviders() {
-            const [overview, directory, options] = await Promise.all([
+            const [overviewResult, directoryResult, optionsResult] = await Promise.allSettled([
                 api.get("/api/providers/overview"),
                 api.get(`/api/providers/directory?${buildProviderDirectoryParams().toString()}`),
                 api.get("/api/providers/options"),
             ]);
-            providers = normalizeProviderOverviewItems(directory);
+            const overview = overviewResult.status === "fulfilled" ? overviewResult.value : { summary: {} };
+            let directory = directoryResult.status === "fulfilled" ? directoryResult.value : { items: [], total: 0 };
+            const options = optionsResult.status === "fulfilled" ? optionsResult.value : [];
+            if (overviewResult.status === "rejected") console.warn("提供商总览加载失败", overviewResult.reason);
+            if (directoryResult.status === "rejected") console.warn("提供商对象目录加载失败", directoryResult.reason);
+            if (optionsResult.status === "rejected") console.warn("提供商选项加载失败", optionsResult.reason);
+            directory = normalizeProviderDirectoryResponse(directory);
+            providers = directory.items;
+            if (!providers.length && (Number(overview.summary?.provider_count || 0) > 0 || Number(directory.total || 0) > 0 || directoryResult.status === "rejected")) {
+                try {
+                    providers = normalizeProviderOverviewItems(await api.get("/api/providers"));
+                } catch (error) {
+                    console.error("提供商对象目录兜底加载失败", error);
+                    showToast(error.message || "提供商对象目录加载失败", "error");
+                    providers = [];
+                }
+                directory = normalizeProviderDirectoryResponse({
+                    items: providers,
+                    total: providers.length,
+                    page: 1,
+                    page_size: providerDirectoryState.pageSize,
+                    total_pages: Math.max(1, Math.ceil(providers.length / (providerDirectoryState.pageSize || 20))),
+                    filter_options: directory.filter_options,
+                });
+            }
             providerSelectOptions = Array.isArray(options) ? options : [];
             providerDirectoryState.total = Number(directory.total || 0);
             providerDirectoryState.page = Number(directory.page || providerDirectoryState.page || 1);
@@ -7646,17 +7897,22 @@
             syncOpenModelsDetailModal();
         }
 
+        function setProviderTelemetryValue(key, value) {
+            const node = document.querySelector(`[data-provider-stat="${key}"]`);
+            if (node) node.textContent = value;
+        }
+
         function renderProviderTelemetry(summary) {
             const providerCount = Number(summary.provider_count || 0);
             const enabledProviderCount = Number(summary.enabled_provider_count || 0);
-            document.querySelector('[data-provider-stat="provider_count"]').textContent = providerCount;
-            document.querySelector('[data-provider-stat="enabled_provider_count"]').textContent = enabledProviderCount;
-            document.querySelector('[data-provider-stat="model_count"]').textContent = Number(summary.model_count || 0);
-            document.querySelector('[data-provider-stat="stream_model_count"]').textContent = Number(summary.stream_model_count || 0);
-            document.querySelector('[data-provider-stat="vision_model_count"]').textContent = Number(summary.vision_model_count || 0);
-            document.querySelector('[data-provider-stat="image_generation_model_count"]').textContent = Number(summary.image_generation_model_count || 0);
-            document.querySelector('[data-provider-stat="priced_model_count"]').textContent = Number(summary.priced_model_count || 0);
-            document.querySelector('[data-provider-stat="avg_stability_score"]').textContent = formatScore(summary.avg_stability_score);
+            setProviderTelemetryValue("provider_count", providerCount);
+            setProviderTelemetryValue("enabled_provider_count", enabledProviderCount);
+            setProviderTelemetryValue("model_count", Number(summary.model_count || 0));
+            setProviderTelemetryValue("stream_model_count", Number(summary.stream_model_count || 0));
+            setProviderTelemetryValue("vision_model_count", Number(summary.vision_model_count || 0));
+            setProviderTelemetryValue("image_generation_model_count", Number(summary.image_generation_model_count || 0));
+            setProviderTelemetryValue("priced_model_count", Number(summary.priced_model_count || 0));
+            setProviderTelemetryValue("avg_stability_score", formatScore(summary.avg_stability_score));
 
             const healthyProviderCount = providers.filter((provider) => provider.health_status === "healthy").length;
             const healthyRatio = providerCount ? Math.round((healthyProviderCount / providerCount) * 100) : 0;
@@ -7880,7 +8136,7 @@
         function renderProviderModelsDetail(provider) {
             const modelConfigs = Array.isArray(provider?.model_configs) ? provider.model_configs : [];
             const enabledCount = modelConfigs.filter((item) => item.enabled).length;
-            const healthyCount = modelConfigs.filter((item) => item.health_status === "healthy").length;
+            const availableCount = modelConfigs.filter((item) => item.route_availability_status !== "unavailable").length;
             const recentContentEvents = Array.isArray(provider?.recent_content_guard_events) ? provider.recent_content_guard_events : [];
             const rows = modelConfigs.map((item) => `
                 <tr>
@@ -7895,7 +8151,7 @@
                     </td>
                     <td class="provider-model-status-cell">
                         <div class="provider-model-detail-badges">
-                            ${renderStatusWithErrorHint(item.health_status, item.last_error)}
+                            ${renderRouteAvailabilityStatus(item)}
                             <span class="status-badge ${item.enabled ? "status-healthy" : "status-unknown"}">${item.enabled ? "已启用" : "已停用"}</span>
                         </div>
                     </td>
@@ -7932,7 +8188,7 @@
                     <div class="provider-model-detail-meta">
                         <div><span>模型总数</span><strong>${formatNumber(modelConfigs.length)}</strong></div>
                         <div><span>已启用</span><strong>${formatNumber(enabledCount)}</strong></div>
-                        <div><span>状态正常</span><strong>${formatNumber(healthyCount)}</strong></div>
+                        <div><span>可路由</span><strong>${formatNumber(availableCount)}</strong></div>
                         <div><span>模型能力</span><strong>${summarizeModelCapabilities(modelConfigs)}</strong></div>
                     </div>
                     ${renderRecentContentGuardEvents(recentContentEvents)}
@@ -7941,7 +8197,7 @@
                             <thead>
                                 <tr>
                                     <th>模型</th>
-                                    <th>健康</th>
+                                    <th>路由状态</th>
                                     <th>端点协议</th>
                                     <th>能力</th>
                                     <th>倍率 / 价格</th>
@@ -8385,11 +8641,21 @@
                 providersSelectAll.indeterminate = selectedVisibleCount > 0 && selectedVisibleCount < visibleIds.length;
                 providersSelectAll.disabled = visibleIds.length === 0;
             }
+            [
+                [providersEnableSelectedBtn, "启用选中"],
+                [providersDisableSelectedBtn, "停用选中"],
+                [providersMarkAvailableSelectedBtn, "置为可用"],
+                [providersMarkTrustedSelectedBtn, "置为可信"],
+            ].forEach(([button, label]) => {
+                if (!button) return;
+                button.disabled = selectedProviderIds.size === 0;
+                button.textContent = selectedProviderIds.size ? `${label} ${formatNumber(selectedProviderIds.size)}` : label;
+            });
             if (providersHealthSelectedBtn) {
                 providersHealthSelectedBtn.disabled = selectedProviderIds.size === 0;
                 providersHealthSelectedBtn.textContent = selectedProviderIds.size
-                    ? `健康检测选中 ${formatNumber(selectedProviderIds.size)}`
-                    : "健康检测选中";
+                    ? `可用性检测选中 ${formatNumber(selectedProviderIds.size)}`
+                    : "可用性检测选中";
             }
             if (providersTrustSelectedBtn) {
                 providersTrustSelectedBtn.disabled = selectedProviderIds.size === 0;
@@ -8459,6 +8725,31 @@
             return getProviderBatchTargets(selectedProviders, options);
         }
 
+        async function runSelectedProvidersGovernance(action, trigger, options = {}) {
+            const providerIds = Array.from(selectedProviderIds).map(Number).filter(Number.isFinite);
+            if (!providerIds.length) {
+                showToast("请先选择提供商", "warning");
+                return;
+            }
+            const label = options.label || "批量治理";
+            try {
+                setButtonLoading(trigger, true);
+                const result = await api.post("/api/providers/batch/governance", {
+                    action,
+                    provider_ids: providerIds,
+                });
+                const updatedCount = Number(result.updated_count || 0);
+                setButtonTransientFeedback(trigger, "success", { successText: "已完成" });
+                showToast(`${label}已完成：处理 ${formatNumber(updatedCount)} 个提供商`, "success");
+                await loadProviders();
+            } catch (error) {
+                setButtonTransientFeedback(trigger, "error", { errorText: "失败" });
+                showToast(error.message || `${label}失败`, "error");
+            } finally {
+                setButtonLoading(trigger, false);
+            }
+        }
+
         async function loadAllProviderDirectoryItemsForCurrentFilters() {
             const firstParams = buildProviderDirectoryParams({ page: 1, pageSize: 100 });
             const firstPage = await api.get(`/api/providers/directory?${firstParams.toString()}`);
@@ -8480,6 +8771,7 @@
                     resultLabel: target.resultLabel || "等待中",
                     latencyMs: target.latencyMs ?? null,
                     message: target.message || "",
+                    detail: target.detail || target,
                 })),
                 startedAt: Date.now(),
             };
@@ -8503,7 +8795,7 @@
         function renderProviderHealthBatchStatusBadge(status) {
             if (status === "passed") return '<span class="status-badge status-healthy">可用</span>';
             if (status === "rate_limited") return '<span class="status-badge status-degraded">已限流</span>';
-            if (status === "failed") return '<span class="status-badge status-unhealthy">异常</span>';
+            if (status === "failed") return '<span class="status-badge status-unhealthy">失败</span>';
             if (status === "running") return '<span class="status-badge status-running">检测中</span>';
             if (status === "skipped") return '<span class="status-badge status-unknown">已跳过</span>';
             return '<span class="status-badge status-unknown">等待中</span>';
@@ -8528,13 +8820,16 @@
             const itemHtml = batchState.items.map((item) => {
                 const latencyText = item.latencyMs == null ? "-" : `${formatNumber(item.latencyMs)} ms`;
                 const disabledText = item.modelId && (!item.providerEnabled || !item.modelEnabled)
-                    ? `<div class="table-muted">${!item.providerEnabled ? "提供商已停用" : "模型已停用"}，仍按挂载模型执行手动健康检测。</div>`
+                    ? `<div class="table-muted">${!item.providerEnabled ? "提供商已停用" : "模型已停用"}，仍按挂载模型执行手动可用性检测。</div>`
                     : "";
                 return `
                     <article class="provider-test-model-item provider-model-batch-item" data-status="${escapeHtml(item.status)}">
                         <div class="provider-test-model-top">
                             <strong>${escapeHtml(item.displayName)}</strong>
-                            <div>${renderProviderHealthBatchStatusBadge(item.status)}</div>
+                            <div class="table-actions">
+                                ${renderProbeDetailButton(item.detail || item, item.displayName || "可用性检测")}
+                                ${renderProviderHealthBatchStatusBadge(item.status)}
+                            </div>
                         </div>
                         <div class="table-muted">${escapeHtml(item.resultLabel)} · 耗时 ${escapeHtml(String(latencyText))}</div>
                         ${disabledText}
@@ -8545,7 +8840,7 @@
             return `
                 <div class="provider-test-result-shell">
                     <section class="provider-test-result-card">
-                        <div class="panel-kicker">批量健康检测</div>
+                        <div class="panel-kicker">批量可用性检测</div>
                         <div class="provider-test-summary-grid">${summaryHtml}</div>
                     </section>
                     <section class="provider-test-result-card">
@@ -8557,7 +8852,7 @@
         }
 
         async function runProviderHealthBatch(targets, trigger, features, options = {}) {
-            const title = options.title || "提供商批量健康检测";
+            const title = options.title || "提供商批量可用性检测";
             if (!targets.length) {
                 showToast("当前没有可执行的挂载模型", "error");
                 return [];
@@ -8568,7 +8863,7 @@
                 if (item.modelId == null) return;
                 item.status = "running";
                 item.resultLabel = "检测中";
-                item.message = "正在执行健康测试";
+                item.message = "正在执行可用性测试";
             });
             setButtonLoading(trigger, true);
             openHealthCheckResultModal(title, renderProviderHealthBatchProgress(batchState), trigger);
@@ -8583,7 +8878,7 @@
                     await runStaggeredByPreviousCompletion(items, async (item) => {
                         item.status = "running";
                         item.resultLabel = "检测中";
-                        item.message = "正在执行健康测试";
+                        item.message = "正在执行可用性测试";
                         refresh();
                         const startedAt = Date.now();
                         try {
@@ -8601,7 +8896,7 @@
                             item.status = "failed";
                             item.resultLabel = "执行失败";
                             item.latencyMs = Date.now() - startedAt;
-                            item.message = error.message || "健康检测请求失败";
+                            item.message = error.message || "可用性检测请求失败";
                         }
                         refresh();
                     });
@@ -8629,22 +8924,22 @@
                 showToast("请先选择提供商", "error");
                 return;
             }
-            const features = await openTestFeaturePicker({ title: "选择选中提供商健康检测功能" });
+            const features = await openTestFeaturePicker({ title: "选择选中提供商可用性检测功能" });
             if (!features) return;
             const targets = getSelectedProviderBatchTargets({
-                emptyMessage: "该提供商当前没有可执行健康检测的挂载模型。",
+                emptyMessage: "该提供商当前没有可执行可用性检测的挂载模型。",
             });
-            await runProviderHealthBatch(targets, trigger, features, { title: "提供商批量健康检测" });
+            await runProviderHealthBatch(targets, trigger, features, { title: "提供商批量可用性检测" });
         }
 
         async function runAllProvidersHealthBatch(trigger) {
-            const features = await openTestFeaturePicker({ title: "选择全部提供商健康检测功能" });
+            const features = await openTestFeaturePicker({ title: "选择全部提供商可用性检测功能" });
             if (!features) return;
             const allProviders = await loadAllProviderDirectoryItemsForCurrentFilters();
             const targets = getProviderBatchTargets(allProviders, {
-                emptyMessage: "该提供商当前没有可执行健康检测的挂载模型。",
+                emptyMessage: "该提供商当前没有可执行可用性检测的挂载模型。",
             });
-            await runProviderHealthBatch(targets, trigger, features, { title: "全部提供商健康检测" });
+            await runProviderHealthBatch(targets, trigger, features, { title: "全部提供商可用性检测" });
         }
 
         function createProviderTrustBatchState(targets) {
@@ -8655,6 +8950,7 @@
                     resultLabel: target.resultLabel || "等待中",
                     latencyMs: target.latencyMs ?? null,
                     message: target.message || "",
+                    detail: target.detail || target,
                 })),
                 startedAt: Date.now(),
             };
@@ -8680,7 +8976,7 @@
             if (status === "passed") return '<span class="status-badge status-healthy">可信</span>';
             if (status === "review") return '<span class="status-badge status-degraded">需复核</span>';
             if (status === "rate_limited") return '<span class="status-badge status-degraded">已限流</span>';
-            if (status === "failed") return '<span class="status-badge status-unhealthy">异常</span>';
+            if (status === "failed") return '<span class="status-badge status-unhealthy">失败</span>';
             if (status === "running") return '<span class="status-badge status-running">检测中</span>';
             if (status === "skipped") return '<span class="status-badge status-unknown">已跳过</span>';
             return '<span class="status-badge status-unknown">等待中</span>';
@@ -8712,7 +9008,10 @@
                     <article class="provider-test-model-item provider-model-batch-item" data-status="${escapeHtml(item.status)}">
                         <div class="provider-test-model-top">
                             <strong>${escapeHtml(item.displayName)}</strong>
-                            <div>${renderProviderTrustBatchStatusBadge(item.status)}</div>
+                            <div class="table-actions">
+                                ${renderProbeDetailButton(item.detail || item, item.displayName || "可信检测")}
+                                ${renderProviderTrustBatchStatusBadge(item.status)}
+                            </div>
                         </div>
                         <div class="table-muted">${escapeHtml(item.resultLabel)} · 耗时 ${escapeHtml(String(latencyText))}</div>
                         ${disabledText}
@@ -8777,11 +9076,13 @@
                                 result?.summary?.content_guard_reason || result?.message || "",
                                 formatContentTrustExecutionPlan(result?.execution_plan),
                             ].filter(Boolean).join("；");
+                            item.detail = result;
                         } catch (error) {
                             item.status = "failed";
                             item.resultLabel = "执行失败";
                             item.latencyMs = null;
                             item.message = error.message || "可信检测请求失败";
+                            item.detail = { ...item, error: item.message };
                         }
                         refresh();
                     });
@@ -8813,6 +9114,7 @@
                     latencyMs: target.latencyMs ?? null,
                     message: target.message || "",
                     endpointSummary: "",
+                    detail: target.detail || target,
                 })),
                 startedAt: Date.now(),
             };
@@ -8859,6 +9161,7 @@
             item.latencyMs = result.latency_ms ?? item.latencyMs;
             item.message = result.message || "";
             item.endpointSummary = formatEndpointProtocolDetectionEndpointSummary(result);
+            item.detail = result;
         }
 
         function renderProviderProtocolBatchProgress(batchState) {
@@ -8883,7 +9186,10 @@
                     <article class="provider-test-model-item provider-model-batch-item" data-status="${escapeHtml(item.status)}">
                         <div class="provider-test-model-top">
                             <strong>${escapeHtml(item.displayName)}</strong>
-                            <div>${renderProviderProtocolBatchStatusBadge(item.status)}</div>
+                            <div class="table-actions">
+                                ${renderProbeDetailButton(item.detail || item, item.displayName || "协议检测")}
+                                ${renderProviderProtocolBatchStatusBadge(item.status)}
+                            </div>
                         </div>
                         <div class="table-muted">${escapeHtml(item.resultLabel)} · 耗时 ${escapeHtml(String(latencyText))}</div>
                         ${item.endpointSummary ? `<div class="table-muted">${escapeHtml(item.endpointSummary)}</div>` : ""}
@@ -8924,7 +9230,7 @@
                 if (["gemini", "claude_messages"].includes(String(item.protocolType || ""))) {
                     item.status = "skipped";
                     item.resultLabel = item.protocolLabel || "原生协议";
-                    item.message = "Gemini/Claude 原生协议模型无需端点协议检测，请使用健康检测和可信检测";
+                    item.message = "Gemini/Claude 原生协议模型无需端点协议检测，请使用可用性检测和可信检测";
                     return;
                 }
                 item.status = "running";
@@ -8964,6 +9270,7 @@
                                 item.status = "skipped";
                                 item.resultLabel = "未返回";
                                 item.message = "接口未返回该挂载模型的检测结果";
+                                item.detail = { ...item };
                             } else {
                                 applyEndpointProtocolDetectionResultToBatchItem(item, detectionResult);
                             }
@@ -8972,6 +9279,7 @@
                             item.resultLabel = "执行失败";
                             item.latencyMs = null;
                             item.message = error.message || "协议检测请求失败";
+                            item.detail = { ...item, error: item.message };
                         }
                         refresh();
                     });
@@ -9112,7 +9420,7 @@
                         <strong>${escapeHtml(model.model_name)}</strong>
                         <div class="table-muted">ID ${escapeHtml(model.upstream_model_name || model.model_name || "-")}</div>
                     </td>
-                    <td class="provider-model-status-cell">${renderStatusWithErrorHint(model.health_status, model.last_error)}</td>
+                    <td class="provider-model-status-cell">${renderRouteAvailabilityStatus(model)}</td>
                     <td>
                         <select class="field-input" data-model-field="protocol_type" data-provider-id="${provider.id}" data-model-id="${model.id}" aria-label="端点协议" ${protocolLocked ? 'disabled data-settings-tooltip-trigger="true" data-settings-tooltip-title="端点协议说明" data-settings-tooltip-copy="Gemini / Claude 类模型只能使用对应原生协议；中国国内模型或 GPT 系列模型会按名称和分组自动推断为 Chat、Responses 或双协议。"' : ""}>
                             ${renderProviderModelProtocolOptions(model)}
@@ -9291,7 +9599,7 @@
                     const features = await openTestFeaturePicker({ title: `选择提供商测试功能 · ${provider.name}` });
                     if (!features) return;
                     const targets = getProviderBatchTargets([provider], {
-                        emptyMessage: "该提供商当前没有可执行健康检测的挂载模型。",
+                        emptyMessage: "该提供商当前没有可执行可用性检测的挂载模型。",
                     });
                     await runProviderHealthBatch(targets, button, features, {
                         title: `提供商测试结果 · ${provider.name}`,
@@ -9390,6 +9698,18 @@
             syncProviderSelectionUi(visibleProviders);
         });
 
+        providersEnableSelectedBtn?.addEventListener("click", async () => {
+            await runSelectedProvidersGovernance("enable", providersEnableSelectedBtn, { label: "批量启用" });
+        });
+        providersDisableSelectedBtn?.addEventListener("click", async () => {
+            await runSelectedProvidersGovernance("disable", providersDisableSelectedBtn, { label: "批量停用" });
+        });
+        providersMarkAvailableSelectedBtn?.addEventListener("click", async () => {
+            await runSelectedProvidersGovernance("mark_available", providersMarkAvailableSelectedBtn, { label: "批量置为可用" });
+        });
+        providersMarkTrustedSelectedBtn?.addEventListener("click", async () => {
+            await runSelectedProvidersGovernance("mark_trusted", providersMarkTrustedSelectedBtn, { label: "批量置为可信" });
+        });
         providersHealthSelectedBtn?.addEventListener("click", async () => {
             await runSelectedProvidersHealthBatch(providersHealthSelectedBtn);
         });
@@ -9733,8 +10053,18 @@
         const providerModelTestSelectedBtn = document.getElementById("provider-model-test-selected-btn");
         const providerModelProtocolDetectSelectedBtn = document.getElementById("provider-model-protocol-detect-selected-btn");
         const providerModelTrustSelectedBtn = document.getElementById("provider-model-trust-selected-btn");
+        const providerModelBatchImportOpenBtn = document.getElementById("provider-model-batch-import-open-btn");
+        const providerModelExportBtn = document.getElementById("provider-model-export-btn");
         const providerModelTestPageBtn = document.getElementById("provider-model-test-page-btn");
         const providerModelTrustPageBtn = document.getElementById("provider-model-trust-page-btn");
+        const providerModelBatchImportModal = document.getElementById("provider-model-batch-import-modal");
+        const providerModelBatchImportForm = document.getElementById("provider-model-batch-import-form");
+        const providerModelBatchImportContentInput = document.getElementById("provider-model-batch-import-content");
+        const providerModelBatchImportTemplateBtn = document.getElementById("provider-model-batch-import-template-btn");
+        const providerModelBatchImportCopyTemplateBtn = document.getElementById("provider-model-batch-import-copy-template-btn");
+        const providerModelBatchImportPreviewBtn = document.getElementById("provider-model-batch-import-preview-btn");
+        const providerModelBatchImportSubmitBtn = document.getElementById("provider-model-batch-import-submit-btn");
+        const providerModelBatchImportResult = document.getElementById("provider-model-batch-import-result");
         const providerModelEditModal = document.getElementById("provider-model-edit-modal");
         const providerModelEditForm = document.getElementById("provider-model-edit-form");
         const providerModelEditTitle = document.getElementById("provider-model-edit-title");
@@ -9769,6 +10099,21 @@
             selectedKeys: new Set(),
             selectedRecords: new Map(),
         };
+        let providerModelBatchImportTemplate = "";
+        let providerModelBatchImportPreview = null;
+
+        const providerModelBatchImportModalController = modalManager.register({
+            modal: providerModelBatchImportModal,
+            dialog: providerModelBatchImportModal?.querySelector('[role="dialog"]'),
+            getInitialFocus: () => providerModelBatchImportContentInput,
+            shouldConfirmClose: () => Boolean(String(providerModelBatchImportContentInput?.value || "").trim()) && !providerModelBatchImportPreview?.created_count,
+            afterClose: () => {
+                providerModelBatchImportForm?.reset();
+                providerModelBatchImportPreview = null;
+                if (providerModelBatchImportSubmitBtn) providerModelBatchImportSubmitBtn.disabled = true;
+                renderProviderModelBatchImportResult(null);
+            },
+        });
 
         const editModalController = modalManager.register({
             modal: providerModelEditModal,
@@ -9969,6 +10314,93 @@
                 : '<span class="status-badge status-unknown">已停用</span>';
         }
 
+        async function ensureProviderModelBatchImportTemplate() {
+            if (providerModelBatchImportTemplate) return providerModelBatchImportTemplate;
+            const result = await api.get("/api/providers/models/batch-import-template");
+            providerModelBatchImportTemplate = String(result.template || "");
+            return providerModelBatchImportTemplate;
+        }
+
+        function renderProviderModelBatchImportResult(result) {
+            if (!providerModelBatchImportResult) return;
+            if (!result) {
+                providerModelBatchImportResult.innerHTML = '<div class="empty-state">粘贴模型挂载列表文本后先预览校验，通过后再确认导入。</div>';
+                return;
+            }
+            const items = Array.isArray(result.items) ? result.items : [];
+            const rows = items.map((item) => {
+                const statusText = item.created ? "已新增" : (item.updated ? "已更新" : (item.skipped ? "已跳过" : (item.valid ? "可导入" : "需修正")));
+                const statusClass = item.created || item.updated || item.valid ? "status-healthy" : (item.skipped ? "status-unknown" : "status-unhealthy");
+                return `
+                    <tr>
+                        <td>${formatNumber(item.index || 0)}</td>
+                        <td>${escapeHtml(item.provider_name || "-")}</td>
+                        <td>
+                            <strong>${escapeHtml(item.model_name || "-")}</strong>
+                            <div class="table-muted">ID ${escapeHtml(item.upstream_model_name || "-")}</div>
+                        </td>
+                        <td><span class="status-badge ${statusClass}">${escapeHtml(statusText)}</span></td>
+                        <td>${escapeHtml((item.errors || []).join("；") || "-")}</td>
+                    </tr>
+                `;
+            }).join("");
+            providerModelBatchImportResult.innerHTML = `
+                <div class="provider-batch-import-summary">
+                    <div><span>总数</span><strong>${formatNumber(result.total || 0)}</strong></div>
+                    <div><span>可导入</span><strong>${formatNumber(result.valid_count || 0)}</strong></div>
+                    <div><span>新增</span><strong>${formatNumber(result.created_count || 0)}</strong></div>
+                    <div><span>更新</span><strong>${formatNumber(result.updated_count || 0)}</strong></div>
+                    <div><span>失败</span><strong>${formatNumber(result.failed_count || 0)}</strong></div>
+                </div>
+                <div class="table-shell">
+                    <table class="data-table">
+                        <thead><tr><th>#</th><th>提供商</th><th>模型</th><th>状态</th><th>问题</th></tr></thead>
+                        <tbody>${rows || '<tr><td colspan="5"><div class="empty-state">没有解析到可导入内容。</div></td></tr>'}</tbody>
+                    </table>
+                </div>
+            `;
+        }
+
+        async function previewProviderModelBatchImport() {
+            const content = String(providerModelBatchImportContentInput?.value || "").trim();
+            if (!content) {
+                showToast("请先粘贴模型挂载导入文本", "error");
+                providerModelBatchImportContentInput?.focus();
+                return null;
+            }
+            try {
+                setButtonLoading(providerModelBatchImportPreviewBtn, true);
+                const result = await api.post("/api/providers/models/batch-import", {
+                    content,
+                    dry_run: true,
+                    skip_missing_providers: true,
+                });
+                providerModelBatchImportPreview = result;
+                renderProviderModelBatchImportResult(result);
+                if (providerModelBatchImportSubmitBtn) {
+                    providerModelBatchImportSubmitBtn.disabled = Number(result.valid_count || 0) <= 0 || Number(result.failed_count || 0) > 0;
+                }
+                showToast(`预览完成：${formatNumber(result.valid_count || 0)} 条可导入`);
+                return result;
+            } catch (error) {
+                providerModelBatchImportPreview = null;
+                if (providerModelBatchImportSubmitBtn) providerModelBatchImportSubmitBtn.disabled = true;
+                renderProviderModelBatchImportResult({
+                    total: 0,
+                    valid_count: 0,
+                    created_count: 0,
+                    updated_count: 0,
+                    skipped_count: 0,
+                    failed_count: 1,
+                    items: [{ index: 1, valid: false, errors: [error.message] }],
+                });
+                showToast(error.message, "error");
+                return null;
+            } finally {
+                setButtonLoading(providerModelBatchImportPreviewBtn, false);
+            }
+        }
+
         function setOptionalPriceInput(input, value) {
             if (!input) return;
             input.value = value == null ? "" : toPricePer1M(value);
@@ -10035,6 +10467,23 @@
             setOptionalIntegerInput(providerModelEditMaxQpsInput, modelConfig.max_qps);
             setOptionalIntegerInput(providerModelEditMaxRpmInput, modelConfig.max_rpm);
             editModalController.open(trigger);
+        }
+
+        async function openProviderModelBatchImportModal(trigger = document.activeElement) {
+            if (!providerModelBatchImportModal) return;
+            try {
+                await ensureProviderModelBatchImportTemplate();
+            } catch (error) {
+                showToast(error.message, "error");
+            }
+            renderProviderModelBatchImportResult(null);
+            if (providerModelBatchImportSubmitBtn) providerModelBatchImportSubmitBtn.disabled = true;
+            providerModelBatchImportPreview = null;
+            providerModelBatchImportModalController.open(trigger);
+        }
+
+        function closeProviderModelBatchImportModal(options = {}) {
+            providerModelBatchImportModalController.close(options);
         }
 
         function renderProviderModels(items = []) {
@@ -10215,6 +10664,7 @@
                     resultLabel: "等待中",
                     latencyMs: null,
                     message: "",
+                    detail: target.detail || target,
                 })),
             };
         }
@@ -10236,7 +10686,7 @@
             if (status === "passed") return `<span class="status-badge status-healthy">${kind === "trust" ? "可信" : "可用"}</span>`;
             if (status === "review") return '<span class="status-badge status-degraded">需复核</span>';
             if (status === "rate_limited") return '<span class="status-badge status-degraded">已限流</span>';
-            if (status === "failed") return '<span class="status-badge status-unhealthy">异常</span>';
+            if (status === "failed") return '<span class="status-badge status-unhealthy">失败</span>';
             if (status === "running") return '<span class="status-badge status-running">进行中</span>';
             return '<span class="status-badge status-unknown">等待中</span>';
         }
@@ -10245,7 +10695,7 @@
             const summary = summarizeProviderModelBatchState(batchState);
             const isTrust = batchState.kind === "trust";
             const summaryHtml = [
-                ["范围", isTrust ? "可信检测" : "健康测试"],
+                ["范围", isTrust ? "可信检测" : "可用性测试"],
                 ["总数", formatNumber(summary.total)],
                 ["完成", `${formatNumber(summary.completed)}/${formatNumber(summary.total)}`],
                 [isTrust ? "可信" : "可用", formatNumber(summary.passed)],
@@ -10264,7 +10714,10 @@
                     <article class="provider-test-model-item provider-model-batch-item" data-status="${escapeHtml(item.status)}">
                         <div class="provider-test-model-top">
                             <strong>${escapeHtml(item.displayName)}</strong>
-                            <div>${renderProviderModelBatchStatusBadge(item.status, batchState.kind)}</div>
+                            <div class="table-actions">
+                                ${renderProbeDetailButton(item.detail || item, item.displayName || (isTrust ? "可信检测" : "可用性测试"))}
+                                ${renderProviderModelBatchStatusBadge(item.status, batchState.kind)}
+                            </div>
                         </div>
                         <div class="table-muted">${escapeHtml(item.resultLabel)} · 耗时 ${escapeHtml(String(latencyText))}</div>
                         ${item.message ? `<div class="provider-test-model-message">${escapeHtml(item.message)}</div>` : ""}
@@ -10306,6 +10759,7 @@
                     latencyMs: null,
                     message: "",
                     endpointSummary: "",
+                    detail: target.detail || target,
                 })),
             };
         }
@@ -10353,7 +10807,10 @@
                     <article class="provider-test-model-item provider-model-batch-item" data-status="${escapeHtml(item.status)}">
                         <div class="provider-test-model-top">
                             <strong>${escapeHtml(item.displayName)}</strong>
-                            <div>${renderProviderModelProtocolBatchStatusBadge(item.status)}</div>
+                            <div class="table-actions">
+                                ${renderProbeDetailButton(item.detail || item, item.displayName || "协议检测")}
+                                ${renderProviderModelProtocolBatchStatusBadge(item.status)}
+                            </div>
                         </div>
                         <div class="table-muted">${escapeHtml(item.resultLabel)} · 耗时 ${escapeHtml(String(latencyText))}</div>
                         ${item.endpointSummary ? `<div class="table-muted">${escapeHtml(item.endpointSummary)}</div>` : ""}
@@ -10387,7 +10844,7 @@
                 if (["gemini", "claude_messages"].includes(String(item.protocolType || ""))) {
                     item.status = "skipped";
                     item.resultLabel = item.protocolLabel || "原生协议";
-                    item.message = "Gemini/Claude 原生协议模型无需端点协议检测，请使用健康检测和可信检测";
+                    item.message = "Gemini/Claude 原生协议模型无需端点协议检测，请使用可用性检测和可信检测";
                     return;
                 }
                 item.status = "running";
@@ -10423,22 +10880,25 @@
                             );
                             const detectionResult = (result.model_results || [])[0];
                             if (!detectionResult) {
-                                item.status = "skipped";
-                                item.resultLabel = "未返回";
-                                item.message = "接口未返回该挂载模型的检测结果";
-                            } else {
-                                item.status = isProbeRateLimitedResult(detectionResult) ? "rate_limited" : (detectionResult.update_allowed ? "passed" : "failed");
-                                item.resultLabel = isProbeRateLimitedResult(detectionResult) ? "已限流" : (detectionResult.protocol_label || formatProviderModelProtocolLabel(detectionResult));
-                                item.latencyMs = detectionResult.latency_ms ?? null;
-                                item.message = detectionResult.message || "";
-                                item.endpointSummary = formatProviderModelProtocolDetectionEndpointSummary(detectionResult);
-                            }
-                        } catch (error) {
-                            item.status = "failed";
-                            item.resultLabel = "执行失败";
-                            item.latencyMs = null;
-                            item.message = error.message || "协议检测请求失败";
+                            item.status = "skipped";
+                            item.resultLabel = "未返回";
+                            item.message = "接口未返回该挂载模型的检测结果";
+                            item.detail = { ...item };
+                        } else {
+                            item.status = isProbeRateLimitedResult(detectionResult) ? "rate_limited" : (detectionResult.update_allowed ? "passed" : "failed");
+                            item.resultLabel = isProbeRateLimitedResult(detectionResult) ? "已限流" : (detectionResult.protocol_label || formatProviderModelProtocolLabel(detectionResult));
+                            item.latencyMs = detectionResult.latency_ms ?? null;
+                            item.message = detectionResult.message || "";
+                            item.endpointSummary = formatProviderModelProtocolDetectionEndpointSummary(detectionResult);
+                            item.detail = detectionResult;
                         }
+                    } catch (error) {
+                        item.status = "failed";
+                        item.resultLabel = "执行失败";
+                        item.latencyMs = null;
+                        item.message = error.message || "协议检测请求失败";
+                        item.detail = { ...item, error: item.message };
+                    }
                         refresh();
                     });
                 }));
@@ -10483,7 +10943,7 @@
                 item.resultLabel = "执行中";
                 item.message = kind === "trust"
                     ? formatContentTrustRunningMessage()
-                    : "正在执行健康测试";
+                    : "正在执行可用性测试";
                 refresh();
                 const startedAt = Date.now();
                 try {
@@ -10501,6 +10961,7 @@
                             result?.summary?.content_guard_reason || result?.message || "",
                             formatContentTrustExecutionPlan(result?.execution_plan),
                         ].filter(Boolean).join("；");
+                        item.detail = result;
                     } else {
                         const result = await api.post(
                             `/api/providers/${item.providerId}/models/${item.modelId}/test`,
@@ -10512,12 +10973,14 @@
                         item.resultLabel = formatHealthCheckOutcomeLabel(result);
                         item.latencyMs = result?.latency_ms ?? (Date.now() - startedAt);
                         item.message = result?.message || "";
+                        item.detail = result;
                     }
                 } catch (error) {
                     item.status = "failed";
                     item.resultLabel = "执行失败";
                     item.latencyMs = Date.now() - startedAt;
                     item.message = error.message || "请求失败";
+                    item.detail = { ...item, error: item.message };
                 }
                 await refreshTableAfterItem();
                 refresh();
@@ -10947,21 +11410,29 @@
             `;
         }
 
-        function renderModelHealthCell(item) {
+        function renderModelHealthReasonHelp(item) {
             const status = item.health_status === "healthy" ? "healthy" : "unhealthy";
             const healthyCount = Number(item.healthy_provider_count ?? item.enabled_provider_count ?? 0);
             const totalCount = Number(item.bound_provider_count ?? item.provider_count ?? 0);
+            const reason = String(item.health_reason || "").trim()
+                || (status === "healthy"
+                    ? "当前至少有 1 个提供商可用，因此模型显示可用。"
+                    : "当前已绑定的提供商全部不可用，因此模型显示不可用。");
             return `
-                <div>${statusBadge(status)}</div>
-                <div class="table-muted">${escapeHtml(String(healthyCount))}/${escapeHtml(String(totalCount))}</div>
+                <span class="models-health-summary">
+                    ${statusBadge(status)}
+                    <button class="settings-help-btn" type="button" aria-label="查看模型可用性原因" data-settings-tooltip-trigger="true" data-settings-tooltip-title="模型可用性原因" data-settings-tooltip-copy="${escapeHtml(reason)}">
+                        <i class="bi bi-question-circle" aria-hidden="true"></i>
+                    </button>
+                    <span class="table-muted">${escapeHtml(String(healthyCount))}/${escapeHtml(String(totalCount))}</span>
+                </span>
             `;
         }
 
         function renderModelStatusSummary(item) {
-            const status = item.health_status === "healthy" ? "healthy" : "unhealthy";
             return `
                 <div class="models-card-status">
-                    ${statusBadge(status)}
+                    ${renderModelHealthReasonHelp(item)}
                     ${item.enabled ? '<span class="status-badge status-healthy">已启用</span>' : '<span class="status-badge status-unknown">已停用</span>'}
                 </div>
             `;
@@ -11102,7 +11573,10 @@
                     <article class="provider-test-model-item">
                         <div class="provider-test-model-top">
                             <strong>${escapeHtml(item.provider_name || "-")}</strong>
-                            <div>${statusBadge(status)}</div>
+                            <div class="table-actions">
+                                ${renderProbeDetailButton(item, item.provider_name || "渠道检测")}
+                                ${statusBadge(status)}
+                            </div>
                         </div>
                         <div class="table-muted">${escapeHtml(meta)}</div>
                         ${message}
@@ -11162,7 +11636,10 @@
                     <article class="provider-test-model-item">
                         <div class="provider-test-model-top">
                             <strong>${escapeHtml(item.display_name || item.model_name || "-")}</strong>
-                            <div>${statusBadge(status)}</div>
+                            <div class="table-actions">
+                                ${renderProbeDetailButton(item, item.display_name || item.model_name || "模型检测")}
+                                ${statusBadge(status)}
+                            </div>
                         </div>
                         <div class="table-muted">通过 ${escapeHtml(String(item.healthy_channel_count ?? 0))}/${escapeHtml(String(item.total_channel_count ?? 0))} · ${escapeHtml(String(item.latency_ms ?? "-"))} ms</div>
                     </article>
@@ -11184,32 +11661,75 @@
 
         function createModelBatchTestState(modelOptions = []) {
             return {
-                items: modelOptions.map((item, index) => ({
-                    index,
-                    modelName: item.model_name,
-                    displayName: item.display_name || item.model_name || `模型 ${index + 1}`,
-                    status: "running",
-                    healthyChannelCount: null,
-                    totalChannelCount: null,
-                    latencyMs: null,
-                    message: "",
-                })),
+                items: modelOptions.map((item, index) => {
+                    const modelName = item.model_name;
+                    const displayName = item.display_name || item.model_name || `模型 ${index + 1}`;
+                    return {
+                        index,
+                        modelName,
+                        displayName,
+                        status: "running",
+                        healthyChannelCount: null,
+                        totalChannelCount: null,
+                        latencyMs: null,
+                        message: "",
+                        selectedProviders: (Array.isArray(item.selected_providers) ? item.selected_providers : []).map((provider, providerIndex) => ({
+                            ...provider,
+                            probeKind: "model_batch_provider",
+                            modelName,
+                            modelDisplayName: displayName,
+                            displayName: `${provider.providerName || "提供商"} / ${displayName}`,
+                            status: provider.status || "waiting",
+                            statusLabel: provider.statusLabel || "等待中",
+                            latencyMs: provider.latencyMs ?? null,
+                            message: provider.message || "",
+                            detail: provider.detail || {
+                                probe_kind: "model_batch_provider",
+                                model_name: modelName,
+                                provider_id: provider.providerId ?? null,
+                                provider_model_id: provider.providerModelId ?? null,
+                                provider_name: provider.providerName || `提供商 ${providerIndex + 1}`,
+                                status: provider.status || "waiting",
+                                message: provider.message || "等待检测",
+                            },
+                        })),
+                        detail: item,
+                    };
+                }),
             };
         }
 
         function recalculateModelBatchTestState(batchState) {
             const items = Array.isArray(batchState?.items) ? batchState.items : [];
+            const providers = items.flatMap((item) => Array.isArray(item.selectedProviders) ? item.selectedProviders : []);
             const total = items.length;
-            const completed = items.filter((item) => item.status === "healthy" || item.status === "unhealthy" || item.status === "failed").length;
-            const running = items.filter((item) => item.status === "running").length;
+            const completed = items.filter((item) => ["healthy", "unhealthy", "failed"].includes(item.status)).length;
+            const running = items.filter((item) => ["running", "waiting"].includes(item.status)).length;
             const healthy = items.filter((item) => item.status === "healthy").length;
             const unhealthy = items.filter((item) => item.status === "unhealthy" || item.status === "failed").length;
-            return { total, completed, running, healthy, unhealthy };
+            const probeCompleted = providers.filter((provider) => ["healthy", "unhealthy", "failed", "rate_limited"].includes(provider.status)).length;
+            const probeRunning = providers.filter((provider) => ["running", "waiting"].includes(provider.status)).length;
+            const probeHealthy = providers.filter((provider) => provider.status === "healthy").length;
+            const probeUnhealthy = providers.filter((provider) => ["unhealthy", "failed", "rate_limited"].includes(provider.status)).length;
+            return {
+                total,
+                completed,
+                running,
+                healthy,
+                unhealthy,
+                probeTotal: providers.length,
+                probeCompleted,
+                probeRunning,
+                probeHealthy,
+                probeUnhealthy,
+            };
         }
 
         function renderModelBatchStatusBadge(status) {
-            if (status === "healthy") return '<span class="status-badge status-healthy">健康</span>';
-            if (status === "unhealthy" || status === "failed") return '<span class="status-badge status-unhealthy">异常</span>';
+            if (status === "healthy") return '<span class="status-badge status-healthy">可用</span>';
+            if (status === "unhealthy") return '<span class="status-badge status-unhealthy">不可用</span>';
+            if (status === "failed") return '<span class="status-badge status-unhealthy">失败</span>';
+            if (status === "waiting") return '<span class="status-badge status-unknown">等待中</span>';
             return '<span class="status-badge status-running">进行中</span>';
         }
 
@@ -11217,6 +11737,15 @@
             const text = String(message || "").trim();
             if (!text) return "";
             return text.length <= 72 ? text : `${text.slice(0, 72)}...`;
+        }
+
+        function renderModelBatchProbeStatusBadge(status) {
+            if (status === "healthy") return '<span class="status-badge status-healthy">可用</span>';
+            if (status === "rate_limited") return '<span class="status-badge status-degraded">已限流</span>';
+            if (status === "unhealthy") return '<span class="status-badge status-unhealthy">不可用</span>';
+            if (status === "failed") return '<span class="status-badge status-unhealthy">失败</span>';
+            if (status === "running") return '<span class="status-badge status-running">检测中</span>';
+            return '<span class="status-badge status-unknown">等待中</span>';
         }
 
         function applyModelBatchTestSuccess(batchState, result) {
@@ -11227,6 +11756,7 @@
             item.totalChannelCount = Number(result?.total_channel_count ?? 0);
             item.latencyMs = result?.latency_ms ?? null;
             item.message = compactModelBatchTestMessage(result?.message);
+            item.detail = result;
         }
 
         function applyModelBatchTestError(batchState, modelName, error) {
@@ -11237,15 +11767,16 @@
             item.totalChannelCount = item.totalChannelCount ?? 0;
             item.latencyMs = null;
             item.message = compactModelBatchTestMessage(error?.message || "测试失败");
+            item.detail = { ...item, error: error?.message || "测试失败" };
         }
 
         function renderModelBatchTestProgress(batchState) {
             const summary = recalculateModelBatchTestState(batchState);
             const summaryHtml = [
-                ["总数", formatNumber(summary.total)],
-                ["完成", `${formatNumber(summary.completed)}/${formatNumber(summary.total)}`],
-                ["健康", formatNumber(summary.healthy)],
-                ["异常", formatNumber(summary.unhealthy)],
+                ["模型数", formatNumber(summary.total)],
+                ["探针完成", `${formatNumber(summary.probeCompleted)}/${formatNumber(summary.probeTotal)}`],
+                ["可用探针", formatNumber(summary.probeHealthy)],
+                ["异常探针", formatNumber(summary.probeUnhealthy)],
             ].map(([label, value]) => `
                 <div class="provider-test-summary-item">
                     <span>${escapeHtml(String(label))}</span>
@@ -11253,18 +11784,41 @@
                 </div>
             `).join("");
             const modelHtml = batchState.items.map((item) => {
-                const meta = item.status === "running"
+                const meta = item.status === "running" || item.status === "waiting"
                     ? "测试中"
                     : `通过 ${item.healthyChannelCount ?? 0}/${item.totalChannelCount ?? 0} · 耗时 ${item.latencyMs ?? "-"} ms`;
+                const providerHtml = Array.isArray(item.selectedProviders) && item.selectedProviders.length
+                    ? `<div class="model-batch-probe-list">${item.selectedProviders.map((provider) => {
+                        const latencyText = provider.latencyMs == null ? "-" : `${formatNumber(provider.latencyMs)} ms`;
+                        const title = provider.displayName || `${provider.providerName || "提供商"} / ${item.displayName}`;
+                        return `
+                            <article class="provider-test-model-item model-batch-probe-card" data-status="${escapeHtml(provider.status || "waiting")}">
+                                <div class="provider-test-model-top">
+                                    <strong>${escapeHtml(title)}</strong>
+                                    <div class="table-actions">
+                                        ${renderProbeDetailButton(provider.detail || provider, title || "模型探针")}
+                                        ${renderModelBatchProbeStatusBadge(provider.status)}
+                                    </div>
+                                </div>
+                                <div class="table-muted">${escapeHtml(provider.statusLabel || "等待中")} · 耗时 ${escapeHtml(String(latencyText))}</div>
+                                ${provider.message ? `<div class="provider-test-model-message">${escapeHtml(provider.message)}</div>` : ""}
+                            </article>
+                        `;
+                    }).join("")}</div>`
+                    : '<div class="playground-provider-list-empty">该模型当前没有绑定可测试的提供商。</div>';
                 return `
-                    <article class="provider-test-model-item model-batch-progress-item" data-status="${escapeHtml(item.status)}">
-                        <div class="provider-test-model-top">
+                    <section class="model-batch-progress-group" data-status="${escapeHtml(item.status)}">
+                        <div class="model-batch-group-head">
                             <strong>${escapeHtml(item.displayName)}</strong>
-                            <div>${renderModelBatchStatusBadge(item.status)}</div>
+                            <div class="table-actions">
+                                ${renderProbeDetailButton(item.detail || item, item.displayName || "模型检测")}
+                                ${renderModelBatchStatusBadge(item.status)}
+                            </div>
                         </div>
                         <div class="table-muted">${escapeHtml(meta)}</div>
                         ${item.message ? `<div class="provider-test-model-message">${escapeHtml(item.message)}</div>` : ""}
-                    </article>
+                        ${providerHtml}
+                    </section>
                 `;
             }).join("");
             return `
@@ -11274,7 +11828,7 @@
                         <div class="provider-test-summary-grid">${summaryHtml}</div>
                     </section>
                     <section class="provider-test-result-card">
-                        <div class="panel-kicker">${summary.completed >= summary.total ? "模型" : `模型 · ${formatNumber(summary.running)} 进行中`}</div>
+                        <div class="panel-kicker">${summary.probeCompleted >= summary.probeTotal ? "探针明细" : `探针明细 · ${formatNumber(summary.probeRunning)} 进行中`}</div>
                         <div class="provider-test-model-list model-batch-progress-list">${modelHtml}</div>
                     </section>
                 </div>
@@ -11309,6 +11863,7 @@
         function updateBatchBar() {
             const selectedCount = state.selectedModelNames.size;
             batchMeta.textContent = `已选 ${formatNumber(selectedCount)} 个模型`;
+            testAllBtn.disabled = selectedCount === 0;
             batchContextApplyBtn.disabled = selectedCount === 0;
             const pageNames = state.models.map((item) => item.model_name);
             const selectedOnPage = pageNames.filter((name) => state.selectedModelNames.has(name)).length;
@@ -11914,95 +12469,221 @@
                 singleModel: true,
             });
             if (!features) return;
+            const modelOptions = getModelTestOptions([modelName]);
+            const batchState = createModelBatchTestState(modelOptions);
             const modalTitle = `模型测试 · ${modelName}`;
+            const refresh = () => refreshHealthCheckResultModal(modalTitle, renderModelBatchTestProgress(batchState));
             try {
                 setButtonLoading(trigger, true);
                 openHealthCheckResultModal(
                     modalTitle,
-                    renderSingleModelTestProgressBody({
-                        titleName: modelName,
-                        message: "请求已提交，正在按模型绑定的提供商执行健康测试。",
-                    }),
+                    renderModelBatchTestProgress(batchState),
                     trigger,
                 );
-                const result = await api.post(
-                    `/api/models/${encodeURIComponent(modelName)}/test`,
-                    { features },
-                    { timeoutMs: PROBE_API_TIMEOUT_MS },
-                );
-                setButtonTransientFeedback(trigger, result.health_status === "healthy" ? "success" : "error", {
-                    successText: "健康",
-                    errorText: "异常",
+                await runSelectedModelBatchTests(modelOptions, batchState, features, refresh);
+                const summary = recalculateModelBatchTestState(batchState);
+                setButtonTransientFeedback(trigger, summary.healthy > 0 ? "success" : "error", {
+                    successText: "可用",
+                    errorText: "不可用",
                 });
-                openHealthCheckResultModal(
-                    modalTitle,
-                    renderModelHealthTestResult(result),
-                    trigger,
-                );
-                showToast(`模型检测：${formatHealthStatusLabel(result.health_status)}`);
+                refresh();
+                showToast(`模型检测：${summary.healthy > 0 ? "可用" : "不可用"}`, summary.healthy > 0 ? "success" : "error");
                 await loadData({ silent: true, reloadProviders: true });
             } catch (error) {
                 setButtonTransientFeedback(trigger, "error", { errorText: "失败" });
-                refreshHealthCheckResultModal(
-                    modalTitle,
-                    renderModelHealthTestResult({
-                        model_name: modelName,
-                        display_name: modelName,
-                        health_status: "unhealthy",
-                        healthy_channel_count: 0,
-                        total_channel_count: 0,
-                        latency_ms: "-",
-                        channel_results: [],
-                        message: error.message || "测试失败",
-                    }),
-                );
+                const item = batchState.items.find((entry) => entry.modelName === modelName);
+                if (item) {
+                    item.status = "failed";
+                    item.message = error.message || "测试失败";
+                }
+                refresh();
                 showToast(error.message, "error");
             } finally {
                 setButtonLoading(trigger, false);
             }
         }
 
+        function getModelTestOptions(modelNames) {
+            const selectedNames = new Set((Array.isArray(modelNames) ? modelNames : [])
+                .map((item) => String(item || "").trim())
+                .filter(Boolean));
+            const byName = new Map();
+            state.models.forEach((item) => byName.set(item.model_name, item));
+            state.allModels.forEach((item) => {
+                if (!byName.has(item.model_name)) byName.set(item.model_name, item);
+            });
+            return Array.from(selectedNames).map((modelName) => {
+                const source = byName.get(modelName) || { model_name: modelName, display_name: modelName };
+                const bindings = (Array.isArray(source.provider_bindings) ? source.provider_bindings : [])
+                    .filter((binding) => binding.bound && binding.provider_model_id && binding.provider_id)
+                    .map((binding) => ({
+                        providerId: Number(binding.provider_id),
+                        providerModelId: Number(binding.provider_model_id),
+                        providerName: binding.provider_name || `提供商 ${binding.provider_id}`,
+                        status: "waiting",
+                        statusLabel: "等待中",
+                    }));
+                return {
+                    model_name: modelName,
+                    display_name: source.display_name || modelName,
+                    selected_providers: bindings,
+                };
+            });
+        }
+
+        function updateModelBatchProviderProgress(batchState, modelName, providerModelId, updates = {}) {
+            const item = batchState.items.find((entry) => entry.modelName === modelName);
+            if (!item || !Array.isArray(item.selectedProviders)) return;
+            const providerItem = item.selectedProviders.find((entry) => String(entry.providerModelId) === String(providerModelId));
+            if (!providerItem) return;
+            Object.assign(providerItem, updates);
+        }
+
+        function finalizeModelBatchItemFromProviders(batchState, modelName, startedAt) {
+            const item = batchState.items.find((entry) => entry.modelName === modelName);
+            if (!item) return;
+            const providers = Array.isArray(item.selectedProviders) ? item.selectedProviders : [];
+            const completedProviders = providers.filter((provider) => ["healthy", "unhealthy", "failed", "rate_limited"].includes(provider.status));
+            const healthyProviders = completedProviders.filter((provider) => provider.status === "healthy");
+            item.healthyChannelCount = healthyProviders.length;
+            item.totalChannelCount = providers.length;
+            item.latencyMs = Date.now() - startedAt;
+            item.status = healthyProviders.length > 0 ? "healthy" : "unhealthy";
+            if (!providers.length) {
+                item.message = "该模型当前没有绑定可测试的提供商。";
+                return;
+            }
+            if (healthyProviders.length > 0) {
+                item.message = `至少 ${formatNumber(healthyProviders.length)} 个提供商可用，模型状态为可用。`;
+                return;
+            }
+            const firstReason = completedProviders.find((provider) => provider.message)?.message || "所有绑定提供商均不可用。";
+            item.message = compactModelBatchTestMessage(firstReason);
+        }
+
+        async function runModelProviderTests(modelOption, batchState, features, refresh) {
+            const item = batchState.items.find((entry) => entry.modelName === modelOption.model_name);
+            if (!item) return;
+            const startedAt = Date.now();
+            item.status = "running";
+            item.message = "正在并行测试该模型绑定的所有提供商。";
+            refresh();
+            const providers = Array.isArray(item.selectedProviders) ? item.selectedProviders : [];
+            if (!providers.length) {
+                finalizeModelBatchItemFromProviders(batchState, item.modelName, startedAt);
+                refresh();
+                return;
+            }
+            await Promise.allSettled(providers.map(async (providerItem) => {
+                updateModelBatchProviderProgress(batchState, item.modelName, providerItem.providerModelId, {
+                    status: "running",
+                    statusLabel: "检测中",
+                    message: "正在请求该提供商挂载模型",
+                    detail: {
+                        probe_kind: "model_batch_provider",
+                        model_name: item.modelName,
+                        provider_id: providerItem.providerId,
+                        provider_model_id: providerItem.providerModelId,
+                        provider_name: providerItem.providerName,
+                        status: "running",
+                        message: "正在请求该提供商挂载模型",
+                    },
+                });
+                refresh();
+                const providerStartedAt = Date.now();
+                try {
+                    const result = await api.post(
+                        `/api/providers/${providerItem.providerId}/models/${providerItem.providerModelId}/test`,
+                        { features },
+                        { timeoutMs: PROBE_API_TIMEOUT_MS },
+                    );
+                    const usable = isHealthCheckUsable(result);
+                    const rateLimited = isProbeRateLimitedResult(result);
+                    updateModelBatchProviderProgress(batchState, item.modelName, providerItem.providerModelId, {
+                        status: rateLimited ? "rate_limited" : (usable ? "healthy" : "unhealthy"),
+                        statusLabel: rateLimited ? "已限流" : (usable ? "可用" : "不可用"),
+                        latencyMs: result?.latency_ms ?? (Date.now() - providerStartedAt),
+                        message: result?.message || "",
+                        detail: {
+                            ...result,
+                            probe_kind: "model_batch_provider",
+                            model_name: item.modelName,
+                            provider_id: providerItem.providerId,
+                            provider_model_id: providerItem.providerModelId,
+                            provider_name: providerItem.providerName,
+                        },
+                    });
+                } catch (error) {
+                    const message = error.message || "测试失败";
+                    updateModelBatchProviderProgress(batchState, item.modelName, providerItem.providerModelId, {
+                        status: "failed",
+                        statusLabel: "失败",
+                        latencyMs: Date.now() - providerStartedAt,
+                        message,
+                        detail: {
+                            probe_kind: "model_batch_provider",
+                            model_name: item.modelName,
+                            provider_id: providerItem.providerId,
+                            provider_model_id: providerItem.providerModelId,
+                            provider_name: providerItem.providerName,
+                            status: "failed",
+                            error: message,
+                        },
+                    });
+                }
+                refresh();
+            }));
+            finalizeModelBatchItemFromProviders(batchState, item.modelName, startedAt);
+            refresh();
+        }
+
+        async function runSelectedModelBatchTests(modelOptions, batchState, features, refresh) {
+            const MODEL_TEST_START_GAP_MS = 10000;
+            const runningTasks = [];
+            let previousTask = null;
+            for (const modelOption of modelOptions) {
+                if (previousTask) {
+                    await Promise.race([
+                        previousTask.catch(() => undefined),
+                        wait(MODEL_TEST_START_GAP_MS),
+                    ]);
+                }
+                const task = runModelProviderTests(modelOption, batchState, features, refresh);
+                runningTasks.push(task);
+                previousTask = task;
+            }
+            await Promise.allSettled(runningTasks);
+        }
+
         async function testAllModelHealth() {
             const features = await openTestFeaturePicker({ title: "选择模型批量测试功能" });
             if (!features) return;
-            const modelOptions = (Array.isArray(state.allModels) ? state.allModels : [])
-                .filter((item) => typeof item?.model_name === "string" && item.model_name.trim())
-                .map((item) => ({
-                    model_name: item.model_name,
-                    display_name: item.display_name || item.model_name,
-                }));
+            const modelOptions = getModelTestOptions(Array.from(state.selectedModelNames));
             if (!modelOptions.length) {
-                showToast("暂无可测试模型", "error");
+                showToast("请先选择要测试的模型", "error");
                 return;
             }
             const batchState = createModelBatchTestState(modelOptions);
+            batchState.items.forEach((item) => {
+                item.status = "waiting";
+                item.message = "等待上一模型完成，最多等待 10 秒后自动开始。";
+            });
+            const refresh = () => refreshHealthCheckResultModal("模型选中测试", renderModelBatchTestProgress(batchState));
             try {
                 setButtonLoading(testAllBtn, true);
                 openHealthCheckResultModal(
-                    "模型批量测试",
+                    "模型选中测试",
                     renderModelBatchTestProgress(batchState),
                     testAllBtn,
                 );
-                await Promise.allSettled(modelOptions.map(async (item) => {
-                    try {
-                        const result = await api.post(
-                            `/api/models/${encodeURIComponent(item.model_name)}/test`,
-                            { features },
-                            { timeoutMs: PROBE_API_TIMEOUT_MS },
-                        );
-                        applyModelBatchTestSuccess(batchState, result);
-                    } catch (error) {
-                        applyModelBatchTestError(batchState, item.model_name, error);
-                    }
-                    refreshHealthCheckResultModal("模型批量测试", renderModelBatchTestProgress(batchState));
-                }));
+                await runSelectedModelBatchTests(modelOptions, batchState, features, refresh);
                 const summary = recalculateModelBatchTestState(batchState);
                 setButtonTransientFeedback(testAllBtn, summary.unhealthy === 0 ? "success" : "error", {
                     successText: "完成",
                     errorText: "有异常",
                 });
-                refreshHealthCheckResultModal("模型批量测试", renderModelBatchTestProgress(batchState));
-                showToast(`模型检测：${summary.healthy}/${summary.total} 健康`);
+                refresh();
+                showToast(`模型检测：${summary.healthy}/${summary.total} 可用`);
                 await loadData({ silent: true, reloadProviders: true });
             } catch (error) {
                 setButtonTransientFeedback(testAllBtn, "error", { errorText: "失败" });
@@ -14170,6 +14851,18 @@
         const form = document.getElementById("settings-form");
         const submitBtn = document.getElementById("settings-submit-btn");
         const healthCheckIntervalInput = document.getElementById("setting-health-check-interval-sec");
+        const logRetentionFields = [
+            ["request_log_retention_days", "setting-request-log-retention-days", "请求日志保留"],
+            ["admin_audit_log_retention_days", "setting-admin-audit-log-retention-days", "审计日志保留"],
+            ["request_child_log_retention_days", "setting-request-child-log-retention-days", "请求事件保留"],
+            ["exception_log_retention_days", "setting-exception-log-retention-days", "异常日志保留"],
+            ["health_log_retention_days", "setting-health-log-retention-days", "可用性日志保留"],
+            ["billing_log_retention_days", "setting-billing-log-retention-days", "计费日志保留"],
+            ["background_job_log_retention_days", "setting-background-job-log-retention-days", "任务日志保留"],
+            ["user_operation_log_retention_days", "setting-user-operation-log-retention-days", "用户操作日志保留"],
+            ["asset_log_retention_days", "setting-asset-log-retention-days", "素材日志保留"],
+            ["alert_event_retention_days", "setting-alert-event-retention-days", "告警日志保留"],
+        ];
         const settingsHelpCopy = {
             "setting-global-max-request-tokens": ["全局最大请求说明", "进入上游前允许的最大请求 token 估算值。0 表示不限制；生产环境建议结合模型上下文设置。"],
             "setting-long-output-stream-threshold-tokens": ["长输出非流式阈值说明", "当预期输出超过该阈值时可引导使用流式链路。0 表示不强制；推荐 8.19k。"],
@@ -14181,8 +14874,16 @@
             "setting-max-logged-metadata-bytes": ["日志 metadata 最大字节数说明", "限制日志 metadata 字段大小，避免绕过正文日志开关保存大上下文。推荐 1024 B。"],
             "setting-max-logged-body-bytes": ["日志正文最大字节数说明", "请求和响应正文允许落库时的最大保存字节数。推荐 16384 B。"],
             "setting-circuit-breaker-threshold": ["熔断阈值说明", "同一提供商或模型连续失败达到该次数后进入熔断。推荐 3；不稳定上游可适当调高。"],
-            "setting-request-log-retention-days": ["请求日志保留说明", "请求日志保留天数。推荐 90 d；合规或排障要求更高时再增大。"],
-            "setting-admin-audit-log-retention-days": ["审计日志保留说明", "管理员操作审计日志保留天数。推荐 180 d，便于追踪配置变更。"],
+            "setting-request-log-retention-days": ["请求日志保留说明", "请求日志保留天数。可在 1-7 d 内调整，避免日志撑爆数据库。"],
+            "setting-admin-audit-log-retention-days": ["审计日志保留说明", "管理员操作审计日志保留天数。可在 1-7 d 内调整，避免日志撑爆数据库。"],
+            "setting-request-child-log-retention-days": ["请求事件保留说明", "请求链路子事件保留天数。可在 1-7 d 内调整。"],
+            "setting-exception-log-retention-days": ["异常日志保留说明", "异常事件保留天数。可在 1-7 d 内调整。"],
+            "setting-health-log-retention-days": ["可用性日志保留说明", "可用性检测运行和探针日志保留天数。可在 1-7 d 内调整。"],
+            "setting-billing-log-retention-days": ["计费日志保留说明", "Token 补全和计费处理日志保留天数。可在 1-7 d 内调整。"],
+            "setting-background-job-log-retention-days": ["任务日志保留说明", "后台调度任务日志保留天数。可在 1-7 d 内调整。"],
+            "setting-user-operation-log-retention-days": ["用户操作日志保留说明", "用户端操作审计日志保留天数。可在 1-7 d 内调整。"],
+            "setting-asset-log-retention-days": ["素材日志保留说明", "上传和素材处理事件保留天数。可在 1-7 d 内调整。"],
+            "setting-alert-event-retention-days": ["告警日志保留说明", "系统告警事件保留天数。可在 1-7 d 内调整。"],
             "setting-global-qps-limit": ["全局 QPS 说明", "全站每秒允许进入 /v1 链路的最大请求数。推荐 20；0 表示不限制。"],
             "setting-global-rpm-limit": ["全局 RPM 说明", "全站每分钟允许进入 /v1 链路的最大请求数。推荐 20；0 表示不限制。"],
             "setting-account-qps-limit": ["单账户 QPS 说明", "单个账户下所有 API Key 合计每秒请求上限。推荐 20；0 表示不限制。"],
@@ -14251,6 +14952,7 @@
         document.getElementById("setting-route-exhausted-retry-max-wait-seconds").value = settings.route_exhausted_retry_max_wait_seconds ?? 600;
         document.getElementById("setting-route-exhausted-retry-infinite-enabled").checked = settings.route_exhausted_retry_infinite_enabled ?? false;
         document.getElementById("setting-trusted-providers-only").checked = settings.trusted_providers_only ?? false;
+        document.getElementById("setting-route-health-gate-mode").value = settings.route_health_gate_mode || "permissive";
         document.getElementById("setting-global-max-request-tokens").value = settings.global_max_request_tokens ?? 0;
         document.getElementById("setting-max-candidate-count").value = settings.max_candidate_count ?? 10;
         document.getElementById("setting-route-candidate-expand-count").value = settings.route_candidate_expand_count ?? 5;
@@ -14274,8 +14976,12 @@
         document.getElementById("setting-enable-stream-response-persist").checked = settings.enable_stream_response_persist;
         document.getElementById("setting-mask-sensitive-fields").checked = settings.mask_sensitive_fields;
         document.getElementById("setting-allow-public-user-registration").checked = settings.allow_public_user_registration;
-        document.getElementById("setting-request-log-retention-days").value = settings.request_log_retention_days;
-        document.getElementById("setting-admin-audit-log-retention-days").value = settings.admin_audit_log_retention_days;
+        logRetentionFields.forEach(([fieldName, id]) => {
+            const input = document.getElementById(id);
+            if (!input) return;
+            const value = Number(settings[fieldName] ?? 7);
+            input.value = String(Math.min(7, Math.max(1, Number.isFinite(value) ? value : 7)));
+        });
         document.getElementById("setting-global-qps-limit").value = settings.global_qps_limit ?? 20;
         document.getElementById("setting-global-rpm-limit").value = settings.global_rpm_limit ?? 20;
         document.getElementById("setting-account-qps-limit").value = settings.account_qps_limit ?? 20;
@@ -14321,6 +15027,7 @@
             }
             return value;
         };
+        const readLogRetentionSetting = (id, label) => readNaturalNumberSetting(id, label, 1, 7);
 
         form.addEventListener("submit", async (event) => {
             event.preventDefault();
@@ -14329,6 +15036,7 @@
                     route_exhausted_retry_max_wait_seconds: Math.min(600, Math.max(0, Number(document.getElementById("setting-route-exhausted-retry-max-wait-seconds").value || 600))),
                     route_exhausted_retry_infinite_enabled: document.getElementById("setting-route-exhausted-retry-infinite-enabled").checked,
                     trusted_providers_only: document.getElementById("setting-trusted-providers-only").checked,
+                    route_health_gate_mode: document.getElementById("setting-route-health-gate-mode").value || "permissive",
                     global_max_request_tokens: Number(document.getElementById("setting-global-max-request-tokens").value),
                     max_candidate_count: readNaturalNumberSetting("setting-max-candidate-count", "最大候选数", 1, 500),
                     route_candidate_expand_count: readNaturalNumberSetting("setting-route-candidate-expand-count", "候选扩展数", 0, 100),
@@ -14351,8 +15059,10 @@
                     mask_sensitive_fields: document.getElementById("setting-mask-sensitive-fields").checked,
                     max_logged_body_bytes: Number(document.getElementById("setting-max-logged-body-bytes").value),
                     allow_public_user_registration: document.getElementById("setting-allow-public-user-registration").checked,
-                    request_log_retention_days: Number(document.getElementById("setting-request-log-retention-days").value),
-                    admin_audit_log_retention_days: Number(document.getElementById("setting-admin-audit-log-retention-days").value),
+                    ...Object.fromEntries(logRetentionFields.map(([fieldName, id, label]) => [
+                        fieldName,
+                        readLogRetentionSetting(id, label),
+                    ])),
                     global_qps_limit: Number(document.getElementById("setting-global-qps-limit").value),
                     global_rpm_limit: Number(document.getElementById("setting-global-rpm-limit").value),
                     account_qps_limit: Number(document.getElementById("setting-account-qps-limit").value),
@@ -14861,6 +15571,7 @@
                     providerResults.set(provider.id, createPlaygroundProviderProbeResult(provider));
                     batchResultsState.results.push(providerResults.get(provider.id));
                 });
+                batchMeta.textContent = formatBatchConnectivityProbeProgress(batchResultsState.results);
                 renderBatchResultsView();
                 const providerGroups = selectedProviders.map((provider) => ({
                     provider,
@@ -14872,7 +15583,7 @@
                     if (!providerResult) return;
                     if (!models.length) {
                         recalculatePlaygroundProviderProbeResult(providerResult);
-                        batchMeta.textContent = `批量测试中，已完成 ${batchResultsState.results.filter((item) => !["等待中", "检测中"].includes(String(item.status_code ?? ""))).length}/${providerIds.length} 个提供商`;
+                        batchMeta.textContent = formatBatchConnectivityProbeProgress(batchResultsState.results);
                         renderBatchResultsView();
                         return;
                     }
@@ -14884,7 +15595,7 @@
                             message: "正在执行单模型检测",
                             health_status: "unknown",
                         });
-                        batchMeta.textContent = `批量测试中，已完成 ${batchResultsState.results.filter((item) => !["等待中", "检测中"].includes(String(item.status_code ?? ""))).length}/${providerIds.length} 个提供商`;
+                        batchMeta.textContent = formatBatchConnectivityProbeProgress(batchResultsState.results);
                         renderBatchResultsView();
                         try {
                             const result = await api.post(
@@ -14910,12 +15621,12 @@
                             });
                         }
                         recalculatePlaygroundProviderProbeResult(providerResult);
-                        batchMeta.textContent = `批量测试中，已完成 ${batchResultsState.results.filter((item) => !["等待中", "检测中"].includes(String(item.status_code ?? ""))).length}/${providerIds.length} 个提供商`;
+                        batchMeta.textContent = formatBatchConnectivityProbeProgress(batchResultsState.results);
                         renderBatchResultsView();
                     });
                 };
                 await Promise.all(providerGroups.map(runProviderGroup));
-                batchMeta.textContent = `批量测试完成，共 ${batchResultsState.results.length} 个提供商`;
+                batchMeta.textContent = formatBatchConnectivityProbeProgress(batchResultsState.results, true);
                 renderBatchResultsView();
                 showToast("批量测试完成");
             } catch (error) {
@@ -16448,7 +17159,7 @@
                     { label: "摘要", value: "当前命中的渠道可能整体可用性异常、响应超时或暂时不可用。" },
                 ],
                 fixes: [
-                    { label: "修复建议", value: "先看候选线路列表里的整体可用性、模型健康和成功率，必要时换模型或换一把授权范围更广的密钥重试。" },
+                    { label: "修复建议", value: "先看候选线路列表里的整体可用性、模型可用性和成功率，必要时换模型或换一把授权范围更广的密钥重试。" },
                     { label: "补充检查", value: "如果连续失败，去日志页确认是否同一渠道持续报错。" },
                 ],
                 next: [
@@ -16817,7 +17528,7 @@
         }
 
         function renderAlertSuggestion(type) {
-            if (type === "provider") return "先检查提供商健康、熔断和最近延迟，再决定是否临时下线。";
+            if (type === "provider") return "先检查提供商可用性、熔断和最近延迟，再决定是否临时下线。";
             if (type === "api_key") return "优先核对密钥状态、余额和授权提供商，再决定是否轮换或恢复。";
             if (type === "account") return "先确认账户额度、冻结金额和最近消费，再决定调账或提升配额。";
             return "结合失败率、消息内容和相关日志，优先处理影响正式流量的问题。";
@@ -18712,6 +19423,7 @@
         const typedLogsRefreshBtn = document.getElementById("typed-logs-refresh-btn");
         const typedLogsExportBtn = document.getElementById("typed-logs-export-btn");
         const typedLogsDeleteFilteredBtn = document.getElementById("typed-logs-delete-filtered-btn");
+        const typedLogsClearBtn = document.getElementById("typed-logs-clear-btn");
         const typedLogsLastRefresh = document.getElementById("typed-logs-last-refresh");
         const typedLogsKeywordLabel = document.getElementById("typed-logs-keyword-label");
         const typedLogsKeywordInput = document.getElementById("typed-logs-keyword");
@@ -18731,6 +19443,7 @@
             typedLogsRefreshBtn,
             typedLogsExportBtn,
             typedLogsDeleteFilteredBtn,
+            typedLogsClearBtn,
             typedLogsLastRefresh,
             typedLogsKeywordLabel,
             typedLogsKeywordInput,
@@ -18867,6 +19580,124 @@
             getInitialFocus: () => closeBtn,
         });
         closeBtn.addEventListener("click", () => traceModalController.close());
+
+        function confirmLogDangerAction({ title, message, confirmText }) {
+            return new Promise((resolve) => {
+                const modal = document.createElement("div");
+                modal.className = "modal-shell";
+                modal.setAttribute("aria-hidden", "true");
+                modal.innerHTML = `
+                    <div class="modal-card modal-sm" role="dialog" aria-modal="true" aria-labelledby="admin-log-confirm-title" tabindex="-1">
+                        <div class="modal-head">
+                            <h3 id="admin-log-confirm-title">${escapeHtml(title)}</h3>
+                            <button class="icon-btn interactive-btn" type="button" data-confirm-cancel aria-label="关闭确认弹窗">×</button>
+                        </div>
+                        <div class="modal-body-stack">
+                            <p class="table-muted">${escapeHtml(message)}</p>
+                            <div class="hero-actions">
+                                <button class="btn btn-ghost interactive-btn" type="button" data-confirm-cancel>取消</button>
+                                <button class="btn btn-danger-soft interactive-btn" type="button" data-confirm-ok>${escapeHtml(confirmText)}</button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                document.body.appendChild(modal);
+                const dialog = modal.querySelector('[role="dialog"]');
+                let settled = false;
+                const controller = modalManager.register({
+                    modal,
+                    dialog,
+                    getInitialFocus: () => modal.querySelector("[data-confirm-cancel]"),
+                    afterClose: () => {
+                        if (!settled) {
+                            settled = true;
+                            resolve(false);
+                        }
+                        modal.remove();
+                    },
+                });
+                const finish = (value) => {
+                    if (settled) return;
+                    settled = true;
+                    resolve(value);
+                    controller.close({ force: true });
+                };
+                modal.querySelectorAll("[data-confirm-cancel]").forEach((button) => {
+                    button.addEventListener("click", () => finish(false));
+                });
+                modal.querySelector("[data-confirm-ok]")?.addEventListener("click", () => finish(true));
+                enhanceInteractiveButtons(modal);
+                controller.open();
+            });
+        }
+
+        function promptLogDeleteTimeScope({ title, message, confirmText = "使用该范围" }) {
+            return new Promise((resolve) => {
+                const modal = document.createElement("div");
+                modal.className = "modal-shell";
+                modal.setAttribute("aria-hidden", "true");
+                modal.innerHTML = `
+                    <div class="modal-card modal-sm" role="dialog" aria-modal="true" aria-labelledby="log-delete-scope-title" tabindex="-1">
+                        <div class="modal-head">
+                            <h3 id="log-delete-scope-title">${escapeHtml(title)}</h3>
+                            <button class="icon-btn interactive-btn" type="button" data-scope-cancel aria-label="关闭范围选择弹窗">×</button>
+                        </div>
+                        <div class="modal-body-stack">
+                            <p class="table-muted">${escapeHtml(message)}</p>
+                            <label>
+                                <span>开始时间</span>
+                                <input class="field-input" data-scope-start type="datetime-local">
+                            </label>
+                            <label>
+                                <span>结束时间</span>
+                                <input class="field-input" data-scope-end type="datetime-local">
+                            </label>
+                            <div class="hero-actions">
+                                <button class="btn btn-ghost interactive-btn" type="button" data-scope-cancel>取消</button>
+                                <button class="btn btn-danger-soft interactive-btn" type="button" data-scope-ok>${escapeHtml(confirmText)}</button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                document.body.appendChild(modal);
+                const startInput = modal.querySelector("[data-scope-start]");
+                const endInput = modal.querySelector("[data-scope-end]");
+                const dialog = modal.querySelector('[role="dialog"]');
+                let settled = false;
+                const controller = modalManager.register({
+                    modal,
+                    dialog,
+                    getInitialFocus: () => startInput,
+                    afterClose: () => {
+                        if (!settled) {
+                            settled = true;
+                            resolve(null);
+                        }
+                        modal.remove();
+                    },
+                });
+                const finish = (value) => {
+                    if (settled) return;
+                    settled = true;
+                    resolve(value);
+                    controller.close({ force: true });
+                };
+                modal.querySelectorAll("[data-scope-cancel]").forEach((button) => {
+                    button.addEventListener("click", () => finish(null));
+                });
+                modal.querySelector("[data-scope-ok]")?.addEventListener("click", () => {
+                    const startAt = startInput?.value || "";
+                    const endAt = endInput?.value || "";
+                    if (!startAt && !endAt) {
+                        showToast("请至少选择开始时间或结束时间", "warning");
+                        return;
+                    }
+                    finish({ start_at: startAt, end_at: endAt });
+                });
+                enhanceInteractiveButtons(modal);
+                controller.open();
+            });
+        }
 
         function hasScopedDeleteParams(params) {
             const ignoredKeys = new Set([
@@ -19115,7 +19946,7 @@
             clearBtn.addEventListener("click", async () => {
                 const confirmed = await confirmLogDangerAction({
                     title: "清空请求日志",
-                    message: "该操作只会清空请求日志列表，不会清空异常事件、健康检查、计费、后台任务或素材日志。",
+                    message: "该操作只会清空请求日志列表，不会清空异常事件、可用性检测、计费、后台任务或素材日志。",
                     confirmText: "确认清空",
                 });
                 if (!confirmed) return;
@@ -19134,9 +19965,19 @@
             deleteFilteredBtn.addEventListener("click", async () => {
                 const params = buildRequestLogFilterParams();
                 if (!hasScopedDeleteParams(params)) {
-                    showToast("请先指定时间范围或筛选条件，再删除请求日志", "warning");
-                    setButtonTransientFeedback(deleteFilteredBtn, "error", { errorText: "需筛选" });
-                    return;
+                    const scope = await promptLogDeleteTimeScope({
+                        title: "选择请求日志删除范围",
+                        message: "当前没有筛选条件。请选择开始时间或结束时间，明确本次要删除的请求日志范围。",
+                    });
+                    if (!scope) return;
+                    if (scope.start_at) {
+                        startAtInput.value = scope.start_at;
+                        params.set("start_at", scope.start_at);
+                    }
+                    if (scope.end_at) {
+                        endAtInput.value = scope.end_at;
+                        params.set("end_at", scope.end_at);
+                    }
                 }
                 const confirmed = await confirmLogDangerAction({
                     title: "删除筛选出的请求日志",
@@ -19177,9 +20018,22 @@
                 if (!config) return;
                 const params = buildTypedLogParams(config, { exportMode: true });
                 if (!hasScopedDeleteParams(params)) {
-                    showToast("请先指定时间范围或筛选条件，再删除当前类型日志", "warning");
-                    setButtonTransientFeedback(typedLogsDeleteFilteredBtn, "error", { errorText: "需筛选" });
-                    return;
+                    const scope = await promptLogDeleteTimeScope({
+                        title: `选择${config.title}删除范围`,
+                        message: "当前没有筛选条件。请选择开始时间或结束时间，明确本次要删除的日志范围。",
+                    });
+                    if (!scope) return;
+                    if (scope.start_at) {
+                        const startNode = getTypedFilterNode("start_at");
+                        if (startNode) startNode.value = scope.start_at;
+                        params.set("start_at", scope.start_at);
+                    }
+                    if (scope.end_at) {
+                        const endNode = getTypedFilterNode("end_at");
+                        if (endNode) endNode.value = scope.end_at;
+                        params.set("end_at", scope.end_at);
+                    }
+                    snapshotCurrentTypedFilters();
                 }
                 const confirmed = await confirmLogDangerAction({
                     title: `删除筛选出的${config.title}`,
@@ -19201,6 +20055,34 @@
                     setButtonTransientFeedback(typedLogsDeleteFilteredBtn, "error", { errorText: "删除失败" });
                 } finally {
                     setButtonLoading(typedLogsDeleteFilteredBtn, false);
+                }
+            });
+            typedLogsClearBtn.addEventListener("click", async () => {
+                const config = typedLogConfigs[state.activeTab];
+                if (!config) return;
+                const confirmed = await confirmLogDangerAction({
+                    title: `清空${config.title}`,
+                    message: `将清空当前类型的全部${config.title}，并清理该类型尚未落库或死信中的持久化日志事件。该操作不可恢复。`,
+                    confirmText: "确认清空",
+                });
+                if (!confirmed) return;
+                try {
+                    setButtonLoading(typedLogsClearBtn, true);
+                    const params = new URLSearchParams({
+                        clear_all: "true",
+                        wait_for_latest: "true",
+                        wait_timeout_ms: "2000",
+                    });
+                    const result = await api.delete(`/api/logging/typed-events/${encodeURIComponent(state.activeTab)}?${params.toString()}`);
+                    showToast(`已清空${config.title} ${formatNumber(result.deleted || 0)} 条`);
+                    setButtonTransientFeedback(typedLogsClearBtn, "success", { successText: "已清空" });
+                    resetCurrentTypedPagination();
+                    await loadTypedLogs({ manual: true });
+                } catch (error) {
+                    showToast(error.message, "error");
+                    setButtonTransientFeedback(typedLogsClearBtn, "error", { errorText: "清空失败" });
+                } finally {
+                    setButtonLoading(typedLogsClearBtn, false);
                 }
             });
         }
@@ -21307,6 +22189,7 @@
             max_logged_metadata_bytes: "日志元数据 B",
             max_logged_body_bytes: "日志正文 B",
             async_request_logging: "异步日志",
+            route_health_gate_mode: "可用性门槛",
             max_candidate_count: "候选数",
             route_candidate_expand_count: "候选扩展数",
             route_candidate_cache_ttl_sec: "路由缓存 s",
@@ -21895,7 +22778,10 @@
             const sampleRate = document.getElementById("ip-setting-event-sample-rate");
             if (sampleRate) sampleRate.value = String(state.settings.event_sample_rate ?? 100);
             const retentionDays = document.getElementById("ip-setting-event-retention-days");
-            if (retentionDays) retentionDays.value = String(state.settings.event_retention_days ?? 30);
+            if (retentionDays) {
+                const value = Number(state.settings.event_retention_days ?? 7);
+                retentionDays.value = String(Math.min(7, Math.max(1, Number.isFinite(value) ? value : 7)));
+            }
         }
 
         function readSettings() {
@@ -21907,7 +22793,8 @@
             payload.trusted_proxy_cidrs = textLines(document.getElementById("ip-setting-trusted-proxy-cidrs")?.value);
             payload.trusted_header_order = selectValues(headerOrder);
             payload.event_sample_rate = Number(document.getElementById("ip-setting-event-sample-rate")?.value || 100);
-            payload.event_retention_days = Number(document.getElementById("ip-setting-event-retention-days")?.value || 30);
+            const retentionValue = Number(document.getElementById("ip-setting-event-retention-days")?.value || 7);
+            payload.event_retention_days = Math.min(7, Math.max(1, Number.isFinite(retentionValue) ? retentionValue : 7));
             return payload;
         }
 

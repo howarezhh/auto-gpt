@@ -9,6 +9,7 @@
         <div class="hero-actions">
             <button class="btn btn-accent interactive-btn" id="add-provider-btn" type="button">新增提供商</button>
             <button class="btn btn-ghost interactive-btn" id="provider-batch-import-open-btn" type="button">批量导入</button>
+            <button class="btn btn-ghost interactive-btn" id="provider-export-btn" type="button">一键导出</button>
             <button class="btn btn-ghost interactive-btn" id="providers-check-all-btn" type="button">检查全部</button>
         </div>
     </div>
@@ -29,7 +30,11 @@
             <h2>提供商对象目录</h2>
         </div>
         <div class="provider-model-page-actions">
-            <button class="btn btn-ghost interactive-btn" id="providers-health-selected-btn" type="button" disabled>健康检测选中</button>
+            <button class="btn btn-ghost interactive-btn" id="providers-enable-selected-btn" type="button" disabled>启用选中</button>
+            <button class="btn btn-ghost interactive-btn" id="providers-disable-selected-btn" type="button" disabled>停用选中</button>
+            <button class="btn btn-ghost interactive-btn" id="providers-mark-available-selected-btn" type="button" disabled>置为可用</button>
+            <button class="btn btn-ghost interactive-btn" id="providers-mark-trusted-selected-btn" type="button" disabled>置为可信</button>
+            <button class="btn btn-ghost interactive-btn" id="providers-health-selected-btn" type="button" disabled>可用性检测选中</button>
             <button class="btn btn-ghost interactive-btn" id="providers-protocol-detect-selected-btn" type="button" disabled>协议检测选中</button>
             <button class="btn btn-ghost interactive-btn" id="providers-trust-selected-btn" type="button" disabled>可信检测选中</button>
         </div>

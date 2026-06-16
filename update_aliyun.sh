@@ -18,6 +18,9 @@ GIT_MIRROR_URLS="${GIT_MIRROR_URLS:-}"
 GIT_HTTP_VERSION="${GIT_HTTP_VERSION:-HTTP/1.1}"
 GIT_LOW_SPEED_LIMIT="${GIT_LOW_SPEED_LIMIT:-1024}"
 GIT_LOW_SPEED_TIME="${GIT_LOW_SPEED_TIME:-20}"
+AUTO_DB_MIGRATE="${AUTO_DB_MIGRATE:-1}"
+DB_MIGRATION_BACKUP_DIR="${DB_MIGRATION_BACKUP_DIR:-$PROJECT_ROOT/data/db-backups}"
+DB_MIGRATION_BACKUP_FILE=""
 
 log() {
   printf '[aotu-gpt-update] %s\n' "$1"
@@ -46,6 +49,13 @@ ensure_local_runtime_paths() {
   if [[ ! -f "$PROJECT_ROOT/.env" && -f "$PROJECT_ROOT/.env.example" ]]; then
     log "Creating .env from .env.example because .env is missing."
     cp "$PROJECT_ROOT/.env.example" "$PROJECT_ROOT/.env"
+  fi
+}
+
+get_env_value() {
+  local key="$1"
+  if [[ -f "$PROJECT_ROOT/.env" ]] && grep -q "^${key}=" "$PROJECT_ROOT/.env"; then
+    grep "^${key}=" "$PROJECT_ROOT/.env" | head -n1 | cut -d'=' -f2-
   fi
 }
 
@@ -84,6 +94,64 @@ ensure_clean_code_worktree() {
     printf '%s\n' "$dirty"
     exit 1
   fi
+}
+
+postgres_dump_url() {
+  local database_url="$1"
+  printf '%s' "$database_url" | sed -E 's|^postgresql\+[^:]+://|postgresql://|'
+}
+
+backup_database_before_update_migration() {
+  local database_url=""
+  local backup_file=""
+  local dump_url=""
+
+  database_url="$(get_env_value "DATABASE_URL")"
+  if [[ -z "$database_url" ]]; then
+    log "DATABASE_URL is empty, cannot safely run automatic database migration."
+    exit 1
+  fi
+
+  case "${database_url,,}" in
+    postgresql://*|postgresql+*|postgres://*) ;;
+    *)
+      log "DATABASE_URL is not PostgreSQL, cannot safely run automatic database migration."
+      exit 1
+      ;;
+  esac
+
+  if ! command -v pg_dump >/dev/null 2>&1; then
+    log "pg_dump is not available, cannot safely run automatic database migration."
+    exit 1
+  fi
+
+  mkdir -p "$DB_MIGRATION_BACKUP_DIR"
+  backup_file="$DB_MIGRATION_BACKUP_DIR/aotu-gpt-before-update-migration-$(date +%Y%m%d-%H%M%S).dump"
+  DB_MIGRATION_BACKUP_FILE="$backup_file"
+  dump_url="$(postgres_dump_url "$database_url")"
+
+  log "Backing up PostgreSQL database before automatic migration: ${backup_file}"
+  pg_dump -Fc -f "$backup_file" "$dump_url"
+  chmod 600 "$backup_file"
+}
+
+run_database_update_migration() {
+  local auto_migrate="1"
+  auto_migrate="${AUTO_DB_MIGRATE:-1}"
+
+  if [[ "$auto_migrate" != "1" ]]; then
+    log "Skipping automatic database migration. Set AUTO_DB_MIGRATE=1 to enable it."
+    return
+  fi
+
+  if [[ ! -f "$PROJECT_ROOT/scripts/run_startup_db_init.py" ]]; then
+    log "Database init script not found, cannot run automatic migration."
+    exit 1
+  fi
+
+  backup_database_before_update_migration
+  log "Running automatic database migration with data preservation."
+  PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}" ENABLE_STARTUP_DB_INIT=false "$PYTHON_BIN" "$PROJECT_ROOT/scripts/run_startup_db_init.py"
 }
 
 current_requirements_hash() {
@@ -294,6 +362,8 @@ Project root: ${PROJECT_ROOT}
 Git HEAD: $(git rev-parse --short HEAD)
 Service: ${SERVICE_NAME}
 Health URL: ${HEALTH_URL}
+Database migration: $([[ "${AUTO_DB_MIGRATE:-1}" == "1" ]] && printf 'executed after PostgreSQL backup' || printf 'skipped by AUTO_DB_MIGRATE=0')
+Database backup: ${DB_MIGRATION_BACKUP_FILE:-Not created}
 
 Runtime data kept local:
   ${PROJECT_ROOT}/.env
@@ -311,6 +381,7 @@ main() {
   ensure_clean_code_worktree
   update_code
   install_python_dependencies_if_needed
+  run_database_update_migration
   refresh_service_files
   wait_for_health
   print_summary

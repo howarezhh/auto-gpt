@@ -30,10 +30,13 @@ from app.schemas.provider import (
     ProviderDiscoverModelsIn,
     ProviderDiscoverModelsResponse,
     ProviderDiscoveredModelOut,
+    ProviderModelBatchImportRequest,
+    ProviderModelBatchImportResponse,
     ProviderModelConfigInput,
     ProviderModelConfigUpdate,
     ProviderUpdate,
     format_provider_protocol_label as schema_format_provider_protocol_label,
+    normalize_content_integrity_status as schema_normalize_content_integrity_status,
     normalize_model_group as schema_normalize_model_group,
     normalize_native_endpoint_path as schema_normalize_native_endpoint_path,
     normalize_provider_name as schema_normalize_provider_name,
@@ -233,6 +236,49 @@ API Key: sk-yyyy
 分组: 第三方聚合
 启用: 是
 备注: 只新增提供商，不新增模型挂载
+"""
+
+    MODEL_BATCH_IMPORT_TEMPLATE = """# 模型挂载批量导入模板
+
+每个模型挂载使用一段键值内容，段落之间用空行或 --- 分隔。导出文件与本模板字段保持一致，可直接改完后重新导入。
+
+字段填写规则：
+- 提供商名称：必填，必须与提供商管理中的名称一致；也可使用提供商ID。
+- 模型名称：必填，本平台展示和对外请求使用的模型名。
+- 模型ID：必填，上游官方模型名或唯一 ID，实际请求上游时使用。
+- 启用：可选，填 是/否，默认 是。
+- 端点协议：可选，支持 双协议、Chat Completions API、Responses API、Gemini 原生协议、Claude Messages API。
+- 模型分组：可选，支持 OpenAI、DeepSeek、通义千问、Gemini、Claude、未知分组等。
+- 倍率：可选，默认 1，必须大于 0。
+- 价格字段统一按每百万 token 填写，留空表示未设置。
+- 容量字段填 0 表示不限，留空表示继承提供商或保持空值。
+
+提供商名称: 中文提供商
+提供商ID:
+模型名称: GPT 5.4
+模型ID: gpt-5.4
+启用: 是
+端点协议: 双协议
+模型分组: OpenAI
+倍率: 1
+优先级: 100
+原生接口路径:
+支持 Stream: 是
+支持图像理解: 是
+支持工具调用: 是
+支持图片生成: 否
+上下文 token:
+最大输入 token:
+最大输出 token:
+最大活跃请求:
+最大流式请求:
+最大 QPS:
+每分钟最多请求:
+账户输入价/1M:
+账户输出价/1M:
+账户缓存价/1M:
+账户缓存写入价/1M:
+可信状态: 未探测
 """
 
     @staticmethod
@@ -944,6 +990,241 @@ API Key: sk-yyyy
         }
 
     @staticmethod
+    def export_providers_import_text(db: Session) -> str:
+        """按提供商批量导入模板导出所有提供商，API Key 按用户要求明文输出。"""
+        providers = list(
+            db.scalars(
+                select(Provider)
+                .options(selectinload(Provider.provider_models))
+                .order_by(Provider.priority.asc(), Provider.id.asc())
+            )
+        )
+        blocks = [
+            "# 提供商批量导出",
+            "# 本文件字段与提供商批量导入模板一致；API Key 为明文，请仅在可信环境保存。",
+            "",
+        ]
+        for provider in providers:
+            model_lines: list[str] = []
+            for provider_model in provider.provider_models:
+                model_lines.extend(
+                    [
+                        f"- 模型名称: {ProviderService._export_text(provider_model.model_name)}",
+                        f"  模型ID: {ProviderService._export_text(ProviderService.provider_model_upstream_model_name(provider_model))}",
+                        f"  启用: {ProviderService._export_bool(provider_model.enabled)}",
+                        f"  端点协议: {ProviderService.provider_model_protocol_label(provider_model)}",
+                        f"  模型分组: {MODEL_GROUP_LABELS.get(provider_model.model_group, provider_model.model_group or 'unknown')}",
+                        f"  倍率: {ProviderService._export_decimal(provider_model.price_multiplier)}",
+                    ]
+                )
+            block = [
+                f"名称: {ProviderService._export_text(provider.name)}",
+                f"Base URL: {ProviderService._export_text(provider.base_url)}",
+                f"API Key: {ProviderService._export_text(provider.api_key)}",
+                f"类型: {ProviderService._export_text(provider.provider_type)}",
+                f"分组: {ProviderService._export_text(provider.group_name)}",
+                f"地区: {ProviderService._export_text(provider.region_tag)}",
+                f"优先级: {ProviderService._export_text(provider.priority)}",
+                f"超时毫秒: {ProviderService._export_text(provider.timeout_ms)}",
+                f"最大重试次数: {ProviderService._export_text(provider.max_retries)}",
+                f"最大活跃请求: {ProviderService._export_text(provider.max_active_requests)}",
+                f"最大流式请求: {ProviderService._export_text(provider.max_active_streams)}",
+                f"最大 QPS: {ProviderService._export_text(provider.max_qps)}",
+                f"每分钟最多请求: {ProviderService._export_text(provider.max_rpm)}",
+                f"首 Token 超时秒: {ProviderService._export_text(provider.first_token_timeout_sec)}",
+                f"启用: {ProviderService._export_bool(provider.enabled)}",
+                f"备注: {ProviderService._export_text(provider.remark)}",
+                "模型:",
+                *(model_lines or [""]),
+            ]
+            blocks.append("\n".join(block).rstrip())
+            blocks.append("\n---\n")
+        return "\n".join(blocks).rstrip() + "\n"
+
+    @staticmethod
+    def export_provider_models_import_text(db: Session) -> str:
+        """按模型挂载导入模板导出所有提供商模型挂载。"""
+        provider_models = list(
+            db.scalars(
+                select(ProviderModel)
+                .join(Provider)
+                .options(selectinload(ProviderModel.provider))
+                .order_by(Provider.priority.asc(), Provider.id.asc(), ProviderModel.priority.asc(), ProviderModel.id.asc())
+            )
+        )
+        blocks = [
+            "# 模型挂载批量导出",
+            "# 本文件字段与模型挂载批量导入模板一致，可直接修改后重新导入。",
+            "",
+        ]
+        for provider_model in provider_models:
+            provider = provider_model.provider
+            block = [
+                f"提供商名称: {ProviderService._export_text(provider.name if provider else None)}",
+                f"提供商ID: {ProviderService._export_text(provider.id if provider else None)}",
+                f"模型名称: {ProviderService._export_text(provider_model.model_name)}",
+                f"模型ID: {ProviderService._export_text(ProviderService.provider_model_upstream_model_name(provider_model))}",
+                f"启用: {ProviderService._export_bool(provider_model.enabled)}",
+                f"端点协议: {ProviderService.provider_model_protocol_label(provider_model)}",
+                f"模型分组: {MODEL_GROUP_LABELS.get(provider_model.model_group, provider_model.model_group or 'unknown')}",
+                f"倍率: {ProviderService._export_decimal(provider_model.price_multiplier)}",
+                f"优先级: {ProviderService._export_text(provider_model.priority)}",
+                f"原生接口路径: {ProviderService._export_text(provider_model.native_endpoint_path)}",
+                f"支持 Stream: {ProviderService._export_bool(provider_model.supports_stream)}",
+                f"支持图像理解: {ProviderService._export_bool(provider_model.supports_vision)}",
+                f"支持工具调用: {ProviderService._export_bool(provider_model.supports_tools)}",
+                f"支持图片生成: {ProviderService._export_bool(provider_model.supports_image_generation)}",
+                f"上下文 token: {ProviderService._export_text(provider_model.context_window_tokens)}",
+                f"最大输入 token: {ProviderService._export_text(provider_model.max_input_tokens)}",
+                f"最大输出 token: {ProviderService._export_text(provider_model.max_output_tokens)}",
+                f"最大活跃请求: {ProviderService._export_text(provider_model.max_active_requests)}",
+                f"最大流式请求: {ProviderService._export_text(provider_model.max_active_streams)}",
+                f"最大 QPS: {ProviderService._export_text(provider_model.max_qps)}",
+                f"每分钟最多请求: {ProviderService._export_text(provider_model.max_rpm)}",
+                f"账户输入价/1M: {ProviderService._export_price_per_1m(provider_model.input_price_per_1k)}",
+                f"账户输出价/1M: {ProviderService._export_price_per_1m(provider_model.output_price_per_1k)}",
+                f"账户缓存价/1M: {ProviderService._export_price_per_1m(provider_model.cache_price_per_1k)}",
+                f"账户缓存写入价/1M: {ProviderService._export_price_per_1m(provider_model.cache_write_price_per_1k)}",
+                f"可信状态: {CONTENT_INTEGRITY_STATUS_LABELS.get(provider_model.content_integrity_status, provider_model.content_integrity_status or 'unknown')}",
+            ]
+            blocks.append("\n".join(block))
+            blocks.append("\n---\n")
+        return "\n".join(blocks).rstrip() + "\n"
+
+    @staticmethod
+    def batch_import_provider_models(db: Session, payload: ProviderModelBatchImportRequest) -> ProviderModelBatchImportResponse:
+        """按模型挂载模板批量新增或更新 provider_models。"""
+        parsed_items = ProviderService._parse_model_batch_import_content(payload.content)
+        if len(parsed_items) > ProviderService.MAX_BATCH_IMPORT_ITEMS:
+            raise ValueError(f"单次最多导入 {ProviderService.MAX_BATCH_IMPORT_ITEMS} 个模型挂载")
+        providers = list(db.scalars(select(Provider).options(selectinload(Provider.provider_models))))
+        providers_by_id = {int(item.id): item for item in providers}
+        providers_by_name = {item.name: item for item in providers}
+        result_items: list[dict] = []
+        created_count = 0
+        updated_count = 0
+        skipped_count = 0
+        failed_count = 0
+        changed_provider_ids: set[int] = set()
+        seen_targets: set[tuple[int, str]] = set()
+
+        for index, raw_item in enumerate(parsed_items, start=1):
+            errors: list[str] = []
+            normalized = ProviderService._normalize_model_batch_item(raw_item, errors)
+            provider = None
+            skipped = False
+            created = False
+            updated = False
+            model_dict = None
+            provider_name = normalized.get("provider_name") if normalized else ProviderService._clean_optional_text(raw_item.get("provider_name") or raw_item.get("name"))
+            model_name = normalized.get("model_name") if normalized else ProviderService._clean_optional_text(raw_item.get("model_name"))
+            upstream_model_name = normalized.get("upstream_model_name") if normalized else ProviderService._clean_optional_text(raw_item.get("upstream_model_name"))
+
+            if normalized:
+                provider_id = normalized.get("provider_id")
+                if provider_id is not None:
+                    provider = providers_by_id.get(int(provider_id))
+                if provider is None and normalized.get("provider_name"):
+                    provider = providers_by_name.get(str(normalized["provider_name"]))
+                if provider is None:
+                    if payload.skip_missing_providers:
+                        skipped = True
+                        skipped_count += 1
+                    else:
+                        errors.append("提供商不存在")
+                elif (provider.id, normalized["model_name"]) in seen_targets:
+                    errors.append("同一导入内容中提供商和模型名称重复")
+                else:
+                    seen_targets.add((provider.id, normalized["model_name"]))
+
+            if normalized and provider is not None and not errors and not skipped and not payload.dry_run:
+                try:
+                    provider_model = next((item for item in provider.provider_models if item.model_name == normalized["model_name"]), None)
+                    if provider_model is None:
+                        provider_model = ProviderModel(provider=provider, model_name=normalized["model_name"])
+                        db.add(provider_model)
+                        created = True
+                    else:
+                        updated = True
+                    ProviderService._apply_model_batch_item(provider_model, normalized)
+                    ProviderService._sync_models_json(provider)
+                    ProviderService.refresh_provider_state(provider)
+                    db.flush()
+                    model_dict = ProviderService.provider_model_to_dict(provider_model, metrics=None)
+                    changed_provider_ids.add(int(provider.id))
+                    created_count += 1 if created else 0
+                    updated_count += 1 if updated else 0
+                except Exception as exc:
+                    db.rollback()
+                    errors.append(str(exc))
+
+            if errors:
+                failed_count += 1
+
+            result_items.append(
+                {
+                    "index": index,
+                    "provider_name": provider_name,
+                    "model_name": model_name,
+                    "upstream_model_name": upstream_model_name,
+                    "valid": normalized is not None and not errors and not skipped,
+                    "skipped": skipped,
+                    "created": created,
+                    "updated": updated,
+                    "errors": errors,
+                    "model": model_dict,
+                }
+            )
+
+        if changed_provider_ids and not payload.dry_run:
+            from app.services.model_catalog_service import ModelCatalogService
+
+            db.commit()
+            ModelCatalogService.sync_model_catalogs(db)
+            ProviderService.invalidate_provider_runtime_cache()
+        elif not payload.dry_run:
+            db.rollback()
+
+        valid_count = sum(1 for item in result_items if item["valid"])
+        return ProviderModelBatchImportResponse(
+            total=len(result_items),
+            valid_count=valid_count,
+            created_count=created_count,
+            updated_count=updated_count,
+            skipped_count=skipped_count,
+            failed_count=failed_count,
+            dry_run=payload.dry_run,
+            template=ProviderService.MODEL_BATCH_IMPORT_TEMPLATE,
+            items=result_items,
+        )
+
+    @staticmethod
+    def _export_text(value: Any) -> str:
+        if value is None:
+            return ""
+        return str(value).replace("\r\n", "\n").replace("\r", "\n").strip()
+
+    @staticmethod
+    def _export_bool(value: bool | None) -> str:
+        return "是" if bool(value) else "否"
+
+    @staticmethod
+    def _export_decimal(value: Any) -> str:
+        if value is None:
+            return ""
+        try:
+            decimal_value = Decimal(str(value))
+        except Exception:
+            return str(value)
+        return f"{decimal_value.normalize():f}".rstrip("0").rstrip(".") or "0"
+
+    @staticmethod
+    def _export_price_per_1m(value: Any) -> str:
+        if value is None:
+            return ""
+        return ProviderService._export_decimal(Decimal(str(value)) * Decimal("1000"))
+
+    @staticmethod
     def get_provider(db: Session, provider_id: int) -> Provider | None:
         """按 ID 读取 provider 及其模型挂载。"""
         return db.scalar(
@@ -1131,6 +1412,17 @@ API Key: sk-yyyy
         return [item for item in (ProviderService._parse_batch_import_block(block) for block in blocks) if item]
 
     @staticmethod
+    def _parse_model_batch_import_content(content: str) -> list[dict]:
+        normalized = (content or "").strip()
+        if not normalized:
+            return []
+        parsed_json = ProviderService._try_parse_batch_import_json(normalized)
+        if parsed_json is not None:
+            return parsed_json
+        blocks = ProviderService._split_batch_import_blocks(normalized)
+        return [item for item in (ProviderService._parse_model_batch_import_block(block) for block in blocks) if item]
+
+    @staticmethod
     def _try_parse_batch_import_json(content: str) -> list[dict] | None:
         try:
             payload = json.loads(content)
@@ -1179,6 +1471,31 @@ API Key: sk-yyyy
             match = re.match(r"^([^:=：]+)\s*[:=：]\s*(.*)$", line)
             if match:
                 normalized_key = ProviderService._normalize_batch_import_key(match.group(1))
+                if not normalized_key:
+                    if current_key:
+                        item[current_key] = f"{item.get(current_key, '')}\n{line}".strip()
+                    continue
+                current_key = normalized_key
+                item[current_key] = match.group(2).strip()
+                continue
+            if current_key:
+                item[current_key] = f"{item.get(current_key, '')}\n{line}".strip()
+        return item
+
+    @staticmethod
+    def _parse_model_batch_import_block(block: str) -> dict:
+        item: dict[str, str] = {}
+        current_key: str | None = None
+        for raw_line in block.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if current_key == "model_names" and (raw_line[:1].isspace() or line.startswith(("-", "—", "*"))):
+                item[current_key] = f"{item.get(current_key, '')}\n{line}".strip()
+                continue
+            match = re.match(r"^([^:=：]+)\s*[:=：]\s*(.*)$", line)
+            if match:
+                normalized_key = ProviderService._normalize_model_batch_import_key(match.group(1))
                 if not normalized_key:
                     if current_key:
                         item[current_key] = f"{item.get(current_key, '')}\n{line}".strip()
@@ -1302,6 +1619,94 @@ API Key: sk-yyyy
         return aliases.get(normalized)
 
     @staticmethod
+    def _normalize_model_batch_import_key(raw_key: str) -> str | None:
+        normalized = re.sub(r"\s+", "", (raw_key or "").strip().lower())
+        aliases = {
+            "提供商名称": "provider_name",
+            "提供商名": "provider_name",
+            "提供商": "provider_name",
+            "provider": "provider_name",
+            "providername": "provider_name",
+            "provider_name": "provider_name",
+            "提供商id": "provider_id",
+            "提供商ID": "provider_id",
+            "providerid": "provider_id",
+            "provider_id": "provider_id",
+            "名称": "model_name",
+            "模型名称": "model_name",
+            "modelname": "model_name",
+            "model_name": "model_name",
+            "模型id": "upstream_model_name",
+            "模型ID": "upstream_model_name",
+            "modelid": "upstream_model_name",
+            "model_id": "upstream_model_name",
+            "upstreammodelname": "upstream_model_name",
+            "upstream_model_name": "upstream_model_name",
+            "启用": "enabled",
+            "enabled": "enabled",
+            "端点协议": "protocol_type",
+            "模型协议": "protocol_type",
+            "protocol": "protocol_type",
+            "protocol_type": "protocol_type",
+            "模型分组": "model_group",
+            "分组": "model_group",
+            "modelgroup": "model_group",
+            "model_group": "model_group",
+            "倍率": "price_multiplier",
+            "price_multiplier": "price_multiplier",
+            "优先级": "priority",
+            "priority": "priority",
+            "原生接口路径": "native_endpoint_path",
+            "native_endpoint_path": "native_endpoint_path",
+            "支持stream": "supports_stream",
+            "supportsstream": "supports_stream",
+            "supports_stream": "supports_stream",
+            "支持图像理解": "supports_vision",
+            "supportsvision": "supports_vision",
+            "supports_vision": "supports_vision",
+            "支持工具调用": "supports_tools",
+            "supportstools": "supports_tools",
+            "supports_tools": "supports_tools",
+            "支持图片生成": "supports_image_generation",
+            "supportsimagegeneration": "supports_image_generation",
+            "supports_image_generation": "supports_image_generation",
+            "上下文token": "context_window_tokens",
+            "上下文tok": "context_window_tokens",
+            "contextwindowtokens": "context_window_tokens",
+            "context_window_tokens": "context_window_tokens",
+            "最大输入token": "max_input_tokens",
+            "max_input_tokens": "max_input_tokens",
+            "最大输出token": "max_output_tokens",
+            "max_output_tokens": "max_output_tokens",
+            "最大活跃请求": "max_active_requests",
+            "max_active_requests": "max_active_requests",
+            "最大流式请求": "max_active_streams",
+            "max_active_streams": "max_active_streams",
+            "最大qps": "max_qps",
+            "max_qps": "max_qps",
+            "每分钟最多请求": "max_rpm",
+            "最大rpm": "max_rpm",
+            "max_rpm": "max_rpm",
+            "账户输入价1m": "input_price_per_1m",
+            "账户输入价/1m": "input_price_per_1m",
+            "输入价1m": "input_price_per_1m",
+            "input_price_per_1m": "input_price_per_1m",
+            "账户输出价1m": "output_price_per_1m",
+            "账户输出价/1m": "output_price_per_1m",
+            "输出价1m": "output_price_per_1m",
+            "output_price_per_1m": "output_price_per_1m",
+            "账户缓存价1m": "cache_price_per_1m",
+            "账户缓存价/1m": "cache_price_per_1m",
+            "cache_price_per_1m": "cache_price_per_1m",
+            "账户缓存写入价1m": "cache_write_price_per_1m",
+            "账户缓存写入价/1m": "cache_write_price_per_1m",
+            "cache_write_price_per_1m": "cache_write_price_per_1m",
+            "可信状态": "content_integrity_status",
+            "content_integrity_status": "content_integrity_status",
+        }
+        return aliases.get(normalized)
+
+    @staticmethod
     def _normalize_batch_provider_item(raw_item: dict, errors: list[str]) -> dict | None:
         normalized = {
             ProviderService._normalize_batch_import_key(str(key)): value
@@ -1361,6 +1766,82 @@ API Key: sk-yyyy
         }
         try:
             return ProviderCreate(**provider_payload).model_dump()
+        except Exception as exc:
+            errors.append(str(exc))
+            return None
+
+    @staticmethod
+    def _normalize_model_batch_item(raw_item: dict, errors: list[str]) -> dict | None:
+        normalized = {
+            ProviderService._normalize_model_batch_import_key(str(key)): value
+            for key, value in raw_item.items()
+            if ProviderService._normalize_model_batch_import_key(str(key))
+        }
+        provider_name = ProviderService._clean_optional_text(normalized.get("provider_name"))
+        provider_id_raw = ProviderService._clean_optional_text(normalized.get("provider_id"))
+        model_name = ProviderService._clean_optional_text(normalized.get("model_name"))
+        upstream_model_name = ProviderService._clean_optional_text(normalized.get("upstream_model_name"))
+        if not model_name:
+            errors.append("缺少模型名称")
+        if not upstream_model_name:
+            errors.append("缺少模型ID")
+        if not provider_name and not provider_id_raw:
+            errors.append("缺少提供商名称或提供商ID")
+        if errors:
+            return None
+        try:
+            provider_id = int(provider_id_raw) if provider_id_raw is not None else None
+        except Exception:
+            errors.append("提供商ID必须是整数")
+            return None
+        try:
+            model_group = ProviderService.normalize_model_group(
+                ProviderService._clean_optional_text(normalized.get("model_group")) or ProviderService.infer_model_group(upstream_model_name or model_name)
+            )
+            protocol_type = ProviderService.protocol_type_for_model_group(
+                model_group,
+                upstream_model_name or model_name,
+                ProviderService._clean_optional_text(normalized.get("protocol_type")),
+            )
+            supports_chat, supports_responses = supports_from_protocol_type(protocol_type)
+            price_multiplier_raw = ProviderService._clean_optional_text(normalized.get("price_multiplier"))
+            price_multiplier = float(str(price_multiplier_raw or "1").strip())
+            if price_multiplier <= 0:
+                raise ValueError("倍率必须大于 0")
+            content_integrity_status = schema_normalize_content_integrity_status(
+                ProviderService._clean_optional_text(normalized.get("content_integrity_status")) or "unknown"
+            )
+            normalized_item = {
+                "provider_name": provider_name,
+                "provider_id": provider_id,
+                "model_name": model_name,
+                "upstream_model_name": upstream_model_name,
+                "enabled": ProviderService._parse_batch_bool(normalized.get("enabled"), default=True),
+                "protocol_type": protocol_type,
+                "model_group": model_group,
+                "price_multiplier": price_multiplier,
+                "priority": ProviderService._parse_batch_int(normalized.get("priority"), default=100, minimum=0),
+                "native_endpoint_path": ProviderService._clean_optional_text(normalized.get("native_endpoint_path")),
+                "supports_stream": ProviderService._parse_batch_bool(normalized.get("supports_stream"), default=True),
+                "supports_vision": ProviderService._parse_batch_bool(normalized.get("supports_vision"), default=True),
+                "supports_tools": ProviderService._parse_batch_bool(normalized.get("supports_tools"), default=True),
+                "supports_image_generation": ProviderService._parse_batch_bool(normalized.get("supports_image_generation"), default=False),
+                "supports_chat_completions": supports_chat,
+                "supports_responses": supports_responses,
+                "context_window_tokens": ProviderService._parse_batch_nullable_int(normalized.get("context_window_tokens"), default=None),
+                "max_input_tokens": ProviderService._parse_batch_nullable_int(normalized.get("max_input_tokens"), default=None),
+                "max_output_tokens": ProviderService._parse_batch_nullable_int(normalized.get("max_output_tokens"), default=None),
+                "max_active_requests": ProviderService._parse_batch_nullable_int(normalized.get("max_active_requests"), default=None),
+                "max_active_streams": ProviderService._parse_batch_nullable_int(normalized.get("max_active_streams"), default=None),
+                "max_qps": ProviderService._parse_batch_nullable_int(normalized.get("max_qps"), default=None),
+                "max_rpm": ProviderService._parse_batch_nullable_int(normalized.get("max_rpm"), default=None),
+                "input_price_per_1k": ProviderService._parse_price_per_1m(normalized.get("input_price_per_1m")),
+                "output_price_per_1k": ProviderService._parse_price_per_1m(normalized.get("output_price_per_1m")),
+                "cache_price_per_1k": ProviderService._parse_price_per_1m(normalized.get("cache_price_per_1m")),
+                "cache_write_price_per_1k": ProviderService._parse_price_per_1m(normalized.get("cache_write_price_per_1m")),
+                "content_integrity_status": content_integrity_status,
+            }
+            return normalized_item
         except Exception as exc:
             errors.append(str(exc))
             return None
@@ -1601,6 +2082,57 @@ API Key: sk-yyyy
         return parsed if parsed > 0 else None
 
     @staticmethod
+    def _parse_price_per_1m(value) -> Decimal | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            decimal_value = Decimal(text)
+        except Exception as exc:
+            raise ValueError("价格必须是大于或等于 0 的数字") from exc
+        if decimal_value < 0:
+            raise ValueError("价格必须是大于或等于 0 的数字")
+        return to_price_decimal(decimal_value / Decimal("1000"))
+
+    @staticmethod
+    def _apply_model_batch_item(provider_model: ProviderModel, item: dict) -> None:
+        provider_model.model_name = item["model_name"]
+        provider_model.upstream_model_name = item["upstream_model_name"]
+        provider_model.enabled = bool(item["enabled"])
+        provider_model.priority = int(item["priority"])
+        provider_model.model_group = ProviderService.normalize_model_group(item["model_group"])
+        provider_model.protocol_type = ProviderService.protocol_type_for_model_group(
+            provider_model.model_group,
+            ProviderService.provider_model_upstream_model_name(provider_model),
+            item["protocol_type"],
+        )
+        supports_chat, supports_responses = supports_from_protocol_type(provider_model.protocol_type)
+        provider_model.supports_chat_completions = supports_chat
+        provider_model.supports_responses = supports_responses
+        provider_model.native_endpoint_path = ProviderService.normalize_native_endpoint_path(item.get("native_endpoint_path"))
+        provider_model.supports_stream = bool(item["supports_stream"])
+        provider_model.supports_vision = bool(item["supports_vision"])
+        provider_model.supports_tools = bool(item["supports_tools"])
+        provider_model.supports_image_generation = bool(item["supports_image_generation"])
+        provider_model.context_window_tokens = item.get("context_window_tokens")
+        provider_model.max_input_tokens = item.get("max_input_tokens")
+        provider_model.max_output_tokens = item.get("max_output_tokens")
+        provider_model.max_active_requests = item.get("max_active_requests")
+        provider_model.max_active_streams = item.get("max_active_streams")
+        provider_model.max_qps = item.get("max_qps")
+        provider_model.max_rpm = item.get("max_rpm")
+        provider_model.price_multiplier = to_multiplier_decimal(item["price_multiplier"])
+        provider_model.input_price_per_1k = to_price_decimal(item.get("input_price_per_1k"))
+        provider_model.output_price_per_1k = to_price_decimal(item.get("output_price_per_1k"))
+        provider_model.cache_price_per_1k = to_price_decimal(item.get("cache_price_per_1k"))
+        provider_model.cache_write_price_per_1k = to_price_decimal(item.get("cache_write_price_per_1k"))
+        provider_model.content_integrity_status = str(item.get("content_integrity_status") or "unknown")
+        if not provider_model.health_status:
+            provider_model.health_status = "unknown"
+        if not provider_model.circuit_state:
+            provider_model.circuit_state = "closed"
+
+    @staticmethod
     def update_provider(db: Session, provider: Provider, payload: ProviderUpdate) -> Provider:
         """更新 provider 基础信息及模型挂载。"""
         from app.services.api_key_admin_service import ApiKeyAdminService
@@ -1624,7 +2156,7 @@ API Key: sk-yyyy
             ProviderService._replace_provider_models(db, provider, ProviderService._resolve_model_configs(payload, provider))
 
         if {"base_url", "api_key", "native_endpoint_path", "protocol_type"} & set(data.keys()):
-            # 上游连接信息变化后，强制重置健康状态并等待重新探测。
+            # 上游连接信息变化后，强制重置可用状态并等待重新探测。
             provider.health_status = "unknown"
             provider.circuit_state = "closed"
             for provider_model in provider.provider_models:
@@ -1637,6 +2169,93 @@ API Key: sk-yyyy
         ProviderService.invalidate_provider_runtime_cache()
         db.refresh(provider)
         return provider
+
+    @staticmethod
+    def batch_update_provider_governance(
+        db: Session,
+        *,
+        provider_ids: list[int],
+        action: str,
+    ) -> dict[str, Any]:
+        """对选中的提供商执行批量启停、可用性或可信度治理。"""
+        normalized_ids = list(dict.fromkeys(int(item) for item in provider_ids if int(item) > 0))
+        if not normalized_ids:
+            raise ValueError("请先选择要操作的提供商")
+        providers = list(
+            db.scalars(
+                select(Provider)
+                .options(selectinload(Provider.provider_models))
+                .where(Provider.id.in_(normalized_ids))
+            )
+        )
+        found_ids = {provider.id for provider in providers}
+        missing_ids = [provider_id for provider_id in normalized_ids if provider_id not in found_ids]
+        updated_items: list[dict[str, Any]] = []
+        skipped_count = 0
+        now = now_beijing()
+        for provider in providers:
+            changed = False
+            if action == "enable":
+                if not provider.enabled:
+                    provider.enabled = True
+                    changed = True
+            elif action == "disable":
+                if provider.enabled:
+                    provider.enabled = False
+                    changed = True
+            elif action == "mark_available":
+                if not provider.enabled:
+                    provider.enabled = True
+                    changed = True
+                if provider.health_status != "healthy":
+                    provider.health_status = "healthy"
+                    changed = True
+                if provider.circuit_state != "closed":
+                    provider.circuit_state = "closed"
+                    changed = True
+                if provider.last_check_at != now:
+                    provider.last_check_at = now
+                    changed = True
+                for provider_model in provider.provider_models:
+                    if provider_model.enabled and provider_model.health_status != "healthy":
+                        provider_model.health_status = "healthy"
+                        changed = True
+                    if provider_model.enabled and provider_model.circuit_state != "closed":
+                        provider_model.circuit_state = "closed"
+                        changed = True
+                    if provider_model.enabled:
+                        provider_model.last_check_at = now
+            elif action == "mark_trusted":
+                if provider.trust_level != "trusted":
+                    provider.trust_level = "trusted"
+                    changed = True
+                if provider.content_integrity_status != "passed":
+                    provider.content_integrity_status = "passed"
+                    changed = True
+                if provider.content_integrity_score < 80:
+                    provider.content_integrity_score = 80
+                    changed = True
+                for provider_model in provider.provider_models:
+                    if provider_model.enabled and provider_model.content_integrity_status != "passed":
+                        provider_model.content_integrity_status = "passed"
+                        changed = True
+            else:
+                raise ValueError("批量治理动作不受支持")
+            if not changed:
+                skipped_count += 1
+            ProviderService.refresh_provider_state(provider)
+            ProviderHealthStateService.clear_provider_runtime_state(provider)
+            updated_items.append(ProviderService.provider_to_dict(provider, metrics=ProviderService._build_quality_metrics(db, [provider])))
+        db.commit()
+        ProviderService.invalidate_provider_runtime_cache()
+        return {
+            "action": action,
+            "requested_count": len(normalized_ids),
+            "updated_count": len(updated_items),
+            "skipped_count": skipped_count,
+            "missing_ids": missing_ids,
+            "items": updated_items,
+        }
 
     @staticmethod
     def delete_provider(db: Session, provider: Provider) -> None:
@@ -1919,6 +2538,7 @@ API Key: sk-yyyy
             default=None,
         )
         trust_summary = ProviderService.provider_trust_summary(provider)
+        health_state = ProviderHealthStateService.effective_provider_health(provider)
         model_config_source = list(provider.provider_models)
         model_config_total = len(model_config_source)
         if model_config_limit is not None and model_config_limit >= 0:
@@ -1975,6 +2595,16 @@ API Key: sk-yyyy
             "model_config_count": model_config_total,
             "model_configs_truncated": len(model_config_source) < model_config_total,
             "health_status": provider.health_status,
+            "db_health": health_state["db_health"],
+            "runtime_health": health_state["runtime_health"],
+            "effective_health": health_state["effective_health"],
+            "db_availability": health_state["db_availability"],
+            "runtime_availability": health_state["runtime_availability"],
+            "effective_availability": health_state["effective_availability"],
+            "availability_status": health_state["effective_availability"],
+            "state_source": health_state["state_source"],
+            "health_state_updated_at": health_state["health_state_updated_at"],
+            "availability_state_updated_at": health_state["availability_state_updated_at"],
             "last_check_at": provider.last_check_at,
             "last_latency_ms": provider.last_latency_ms,
             "failure_count": provider.failure_count,
@@ -1995,6 +2625,7 @@ API Key: sk-yyyy
 
     @staticmethod
     def provider_to_option_dict(provider: Provider) -> dict:
+        health_state = ProviderHealthStateService.effective_provider_health(provider)
         return {
             "id": provider.id,
             "name": provider.name,
@@ -2002,6 +2633,16 @@ API Key: sk-yyyy
             "region_tag": provider.region_tag,
             "enabled": provider.enabled,
             "health_status": provider.health_status,
+            "db_health": health_state["db_health"],
+            "runtime_health": health_state["runtime_health"],
+            "effective_health": health_state["effective_health"],
+            "db_availability": health_state["db_availability"],
+            "runtime_availability": health_state["runtime_availability"],
+            "effective_availability": health_state["effective_availability"],
+            "availability_status": health_state["effective_availability"],
+            "state_source": health_state["state_source"],
+            "health_state_updated_at": health_state["health_state_updated_at"],
+            "availability_state_updated_at": health_state["availability_state_updated_at"],
             "protocol_type": ProviderService.provider_protocol_type(provider),
             "protocol_label": ProviderService.provider_protocol_label(getattr(provider, "protocol_type", None)),
             "native_endpoint_path": provider.native_endpoint_path,
@@ -2031,6 +2672,7 @@ API Key: sk-yyyy
 
     @staticmethod
     def provider_to_summary_dict(provider: Provider) -> dict:
+        health_state = ProviderHealthStateService.effective_provider_health(provider)
         return {
             "id": provider.id,
             "name": provider.name,
@@ -2039,6 +2681,16 @@ API Key: sk-yyyy
             "enabled": provider.enabled,
             "priority": provider.priority,
             "health_status": provider.health_status,
+            "db_health": health_state["db_health"],
+            "runtime_health": health_state["runtime_health"],
+            "effective_health": health_state["effective_health"],
+            "db_availability": health_state["db_availability"],
+            "runtime_availability": health_state["runtime_availability"],
+            "effective_availability": health_state["effective_availability"],
+            "availability_status": health_state["effective_availability"],
+            "state_source": health_state["state_source"],
+            "health_state_updated_at": health_state["health_state_updated_at"],
+            "availability_state_updated_at": health_state["availability_state_updated_at"],
             "protocol_type": ProviderService.provider_protocol_type(provider),
             "protocol_label": ProviderService.provider_protocol_label(getattr(provider, "protocol_type", None)),
             "native_endpoint_path": provider.native_endpoint_path,
@@ -2234,6 +2886,7 @@ API Key: sk-yyyy
         trust_status = ProviderService.provider_model_trust_status(provider_model)
         content_probe_results = ProviderService._parse_content_probe_results(provider_model.content_probe_results_json)
         health_state = ProviderHealthStateService.effective_model_health(provider_model)
+        route_availability = ProviderService.provider_model_route_availability(provider_model)
         model_identity = ProviderService.provider_model_upstream_model_name(provider_model)
         model_group = provider_model.model_group or ProviderService.infer_model_group(model_identity)
         return {
@@ -2248,8 +2901,17 @@ API Key: sk-yyyy
             "db_health": health_state["db_health"],
             "runtime_health": health_state["runtime_health"],
             "effective_health": health_state["effective_health"],
+            "db_availability": health_state["db_availability"],
+            "runtime_availability": health_state["runtime_availability"],
+            "effective_availability": health_state["effective_availability"],
+            "availability_status": health_state["effective_availability"],
+            "route_availability_status": route_availability["status"],
+            "route_availability_status_label": route_availability["label"],
+            "route_availability_reasons": route_availability["reasons"],
+            "route_availability_reason_text": route_availability["reason_text"],
             "state_source": health_state["state_source"],
             "health_state_updated_at": health_state["health_state_updated_at"],
+            "availability_state_updated_at": health_state["availability_state_updated_at"],
             "circuit_state": provider_model.circuit_state,
             "circuit_opened_at": provider_model.circuit_opened_at,
             "last_check_at": provider_model.last_check_at,
@@ -2294,6 +2956,66 @@ API Key: sk-yyyy
             "quality_window_minutes": metrics.get("quality_window_minutes", ProviderService.QUALITY_WINDOW_MINUTES),
             "created_at": provider_model.created_at,
             "updated_at": provider_model.updated_at,
+        }
+
+    @staticmethod
+    def provider_model_route_availability(provider_model: ProviderModel) -> dict[str, Any]:
+        provider = provider_model.provider
+        reasons: list[str] = []
+        if provider is None:
+            reasons.append("provider_missing")
+        else:
+            if not provider.enabled:
+                reasons.append("provider_disabled")
+            if provider.maintenance_mode_enabled:
+                reasons.append("provider_maintenance")
+            if provider.circuit_state == "open":
+                reasons.append("provider_circuit_open")
+            if provider.health_status == "unhealthy":
+                reasons.append("provider_unavailable")
+            if provider.content_integrity_status == "blocked":
+                reasons.append("provider_content_integrity_blocked")
+        if not provider_model.enabled:
+            reasons.append("model_disabled")
+        if provider_model.circuit_state == "open":
+            reasons.append("model_circuit_open")
+        if provider_model.health_status == "unhealthy":
+            reasons.append("model_unavailable")
+        if provider_model.content_integrity_status == "blocked":
+            reasons.append("model_content_integrity_blocked")
+        if reasons:
+            status_value = "unavailable"
+        elif int(provider_model.priority or 100) < 100 or (provider is not None and int(provider.priority or 100) < 100):
+            status_value = "preferred"
+        else:
+            status_value = "normal"
+        labels = {
+            "unavailable": "不可路由",
+            "normal": "正常",
+            "preferred": "偏好",
+        }
+        reason_labels = {
+            "provider_missing": "提供商不存在",
+            "provider_disabled": "提供商已停用",
+            "provider_maintenance": "提供商维护中",
+            "provider_circuit_open": "提供商熔断中",
+            "provider_unavailable": "提供商不可用",
+            "provider_content_integrity_blocked": "提供商内容完整性已隔离",
+            "model_disabled": "模型挂载已停用",
+            "model_circuit_open": "模型挂载熔断中",
+            "model_unavailable": "模型挂载不可用",
+            "model_content_integrity_blocked": "模型内容完整性已隔离",
+        }
+        reason_texts = [reason_labels.get(item, item) for item in reasons]
+        if status_value == "preferred" and not reason_texts:
+            reason_texts.append("优先级高于默认值，路由打分更靠前")
+        if status_value == "normal" and not reason_texts:
+            reason_texts.append("当前挂载满足基础路由条件")
+        return {
+            "status": status_value,
+            "label": labels[status_value],
+            "reasons": reasons,
+            "reason_text": "；".join(reason_texts),
         }
 
     @staticmethod
@@ -2367,6 +3089,7 @@ API Key: sk-yyyy
     def provider_model_mount_to_dict(provider_model: ProviderModel, *, metrics: dict | None = None) -> dict:
         provider = provider_model.provider
         provider_trust_summary = ProviderService.provider_trust_summary(provider)
+        provider_health_state = ProviderHealthStateService.effective_provider_health(provider)
         return {
             "provider": {
                 "id": provider.id,
@@ -2379,6 +3102,16 @@ API Key: sk-yyyy
                 "region_tag": provider.region_tag,
                 "enabled": provider.enabled,
                 "health_status": provider.health_status,
+                "db_health": provider_health_state["db_health"],
+                "runtime_health": provider_health_state["runtime_health"],
+                "effective_health": provider_health_state["effective_health"],
+                "db_availability": provider_health_state["db_availability"],
+                "runtime_availability": provider_health_state["runtime_availability"],
+                "effective_availability": provider_health_state["effective_availability"],
+                "availability_status": provider_health_state["effective_availability"],
+                "state_source": provider_health_state["state_source"],
+                "health_state_updated_at": provider_health_state["health_state_updated_at"],
+                "availability_state_updated_at": provider_health_state["availability_state_updated_at"],
                 "trust_status": provider_trust_summary["status"],
                 "trust_status_label": provider_trust_summary["label"],
                 "trust_status_reason": provider_trust_summary["reason"],

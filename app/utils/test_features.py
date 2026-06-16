@@ -35,13 +35,13 @@ def normalize_test_features(payload: dict | None = None, *, single_model: bool =
 
 def phase_keys_from_test_features(features: set[str]) -> frozenset[str]:
     """
-    将测试功能集合转换为健康检查阶段键集合
+    将测试功能集合转换为可用性检测阶段键集合
 
     Args:
         features: 通过 normalize_test_features 标准化后的测试功能集合
 
     Returns:
-        冻结集合，包含需要执行的健康检查阶段键
+        冻结集合，包含需要执行的可用性检测阶段键
 
     规范约束：
         - 移除了对 "text" 的特殊处理，不再同时添加 "text" 和 "text_stream"

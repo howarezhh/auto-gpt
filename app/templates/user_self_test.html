@@ -210,7 +210,7 @@
                 <tr>
                     <th>渠道</th>
                     <th>模型</th>
-                    <th>健康</th>
+                    <th>可用</th>
                     <th>熔断</th>
                     <th>得分</th>
                     <th>近期成功率</th>
@@ -231,7 +231,7 @@
                     <td>{{ '是' if item.is_default else '否' }}</td>
                 </tr>
                 {% else %}
-                <tr><td colspan="8"><div class="empty-state">当前没有命中的路由候选，请检查密钥授权范围、模型状态或渠道健康状态。</div></td></tr>
+                <tr><td colspan="8"><div class="empty-state">当前没有命中的路由候选，请检查密钥授权范围、模型状态或渠道可用状态。</div></td></tr>
                 {% endfor %}
             </tbody>
         </table>

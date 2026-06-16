@@ -692,7 +692,7 @@ def _check_runtime_guard_request_semantics() -> None:
             provider=unknown_health_provider,
             route_context=_context(),
         ) is True,
-        "健康状态 unknown 的 provider 不能因自定义关闭缓冲而跳过首段防护",
+        "可用状态 unknown 的 provider 不能因自定义关闭缓冲而跳过首段防护",
     )
     runtime_provider = _provider(content_integrity_status="unknown", circuit_state="closed")
     runtime_model = ProviderModel(
@@ -1246,14 +1246,14 @@ def _check_health_probe_guard_helpers() -> None:
         endpoint_path="/chat/completions",
         request_payload={"model": "stage33-model", "messages": [{"role": "user", "content": "ping"}]},
     )
-    _assert(json_result.result == ContentGuardService.RESULT_BLOCK, f"健康检查 JSON 探针应识别结构污染：{json_result}")
+    _assert(json_result.result == ContentGuardService.RESULT_BLOCK, f"可用性检测 JSON 探针应识别结构污染：{json_result}")
 
     stream_result = ContentGuardProbeService.inspect_probe_stream_chunk(
         b"data: not-json\n\n",
         endpoint_path="/chat/completions",
     )
-    _assert(stream_result.result == ContentGuardService.RESULT_REVIEW, f"健康检查流式探针应将非 JSON SSE 降级复核：{stream_result}")
-    _assert(stream_result.risk_level == "medium", f"健康检查非 JSON SSE 应标记中风险：{stream_result}")
+    _assert(stream_result.result == ContentGuardService.RESULT_REVIEW, f"可用性检测流式探针应将非 JSON SSE 降级复核：{stream_result}")
+    _assert(stream_result.risk_level == "medium", f"可用性检测非 JSON SSE 应标记中风险：{stream_result}")
     stream_delta = ContentGuardProbeService.extract_probe_sse_text_delta(
         '{"choices":[{"delta":{"content":"AOTU_CONTENT_GUARD_OK"}}]}'
     )
@@ -1267,7 +1267,7 @@ def _check_health_probe_guard_helpers() -> None:
         status_code=200,
         guard_result=stream_result,
     )
-    _assert(failure["success"] is False, f"内容探针失败必须转为健康检查失败：{failure}")
+    _assert(failure["success"] is False, f"内容探针失败必须转为可用性检测失败：{failure}")
     _assert(failure["retryable"] is False, f"内容完整性失败不应自动重试：{failure}")
     _assert(failure["content_guard"]["content_guard_result"] == ContentGuardService.RESULT_REVIEW, f"探针失败应保留非 JSON SSE 复核上下文：{failure}")
     _assert(failure["content_guard"]["content_guard_risk_level"] == "medium", f"探针失败应保留中风险上下文：{failure}")
@@ -1333,7 +1333,7 @@ def _check_health_probe_guard_helpers() -> None:
         )
     finally:
         health_service_module.HealthLogRecorder.record_probe = original_record_probe
-    _assert(records and records[0]["protocol_type"] is None, f"endpoint_path=None 的健康探针不得误记 responses 协议：{records}")
+    _assert(records and records[0]["protocol_type"] is None, f"endpoint_path=None 的可用性探针不得误记 responses 协议：{records}")
 
 
 async def _check_scheduled_content_probe_batch_policy() -> None:

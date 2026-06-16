@@ -105,7 +105,7 @@ class ModelCatalogService:
     @staticmethod
     def list_model_option_dicts(db: Session) -> list[dict]:
         """返回适合下拉框与引用型页面的轻量模型列表。"""
-        cache_key = "model-options:v2:list"
+        cache_key = "model-options:v3:list"
         cached = CacheService.get(cache_key)
         if isinstance(cached, list):
             return cached
@@ -730,6 +730,7 @@ class ModelCatalogService:
                     )
                 )
                 .order_by(Provider.priority.asc(), Provider.id.asc())
+                .execution_options(populate_existing=True)
             )
         )
 
@@ -776,7 +777,7 @@ class ModelCatalogService:
         if not normalized:
             return None
         if normalized not in {"healthy", "unhealthy"}:
-            raise ValueError("模型健康状态筛选仅支持 healthy 或 unhealthy")
+            raise ValueError("模型可用状态筛选仅支持 healthy 或 unhealthy")
         return normalized
 
     @staticmethod
@@ -857,8 +858,10 @@ class ModelCatalogService:
             item for item in active_bindings if ModelCatalogService._is_binding_available_for_catalog_display(item)
         ]
         enabled_bindings = [item for item in active_bindings if ModelCatalogService._is_binding_routable(item)]
+        healthy_bindings = [item for item in active_bindings if ModelCatalogService._is_binding_healthy_for_catalog_status(item)]
         trusted_bindings = [item for item in active_bindings if item.get("trust_status") == "trusted"]
-        health_status = "healthy" if enabled_bindings else "unhealthy"
+        health_status = "healthy" if healthy_bindings else "unhealthy"
+        health_reason = ModelCatalogService._build_catalog_health_reason(catalog, active_bindings, healthy_bindings)
         input_prices = [item["effective_input_price_per_1k"] for item in enabled_bindings if item["effective_input_price_per_1k"] is not None]
         output_prices = [item["effective_output_price_per_1k"] for item in enabled_bindings if item["effective_output_price_per_1k"] is not None]
         cache_prices = [item["effective_cache_price_per_1k"] for item in enabled_bindings if item["effective_cache_price_per_1k"] is not None]
@@ -909,8 +912,9 @@ class ModelCatalogService:
             "enabled_provider_count": len(enabled_bindings),
             "trusted_provider_count": len(trusted_bindings),
             "health_status": health_status,
-            "healthy_provider_count": len(enabled_bindings),
-            "unhealthy_provider_count": max(0, len(active_bindings) - len(enabled_bindings)),
+            "health_reason": health_reason,
+            "healthy_provider_count": len(healthy_bindings),
+            "unhealthy_provider_count": max(0, len(active_bindings) - len(healthy_bindings)),
             "lowest_input_price_per_1k": min(input_prices) if input_prices else catalog.input_price_per_1k,
             "lowest_output_price_per_1k": min(output_prices) if output_prices else catalog.output_price_per_1k,
             "lowest_cache_price_per_1k": (
@@ -937,6 +941,52 @@ class ModelCatalogService:
         }
 
     @staticmethod
+    def _build_catalog_health_reason(
+        catalog: ModelCatalog,
+        active_bindings: list[dict[str, Any]],
+        healthy_bindings: list[dict[str, Any]],
+    ) -> str:
+        model_label = catalog.display_name or catalog.model_name
+        if healthy_bindings:
+            provider_names = [
+                str(item.get("provider_name") or "").strip()
+                for item in healthy_bindings
+                if str(item.get("provider_name") or "").strip()
+            ]
+            if provider_names:
+                preview = "、".join(provider_names[:3])
+                suffix = f" 等 {len(provider_names)} 个提供商" if len(provider_names) > 3 else " 个提供商"
+                return f"{model_label} 当前有 {preview}{suffix} 可用，状态为可用。"
+            return f"{model_label} 当前至少有 1 个提供商可用，状态为可用。"
+        if not active_bindings:
+            return f"{model_label} 尚未绑定任何提供商，因此显示不可用。"
+        unavailable_reasons: list[str] = []
+        for item in active_bindings:
+            provider_name = str(item.get("provider_name") or "提供商").strip() or "提供商"
+            if not item.get("provider_enabled"):
+                unavailable_reasons.append(f"{provider_name} 已停用")
+            elif item.get("provider_maintenance_mode_enabled"):
+                unavailable_reasons.append(f"{provider_name} 维护中")
+            elif item.get("provider_circuit_state") == "open" or item.get("model_circuit_state") == "open":
+                unavailable_reasons.append(f"{provider_name} 熔断中")
+            elif not item.get("enabled"):
+                unavailable_reasons.append(f"{provider_name} 的挂载已停用")
+            elif item.get("provider_health_status") == "unhealthy":
+                unavailable_reasons.append(f"{provider_name} 自身不可用")
+            elif item.get("provider_health_status") not in {"healthy", "degraded"}:
+                unavailable_reasons.append(f"{provider_name} 自身未检测")
+            elif item.get("model_health_status") == "unhealthy":
+                unavailable_reasons.append(f"{provider_name} 的挂载不可用")
+            elif item.get("model_health_status") not in {"healthy", "degraded"}:
+                unavailable_reasons.append(f"{provider_name} 的挂载未检测")
+            else:
+                unavailable_reasons.append(f"{provider_name} 当前不可用")
+        reason_text = "；".join(unavailable_reasons[:3])
+        if len(unavailable_reasons) > 3:
+            reason_text += f" 等 {len(unavailable_reasons)} 项原因"
+        return f"{model_label} 所有已绑定提供商均不可用：{reason_text}。"
+
+    @staticmethod
     def _serialize_catalog_option(catalog: ModelCatalog, providers: list[Provider]) -> dict:
         serialized = ModelCatalogService._serialize_catalog(catalog, providers)
         return {
@@ -957,6 +1007,7 @@ class ModelCatalogService:
             "bound_provider_count": serialized["bound_provider_count"],
             "available_provider_count": serialized["available_provider_count"],
             "enabled_provider_count": serialized["enabled_provider_count"],
+            "provider_bindings": serialized["provider_bindings"],
         }
 
     @staticmethod
@@ -1376,16 +1427,24 @@ class ModelCatalogService:
         message = str(endpoint_result.get("message") or endpoint_result.get("support_label") or "")
         if len(message) > 180:
             message = f"{message[:177]}..."
-        return {
+        payload = {
             "endpoint_path": endpoint_result.get("endpoint_path"),
             "endpoint_label": endpoint_result.get("endpoint_label"),
             "success": bool(endpoint_result.get("success")),
+            "native_success": bool(endpoint_result.get("native_success")),
+            "adapted_success": bool(endpoint_result.get("adapted_success")),
+            "support_mode": endpoint_result.get("support_mode"),
             "support_label": endpoint_result.get("support_label"),
             "latency_ms": int(endpoint_result.get("latency_ms") or 0),
             "status_code": endpoint_result.get("status_code"),
             "message": message,
+            "retryable": endpoint_result.get("retryable"),
+            "trace": endpoint_result.get("trace") if isinstance(endpoint_result.get("trace"), list) else [],
             "content_guard": endpoint_result.get("content_guard") if isinstance(endpoint_result.get("content_guard"), dict) else None,
         }
+        if endpoint_result.get("raw_provider_response") is not None:
+            payload["raw_provider_response"] = endpoint_result.get("raw_provider_response")
+        return payload
 
     @staticmethod
     def _sync_provider_capabilities_from_catalog(db: Session, catalog: ModelCatalog) -> None:
@@ -1551,6 +1610,19 @@ class ModelCatalogService:
             and binding.get("provider_circuit_state") != "open"
             and binding.get("model_circuit_state") != "open"
             and binding.get("model_health_status") != "unhealthy"
+        )
+
+    @staticmethod
+    def _is_binding_healthy_for_catalog_status(binding: dict) -> bool:
+        return (
+            binding["bound"]
+            and binding["enabled"]
+            and binding["provider_enabled"]
+            and not binding.get("provider_maintenance_mode_enabled")
+            and binding.get("provider_circuit_state") != "open"
+            and binding.get("model_circuit_state") != "open"
+            and binding.get("provider_health_status") in {"healthy", "degraded"}
+            and binding.get("model_health_status") in {"healthy", "degraded"}
         )
 
     @staticmethod

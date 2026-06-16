@@ -99,6 +99,16 @@ TYPED_LOG_TIME_FILTERS: dict[str, dict[str, str]] = {
     "alert-events": {"field": "last_seen_at", "label": "最近出现时间", "start_label": "出现开始", "end_label": "出现结束"},
 }
 
+TYPED_LOG_QUEUE_EVENT_NAMES: dict[str, set[str]] = {
+    "exceptions": {"exception"},
+    "health-runs": {"health_check_run", "health_probe"},
+    "billing-events": {"token_finalize", "billing_process"},
+    "content-guard-events": {"request_content_guard"},
+    "background-jobs": {"background_job"},
+    "user-operations": {"user_operation"},
+    "asset-events": {"asset"},
+}
+
 TYPED_LOG_FILTER_ALIASES: dict[str, dict[str, tuple[str, ...]]] = {
     "severity": {
         "严重": ("critical",),
@@ -108,7 +118,7 @@ TYPED_LOG_FILTER_ALIASES: dict[str, dict[str, tuple[str, ...]]] = {
     },
     "overall_result": {
         "成功": ("healthy",),
-        "健康": ("healthy",),
+        "可用": ("healthy",),
         "异常": ("unhealthy", "failed"),
         "失败": ("failed", "unhealthy"),
         "跳过": ("skipped",),
@@ -1280,6 +1290,7 @@ def delete_typed_logs(
     storage_scope: str | None = None,
     start_at: datetime | None = None,
     end_at: datetime | None = None,
+    clear_all: bool = Query(default=False),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     filter_snapshot = {
@@ -1313,10 +1324,12 @@ def delete_typed_logs(
         "storage_scope": storage_scope,
         "start_at": start_at.isoformat() if start_at else None,
         "end_at": end_at.isoformat() if end_at else None,
+        "clear_all": clear_all,
     }
-    if not _has_typed_log_delete_scope(typed_log_type, filter_snapshot):
+    if not clear_all and not _has_typed_log_delete_scope(typed_log_type, filter_snapshot):
         raise HTTPException(status_code=400, detail="删除类型化日志必须至少指定一个筛选条件或时间范围")
 
+    discarded_queue = _discard_pending_typed_log_events(typed_log_type)
     result_payload = _delete_typed_logs_by_filter(
         db,
         typed_log_type=typed_log_type,
@@ -1352,16 +1365,22 @@ def delete_typed_logs(
         end_at=end_at,
     )
     deleted = int(result_payload.get("deleted") or 0)
+    result_payload["discarded_pending_typed_logs"] = discarded_queue
     _record_logging_admin_audit(
         db,
         request=request,
-        action="delete_typed_logs",
-        summary=f"按筛选删除类型化日志：{typed_log_type}，共 {deleted} 条",
+        action="clear_typed_logs" if clear_all else "delete_typed_logs",
+        summary=(
+            f"清空类型化日志：{typed_log_type}，共 {deleted} 条"
+            if clear_all
+            else f"按筛选删除类型化日志：{typed_log_type}，共 {deleted} 条"
+        ),
         detail={
             "typed_log_type": typed_log_type,
             "deleted": deleted,
             "filters": filter_snapshot,
             "details": result_payload,
+            "discarded_pending_typed_logs": discarded_queue,
         },
         risk_level="high",
     )
@@ -2316,6 +2335,13 @@ def _delete_typed_logs_by_filter(
         raise HTTPException(status_code=400, detail="unsupported typed log delete")
     deleted = sum(int(value or 0) for value in details.values())
     return {"success": True, "typed_log_type": typed_log_type, "deleted": deleted, "details": details}
+
+
+def _discard_pending_typed_log_events(typed_log_type: str) -> dict[str, int]:
+    event_names = TYPED_LOG_QUEUE_EVENT_NAMES.get(str(typed_log_type))
+    if not event_names:
+        return {"queued": 0, "processing": 0, "dead_letter": 0, "failure_count": 0}
+    return LoggingQueue.discard_pending(event_names=event_names)
 
 
 def _has_typed_log_delete_scope(typed_log_type: str | dict[str, Any], filters: dict[str, Any] | None = None) -> bool:

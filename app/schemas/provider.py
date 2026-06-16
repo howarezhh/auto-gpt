@@ -369,8 +369,17 @@ class ProviderModelConfigOut(ProviderModelConfigBase):
     db_health: str = "unknown"
     runtime_health: str | None = None
     effective_health: str = "unknown"
+    db_availability: str = "unknown"
+    runtime_availability: str | None = None
+    effective_availability: str = "unknown"
+    availability_status: str = "unknown"
+    route_availability_status: str = "normal"
+    route_availability_status_label: str = "正常"
+    route_availability_reasons: list[str] = Field(default_factory=list)
+    route_availability_reason_text: str | None = None
     state_source: str = "db"
     health_state_updated_at: datetime | str | None = None
+    availability_state_updated_at: datetime | str | None = None
     circuit_state: str
     circuit_opened_at: datetime | None
     last_check_at: datetime | None
@@ -412,8 +421,13 @@ class ProviderModelMountProviderOut(BaseModel):
     db_health: str = "unknown"
     runtime_health: str | None = None
     effective_health: str = "unknown"
+    db_availability: str = "unknown"
+    runtime_availability: str | None = None
+    effective_availability: str = "unknown"
+    availability_status: str = "unknown"
     state_source: str = "db"
     health_state_updated_at: datetime | str | None = None
+    availability_state_updated_at: datetime | str | None = None
     trust_status: str = "unknown"
     trust_status_label: str = "未检测"
     trust_status_reason: str | None = None
@@ -551,6 +565,42 @@ class ProviderBatchImportResponse(BaseModel):
     dry_run: bool
     template: str | None = None
     items: list[ProviderBatchImportItemOut]
+
+
+class ProviderModelBatchImportRequest(BaseModel):
+    content: str = Field(..., min_length=1, max_length=200000)
+    dry_run: bool = True
+    skip_missing_providers: bool = True
+
+    @field_validator("content")
+    @classmethod
+    def normalize_content(cls, value: str) -> str:
+        return value.strip()
+
+
+class ProviderModelBatchImportItemOut(BaseModel):
+    index: int
+    provider_name: str | None = None
+    model_name: str | None = None
+    upstream_model_name: str | None = None
+    valid: bool = False
+    skipped: bool = False
+    created: bool = False
+    updated: bool = False
+    errors: list[str] = Field(default_factory=list)
+    model: ProviderModelConfigOut | None = None
+
+
+class ProviderModelBatchImportResponse(BaseModel):
+    total: int
+    valid_count: int
+    created_count: int = 0
+    updated_count: int = 0
+    skipped_count: int = 0
+    failed_count: int = 0
+    dry_run: bool
+    template: str | None = None
+    items: list[ProviderModelBatchImportItemOut]
 
 
 class ProviderBase(BaseModel):
@@ -735,6 +785,26 @@ class ProviderUpdate(BaseModel):
         return normalize_content_integrity_status(value)
 
 
+class ProviderBatchGovernanceRequest(BaseModel):
+    provider_ids: list[int] = Field(..., min_length=1)
+    action: str
+
+    @field_validator("provider_ids")
+    @classmethod
+    def normalize_provider_ids(cls, value: list[int]) -> list[int]:
+        normalized = [int(item) for item in value if int(item) > 0]
+        return list(dict.fromkeys(normalized))
+
+    @field_validator("action")
+    @classmethod
+    def normalize_action(cls, value: str) -> str:
+        normalized = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+        allowed = {"enable", "disable", "mark_available", "mark_trusted"}
+        if normalized not in allowed:
+            raise ValueError("批量治理动作仅支持 enable、disable、mark_available、mark_trusted")
+        return normalized
+
+
 class ProviderOut(BaseModel):
     id: int
     name: str
@@ -787,8 +857,13 @@ class ProviderOut(BaseModel):
     db_health: str = "unknown"
     runtime_health: str | None = None
     effective_health: str = "unknown"
+    db_availability: str = "unknown"
+    runtime_availability: str | None = None
+    effective_availability: str = "unknown"
+    availability_status: str = "unknown"
     state_source: str = "db"
     health_state_updated_at: datetime | str | None = None
+    availability_state_updated_at: datetime | str | None = None
     last_check_at: datetime | None
     last_latency_ms: int | None
     failure_count: int
@@ -808,6 +883,15 @@ class ProviderOut(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class ProviderBatchGovernanceResponse(BaseModel):
+    action: str
+    requested_count: int
+    updated_count: int
+    skipped_count: int = 0
+    missing_ids: list[int] = Field(default_factory=list)
+    items: list[ProviderOut] = Field(default_factory=list)
 
 
 class ProviderTelemetryCardOut(BaseModel):
@@ -841,8 +925,13 @@ class ProviderOptionOut(BaseModel):
     db_health: str = "unknown"
     runtime_health: str | None = None
     effective_health: str = "unknown"
+    db_availability: str = "unknown"
+    runtime_availability: str | None = None
+    effective_availability: str = "unknown"
+    availability_status: str = "unknown"
     state_source: str = "db"
     health_state_updated_at: datetime | str | None = None
+    availability_state_updated_at: datetime | str | None = None
     protocol_type: str = "both"
     protocol_label: str = "双协议"
     native_endpoint_path: str | None = None
@@ -871,8 +960,13 @@ class ProviderPlaygroundOut(BaseModel):
     db_health: str = "unknown"
     runtime_health: str | None = None
     effective_health: str = "unknown"
+    db_availability: str = "unknown"
+    runtime_availability: str | None = None
+    effective_availability: str = "unknown"
+    availability_status: str = "unknown"
     state_source: str = "db"
     health_state_updated_at: datetime | str | None = None
+    availability_state_updated_at: datetime | str | None = None
     protocol_type: str = "both"
     protocol_label: str = "双协议"
     native_endpoint_path: str | None = None
@@ -891,8 +985,13 @@ class ProviderSummaryOut(BaseModel):
     db_health: str = "unknown"
     runtime_health: str | None = None
     effective_health: str = "unknown"
+    db_availability: str = "unknown"
+    runtime_availability: str | None = None
+    effective_availability: str = "unknown"
+    availability_status: str = "unknown"
     state_source: str = "db"
     health_state_updated_at: datetime | str | None = None
+    availability_state_updated_at: datetime | str | None = None
     protocol_type: str = "both"
     protocol_label: str = "双协议"
     native_endpoint_path: str | None = None

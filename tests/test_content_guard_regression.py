@@ -662,7 +662,7 @@ def test_stream_health_probe_decompression_error_is_not_endpoint_unsupported(mon
 def test_health_probe_does_not_clear_content_integrity_state() -> None:
     provider = Provider(
         id=21,
-        name="健康内容隔离拆分提供商",
+        name="可用性内容隔离拆分提供商",
         base_url="https://example.com/v1",
         api_key="sk-test",
         enabled=True,
@@ -673,7 +673,7 @@ def test_health_probe_does_not_clear_content_integrity_state() -> None:
     provider_model = ProviderModel(
         id=211,
         provider_id=21,
-        model_name="健康内容隔离拆分模型",
+        model_name="可用性内容隔离拆分模型",
         enabled=True,
         health_status="unhealthy",
         circuit_state="open",
@@ -762,7 +762,7 @@ def test_provider_model_serialization_returns_effective_health_fields() -> None:
     provider_model = ProviderModel(
         id=23,
         provider_id=2,
-        model_name="有效健康状态模型",
+        model_name="有效可用状态模型",
         enabled=True,
         health_status="healthy",
         circuit_state="closed",
@@ -924,7 +924,7 @@ def test_pollution_scenarios_use_single_upstream_request() -> None:
                                 "text": (
                                     "[[long_context_answer]]\n"
                                     "请求进入代理后先校验密钥。\n"
-                                    "再选择健康提供商。\n"
+                                    "再选择可用提供商。\n"
                                     "随后转发上游模型。\n"
                                     "最后记录日志和用量。\n\n"
                                     "[[tool_context_answer]]\n"
@@ -986,7 +986,7 @@ def test_fixed_answer_and_pollution_rules_use_single_upstream_request() -> None:
                                     "AOTU_CONTENT_GUARD_OK\n\n"
                                     "[[long_context_answer]]\n"
                                     "请求进入代理后先校验密钥。\n"
-                                    "再选择健康提供商。\n"
+                                    "再选择可用提供商。\n"
                                     "随后转发上游模型。\n"
                                     "最后记录日志和用量。\n\n"
                                     "[[tool_context_answer]]\n"

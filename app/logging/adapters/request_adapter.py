@@ -221,7 +221,7 @@ class RequestLogRecorder:
                     "request_log_id": request_log_id,
                     "trace_id": trace_id,
                     "route_round": 1,
-                    "route_policy": "健康优先",
+                    "route_policy": "可用性优先",
                     "candidate_count": candidate_count,
                     "selected_provider_id": log.provider_id,
                     "selected_provider_model_id": log.resolved_provider_model_id,

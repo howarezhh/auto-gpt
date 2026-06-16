@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import Text, and_, case, cast, delete, func, not_, or_, select
 from sqlalchemy.orm import Session, load_only
 
+from app.models.api_client_key import ApiClientKey
 from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
 from app.models.logging_events import RequestContentGuardEvent
@@ -116,9 +117,9 @@ class LogService:
         "responses": "响应",
         "moderations": "审核",
         "files": "文件",
-        "health_check": "健康检查",
-        "health_check_provider": "提供商健康检查",
-        "health_check_model": "模型健康检查",
+        "health_check": "可用性检测",
+        "health_check_provider": "提供商可用性检测",
+        "health_check_model": "模型可用性检测",
         "pass": "通过",
         "review": "需复核",
         "block": "已拦截",
@@ -142,9 +143,9 @@ class LogService:
         "danger": "危险",
         "warning": "警告",
         "info": "信息",
-        "healthy": "健康",
+        "healthy": "可用",
         "degraded": "降级",
-        "unhealthy": "异常",
+        "unhealthy": "不可用",
         "running": "运行中",
         "stale_running": "运行超时",
         "manual_single": "手动单项",
@@ -208,6 +209,8 @@ class LogService:
         is_stream: bool = False,
         has_image: bool = False,
         success: bool,
+        billable: bool | None = None,
+        billable_reason: str | None = None,
         status_code: int | None = None,
         latency_ms: int | None = None,
         first_token_latency_ms: int | None = None,
@@ -369,6 +372,25 @@ class LogService:
             trace = LogService._merge_error_context_into_trace(trace=trace, error_context=error_context)
         if capability_result is not None and response_body_json is None:
             response_body_json = dumps_json({"capability_result": capability_result})
+        effective_billable = LogService.resolve_billable(
+            success=success,
+            billable=billable,
+            api_client_key_id=api_client_key_id,
+            request_path=request_path,
+            log_type=log_type,
+            prompt_tokens=effective_prompt_tokens,
+            completion_tokens=effective_completion_tokens,
+            total_tokens=effective_total_tokens,
+            response_text=response_text,
+            response_body_json=response_body_json,
+            error_code=error_code,
+        )
+        effective_billable_reason = LogService.resolve_billable_reason(
+            billable=effective_billable,
+            success=success,
+            explicit_reason=billable_reason,
+            error_code=error_code,
+        )
         log = RequestLog(
             log_type=log_type,
             provider_id=provider_id,
@@ -390,6 +412,8 @@ class LogService:
             is_stream=is_stream,
             has_image=has_image,
             success=success,
+            billable=effective_billable,
+            billable_reason=effective_billable_reason,
             status_code=status_code,
             latency_ms=latency_ms,
             first_token_latency_ms=first_token_latency_ms,
@@ -527,6 +551,7 @@ class LogService:
                 schedule_token_fill=schedule_token_fill,
         )
         LogService._cache_recent_runtime_log(log)
+        LogService.record_retry_failure_signal_for_log(log)
         return log
 
     @staticmethod
@@ -630,6 +655,74 @@ class LogService:
         return [event]
 
     @staticmethod
+    def resolve_billable(
+        *,
+        success: bool,
+        billable: bool | None,
+        api_client_key_id: int | None,
+        request_path: str | None,
+        log_type: str,
+        prompt_tokens: int | None,
+        completion_tokens: int | None,
+        total_tokens: int | None,
+        response_text: str | None,
+        response_body_json: str | None,
+        error_code: str | None,
+    ) -> bool:
+        if billable is not None:
+            return bool(billable)
+        if api_client_key_id is None:
+            return False
+        if LogService.is_model_list_request_path(request_path):
+            return False
+        if log_type not in LogService.TOKEN_BILLING_LOG_TYPES:
+            return False
+        if success:
+            return True
+        if error_code != "content_integrity_violation":
+            return False
+        has_usage = any(value is not None and int(value or 0) > 0 for value in (prompt_tokens, completion_tokens, total_tokens))
+        has_response = bool(str(response_text or "").strip() or str(response_body_json or "").strip())
+        return has_usage or has_response
+
+    @staticmethod
+    def resolve_billable_reason(
+        *,
+        billable: bool,
+        success: bool,
+        explicit_reason: str | None,
+        error_code: str | None,
+    ) -> str | None:
+        if explicit_reason:
+            return str(explicit_reason)
+        if not billable:
+            return None
+        if success:
+            return "completed"
+        if error_code == "content_integrity_violation":
+            return "blocked_after_output"
+        return "upstream_consumed"
+
+    @staticmethod
+    def record_retry_failure_signal_for_log(log: RequestLog) -> None:
+        if log.api_client_key_id is None or log.success:
+            return
+        if log.retryable is True:
+            return
+        if log.error_code in {"rate_limit_exceeded", "retry_backoff_required", "concurrency_limit_exceeded"}:
+            return
+        try:
+            from app.services.rate_limit_service import RateLimitService
+
+            RateLimitService.record_abnormal_retry_failure(
+                api_key_id=log.api_client_key_id,
+                account_id=log.user_account_id,
+                source_ip=log.source_ip,
+            )
+        except Exception:
+            return
+
+    @staticmethod
     def _token_job_payload_or_none(payload: dict | None) -> dict | None:
         """仅在 payload 足够小且可序列化时保留给异步补算任务。"""
         if not isinstance(payload, dict):
@@ -681,6 +774,7 @@ class LogService:
         *,
         include_payload_fields: bool = True,
         derive_image_observability: bool = True,
+        raw_api_key_by_id: dict[int, str | None] | None = None,
     ) -> dict[str, Any]:
         """把单条日志对象转换为接口返回结构。"""
         data = {}
@@ -693,6 +787,9 @@ class LogService:
             requested_model=log.requested_model,
             actual_model=log.model_name,
         )
+        if raw_api_key_by_id is not None:
+            raw_api_key = raw_api_key_by_id.get(int(log.api_client_key_id)) if log.api_client_key_id is not None else None
+            data["raw_api_key"] = raw_api_key
         if derive_image_observability:
             data.update(LogService._derive_image_observability(log))
         else:
@@ -705,6 +802,7 @@ class LogService:
         *,
         include_payload_fields: bool = True,
         derive_image_observability: bool = True,
+        raw_api_key_by_id: dict[int, str | None] | None = None,
     ) -> list[dict[str, Any]]:
         """批量序列化日志对象。"""
         return [
@@ -712,9 +810,31 @@ class LogService:
                 item,
                 include_payload_fields=include_payload_fields,
                 derive_image_observability=derive_image_observability,
+                raw_api_key_by_id=raw_api_key_by_id,
             )
             for item in logs
         ]
+
+    @staticmethod
+    def load_raw_api_keys_for_logs(db: Session, logs: list[RequestLog]) -> dict[int, str | None]:
+        from app.services.api_key_service import ApiKeyService
+
+        api_client_key_ids = sorted(
+            {
+                int(item.api_client_key_id)
+                for item in logs
+                if getattr(item, "api_client_key_id", None) is not None
+            }
+        )
+        if not api_client_key_ids:
+            return {}
+        keys = db.scalars(
+            select(ApiClientKey).where(ApiClientKey.id.in_(api_client_key_ids))
+        ).all()
+        raw_api_keys: dict[int, str | None] = {}
+        for api_client_key in keys:
+            raw_api_keys[api_client_key.id] = ApiKeyService.decrypt_raw_api_key(api_client_key.raw_key_encrypted)
+        return raw_api_keys
 
     @staticmethod
     def _lightweight_log_load_options():
@@ -959,6 +1079,7 @@ class LogService:
             func.count(RequestLog.id).label("total_requests"),
             func.sum(case((RequestLog.success.is_(True), 1), else_=0)).label("success_requests"),
             func.sum(case((RequestLog.success.is_(False), 1), else_=0)).label("failed_requests"),
+            func.sum(case((RequestLog.billable.is_(True), 1), else_=0)).label("billable_requests"),
             func.sum(RequestLog.prompt_tokens).label("prompt_tokens"),
             func.sum(RequestLog.completion_tokens).label("completion_tokens"),
             func.sum(RequestLog.total_tokens).label("total_tokens"),
@@ -1067,6 +1188,7 @@ class LogService:
             "total_requests": int(summary_row.total_requests or 0),
             "success_requests": int(summary_row.success_requests or 0),
             "failed_requests": int(summary_row.failed_requests or 0),
+            "billable_requests": int(summary_row.billable_requests or 0),
             "prompt_tokens": int(summary_row.prompt_tokens or 0),
             "completion_tokens": int(summary_row.completion_tokens or 0),
             "total_tokens": int(summary_row.total_tokens or 0),
@@ -1289,7 +1411,7 @@ class LogService:
             LogService._non_health_check_expr(),
             RequestLog.log_type.in_(LogService.TOKEN_BILLING_LOG_TYPES),
             RequestLog.api_client_key_id.is_not(None),
-            RequestLog.success.is_(True),
+            RequestLog.billable.is_(True),
         )
 
     @staticmethod
@@ -1318,7 +1440,7 @@ class LogService:
             and log.log_type not in LogService.HEALTH_CHECK_LOG_TYPES
             and log.log_type in LogService.TOKEN_BILLING_LOG_TYPES
             and log.api_client_key_id is not None
-            and log.success is True
+            and log.billable is True
         )
 
     @staticmethod

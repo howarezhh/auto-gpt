@@ -71,7 +71,7 @@ sudo ./start_aliyun.sh
 - 写入 `nginx` 站点配置并启用
 - 若服务器启用了 `ufw`，自动放行 `80/TCP`
 - 设置后端与 `nginx` 开机自启并立即启动
-- 执行本机和公网健康检查；已完成的依赖安装、虚拟环境创建、Python 依赖安装会自动跳过
+- 执行本机和公网可用性检测；已完成的依赖安装、虚拟环境创建、Python 依赖安装会自动跳过
 
 部署完成后，仍需在阿里云安全组放行 `80/TCP` 到 `0.0.0.0/0`。
 
@@ -89,7 +89,7 @@ API Key 鉴权结果会按 Bearer Key 的 SHA256 哈希写入 Redis 短 TTL 缓�
 
 SSE 流式请求使用独立流式并发租约，默认 `GLOBAL_MAX_ACTIVE_STREAMS=10`，并通过 `STREAM_CONNECT_TIMEOUT_SECONDS=10`、`STREAM_FIRST_TOKEN_TIMEOUT_SECONDS=60`、`STREAM_IDLE_TIMEOUT_SECONDS=120`、`STREAM_MAX_DURATION_SECONDS=600` 控制连接上游、首 Token、空闲 chunk 和最长持续时间。流式日志只在结束、取消或异常时写一条摘要，客户端取消记录 499 且不计 provider 失败。
 
-监控与告警入口包括 `/live`、`/ready`、`/health`、`/metrics` 和后台 `/api/metrics/system`。`/ready` 会检查数据库、Redis、全局活跃请求、全局流式请求、数据库连接池和后台 Token/计费任务积压；后台“告警中心”会展示核心健康指标，并把 Redis 不可用、数据库不可用、5xx/429 异常、provider 失败率过高、后台任务积压、Token/计费失败写入告警事件流。
+监控与告警入口包括 `/live`、`/ready`、`/health`、`/metrics` 和后台 `/api/metrics/system`。`/ready` 会检查数据库、Redis、全局活跃请求、全局流式请求、数据库连接池和后台 Token/计费任务积压；后台“告警中心”会展示核心可用指标，并把 Redis 不可用、数据库不可用、5xx/429 异常、provider 失败率过高、后台任务积压、Token/计费失败写入告警事件流。
 
 若需要让“使用文档”页面固定展示公网地址，部署完成后再把 `.env` 中的 `EXTERNAL_BASE_URL` 改成你的公网地址，例如：
 

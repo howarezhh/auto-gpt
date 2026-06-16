@@ -12,6 +12,7 @@ from app.models.model_mapping import ModelMapping
 from app.schemas.model_mapping import ModelMappingCreate, ModelMappingTarget, ModelMappingUpdate
 from app.services.api_key_service import ApiClientAuthContext, ApiKeyService
 from app.services.cache_service import CacheService
+from app.services.provider_service import ProviderService
 from app.services.router_service import RouterService
 from app.utils.json_utils import dumps_json, loads_json
 
@@ -151,6 +152,15 @@ class ModelMappingService:
         api_client_auth: ApiClientAuthContext | None,
         sticky_key: str | None,
         excluded_target_model_names: tuple[str, ...] | None = None,
+        endpoint_path: str | None = None,
+        require_stream: bool = False,
+        require_vision: bool = False,
+        require_tools: bool = False,
+        require_image_generation: bool = False,
+        require_chat_completions: bool = False,
+        require_responses: bool = False,
+        required_upstream_protocol_type: str | None = None,
+        route_context: Any = None,
     ) -> ModelMappingResolution | None:
         if not source_model_name:
             return None
@@ -160,6 +170,15 @@ class ModelMappingService:
             api_client_auth=api_client_auth,
             sticky_key=sticky_key,
             excluded_target_model_names=excluded_target_model_names,
+            endpoint_path=endpoint_path,
+            require_stream=require_stream,
+            require_vision=require_vision,
+            require_tools=require_tools,
+            require_image_generation=require_image_generation,
+            require_chat_completions=require_chat_completions,
+            require_responses=require_responses,
+            required_upstream_protocol_type=required_upstream_protocol_type,
+            route_context=route_context,
         )
 
     @staticmethod
@@ -169,6 +188,15 @@ class ModelMappingService:
         api_client_auth: ApiClientAuthContext | None,
         sticky_key: str | None,
         excluded_target_model_names: tuple[str, ...] | None = None,
+        endpoint_path: str | None = None,
+        require_stream: bool = False,
+        require_vision: bool = False,
+        require_tools: bool = False,
+        require_image_generation: bool = False,
+        require_chat_completions: bool = False,
+        require_responses: bool = False,
+        required_upstream_protocol_type: str | None = None,
+        route_context: Any = None,
     ) -> ModelMappingResolution | None:
         from app.database import SessionLocal
 
@@ -222,6 +250,44 @@ class ModelMappingService:
                 if not catalog.enabled:
                     evaluated.append(ModelMappingService._target_trace(target, index, available=False, reason="target_model_disabled"))
                     continue
+                capability_reason = ModelMappingService._target_capability_reason(
+                    catalog,
+                    endpoint_path=endpoint_path,
+                    require_stream=require_stream,
+                    require_vision=require_vision,
+                    require_tools=require_tools,
+                    require_image_generation=require_image_generation,
+                    require_chat_completions=require_chat_completions,
+                    require_responses=require_responses,
+                    required_upstream_protocol_type=required_upstream_protocol_type,
+                )
+                if capability_reason is not None:
+                    evaluated.append(ModelMappingService._target_trace(target, index, available=False, reason=capability_reason))
+                    continue
+                route_diagnostics = RouterService.diagnose_candidate_unavailability(
+                    db,
+                    model_name=target_model_name,
+                    route_context=route_context,
+                    require_vision=require_vision,
+                    require_stream=require_stream,
+                    require_tools=require_tools,
+                    require_image_generation=require_image_generation,
+                    require_chat_completions=require_chat_completions,
+                    require_responses=require_responses,
+                    required_upstream_protocol_type=required_upstream_protocol_type,
+                    is_stream=require_stream,
+                )
+                if int(route_diagnostics.get("final_candidate_count") or 0) <= 0:
+                    evaluated.append(
+                        ModelMappingService._target_trace(
+                            target,
+                            index,
+                            available=False,
+                            reason="target_route_unavailable",
+                            extra={"route_diagnostics": route_diagnostics},
+                        )
+                    )
+                    continue
                 evaluated.append(ModelMappingService._target_trace(target, index, available=True))
             available = [item for item in evaluated if item.get("available")]
             if not available:
@@ -233,7 +299,7 @@ class ModelMappingService:
                     trace={
                         "result": "model_mapping_no_available_target",
                         "source_model_name": source_model_name,
-                        "provider_checks_deferred": True,
+                        "provider_checks_deferred": False,
                         "targets": evaluated,
                     },
                 )
@@ -257,7 +323,9 @@ class ModelMappingService:
                     "mapping_id": mapping.id,
                     "source_model_name": source_model_name,
                     "selected_model_name": selected["model_name"],
-                    "provider_checks_deferred": True,
+                    "provider_checks_deferred": False,
+                    "endpoint_path": endpoint_path,
+                    "required_upstream_protocol_type": required_upstream_protocol_type,
                     "candidate_model_names": list(candidate_model_names),
                     "targets": evaluated,
                     "selection_reason": selected.get("selection_reason"),
@@ -295,12 +363,57 @@ class ModelMappingService:
             ordered.append(item)
             seen.add(model_name)
         if ordered and not ordered[0].get("selection_reason"):
-            ordered[0]["selection_reason"] = "按目标模型配置顺序选择，提供商能力与健康在下一阶段判断"
+            ordered[0]["selection_reason"] = "按目标模型配置顺序选择，提供商能力与可用在下一阶段判断"
         return ordered
 
     @staticmethod
     def _ordered_targets_by_config(targets: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return list(targets)
+
+    @staticmethod
+    def _normalize_required_upstream_protocol_type(protocol_type: str | None) -> str | None:
+        return RouterService._normalize_required_upstream_protocol_type(protocol_type)
+
+    @staticmethod
+    def _catalog_protocol_type(catalog: ModelCatalog) -> str:
+        model_group = ProviderService.normalize_model_group(getattr(catalog, "model_group", None))
+        return ProviderService.protocol_type_for_model_group(
+            model_group,
+            str(getattr(catalog, "model_name", "") or ""),
+            None,
+        )
+
+    @staticmethod
+    def _target_capability_reason(
+        catalog: ModelCatalog,
+        *,
+        endpoint_path: str | None,
+        require_stream: bool,
+        require_vision: bool,
+        require_tools: bool,
+        require_image_generation: bool,
+        require_chat_completions: bool,
+        require_responses: bool,
+        required_upstream_protocol_type: str | None,
+    ) -> str | None:
+        _ = endpoint_path
+        required_native = ModelMappingService._normalize_required_upstream_protocol_type(required_upstream_protocol_type)
+        catalog_protocol = ModelMappingService._catalog_protocol_type(catalog)
+        if required_native and catalog_protocol != required_native:
+            return "target_protocol_mismatch"
+        if not required_native:
+            if require_chat_completions and not bool(getattr(catalog, "supports_chat_completions", True)):
+                return "target_chat_not_supported"
+            if require_responses and not bool(getattr(catalog, "supports_responses", True)):
+                return "target_responses_not_supported"
+        if require_stream and not bool(getattr(catalog, "supports_stream", True)):
+            return "target_stream_not_supported"
+        if require_vision and not bool(getattr(catalog, "supports_vision", False)):
+            return "target_vision_not_supported"
+        if require_tools and not bool(getattr(catalog, "supports_tools", False)):
+            return "target_tools_not_supported"
+        _ = require_image_generation
+        return None
 
     @staticmethod
     def _target_trace(
@@ -309,6 +422,7 @@ class ModelMappingService:
         *,
         available: bool,
         reason: str | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         model_name = str(target.get("model_name") or "").strip()
         payload: dict[str, Any] = {
@@ -319,6 +433,8 @@ class ModelMappingService:
         }
         if reason:
             payload["reason"] = reason
+        if extra:
+            payload.update(extra)
         return payload
 
     @staticmethod

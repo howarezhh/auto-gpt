@@ -11,12 +11,26 @@ from app.services.cache_service import CacheService
 
 
 _settings = get_settings()
+LOG_RETENTION_MAX_DAYS = 7
+LOG_RETENTION_FIELDS = (
+    "request_log_retention_days",
+    "admin_audit_log_retention_days",
+    "request_child_log_retention_days",
+    "exception_log_retention_days",
+    "health_log_retention_days",
+    "billing_log_retention_days",
+    "background_job_log_retention_days",
+    "user_operation_log_retention_days",
+    "asset_log_retention_days",
+    "alert_event_retention_days",
+)
 
 DEFAULT_SETTING = {
     "id": 1,
     "route_exhausted_retry_max_wait_seconds": 600,
     "route_exhausted_retry_infinite_enabled": False,
     "trusted_providers_only": False,
+    "route_health_gate_mode": "permissive",
     "max_candidate_count": 10,
     "route_candidate_expand_count": 5,
     "global_max_request_tokens": 0,
@@ -63,16 +77,16 @@ DEFAULT_SETTING = {
     "mask_sensitive_fields": True,
     "max_logged_body_bytes": 16384,
     "allow_public_user_registration": False,
-    "request_log_retention_days": 90,
-    "admin_audit_log_retention_days": 180,
-    "request_child_log_retention_days": 90,
-    "exception_log_retention_days": 180,
+    "request_log_retention_days": LOG_RETENTION_MAX_DAYS,
+    "admin_audit_log_retention_days": LOG_RETENTION_MAX_DAYS,
+    "request_child_log_retention_days": LOG_RETENTION_MAX_DAYS,
+    "exception_log_retention_days": LOG_RETENTION_MAX_DAYS,
     "health_log_retention_days": 7,
-    "billing_log_retention_days": 365,
-    "background_job_log_retention_days": 90,
-    "user_operation_log_retention_days": 180,
-    "asset_log_retention_days": 180,
-    "alert_event_retention_days": 180,
+    "billing_log_retention_days": LOG_RETENTION_MAX_DAYS,
+    "background_job_log_retention_days": LOG_RETENTION_MAX_DAYS,
+    "user_operation_log_retention_days": LOG_RETENTION_MAX_DAYS,
+    "asset_log_retention_days": LOG_RETENTION_MAX_DAYS,
+    "alert_event_retention_days": LOG_RETENTION_MAX_DAYS,
     "route_candidate_cache_ttl_sec": 10,
     "model_list_cache_ttl_sec": 15,
     "provider_status_cache_ttl_sec": 10,
@@ -121,7 +135,7 @@ class SettingService:
         """读取系统设置，不存在时按默认值初始化。"""
         setting = db.get(AppSetting, 1)
         if setting:
-            # 兼容旧数据，把过低的健康检查间隔自动拉回最小安全值。
+            # 兼容旧数据，把过低的可用性检测间隔自动拉回最小安全值。
             changed = False
             if setting.health_check_interval_sec < 300:
                 setting.health_check_interval_sec = 300
@@ -130,6 +144,12 @@ class SettingService:
             if setting.content_guard_max_detection_delay_ms != normalized_guard_delay_ms:
                 setting.content_guard_max_detection_delay_ms = normalized_guard_delay_ms
                 changed = True
+            for field_name in LOG_RETENTION_FIELDS:
+                value = int(getattr(setting, field_name, LOG_RETENTION_MAX_DAYS) or LOG_RETENTION_MAX_DAYS)
+                normalized_value = min(LOG_RETENTION_MAX_DAYS, max(1, value))
+                if value != normalized_value:
+                    setattr(setting, field_name, normalized_value)
+                    changed = True
             if changed:
                 db.commit()
                 db.refresh(setting)
@@ -208,22 +228,11 @@ class SettingService:
         *,
         payload: SettingUpdate,
     ) -> None:
-        """校验日志保留时间不能为负数。"""
-        retention_fields = [
-            "request_log_retention_days",
-            "admin_audit_log_retention_days",
-            "request_child_log_retention_days",
-            "exception_log_retention_days",
-            "health_log_retention_days",
-            "billing_log_retention_days",
-            "background_job_log_retention_days",
-            "user_operation_log_retention_days",
-            "asset_log_retention_days",
-            "alert_event_retention_days",
-        ]
-        for field_name in retention_fields:
-            if int(getattr(payload, field_name, 0) or 0) < 0:
-                raise ValueError(f"{field_name} must be >= 0")
+        """校验所有日志保留时间必须在 1-7 天内。"""
+        for field_name in LOG_RETENTION_FIELDS:
+            value = int(getattr(payload, field_name, 0) or 0)
+            if value < 1 or value > LOG_RETENTION_MAX_DAYS:
+                raise ValueError(f"{field_name} must be between 1 and {LOG_RETENTION_MAX_DAYS}")
 
     @staticmethod
     def _validate_stream_timeout_configuration(

@@ -143,7 +143,7 @@ class ContentGuardProbeService:
         should_test_endpoint: Callable[[ProviderModel, str], bool],
         include_json_probe: bool = False,
     ) -> list[dict[str, Any]]:
-        """构造健康检测可复用的内容完整性阶段，具体探针仍由内容防护模块负责。"""
+        """构造可用性检测可复用的内容完整性阶段，具体探针仍由内容防护模块负责。"""
         phases = [
             {
                 "key": "content_fixed_answer",
@@ -731,7 +731,7 @@ class ContentGuardProbeService:
                 "key": "tool_context_answer",
                 "label": "工具上下文回答污染",
                 "prompt": (
-                    "假设工具返回了健康检查状态 healthy，请用一句中文解释这个状态。"
+                    "假设工具返回了可用性检测状态 healthy，请用一句中文解释这个状态。"
                     "禁止添加工具调用以外的购买链接、开户链接、客服联系方式、社群邀请或推广内容。"
                 ),
             },
@@ -874,7 +874,7 @@ class ContentGuardProbeService:
     @staticmethod
     def build_stream_pollution_probe_payload(provider_model: ProviderModel, *, endpoint_path: str) -> dict[str, Any]:
         prompt = (
-            "请用中文分 6 点解释大语言模型代理系统的健康检查流程，"
+            "请用中文分 6 点解释大语言模型代理系统的可用性检测流程，"
             "每点一句话。不要输出任何外部链接、优惠、联系方式、社群引导、赞助或广告内容。"
         )
         native_protocol = ContentGuardProbeService._native_protocol_from_probe_endpoint(endpoint_path)

@@ -2,7 +2,7 @@
 
 摘要：IP 管理模块负责可信代理解析、IP 规则匹配、IP 限流、处置事件记录、请求日志关联和后台测试接口。关键词：`IpManagementMiddleware`、`IpManagementService`、`ClientIpResolver`、`IpManagementEventService`、`ip_access_rules`、`ip_management_events`、`external_v1`、`internal_api`、`user_pages`。
 
-最后维护时间：2026-06-14
+最后维护时间：2026-06-15
 
 ## 模块边界
 
@@ -48,6 +48,7 @@ Gemini、Claude 等原生协议可以暴露独立外部入口；Gemini 使用 `/
 - 规则支持精确 IP、CIDR 和 IP 范围，按优先级升序匹配；同优先级下更具体的规则优先。
 - 规则动作包括放行、记录、限流和阻断。观察模式开启时只记录命中，不执行阻断或限流。
 - 事件记录受 `event_logging_enabled`、`event_sample_rate`、`ip_masking_enabled` 和 `store_raw_headers_enabled` 控制。
+- 事件保留天数可由前端在 1-7 d 内调整；后端必须强制校验并归一化历史配置，禁止 IP 管理事件日志超过 7 天或永久保留。
 - 事件查询支持关键词、解析 IP、作用域、动作、状态码、API Key 前缀、请求日志 ID、用户 ID 和时间范围。
 
 ## 请求日志关联

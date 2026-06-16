@@ -84,6 +84,7 @@ class TokenUsageService:
                 RequestLog.api_client_key_id,
                 RequestLog.user_account_id,
                 RequestLog.created_at,
+                RequestLog.billable,
                 RequestLog.billing_finalized_at,
                 RequestLog.billing_status,
                 RequestLog.billing_error,
@@ -1062,6 +1063,8 @@ class TokenUsageService:
     def _can_fast_finalize_no_charge(log: RequestLog) -> bool:
         """零价格请求无需进入余额锁定计费路径，避免后台任务挤爆 DB 连接池。"""
         if log.api_client_key_id is None:
+            return False
+        if not getattr(log, "billable", False):
             return False
         if log.billing_finalized_at is not None and log.billing_status != "pending_tokens":
             return False

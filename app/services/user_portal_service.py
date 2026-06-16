@@ -133,9 +133,9 @@ class UserPortalService:
             key_ids = UserPortalService.list_owned_api_key_ids(db, user_id=user.id)
             api_key_options = []
         if not key_ids:
-            return 0, [], {"total_requests": 0, "success_requests": 0, "failed_requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "total_cost": 0, "matched_api_keys": 0}, []
+            return 0, [], {"total_requests": 0, "success_requests": 0, "failed_requests": 0, "billable_requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "total_cost": 0, "matched_api_keys": 0}, []
         if api_client_key_id is not None and api_client_key_id not in key_ids:
-            return 0, [], {"total_requests": 0, "success_requests": 0, "failed_requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "total_cost": 0, "matched_api_keys": 0}, api_key_options
+            return 0, [], {"total_requests": 0, "success_requests": 0, "failed_requests": 0, "billable_requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "total_cost": 0, "matched_api_keys": 0}, api_key_options
         effective_log_type = log_type if log_type in LogService.USER_VISIBLE_LOG_TYPES else None
         total, items, summary = LogService.list_logs(
             db,
@@ -484,9 +484,12 @@ class UserPortalService:
                 func.count(RequestLog.id).label("total_requests"),
                 func.sum(case((RequestLog.created_at >= day_start, 1), else_=0)).label("day_requests"),
                 func.sum(case((RequestLog.created_at >= month_start, 1), else_=0)).label("month_requests"),
-                func.sum(case((RequestLog.success.is_(True), RequestLog.total_tokens), else_=0)).label("total_tokens"),
-                func.sum(case(((RequestLog.success.is_(True)) & (RequestLog.created_at >= day_start), RequestLog.total_tokens), else_=0)).label("day_tokens"),
-                func.sum(case(((RequestLog.success.is_(True)) & (RequestLog.created_at >= month_start), RequestLog.total_tokens), else_=0)).label("month_tokens"),
+                func.sum(case((RequestLog.success.is_(True), 1), else_=0)).label("success_requests"),
+                func.sum(case((RequestLog.success.is_(False), 1), else_=0)).label("failed_requests"),
+                func.sum(case((RequestLog.billable.is_(True), 1), else_=0)).label("billable_requests"),
+                func.sum(case((RequestLog.billable.is_(True), RequestLog.total_tokens), else_=0)).label("total_tokens"),
+                func.sum(case(((RequestLog.billable.is_(True)) & (RequestLog.created_at >= day_start), RequestLog.total_tokens), else_=0)).label("day_tokens"),
+                func.sum(case(((RequestLog.billable.is_(True)) & (RequestLog.created_at >= month_start), RequestLog.total_tokens), else_=0)).label("month_tokens"),
             ).where(
                 RequestLog.user_account_id.in_(user_ids),
                 LogService._route_traffic_expr(),
@@ -560,6 +563,9 @@ class UserPortalService:
                 "total_requests": int(getattr(log_row, "total_requests", 0) or 0),
                 "day_requests": int(getattr(log_row, "day_requests", 0) or 0),
                 "month_requests": int(getattr(log_row, "month_requests", 0) or 0),
+                "success_requests": int(getattr(log_row, "success_requests", 0) or 0),
+                "failed_requests": int(getattr(log_row, "failed_requests", 0) or 0),
+                "billable_requests": int(getattr(log_row, "billable_requests", 0) or 0),
                 "total_tokens": int(getattr(log_row, "total_tokens", 0) or 0),
                 "day_tokens": int(getattr(log_row, "day_tokens", 0) or 0),
                 "month_tokens": int(getattr(log_row, "month_tokens", 0) or 0),
@@ -780,6 +786,7 @@ class UserPortalService:
                 route_context=RoutePolicyContext(
                     allowed_provider_ids=sorted(provider_ids),
                     require_trusted_provider=bool(getattr(route_setting, "trusted_providers_only", False)),
+                    health_gate_mode=str(getattr(route_setting, "route_health_gate_mode", "permissive") or "permissive"),
                 ),
             ):
                 if model.provider.id not in provider_ids:
@@ -818,7 +825,8 @@ class UserPortalService:
                     }
                 route_context = RoutePolicyContext(
                     allowed_provider_ids=[binding.provider_id for binding in selected_key.provider_bindings],
-                    require_trusted_provider=bool(getattr(SettingService.get_cached(), "trusted_providers_only", False)),
+                    require_trusted_provider=bool(getattr(route_setting, "trusted_providers_only", False)),
+                    health_gate_mode=str(getattr(route_setting, "route_health_gate_mode", "permissive") or "permissive"),
                 )
                 candidates = RouterService.order_candidates(
                     db,

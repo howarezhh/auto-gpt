@@ -130,7 +130,7 @@
                                     {% elif item.entity_type == 'provider' %}
                                     <span><b>渠道</b>{{ item.entity_name or item.entity_id or '-' }}</span><span><b>重点</b>Base URL / 协议 / 容量 / 凭据</span>
                                     {% elif item.entity_type == 'provider_model' %}
-                                    <span><b>模型</b>{{ item.entity_name or item.entity_id or '-' }}</span><span><b>重点</b>协议 / 能力 / 健康检查</span>
+                                    <span><b>模型</b>{{ item.entity_name or item.entity_id or '-' }}</span><span><b>重点</b>协议 / 能力 / 可用性检测</span>
                                     {% elif item.entity_type == 'user' or item.entity_type == 'auth' %}
                                     <span><b>账号</b>{{ item.entity_name or item.entity_id or '-' }}</span><span><b>重点</b>角色 / 状态 / 登录安全</span>
                                     {% elif item.entity_type == 'benchmark' %}

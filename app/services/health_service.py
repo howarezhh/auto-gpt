@@ -301,7 +301,7 @@ class HealthService:
             provider_model.circuit_state = "open"
             provider_model.circuit_opened_at = now
             provider_model.last_check_at = now
-            provider_model.last_error = "自动健康探针频率超过每分钟 2 次限制，未继续触发上游探针，按异常状态处理"
+            provider_model.last_error = "自动可用性探针频率超过每分钟 2 次限制，未继续触发上游探针，按异常状态处理"
             ProviderService.refresh_provider_state(provider)
             db.commit()
             ProviderHealthStateService.record_model_probe(
@@ -325,7 +325,7 @@ class HealthService:
                     {
                         "provider_model_id": provider_model.id,
                         "model_name": provider_model.model_name,
-                        "endpoint_label": "自动健康探针频率限制",
+                        "endpoint_label": "自动可用性探针频率限制",
                         "capability_key": "auto_probe_rate_limit",
                         "success": False,
                         "status_code": 429,
@@ -486,7 +486,7 @@ class HealthService:
                 latency_ms = int((time.perf_counter() - started) * 1000)
                 has_tool_call = HealthService._response_has_tool_call(response)
                 if has_tool_call:
-                    return {
+                    return HealthService._attach_probe_raw_provider_response({
                         "endpoint_path": endpoint_path,
                         "endpoint_label": endpoint_label,
                         "success": True,
@@ -498,7 +498,7 @@ class HealthService:
                         "status_code": 200,
                         "message": "ok",
                         "trace": [],
-                    }
+                    }, response=response)
                 last_error = {
                     "endpoint_path": endpoint_path,
                     "status_code": 200,
@@ -507,26 +507,40 @@ class HealthService:
             except Exception as exc:
                 status_code = HealthService._exception_status_code(exc)
                 message = HealthService._exception_message(exc)
+                support_mode, support_label = HealthService._probe_failure_support_state(
+                    endpoint_label=endpoint_label,
+                    unsupported_label="不支持 tools",
+                    status_code=status_code,
+                    message=message,
+                )
                 last_error = {
                     "endpoint_path": endpoint_path,
                     "status_code": status_code,
                     "message": message,
+                    "support_mode": support_mode,
+                    "support_label": support_label,
                 }
                 continue
         latency_ms = int((time.perf_counter() - started) * 1000)
-        return {
+        support_mode = str(last_error.get("support_mode") or "") if last_error else ""
+        support_label = (
+            str(last_error.get("support_label") or "")
+            if support_mode == "unknown"
+            else "不支持 tools"
+        )
+        return HealthService._attach_probe_raw_provider_response({
             "endpoint_path": last_error.get("endpoint_path") if last_error else None,
             "endpoint_label": endpoint_label,
             "success": False,
             "native_success": False,
             "adapted_success": False,
-            "support_mode": "unsupported",
-            "support_label": "不支持 tools",
+            "support_mode": support_mode or "unsupported",
+            "support_label": support_label or "不支持 tools",
             "latency_ms": latency_ms,
             "status_code": last_error.get("status_code") if last_error else None,
             "message": last_error.get("message") if last_error else "工具调用探测失败",
             "trace": [],
-        }
+        }, response=last_error.get("message") if last_error else None)
 
     @staticmethod
     async def _probe_native_tools_endpoint(
@@ -557,7 +571,7 @@ class HealthService:
             payload = HealthService._build_chat_tool_probe_payload(provider_model, max_tokens=max_tokens)
             support_label = "Chat 工具调用"
         if not endpoint_supported:
-            return {
+            result = {
                 "endpoint_path": endpoint_path,
                 "endpoint_label": endpoint_label,
                 "capability_key": capability_key,
@@ -571,6 +585,7 @@ class HealthService:
                 "message": "提供商或模型未启用该端点原生工具调用探测",
                 "trace": [],
             }
+            return result
         setting = await ProxyService._get_setting_async()
         try:
             prepared = ProxyService._prepare_upstream_request(provider, endpoint_path=endpoint_path, payload=payload)
@@ -588,7 +603,7 @@ class HealthService:
             )
             latency_ms = int((time.perf_counter() - started) * 1000)
             has_tool_call = HealthService._response_has_tool_call(response)
-            return {
+            result = {
                 "endpoint_path": endpoint_path,
                 "endpoint_label": endpoint_label,
                 "capability_key": capability_key,
@@ -602,24 +617,31 @@ class HealthService:
                 "message": "ok" if has_tool_call else "未返回工具调用",
                 "trace": [],
             }
+            return HealthService._attach_probe_raw_provider_response(result, response=response)
         except Exception as exc:
             latency_ms = int((time.perf_counter() - started) * 1000)
             status_code = HealthService._exception_status_code(exc)
             message = HealthService._exception_message(exc)
-            return {
+            support_mode, failure_label = HealthService._probe_failure_support_state(
+                endpoint_label=support_label,
+                unsupported_label=f"不支持 {support_label}",
+                status_code=status_code,
+                message=message,
+            )
+            return HealthService._attach_probe_raw_provider_response({
                 "endpoint_path": endpoint_path,
                 "endpoint_label": endpoint_label,
                 "capability_key": capability_key,
                 "success": False,
                 "native_success": False,
                 "adapted_success": False,
-                "support_mode": "unsupported",
-                "support_label": f"不支持 {support_label}",
+                "support_mode": support_mode,
+                "support_label": failure_label,
                 "latency_ms": latency_ms,
                 "status_code": status_code,
                 "message": message,
                 "trace": [],
-            }
+            }, response=message)
 
     @staticmethod
     async def _probe_native_image_generation(
@@ -665,7 +687,7 @@ class HealthService:
             )
             latency_ms = int((time.perf_counter() - started) * 1000)
             has_generated_image = HealthService._response_has_generated_image(response)
-            return {
+            result = {
                 "endpoint_path": "/responses",
                 "endpoint_label": endpoint_label,
                 "success": has_generated_image,
@@ -681,23 +703,30 @@ class HealthService:
                 ),
                 "trace": [],
             }
+            return HealthService._attach_probe_raw_provider_response(result, response=response)
         except Exception as exc:
             latency_ms = int((time.perf_counter() - started) * 1000)
             status_code = HealthService._exception_status_code(exc)
             message = HealthService._exception_message(exc)
-            return {
+            support_mode, support_label = HealthService._probe_failure_support_state(
+                endpoint_label="image_generation",
+                unsupported_label="不支持 image_generation",
+                status_code=status_code,
+                message=message,
+            )
+            return HealthService._attach_probe_raw_provider_response({
                 "endpoint_path": "/responses",
                 "endpoint_label": endpoint_label,
                 "success": False,
                 "native_success": False,
                 "adapted_success": False,
-                "support_mode": "unsupported",
-                "support_label": "不支持 image_generation",
+                "support_mode": support_mode,
+                "support_label": support_label,
                 "latency_ms": latency_ms,
                 "status_code": status_code,
                 "message": message,
                 "trace": [],
-            }
+            }, response=message)
 
     @staticmethod
     async def _probe_native_vision(
@@ -762,19 +791,25 @@ class HealthService:
                 }
             last_error = result
         latency_ms = int((time.perf_counter() - started) * 1000)
-        return {
+        support_mode = str(last_error.get("support_mode") or "") if last_error else ""
+        support_label = (
+            "vision 上游暂不可用，支持状态待确认"
+            if support_mode == "unknown"
+            else "不支持 vision"
+        )
+        return HealthService._attach_probe_raw_provider_response({
             "endpoint_path": last_error.get("endpoint_path") if last_error else None,
             "endpoint_label": endpoint_label,
             "success": False,
             "native_success": False,
             "adapted_success": False,
-            "support_mode": "unsupported",
-            "support_label": "不支持 vision",
+            "support_mode": support_mode or "unsupported",
+            "support_label": support_label or "不支持 vision",
             "latency_ms": latency_ms,
             "status_code": last_error.get("status_code") if last_error else None,
             "message": last_error.get("message") if last_error else "图像理解探测失败",
             "trace": last_error.get("trace") if last_error else [],
-        }
+        }, response=last_error.get("message") if last_error else None)
 
     @staticmethod
     async def _probe_native_vision_endpoint(
@@ -849,11 +884,17 @@ class HealthService:
             payload=payload,
             interactive_mode=interactive_mode,
         )
+        if result.get("success"):
+            next_support_label = f"原生支持 {support_label}"
+        elif result.get("support_mode") == "unknown":
+            next_support_label = result.get("support_label") or f"{support_label} 上游暂不可用，支持状态待确认"
+        else:
+            next_support_label = f"不支持 {support_label}"
         return {
             **result,
             "endpoint_label": endpoint_label,
             "capability_key": capability_key,
-            "support_label": f"原生支持 {support_label}" if result.get("success") else f"不支持 {support_label}",
+            "support_label": next_support_label,
         }
 
     @staticmethod
@@ -1663,12 +1704,12 @@ class HealthService:
                 {
                     "provider_model_id": provider_model.id,
                     "model_name": provider_model.model_name,
-                    "endpoint_label": "自动健康探针频率限制",
+                    "endpoint_label": "自动可用性探针频率限制",
                     "capability_key": "auto_probe_rate_limit",
                     "success": False,
                     "status_code": 429,
                     "latency_ms": 0,
-                    "message": "自动健康探针频率超过每分钟 2 次限制，未继续触发上游探针，按异常状态处理",
+                    "message": "自动可用性探针频率超过每分钟 2 次限制，未继续触发上游探针，按异常状态处理",
                 }
             )
         models_to_probe = actual_models_to_check
@@ -1927,6 +1968,29 @@ class HealthService:
         return str(exc)
 
     @staticmethod
+    def _attach_probe_raw_provider_response(
+        result: dict[str, Any],
+        *,
+        response: Any = None,
+        output_text: str | None = None,
+        stream_chunk: bytes | str | None = None,
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        stream_chunks: list[str] | None = None
+        if stream_chunk is not None:
+            if isinstance(stream_chunk, bytes):
+                stream_chunks = [stream_chunk.decode("utf-8", errors="replace")]
+            else:
+                stream_chunks = [str(stream_chunk)]
+        return ContentGuardProbeService.attach_raw_provider_response(
+            result,
+            response=response,
+            output_text=output_text,
+            stream_chunks=stream_chunks,
+            note=note,
+        )
+
+    @staticmethod
     def _protocol_type_from_supports(supports_chat: bool, supports_responses: bool, fallback: str) -> str:
         if supports_chat and supports_responses:
             return "both"
@@ -2026,7 +2090,7 @@ class HealthService:
                 "provider_model_id": target.get("provider_model_id"),
                 "model_name": target.get("model_name"),
                 "status": "skipped",
-                "message": "Gemini/Claude 原生协议模型无需端点协议检测，请使用对应原生健康检测和可信检测",
+                "message": "Gemini/Claude 原生协议模型无需端点协议检测，请使用对应原生可用性检测和可信检测",
                 "skipped_reason": "native_protocol_without_endpoint_protocol_detection",
                 "updated": False,
                 "update_allowed": False,
@@ -3015,7 +3079,7 @@ class HealthService:
             current_result["retried"] = False
             return current_result
         if last_result is None:
-            return {"success": False, "message": "健康检查未返回结果", "attempt_count": 0, "retried": False}
+            return {"success": False, "message": "可用性检测未返回结果", "attempt_count": 0, "retried": False}
         return last_result
 
     @staticmethod
@@ -3061,14 +3125,16 @@ class HealthService:
         message = model_result.get("message")
         endpoint_results = model_result.get("endpoint_results") or []
         content_guard_result = ContentGuardProbeService.first_content_guard_result(endpoint_results)
+        availability_state_updated = False
         if update_health_state:
-            HealthService._apply_model_health(
+            availability_state_updated = HealthService._apply_model_health(
                 db,
                 provider,
                 provider_model,
                 health_status=str(model_result.get("health_status") or "unknown"),
                 latency_ms=int(model_result.get("latency_ms") or 0),
                 error_message=None if success else (str(message) if message is not None else None),
+                endpoint_results=endpoint_results,
             )
         if content_guard_result is not None:
             ContentGuardProbeService.apply_content_probe_health(
@@ -3098,7 +3164,7 @@ class HealthService:
             ),
             schedule_token_fill=False,
         )
-        if update_health_state:
+        if update_health_state and availability_state_updated:
             ProviderHealthStateService.record_model_probe(
                 provider,
                 provider_model,
@@ -3332,7 +3398,7 @@ class HealthService:
                 elapsed_seconds = (now_beijing() - started_at).total_seconds()
                 if elapsed_seconds < HealthService.MANUAL_CHECK_MIN_INTERVAL_SEC:
                     remaining = max(1, int(HealthService.MANUAL_CHECK_MIN_INTERVAL_SEC - elapsed_seconds))
-                    raise ValueError(f"{scope_label} 已有健康检查任务运行中，请在 {remaining} 秒后重试")
+                    raise ValueError(f"{scope_label} 已有可用性检测任务运行中，请在 {remaining} 秒后重试")
         CacheService.set(
             cache_key,
             now_beijing().isoformat(),
@@ -3399,7 +3465,7 @@ class HealthService:
         if not protocol_type:
             return {
                 "endpoint_path": None,
-                "endpoint_label": "原生健康探针",
+                "endpoint_label": "原生可用性探针",
                 "success": False,
                 "native_success": False,
                 "adapted_success": False,
@@ -3443,16 +3509,16 @@ class HealthService:
                 request_payload=prepared.request_payload,
             )
             if guard_result.result != ContentGuardProbeService.RESULT_PASS:
-                return ContentGuardProbeService.probe_failure(
+                return HealthService._attach_probe_raw_provider_response(ContentGuardProbeService.probe_failure(
                     endpoint_path=prepared.request_path,
                     endpoint_label=endpoint_label,
-                    support_label="原生健康探针未通过",
+                    support_label="原生可用性探针未通过",
                     latency_ms=latency_ms,
                     status_code=200,
                     guard_result=guard_result,
-                )
+                ), response=response)
             output_text = ProxyService._extract_response_display_text(response, limit_bytes=160)
-            return {
+            return HealthService._attach_probe_raw_provider_response({
                 "endpoint_path": prepared.request_path,
                 "endpoint_type": protocol_type,
                 "protocol_type": protocol_type,
@@ -3461,17 +3527,17 @@ class HealthService:
                 "native_success": True,
                 "adapted_success": False,
                 "support_mode": "native",
-                "support_label": "原生健康探针通过",
+                "support_label": "原生可用性探针通过",
                 "latency_ms": latency_ms,
                 "status_code": 200,
                 "message": output_text or "ok",
                 "trace": [{"result": "native_health_probe", "protocol_type": protocol_type, "endpoint": prepared.request_path}],
-            }
+            }, response=response, output_text=output_text)
         except Exception as exc:
             latency_ms = int((time.perf_counter() - started) * 1000)
             status_code = HealthService._exception_status_code(exc)
             message = HealthService._exception_message(exc)
-            return {
+            return HealthService._attach_probe_raw_provider_response({
                 "endpoint_path": prepared.request_path,
                 "endpoint_type": protocol_type,
                 "protocol_type": protocol_type,
@@ -3480,7 +3546,7 @@ class HealthService:
                 "native_success": False,
                 "adapted_success": False,
                 "support_mode": "probe_failed",
-                "support_label": "原生健康探针失败",
+                "support_label": "原生可用性探针失败",
                 "latency_ms": latency_ms,
                 "status_code": status_code,
                 "message": message,
@@ -3490,7 +3556,7 @@ class HealthService:
                     message=message,
                     interactive_mode=interactive_mode,
                 ),
-            }
+            }, response=message)
 
     @staticmethod
     async def _probe_native_health_stream_endpoint(
@@ -3529,7 +3595,7 @@ class HealthService:
                 limit_result,
                 endpoint_path=prepared.request_path,
                 endpoint_label=endpoint_label,
-                support_label="原生流式健康探针已限频",
+                support_label="原生流式可用性探针已限频",
             )
         stream_context = None
         exc_type = exc_value = exc_traceback = None
@@ -3569,15 +3635,15 @@ class HealthService:
             latency_ms = int((time.perf_counter() - started) * 1000)
             guard_result = ContentGuardProbeService.inspect_probe_stream_chunk(chunk, endpoint_path=prepared.request_path)
             if guard_result.result != ContentGuardProbeService.RESULT_PASS:
-                return ContentGuardProbeService.probe_failure(
+                return HealthService._attach_probe_raw_provider_response(ContentGuardProbeService.probe_failure(
                     endpoint_path=prepared.request_path,
                     endpoint_label=endpoint_label,
-                    support_label="原生流式健康探针未通过",
+                    support_label="原生流式可用性探针未通过",
                     latency_ms=latency_ms,
                     status_code=200,
                     guard_result=guard_result,
-                )
-            return {
+                ), stream_chunk=chunk, note="原生流式可用性探针首个数据块")
+            return HealthService._attach_probe_raw_provider_response({
                 "endpoint_path": prepared.request_path,
                 "endpoint_type": protocol_type,
                 "protocol_type": protocol_type,
@@ -3586,18 +3652,18 @@ class HealthService:
                 "native_success": bool(chunk),
                 "adapted_success": False,
                 "support_mode": "native" if chunk else "unsupported",
-                "support_label": "原生流式健康探针通过" if chunk else "原生流式响应为空",
+                "support_label": "原生流式可用性探针通过" if chunk else "原生流式响应为空",
                 "latency_ms": latency_ms,
                 "status_code": 200,
                 "message": "已收到原生流式首个数据块" if chunk else "原生流式响应为空",
                 "trace": [{"result": "native_stream_health_probe", "protocol_type": protocol_type, "endpoint": prepared.request_path}],
-            }
+            }, stream_chunk=chunk, note="原生流式可用性探针首个数据块")
         except Exception as exc:
             exc_type, exc_value, exc_traceback = type(exc), exc, exc.__traceback__
             latency_ms = int((time.perf_counter() - started) * 1000)
             status_code = HealthService._exception_status_code(exc)
             message = HealthService._exception_message(exc)
-            return {
+            return HealthService._attach_probe_raw_provider_response({
                 "endpoint_path": prepared.request_path,
                 "endpoint_type": protocol_type,
                 "protocol_type": protocol_type,
@@ -3606,7 +3672,7 @@ class HealthService:
                 "native_success": False,
                 "adapted_success": False,
                 "support_mode": "probe_failed",
-                "support_label": "原生流式健康探针失败",
+                "support_label": "原生流式可用性探针失败",
                 "latency_ms": latency_ms,
                 "status_code": status_code,
                 "message": message,
@@ -3616,7 +3682,7 @@ class HealthService:
                     message=message,
                     interactive_mode=interactive_mode,
                 ),
-            }
+            }, response=message)
         finally:
             if stream_context is not None:
                 await stream_context.__aexit__(exc_type, exc_value, exc_traceback)
@@ -3658,16 +3724,16 @@ class HealthService:
                 request_payload=payload,
             )
             if guard_result.result != ContentGuardProbeService.RESULT_PASS:
-                return ContentGuardProbeService.probe_failure(
+                return HealthService._attach_probe_raw_provider_response(ContentGuardProbeService.probe_failure(
                     endpoint_path=endpoint_path,
                     endpoint_label=endpoint_label,
                     support_label=native_support_label,
                     latency_ms=latency_ms,
                     status_code=200,
                     guard_result=guard_result,
-                )
+                ), response=response)
             output_text = ProxyService._extract_response_display_text(response, limit_bytes=160)
-            return {
+            return HealthService._attach_probe_raw_provider_response({
                 "endpoint_path": endpoint_path,
                 "endpoint_label": endpoint_label,
                 "success": True,
@@ -3679,7 +3745,7 @@ class HealthService:
                 "status_code": 200,
                 "message": output_text or "ok",
                 "trace": fallback_trace,
-            }
+            }, response=response, output_text=output_text)
         except httpx.HTTPStatusError as exc:
             latency_ms = int((time.perf_counter() - started) * 1000)
             message = await HealthService._safe_error_text(exc.response)
@@ -3689,7 +3755,7 @@ class HealthService:
                 status_code=exc.response.status_code,
                 message=message,
             )
-            return {
+            return HealthService._attach_probe_raw_provider_response({
                 "endpoint_path": endpoint_path,
                 "endpoint_label": endpoint_label,
                 "success": False,
@@ -3706,7 +3772,7 @@ class HealthService:
                     message=message,
                     interactive_mode=interactive_mode,
                 ),
-            }
+            }, response=message)
         except requests.HTTPError as exc:
             latency_ms = int((time.perf_counter() - started) * 1000)
             response = exc.response
@@ -3718,7 +3784,7 @@ class HealthService:
                 status_code=status_code,
                 message=message,
             )
-            return {
+            return HealthService._attach_probe_raw_provider_response({
                 "endpoint_path": endpoint_path,
                 "endpoint_label": endpoint_label,
                 "success": False,
@@ -3735,7 +3801,7 @@ class HealthService:
                     message=message,
                     interactive_mode=interactive_mode,
                 ),
-            }
+            }, response=message)
         except Exception as exc:
             latency_ms = int((time.perf_counter() - started) * 1000)
             status_code = HealthService._exception_status_code(exc)
@@ -3746,7 +3812,7 @@ class HealthService:
                 status_code=status_code,
                 message=message,
             )
-            return {
+            return HealthService._attach_probe_raw_provider_response({
                 "endpoint_path": endpoint_path,
                 "endpoint_label": endpoint_label,
                 "success": False,
@@ -3763,7 +3829,7 @@ class HealthService:
                     message=message,
                     interactive_mode=interactive_mode,
                 ),
-            }
+            }, response=message)
 
     @staticmethod
     async def _probe_formal_stream_endpoint(
@@ -3789,7 +3855,7 @@ class HealthService:
                 limit_result,
                 endpoint_path=endpoint_path,
                 endpoint_label=endpoint_label,
-                support_label="流式健康探针已限频",
+                support_label="流式可用性探针已限频",
             )
         stream_context = None
         exc_type = exc_value = exc_traceback = None
@@ -3830,15 +3896,15 @@ class HealthService:
                 endpoint_path=endpoint_path,
             )
             if guard_result.result != ContentGuardProbeService.RESULT_PASS:
-                return ContentGuardProbeService.probe_failure(
+                return HealthService._attach_probe_raw_provider_response(ContentGuardProbeService.probe_failure(
                     endpoint_path=endpoint_path,
                     endpoint_label=endpoint_label,
                     support_label=native_support_label if chunk else unsupported_label,
                     latency_ms=latency_ms,
                     status_code=200,
                     guard_result=guard_result,
-                )
-            return {
+                ), stream_chunk=chunk, note="流式可用性探针首个数据块")
+            return HealthService._attach_probe_raw_provider_response({
                 "endpoint_path": endpoint_path,
                 "endpoint_label": endpoint_label,
                 "success": bool(chunk),
@@ -3850,11 +3916,11 @@ class HealthService:
                 "status_code": 200,
                 "message": "已收到流式首个数据块" if chunk else "流式响应为空",
                 "trace": fallback_trace,
-            }
+            }, stream_chunk=chunk, note="流式可用性探针首个数据块")
         except StopAsyncIteration as exc:
             exc_type, exc_value, exc_traceback = type(exc), exc, exc.__traceback__
             latency_ms = int((time.perf_counter() - started) * 1000)
-            return {
+            return HealthService._attach_probe_raw_provider_response({
                 "endpoint_path": endpoint_path,
                 "endpoint_label": endpoint_label,
                 "success": False,
@@ -3871,7 +3937,7 @@ class HealthService:
                     message="上游流式响应未返回任何数据",
                     interactive_mode=interactive_mode,
                 ),
-            }
+            }, note="上游流式响应未返回任何数据")
         except httpx.HTTPStatusError as exc:
             exc_type, exc_value, exc_traceback = type(exc), exc, exc.__traceback__
             latency_ms = int((time.perf_counter() - started) * 1000)
@@ -3882,7 +3948,7 @@ class HealthService:
                 status_code=exc.response.status_code,
                 message=message,
             )
-            return {
+            return HealthService._attach_probe_raw_provider_response({
                 "endpoint_path": endpoint_path,
                 "endpoint_label": endpoint_label,
                 "success": False,
@@ -3899,7 +3965,7 @@ class HealthService:
                     message=message,
                     interactive_mode=interactive_mode,
                 ),
-            }
+            }, response=message)
         except Exception as exc:
             exc_type, exc_value, exc_traceback = type(exc), exc, exc.__traceback__
             latency_ms = int((time.perf_counter() - started) * 1000)
@@ -3915,7 +3981,7 @@ class HealthService:
                 status_code=status_code,
                 message=message,
             )
-            return {
+            return HealthService._attach_probe_raw_provider_response({
                 "endpoint_path": endpoint_path,
                 "endpoint_label": endpoint_label,
                 "success": False,
@@ -3932,7 +3998,7 @@ class HealthService:
                     message=message,
                     interactive_mode=interactive_mode,
                 ),
-            }
+            }, response=message)
         finally:
             if stream_context is not None:
                 await stream_context.__aexit__(exc_type, exc_value, exc_traceback)
@@ -3974,6 +4040,26 @@ class HealthService:
             status_value = int(status_code)
             transient = status_value in {408, 429} or status_value >= 500
         normalized_message = (message or "").strip().lower()
+        auth_or_quota_hints = (
+            "invalid api key",
+            "unauthorized",
+            "forbidden",
+            "permission",
+            "insufficient balance",
+            "insufficient_quota",
+            "quota",
+            "billing",
+            "paid_model_required",
+            "no credit",
+            "余额",
+            "额度",
+            "鉴权",
+            "无权限",
+        )
+        if (status_code is not None and int(status_code) in {401, 402, 403}) or any(
+            hint in normalized_message for hint in auth_or_quota_hints
+        ):
+            return "unknown", f"{endpoint_label} 上游鉴权或额度异常，支持状态待确认"
         transient_hints = (
             "timeout",
             "timed out",
@@ -3994,6 +4080,25 @@ class HealthService:
             transient = True
         if transient:
             return "unknown", f"{endpoint_label} 上游暂不可用，支持状态待确认"
+        unsupported_hints = (
+            "cannot post",
+            "unknown url",
+            "unknown endpoint",
+            "unsupported",
+            "does not support",
+            "not support",
+            "not implemented",
+            "no route",
+            "not found",
+            "不存在该接口",
+            "不支持",
+        )
+        if status_code is not None and int(status_code) in {400, 404, 405} and any(
+            hint in normalized_message for hint in unsupported_hints
+        ):
+            return "unsupported", unsupported_label
+        if status_code is not None and 400 <= int(status_code) < 500:
+            return "unknown", f"{endpoint_label} 上游请求被拒绝，支持状态待确认"
         return "unsupported", unsupported_label
 
     @staticmethod
@@ -4335,7 +4440,30 @@ class HealthService:
         health_status: str,
         latency_ms: int,
         error_message: str | None,
-    ) -> None:
+        endpoint_results: list[dict[str, Any]] | None = None,
+    ) -> bool:
+        if (
+            provider_model.last_error == ProviderHealthStateService.FIXED_SUCCESS_RESPONSE_ERROR_CODE
+            and health_status in {"healthy", "degraded"}
+            and not HealthService._fixed_success_recovery_probe_passed(endpoint_results or [])
+        ):
+            ProviderHealthStateService.record_runtime_metrics(
+                provider,
+                provider_model,
+                {
+                    "total_requests": 0,
+                    "success_requests": 0,
+                    "failed_requests": 0,
+                    "upstream_failure_requests": 0,
+                    "window_seconds": ProviderHealthStateService.ROUTE_METRIC_WINDOW_MINUTES * 60,
+                    "decision": "fixed_success_recovery_probe_required",
+                    "confidence": 1.0,
+                },
+                health_status="unhealthy",
+                circuit_state="open",
+                status_update_reason="fixed_success_recovery_probe_required",
+            )
+            return False
         provider_model.health_status = health_status
         provider_model.last_check_at = now_beijing()
         provider_model.last_latency_ms = latency_ms
@@ -4374,7 +4502,20 @@ class HealthService:
         provider.last_check_at = provider_model.last_check_at
         provider.last_latency_ms = latency_ms
         ProviderService.refresh_provider_state(provider)
-        db.commit()
+        return True
+
+    @staticmethod
+    def _fixed_success_recovery_probe_passed(endpoint_results: list[dict[str, Any]]) -> bool:
+        for item in endpoint_results:
+            if not isinstance(item, dict):
+                continue
+            if ProbeRateLimitService.is_rate_limited_result(item):
+                return False
+            probe_key = str(item.get("probe_key") or item.get("key") or "")
+            capability_key = str(item.get("capability_key") or "")
+            if probe_key == "fixed_answer" or capability_key == "content_fixed_answer":
+                return bool(item.get("success"))
+        return False
 
     @staticmethod
     def _mark_provider_unreachable(

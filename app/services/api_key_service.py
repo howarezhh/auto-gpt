@@ -46,6 +46,7 @@ class ApiClientAuthError(Exception):
         user_account_name: str | None = None,
         remaining_balance: float | None = None,
         policy_snapshot_json: str | None = None,
+        retry_after_seconds: int | None = None,
     ):
         self.status_code = status_code
         self.code = code
@@ -57,6 +58,7 @@ class ApiClientAuthError(Exception):
         self.user_account_name = user_account_name
         self.remaining_balance = remaining_balance
         self.policy_snapshot_json = policy_snapshot_json
+        self.retry_after_seconds = retry_after_seconds
         super().__init__(message)
 
 
@@ -484,6 +486,7 @@ class ApiKeyService:
         route_context = RoutePolicyContext(
             allowed_provider_ids=allowed_provider_ids,
             require_trusted_provider=bool(getattr(route_setting, "trusted_providers_only", False)),
+            health_gate_mode=str(getattr(route_setting, "route_health_gate_mode", "permissive") or "permissive"),
             preferred_provider_ids=loads_json(api_client_key.preferred_provider_ids_json, []),
             preferred_region_tags=loads_json(api_client_key.preferred_region_tags_json, []),
             latency_bias=api_client_key.latency_bias,
@@ -584,9 +587,29 @@ class ApiKeyService:
         return model_name in allowed_models
 
     @staticmethod
-    async def validate_redis_rate_limits(auth_context: ApiClientAuthContext, *, request_path: str | None = None) -> None:
+    async def validate_redis_rate_limits(auth_context: ApiClientAuthContext, *, request_path: str | None = None, source_ip: str | None = None) -> None:
         api_client_key = auth_context.api_client_key
         setting = SettingService.get_cached()
+        try:
+            await RateLimitService.check_abnormal_retry_cooldown(
+                api_key_id=api_client_key.id,
+                account_id=api_client_key.owner_user_id,
+                source_ip=source_ip,
+            )
+        except RateLimitExceededError as exc:
+            raise ApiClientAuthError(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                code=exc.code,
+                message=exc.message,
+                api_client_key_id=api_client_key.id,
+                api_client_key_name=api_client_key.name,
+                api_client_key_prefix=api_client_key.key_prefix,
+                user_account_id=api_client_key.owner_user_id,
+                user_account_name=api_client_key.owner_user.username if api_client_key.owner_user else None,
+                remaining_balance=auth_context.remaining_balance,
+                policy_snapshot_json=auth_context.policy_snapshot_json,
+                retry_after_seconds=exc.retry_after_seconds,
+            ) from exc
         has_api_key_limits = any(
             value is not None
             for value in (
@@ -628,6 +651,7 @@ class ApiKeyService:
                 user_account_name=api_client_key.owner_user.username if api_client_key.owner_user else None,
                 remaining_balance=auth_context.remaining_balance,
                 policy_snapshot_json=auth_context.policy_snapshot_json,
+                retry_after_seconds=exc.retry_after_seconds or 1,
             ) from exc
         except Exception as exc:
             raise ApiClientAuthError(
@@ -926,5 +950,5 @@ async def require_api_client_auth(
             request_path=request.url.path,
             source_ip=source_ip,
         )
-    await ApiKeyService.validate_redis_rate_limits(auth_context, request_path=request.url.path)
+    await ApiKeyService.validate_redis_rate_limits(auth_context, request_path=request.url.path, source_ip=source_ip)
     return auth_context

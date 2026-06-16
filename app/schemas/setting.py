@@ -16,6 +16,7 @@ class SettingUpdate(BaseModel):
     route_exhausted_retry_max_wait_seconds: int = Field(default=600, ge=0, le=600)
     route_exhausted_retry_infinite_enabled: bool = False
     trusted_providers_only: bool = False
+    route_health_gate_mode: Literal["permissive", "healthy_only", "trusted_healthy"] = "permissive"
     max_candidate_count: int = Field(default=10, ge=1, le=500)
     route_candidate_expand_count: int = Field(default=5, ge=0, le=100)
     global_max_request_tokens: int = Field(default=0, ge=0)
@@ -68,16 +69,16 @@ class SettingUpdate(BaseModel):
     mask_sensitive_fields: bool = True
     max_logged_body_bytes: int = Field(default=16384, ge=0)
     allow_public_user_registration: bool = False
-    request_log_retention_days: int = Field(default=90, ge=0)
-    admin_audit_log_retention_days: int = Field(default=180, ge=0)
-    request_child_log_retention_days: int = Field(default=90, ge=0)
-    exception_log_retention_days: int = Field(default=180, ge=0)
-    health_log_retention_days: int = Field(default=7, ge=0)
-    billing_log_retention_days: int = Field(default=365, ge=0)
-    background_job_log_retention_days: int = Field(default=90, ge=0)
-    user_operation_log_retention_days: int = Field(default=180, ge=0)
-    asset_log_retention_days: int = Field(default=180, ge=0)
-    alert_event_retention_days: int = Field(default=180, ge=0)
+    request_log_retention_days: int = Field(default=7, ge=1, le=7)
+    admin_audit_log_retention_days: int = Field(default=7, ge=1, le=7)
+    request_child_log_retention_days: int = Field(default=7, ge=1, le=7)
+    exception_log_retention_days: int = Field(default=7, ge=1, le=7)
+    health_log_retention_days: int = Field(default=7, ge=1, le=7)
+    billing_log_retention_days: int = Field(default=7, ge=1, le=7)
+    background_job_log_retention_days: int = Field(default=7, ge=1, le=7)
+    user_operation_log_retention_days: int = Field(default=7, ge=1, le=7)
+    asset_log_retention_days: int = Field(default=7, ge=1, le=7)
+    alert_event_retention_days: int = Field(default=7, ge=1, le=7)
     route_candidate_cache_ttl_sec: int = Field(default=10, ge=0, le=300)
     model_list_cache_ttl_sec: int = Field(default=15, ge=0, le=300)
     provider_status_cache_ttl_sec: int = Field(default=10, ge=0, le=300)

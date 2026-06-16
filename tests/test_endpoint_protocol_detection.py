@@ -239,6 +239,18 @@ def test_stream_probe_503_keeps_endpoint_support_unknown(monkeypatch) -> None:
     assert result["retryable"] is True
 
 
+def test_probe_auth_and_quota_errors_do_not_report_capability_unsupported() -> None:
+    support_mode, support_label = HealthService._probe_failure_support_state(
+        endpoint_label="chat/completions stream",
+        unsupported_label="不支持 chat/completions stream",
+        status_code=403,
+        message='{"error":{"message":"insufficient balance"}}',
+    )
+
+    assert support_mode == "unknown"
+    assert support_label == "chat/completions stream 上游鉴权或额度异常，支持状态待确认"
+
+
 def test_endpoint_protocol_detection_preserves_previous_support_on_transient_endpoint_error(monkeypatch) -> None:
     async def fake_setting():
         return SimpleNamespace(max_non_stream_response_body_bytes=1024 * 1024)
@@ -516,7 +528,7 @@ def test_interactive_model_health_does_not_run_trust_probe(monkeypatch) -> None:
         ]
 
     async def fail_if_trust_probe_runs(*args, **kwargs):
-        raise AssertionError("健康检测不应隐式触发可信检测")
+        raise AssertionError("可用性检测不应隐式触发可信检测")
 
     monkeypatch.setattr(HealthService, "_run_provider_model_checks", staticmethod(fake_model_checks))
     monkeypatch.setattr(HealthService, "_persist_model_health_result", staticmethod(lambda *args, **kwargs: None))
@@ -560,7 +572,7 @@ def test_single_endpoint_mode_uses_native_stream_probe_for_gemini_group(monkeypa
         return {"success": True, "endpoint_path": "/models/gemini-3.1-pro:streamGenerateContent?alt=sse"}
 
     async def fail_formal_stream_probe(*args, **kwargs):
-        raise AssertionError("Gemini 分组的单模型健康检测不应走 Chat/Responses")
+        raise AssertionError("Gemini 分组的单模型可用性检测不应走 Chat/Responses")
 
     monkeypatch.setattr(HealthService, "_probe_native_health_stream_endpoint", staticmethod(fake_native_stream_probe))
     monkeypatch.setattr(HealthService, "_probe_formal_stream_endpoint", staticmethod(fail_formal_stream_probe))

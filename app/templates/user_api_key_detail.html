@@ -4,14 +4,14 @@
     <div class="cockpit-hero-copy">
         <div class="eyebrow">接入控制台</div>
         <h2>{{ api_key.name }}</h2>
-        <p>这是用户侧最核心的接入控制台。首屏优先处理明文密钥、Base URL、示例请求和健康状态，其余分析、账单和日志放到后面的分区阅读。当前对外同时提供 OpenAI 兼容入口与 Gemini / Claude 原生入口，正式支持的路径以本页示例为准。</p>
+        <p>这是用户侧最核心的接入控制台。首屏优先处理明文密钥、Base URL、示例请求和可用状态，其余分析、账单和日志放到后面的分区阅读。当前对外同时提供 OpenAI 兼容入口与 Gemini / Claude 原生入口，正式支持的路径以本页示例为准。</p>
         <div class="hero-actions">
             <a class="btn btn-ghost interactive-btn" href="/user/api-keys" data-shell-link>返回密钥管理</a>
             <a class="btn btn-accent interactive-btn" href="/user/self-test?api_key_id={{ api_key.id }}" data-shell-link>用这把密钥自检</a>
         </div>
     </div>
     <div class="cockpit-hero-aside">
-        <div class="cockpit-aside-label">健康状态</div>
+        <div class="cockpit-aside-label">可用状态</div>
         <div class="cockpit-aside-value">
             {% if api_key.status == 'active' %}正常可用
             {% elif api_key.status == 'disabled' %}已禁用
@@ -238,7 +238,7 @@ print(resp.output_text)</pre>
         <div class="panel-card">
             <div class="panel-head">
                 <div>
-                    <div class="panel-kicker">健康判断</div>
+                    <div class="panel-kicker">可用性判断</div>
                     <h3>上线前先看这几项</h3>
                 </div>
             </div>
@@ -264,8 +264,8 @@ print(resp.output_text)</pre>
         <div class="api-key-chip-grid">
             <article class="api-key-chip-card">
                 <strong>路由主策略</strong>
-                <span>健康优先</span>
-                <span>候选由授权范围、健康状态、容量和全局路由设置共同决定</span>
+                <span>可用性优先</span>
+                <span>候选由授权范围、可用状态、容量和全局路由设置共同决定</span>
             </article>
             <article class="api-key-chip-card">
                 <strong>授权提供商</strong>

@@ -40,6 +40,7 @@ from app.services.cache_service import CacheService
 from app.services.currency_service import CurrencyService
 from app.services.content_guard_service import ContentGuardResult, ContentGuardService
 from app.services.content_runtime_guard_service import ContentRuntimeGuardService
+from app.services.fixed_success_response_service import FixedSuccessResponseService
 from app.services.log_service import LogService
 from app.services.model_mapping_service import ModelMappingResolution, ModelMappingService
 from app.services.native_protocol_adapter import NativeProtocolAdapter
@@ -50,6 +51,7 @@ from app.services.provider_capacity_service import (
     ProviderCapacityService,
     ProviderCapacityUnavailableError,
 )
+from app.services.provider_health_state_service import ProviderHealthStateService
 from app.services.provider_service import ProviderService
 from app.services.proxy_request_context import set_current_provider_candidate
 from app.services.request_log_queue_service import RequestLogQueueService
@@ -140,6 +142,20 @@ class ContentGuardBlockedError(Exception):
         self.guard_result = guard_result
         self.status_code = status_code
         self.detail = detail or {}
+
+
+class FixedSuccessResponseDetectedError(Exception):
+    """表示上游以 HTTP 200 返回固定失败文本，需按可重试上游故障处理。"""
+
+    def __init__(self, *, detection: dict[str, Any], status_code: int = status.HTTP_502_BAD_GATEWAY) -> None:
+        super().__init__(ProviderHealthStateService.FIXED_SUCCESS_RESPONSE_ERROR_CODE)
+        self.detection = detection
+        self.status_code = status_code
+        self.detail = {
+            "message": "上游返回了高度相似的固定失败文本，已按伪成功响应故障切换候选",
+            "code": ProviderHealthStateService.FIXED_SUCCESS_RESPONSE_ERROR_CODE,
+            "detection": detection,
+        }
 
 
 UpstreamStreamResponse = httpx.Response | AiohttpStreamResponse
@@ -291,6 +307,7 @@ class ProxyService:
             success_rate_bias=route_context.success_rate_bias,
             require_trusted_provider=True,
             content_guard_required=route_context.content_guard_required,
+            health_gate_mode=route_context.health_gate_mode,
         )
 
     @staticmethod
@@ -1241,6 +1258,74 @@ class ProxyService:
         )
 
     @staticmethod
+    def _mark_fixed_success_response_failure(
+        db: Session,
+        provider: Provider,
+        provider_model: ProviderModel,
+        latency_ms: int,
+        detection: dict[str, Any],
+    ) -> None:
+        now = now_beijing()
+        ProviderHealthStateService.record_fixed_success_response_failure(
+            provider,
+            provider_model,
+            latency_ms=latency_ms,
+            detection=detection,
+        )
+        provider.failure_count += 1
+        provider.last_check_at = now
+        provider.last_latency_ms = latency_ms
+        provider_model.failure_count = max(1, int(provider_model.failure_count or 0) + 1)
+        provider_model.last_latency_ms = latency_ms
+        provider_model.last_check_at = now
+        provider_model.health_status = "unhealthy"
+        provider_model.circuit_state = "open"
+        provider_model.circuit_opened_at = now
+        provider_model.last_error = ProviderHealthStateService.FIXED_SUCCESS_RESPONSE_ERROR_CODE
+        ProviderService.refresh_provider_state(provider)
+
+    @staticmethod
+    def _mark_fixed_success_response_failure_by_id(
+        db: Session,
+        provider_id: int,
+        provider_model_id: int,
+        latency_ms: int,
+        detection: dict[str, Any],
+    ) -> None:
+        provider = db.get(Provider, provider_id)
+        provider_model = db.get(ProviderModel, provider_model_id)
+        if provider is None or provider_model is None:
+            return
+        ProxyService._mark_fixed_success_response_failure(db, provider, provider_model, latency_ms, detection)
+
+    @staticmethod
+    async def _mark_fixed_success_response_failure_async(
+        provider: Provider,
+        provider_model: ProviderModel,
+        latency_ms: int,
+        detection: dict[str, Any],
+        *,
+        db: Session | None = None,
+    ) -> None:
+        if db is not None:
+            await run_in_threadpool(
+                ProxyService._mark_fixed_success_response_failure,
+                db,
+                provider,
+                provider_model,
+                latency_ms,
+                detection,
+            )
+            return
+        await ProxyService._run_db_write(
+            ProxyService._mark_fixed_success_response_failure_by_id,
+            provider.id,
+            provider_model.id,
+            latency_ms,
+            detection,
+        )
+
+    @staticmethod
     async def _mark_failure_async(
         provider: Provider,
         provider_model: ProviderModel,
@@ -1986,6 +2071,15 @@ class ProxyService:
             api_client_auth=api_client_auth,
             sticky_key=session_sticky_key,
             excluded_target_model_names=mapping_failover_excluded_target_model_names,
+            endpoint_path=endpoint_path,
+            require_stream=False,
+            require_vision=has_image_input,
+            require_tools=require_tools,
+            require_image_generation=require_image_generation,
+            require_chat_completions=require_chat_completions,
+            require_responses=require_responses,
+            required_upstream_protocol_type=required_upstream_protocol_type,
+            route_context=route_context,
         )
         model_mapping_unavailable = ProxyService._model_mapping_unavailable(mapping_resolution)
         if mapping_resolution is not None and not model_mapping_unavailable and mapping_resolution.selected_model_name != requested_model_name:
@@ -2138,6 +2232,7 @@ class ProxyService:
                     require_image_generation=require_image_generation,
                     require_chat_completions=require_chat_completions,
                     require_responses=require_responses,
+                    required_upstream_protocol_type=required_upstream_protocol_type,
                 )
             )
         except ProviderCapacityUnavailableError as exc:
@@ -2155,15 +2250,10 @@ class ProxyService:
                 require_image_generation=require_image_generation,
                 require_chat_completions=require_chat_completions,
                 require_responses=require_responses,
+                required_upstream_protocol_type=required_upstream_protocol_type,
                 is_stream=False,
             )
         )
-        if candidates and required_upstream_protocol_type:
-            candidates = [
-                candidate
-                for candidate in candidates
-                if ProviderService.provider_or_model_native_protocol(candidate.provider, candidate.provider_model) == required_upstream_protocol_type
-            ]
         if candidates and failed_candidate_keys:
             candidates = ProxyService._filter_failed_route_candidates(candidates, failed_candidate_keys)
         if candidates:
@@ -2195,6 +2285,7 @@ class ProxyService:
                     require_image_generation=require_image_generation,
                     require_chat_completions=require_chat_completions,
                     require_responses=require_responses,
+                    required_upstream_protocol_type=required_upstream_protocol_type,
                     is_stream=False,
                 )
             )
@@ -2223,6 +2314,7 @@ class ProxyService:
                 requires_tools=require_tools,
                 requires_image_generation=require_image_generation,
                 model_mapping_unavailable=model_mapping_unavailable,
+                requested_endpoint_override=effective_log_request_path,
             )
             mapped_retry = await ProxyService._retry_with_next_mapped_model_json(
                 db=db,
@@ -2246,6 +2338,7 @@ class ProxyService:
                 requested_model_name=requested_model_name if isinstance(requested_model_name, str) else None,
                 current_model_name=model_name if isinstance(model_name, str) else None,
                 excluded_target_model_names=mapping_failover_excluded_target_model_names,
+                required_upstream_protocol_type=required_upstream_protocol_type,
                 request_id=request_id,
                 conversation_key=conversation_key,
                 session_id=session_id,
@@ -2454,6 +2547,10 @@ class ProxyService:
                         if setting.enable_payload_logging
                         else None
                     )
+                    detection_response_text = response_text or ProxyService._extract_response_display_text(
+                        client_response,
+                        limit_bytes=min(4096, max(1024, int(getattr(setting, "max_logged_body_bytes", 4096) or 4096))),
+                    )
                     trace.extend(fallback_trace)
                     ProxyService._append_typed_request_event(
                         trace,
@@ -2631,6 +2728,46 @@ class ProxyService:
                             severity="danger" if guard_result.risk_level == "high" else "info",
                             module="content_guard",
                         )
+                    fixed_success_detection = FixedSuccessResponseService.inspect_and_record(
+                        provider_id=provider.id,
+                        provider_model_id=provider_model.id,
+                        request_payload=request_payload_for_log,
+                        response_text=detection_response_text,
+                    )
+                    if fixed_success_detection.get("detected"):
+                        fixed_success_detection["will_switch_provider"] = True
+                        ProxyService._append_typed_request_event(
+                            trace,
+                            "fixed_success_response_detected",
+                            fixed_success_detection,
+                            result="failed",
+                            severity="warning",
+                            module="routing",
+                        )
+                        trace.append(
+                            ProxyService._build_trace_item(
+                                provider,
+                                provider_model,
+                                "fixed_success_response_detected",
+                                latency_ms,
+                                status_code=status.HTTP_502_BAD_GATEWAY,
+                                error=ProviderHealthStateService.FIXED_SUCCESS_RESPONSE_ERROR_CODE,
+                                extra={
+                                    "similarity": fixed_success_detection.get("similarity"),
+                                    "threshold": fixed_success_detection.get("threshold"),
+                                    "request_fingerprint": fixed_success_detection.get("request_fingerprint"),
+                                    "previous_request_fingerprint": fixed_success_detection.get("previous_request_fingerprint"),
+                                },
+                            )
+                        )
+                        await ProxyService._mark_fixed_success_response_failure_async(
+                            provider,
+                            provider_model,
+                            latency_ms,
+                            fixed_success_detection,
+                            db=db,
+                        )
+                        raise FixedSuccessResponseDetectedError(detection=fixed_success_detection)
                     trace.append(ProxyService._build_trace_item(provider, provider_model, "success", latency_ms, status_code=200))
                     ProxyService._append_typed_request_event(
                         trace,
@@ -2730,6 +2867,13 @@ class ProxyService:
                     ProxyService._release_owner_balance_reservation(api_client_auth, trace_id=trace_id)
                     raise ProxyService._capacity_service_unavailable_http_exception(exc) from exc
                 except ContentGuardBlockedError as exc:
+                    last_upstream_error = {
+                        "status_code": exc.status_code,
+                        "detail": exc.detail,
+                    }
+                    ProxyService._mark_route_candidate_failed(failed_candidate_keys, candidate)
+                    break
+                except FixedSuccessResponseDetectedError as exc:
                     last_upstream_error = {
                         "status_code": exc.status_code,
                         "detail": exc.detail,
@@ -2906,6 +3050,7 @@ class ProxyService:
                 requested_model_name=requested_model_name if isinstance(requested_model_name, str) else None,
                 current_model_name=model_name if isinstance(model_name, str) else None,
                 excluded_target_model_names=mapping_failover_excluded_target_model_names,
+                required_upstream_protocol_type=required_upstream_protocol_type,
                 request_id=request_id,
                 conversation_key=conversation_key,
                 session_id=session_id,
@@ -3141,6 +3286,15 @@ class ProxyService:
             api_client_auth=api_client_auth,
             sticky_key=session_sticky_key,
             excluded_target_model_names=mapping_failover_excluded_target_model_names,
+            endpoint_path=endpoint_path,
+            require_stream=True,
+            require_vision=has_image_input,
+            require_tools=require_tools,
+            require_image_generation=require_image_generation,
+            require_chat_completions=require_chat_completions,
+            require_responses=require_responses,
+            required_upstream_protocol_type=required_upstream_protocol_type,
+            route_context=route_context,
         )
         model_mapping_unavailable = ProxyService._model_mapping_unavailable(mapping_resolution)
         if mapping_resolution is not None and not model_mapping_unavailable and mapping_resolution.selected_model_name != requested_model_name:
@@ -3280,6 +3434,7 @@ class ProxyService:
                     require_image_generation=require_image_generation,
                     require_chat_completions=require_chat_completions,
                     require_responses=require_responses,
+                    required_upstream_protocol_type=required_upstream_protocol_type,
                 )
             )
         except ProviderCapacityUnavailableError as exc:
@@ -3297,15 +3452,10 @@ class ProxyService:
                 require_image_generation=require_image_generation,
                 require_chat_completions=require_chat_completions,
                 require_responses=require_responses,
+                required_upstream_protocol_type=required_upstream_protocol_type,
                 is_stream=True,
             )
         )
-        if candidates and required_upstream_protocol_type:
-            candidates = [
-                candidate
-                for candidate in candidates
-                if ProviderService.provider_or_model_native_protocol(candidate.provider, candidate.provider_model) == required_upstream_protocol_type
-            ]
         if candidates and failed_candidate_keys:
             candidates = ProxyService._filter_failed_route_candidates(candidates, failed_candidate_keys)
         if candidates:
@@ -3337,6 +3487,7 @@ class ProxyService:
                     require_image_generation=require_image_generation,
                     require_chat_completions=require_chat_completions,
                     require_responses=require_responses,
+                    required_upstream_protocol_type=required_upstream_protocol_type,
                     is_stream=True,
                 )
             )
@@ -3365,6 +3516,7 @@ class ProxyService:
                 requires_tools=require_tools,
                 requires_image_generation=require_image_generation,
                 model_mapping_unavailable=model_mapping_unavailable,
+                requested_endpoint_override=effective_log_request_path,
             )
             mapped_retry = await ProxyService._retry_with_next_mapped_model_stream(
                 db=db,
@@ -3386,6 +3538,7 @@ class ProxyService:
                 requested_model_name=requested_model_name if isinstance(requested_model_name, str) else None,
                 current_model_name=model_name if isinstance(model_name, str) else None,
                 excluded_target_model_names=mapping_failover_excluded_target_model_names,
+                required_upstream_protocol_type=required_upstream_protocol_type,
                 request_id=request_id,
                 conversation_key=conversation_key,
                 session_id=session_id,
@@ -3705,6 +3858,70 @@ class ProxyService:
                                 trace_id=trace_id,
                                 retried=True,
                             )
+                            break
+                        prefetch_response_text = ProxyService._extract_stream_prefetch_display_text(
+                            prefetched_stream_guard_bytes,
+                            stream_log_fast_path=stream_log_fast_path,
+                            limit_bytes=min(4096, max(1024, int(getattr(setting, "max_logged_body_bytes", 4096) or 4096))),
+                        )
+                        fixed_success_detection = FixedSuccessResponseService.inspect_and_record(
+                            provider_id=provider.id,
+                            provider_model_id=provider_model.id,
+                            request_payload=request_payload_for_log,
+                            response_text=prefetch_response_text,
+                        )
+                        if fixed_success_detection.get("detected"):
+                            if prefetch_pending_read_task is not None and not prefetch_pending_read_task.done():
+                                prefetch_pending_read_task.cancel()
+                                with suppress(asyncio.CancelledError):
+                                    await prefetch_pending_read_task
+                            duration_ms = int((time.perf_counter() - started) * 1000)
+                            fixed_success_detection["will_switch_provider"] = True
+                            ProxyService._append_typed_request_event(
+                                trace,
+                                "fixed_success_response_detected",
+                                fixed_success_detection,
+                                result="failed",
+                                severity="warning",
+                                module="routing",
+                            )
+                            trace.append(
+                                ProxyService._build_trace_item(
+                                    provider,
+                                    provider_model,
+                                    "fixed_success_response_detected",
+                                    duration_ms,
+                                    status_code=status.HTTP_502_BAD_GATEWAY,
+                                    error=ProviderHealthStateService.FIXED_SUCCESS_RESPONSE_ERROR_CODE,
+                                    extra={
+                                        "similarity": fixed_success_detection.get("similarity"),
+                                        "threshold": fixed_success_detection.get("threshold"),
+                                        "request_fingerprint": fixed_success_detection.get("request_fingerprint"),
+                                        "previous_request_fingerprint": fixed_success_detection.get("previous_request_fingerprint"),
+                                    },
+                                )
+                            )
+                            await stream_context.__aexit__(None, None, None)
+                            stream_context = None
+                            if capacity_lease is not None and capacity_lease_entered:
+                                await capacity_lease.__aexit__(None, None, None)
+                                capacity_lease_entered = False
+                            await ProxyService._mark_fixed_success_response_failure_async(
+                                provider,
+                                provider_model,
+                                duration_ms,
+                                fixed_success_detection,
+                                db=db,
+                            )
+                            last_upstream_error = {
+                                "status_code": status.HTTP_502_BAD_GATEWAY,
+                                "detail": {
+                                    "message": "上游流式首段返回了高度相似的固定失败文本，已按伪成功响应故障切换候选",
+                                    "code": ProviderHealthStateService.FIXED_SUCCESS_RESPONSE_ERROR_CODE,
+                                    "detection": fixed_success_detection,
+                                },
+                            }
+                            ProxyService._mark_route_candidate_failed(failed_candidate_keys, candidate)
                             break
 
                     async def stream_generator() -> AsyncIterator[bytes]:
@@ -4156,6 +4373,16 @@ class ProxyService:
                                 result="success" if stream_result == "completed" else "failed",
                             )
                             stream_guard_blocked = error_code == "content_integrity_violation"
+                            stream_billable = (
+                                success
+                                and not interrupted
+                            ) or (
+                                stream_guard_blocked
+                                and (
+                                    int(usage_info.get("total_tokens") or 0) > 0
+                                    or bool(str(response_text_for_log or "").strip())
+                                )
+                            )
                             if ProxyService._should_append_content_guard_typed_event(guard_result, setting=setting, blocked=stream_guard_blocked):
                                 ProxyService._append_typed_request_event(
                                     typed_terminal_events,
@@ -4174,7 +4401,7 @@ class ProxyService:
                                 "request_billing",
                                 {
                                     "billing_event_id": None,
-                                    "billing_stage": "queued" if setting.enable_token_logging and success and not interrupted else "skipped",
+                                    "billing_stage": "queued" if setting.enable_token_logging and stream_billable else "skipped",
                                     "token_source": "upstream_usage" if usage_info.get("total_tokens") is not None else "missing",
                                     "prompt_tokens": usage_info["prompt_tokens"],
                                     "completion_tokens": usage_info["completion_tokens"],
@@ -4207,6 +4434,65 @@ class ProxyService:
                                     severity="warning",
                                 )
                             if success and not interrupted:
+                                post_stream_fixed_success_detection = FixedSuccessResponseService.inspect_and_record(
+                                    provider_id=provider.id,
+                                    provider_model_id=provider_model.id,
+                                    request_payload=request_payload_for_log,
+                                    response_text=response_text_for_log,
+                                )
+                                if post_stream_fixed_success_detection.get("detected"):
+                                    post_stream_fixed_success_detection["will_switch_provider"] = False
+                                    post_stream_fixed_success_detection["downstream_already_started"] = True
+                                    ProxyService._append_typed_request_event(
+                                        typed_terminal_events,
+                                        "fixed_success_response_detected",
+                                        post_stream_fixed_success_detection,
+                                        result="failed",
+                                        severity="warning",
+                                        module="routing",
+                                    )
+                                    await ProxyService._mark_fixed_success_response_failure_async(
+                                        provider,
+                                        provider_model,
+                                        total_duration_ms,
+                                        post_stream_fixed_success_detection,
+                                    )
+                                    fixed_success_trace = trace + typed_terminal_events + [
+                                        ProxyService._build_trace_item(
+                                            provider,
+                                            provider_model,
+                                            "fixed_success_response_detected",
+                                            total_duration_ms,
+                                            status_code=status.HTTP_502_BAD_GATEWAY,
+                                            first_token_latency_ms=first_chunk_latency_ms,
+                                            total_duration_ms=total_duration_ms,
+                                            error=ProviderHealthStateService.FIXED_SUCCESS_RESPONSE_ERROR_CODE,
+                                            extra={
+                                                "similarity": post_stream_fixed_success_detection.get("similarity"),
+                                                "threshold": post_stream_fixed_success_detection.get("threshold"),
+                                                "request_fingerprint": post_stream_fixed_success_detection.get("request_fingerprint"),
+                                                "previous_request_fingerprint": post_stream_fixed_success_detection.get("previous_request_fingerprint"),
+                                                "downstream_already_started": True,
+                                            },
+                                        )
+                                    ]
+                                    await ProxyService._run_db_write(
+                                        LogService.create_log,
+                                        **{
+                                            **base_log_kwargs,
+                                            "success": False,
+                                            "billable": False,
+                                            "status_code": status.HTTP_502_BAD_GATEWAY,
+                                            "message": "stream fixed success response detected after downstream output",
+                                            "error_type": "server_error",
+                                            "error_code": ProviderHealthStateService.FIXED_SUCCESS_RESPONSE_ERROR_CODE,
+                                            "retryable": True,
+                                            "trace": fixed_success_trace,
+                                            "schedule_token_fill": False,
+                                        },
+                                    )
+                                    ProxyService._release_owner_balance_reservation(api_client_auth, trace_id=trace_id)
+                                    return
                                 final_trace = trace + typed_terminal_events + [
                                     ProxyService._build_trace_item(
                                         provider,
@@ -4275,6 +4561,8 @@ class ProxyService:
                                     **{
                                         **base_log_kwargs,
                                         "success": False,
+                                        "billable": stream_billable,
+                                        "billable_reason": "blocked_after_output" if error_code == "content_integrity_violation" else None,
                                         "status_code": terminal_status_code,
                                         "message": error_message or f"stream {log_type} failed",
                                         "error_type": (
@@ -4302,7 +4590,7 @@ class ProxyService:
                                         ),
                                     },
                                 )
-                            if not (setting.enable_token_logging and success and not interrupted):
+                            if not (setting.enable_token_logging and stream_billable):
                                 ProxyService._release_owner_balance_reservation(api_client_auth, trace_id=trace_id)
 
                     return stream_generator(), provider, trace, latency_ms
@@ -6382,9 +6670,11 @@ class ProxyService:
                 normalized_payload = dict(internal_payload)
                 if native_protocol == NativeProtocolAdapter.CLAUDE_MESSAGES:
                     normalized_payload["model"] = str(native_model_name)
+                    if native_stream:
+                        normalized_payload["stream"] = True
                 else:
                     normalized_payload.pop("model", None)
-                normalized_payload.pop("stream", None)
+                    normalized_payload.pop("stream", None)
             else:
                 native_source_payload = dict(internal_payload)
                 native_source_payload["model"] = str(native_model_name)
@@ -6802,7 +7092,7 @@ class ProxyService:
             "request_route_decision",
             {
                 "route_round": route_round,
-                "route_policy": "健康优先",
+                "route_policy": "可用性优先",
                 "candidate_count": candidate_count,
                 "hard_filter_final_candidate_count": hard_filter_final_candidate_count,
                 "candidate_count_after_failed_exclusion": candidate_count,
@@ -6933,6 +7223,7 @@ class ProxyService:
         require_image_generation: bool,
         require_chat_completions: bool,
         require_responses: bool,
+        required_upstream_protocol_type: str | None = None,
         is_stream: bool,
     ) -> dict[str, Any] | None:
         try:
@@ -6946,6 +7237,7 @@ class ProxyService:
                 require_image_generation=require_image_generation,
                 require_chat_completions=require_chat_completions,
                 require_responses=require_responses,
+                required_upstream_protocol_type=required_upstream_protocol_type,
                 is_stream=is_stream,
             )
         except Exception as exc:
@@ -7068,6 +7360,7 @@ class ProxyService:
         requested_model_name: str | None,
         current_model_name: str | None,
         excluded_target_model_names: tuple[str, ...],
+        required_upstream_protocol_type: str | None,
         request_id: str,
         conversation_key: str,
         session_id: str,
@@ -7125,6 +7418,7 @@ class ProxyService:
             route_retry_trace=next_trace,
             route_retry_attempt_count=route_retry_attempt_count,
             mapping_failover_excluded_target_model_names=next_excluded,
+            required_upstream_protocol_type=required_upstream_protocol_type,
             request_id_override=request_id,
             conversation_key_override=conversation_key,
             session_id_override=session_id,
@@ -7152,6 +7446,7 @@ class ProxyService:
         requested_model_name: str | None,
         current_model_name: str | None,
         excluded_target_model_names: tuple[str, ...],
+        required_upstream_protocol_type: str | None,
         request_id: str,
         conversation_key: str,
         session_id: str,
@@ -7207,6 +7502,7 @@ class ProxyService:
             route_retry_trace=next_trace,
             route_retry_attempt_count=route_retry_attempt_count,
             mapping_failover_excluded_target_model_names=next_excluded,
+            required_upstream_protocol_type=required_upstream_protocol_type,
             request_id_override=request_id,
             conversation_key_override=conversation_key,
             session_id_override=session_id,
@@ -7288,8 +7584,9 @@ class ProxyService:
         requires_tools: bool,
         requires_image_generation: bool,
         model_mapping_unavailable: bool,
+        requested_endpoint_override: str | None = None,
     ) -> dict[str, Any]:
-        requested_endpoint = ProxyService._external_v1_endpoint(endpoint_path)
+        requested_endpoint = requested_endpoint_override or ProxyService._external_v1_endpoint(endpoint_path)
         endpoint_detail = ProxyService._endpoint_unavailable_detail(route_diagnostics, requested_endpoint=requested_endpoint)
         if endpoint_detail is not None:
             message = str(endpoint_detail["message"])
@@ -7309,6 +7606,11 @@ class ProxyService:
         }
         if endpoint_detail is not None:
             detail.update(endpoint_detail)
+        protocol_detail = ProxyService._protocol_unavailable_detail(route_diagnostics, requested_endpoint=requested_endpoint)
+        if protocol_detail is not None:
+            detail.update(protocol_detail)
+            detail["message"] = protocol_detail["message"]
+            detail["code"] = protocol_detail["code"]
         return detail
 
     @staticmethod
@@ -7356,6 +7658,51 @@ class ProxyService:
                 primary_reason_code=ProxyService._first_present_reason(reason_counts, reasons),
             )
         return None
+
+    @staticmethod
+    def _protocol_unavailable_detail(
+        route_diagnostics: dict[str, Any],
+        *,
+        requested_endpoint: str,
+    ) -> dict[str, Any] | None:
+        reason_counts = route_diagnostics.get("reason_counts") or {}
+        if int(reason_counts.get("protocol_mismatch") or 0) <= 0:
+            return None
+        samples = [
+            item
+            for item in (route_diagnostics.get("samples") or [])
+            if isinstance(item, dict) and item.get("protocol_mismatch")
+        ]
+        required_protocol = str(
+            route_diagnostics.get("required_upstream_protocol_type")
+            or (samples[0].get("required_protocol") if samples else "")
+            or ""
+        )
+        actual_protocols = sorted(
+            {
+                str(item.get("actual_protocol"))
+                for item in samples
+                if item.get("actual_protocol")
+            }
+        )
+        return {
+            "message": (
+                f"请求入口 {requested_endpoint} 需要上游原生协议 {required_protocol or 'unknown'}，"
+                "但当前候选提供商或模型的实际协议不匹配。"
+            ),
+            "code": "upstream_protocol_mismatch",
+            "requested_endpoint": requested_endpoint,
+            "required_protocol": required_protocol or None,
+            "actual_protocol": actual_protocols[0] if len(actual_protocols) == 1 else None,
+            "actual_protocols": actual_protocols,
+            "primary_reason": {
+                "code": "protocol_mismatch",
+                "label": RouterService._diagnostic_reason_label("protocol_mismatch"),
+            },
+            "reason_counts": reason_counts,
+            "reason_details": ProxyService._route_reason_details(route_diagnostics),
+            "diagnostic_samples": samples or route_diagnostics.get("samples") or [],
+        }
 
     @staticmethod
     def _build_endpoint_capability_error_detail(
@@ -9800,6 +10147,45 @@ class ProxyService:
             truncated_payload["keys"] = keys[:40]
             truncated_payload["truncated_keys"] = max(0, len(keys) - 40)
         return dumps_json(truncated_payload)
+
+    @staticmethod
+    def _extract_stream_prefetch_display_text(
+        chunk: bytes,
+        *,
+        stream_log_fast_path: str | None,
+        limit_bytes: int,
+    ) -> str | None:
+        if not chunk:
+            return None
+        response_text_parts: list[str] = []
+        usage_info = {
+            "prompt_tokens": None,
+            "completion_tokens": None,
+            "total_tokens": None,
+            "cache_read_tokens": None,
+            "cache_write_tokens": None,
+        }
+        ProxyService._collect_stream_log_data(
+            chunk=chunk,
+            event_buffer=bytearray(),
+            response_text_parts=response_text_parts,
+            response_text_bytes=0,
+            token_response_parts=None,
+            token_response_bytes=0,
+            finish_reason=None,
+            usage_info=usage_info,
+            usage_payload=None,
+            generated_image_summary=None,
+            capture_text=True,
+            capture_usage=False,
+            limit_bytes=limit_bytes,
+            token_limit_bytes=limit_bytes,
+            stream_log_fast_path=stream_log_fast_path,
+        )
+        parsed_text = ProxyService._finalize_text_capture(response_text_parts)
+        if parsed_text:
+            return parsed_text
+        return chunk[:limit_bytes].decode("utf-8", errors="ignore")
 
     @staticmethod
     def _collect_stream_log_data(

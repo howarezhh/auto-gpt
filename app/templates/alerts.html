@@ -4,7 +4,7 @@
     <div class="cockpit-hero-copy">
         <div class="eyebrow">告警中心</div>
         <h2>告警中心</h2>
-        <p>汇总渠道健康异常、密钥异常状态、账户额度预警和最近 24 小时失败率，便于管理员集中处理。</p>
+        <p>汇总渠道可用异常、密钥异常状态、账户额度预警和最近 24 小时失败率，便于管理员集中处理。</p>
     </div>
     <div class="cockpit-hero-aside">
         <div class="cockpit-aside-label">24h 失败率</div>
@@ -28,7 +28,7 @@
 <section class="panel-card section-shell">
     <div class="section-subhead">
         <div>
-            <div class="panel-kicker">系统健康</div>
+            <div class="panel-kicker">系统可用性</div>
             <h3>实时运行指标</h3>
         </div>
     </div>
@@ -187,7 +187,7 @@
                         <td>{{ availability_labels.get(item.health_status, '未检测') }}</td>
                         <td>{{ circuit_labels.get(item.circuit_state, '未知') }}</td>
                         <td>{{ item.last_latency_ms if item.last_latency_ms is not none else '-' }}</td>
-                        <td>{% if item.circuit_state == 'open' %}优先下线或切流，再排查上游连通性{% else %}复查健康检查与模型可用性{% endif %}</td>
+                        <td>{% if item.circuit_state == 'open' %}优先下线或切流，再排查上游连通性{% else %}复查可用性检测与模型可用性{% endif %}</td>
                         <td><a href="/providers" data-shell-link>进入渠道管理</a></td>
                     </tr>
                     {% else %}

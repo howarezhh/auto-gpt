@@ -17,7 +17,7 @@ def _assert(condition: bool, message: str) -> None:
 def _provider(**kwargs) -> Provider:
     return Provider(
         id=kwargs.get("id", 1),
-        name=kwargs.get("name", "健康路由测试提供商"),
+        name=kwargs.get("name", "可用路由测试提供商"),
         provider_type=kwargs.get("provider_type", "openai_compatible"),
         protocol_type=kwargs.get("protocol_type", "both"),
         base_url="https://example.com/v1",
@@ -40,7 +40,7 @@ def _provider_model(**kwargs) -> ProviderModel:
     return ProviderModel(
         id=kwargs.get("id", 11),
         provider_id=kwargs.get("provider_id", 1),
-        model_name=kwargs.get("model_name", "健康路由测试模型"),
+        model_name=kwargs.get("model_name", "可用路由测试模型"),
         enabled=True,
         priority=kwargs.get("priority", 10),
         weight=100,

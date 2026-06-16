@@ -26,7 +26,7 @@ class IpManagementSettingsUpdate(BaseModel):
     rate_limit_enabled: bool = False
     event_logging_enabled: bool = False
     event_sample_rate: int = Field(default=100, ge=0, le=100)
-    event_retention_days: int = Field(default=30, ge=1, le=3650)
+    event_retention_days: int = Field(default=7, ge=1, le=7)
     store_raw_headers_enabled: bool = False
     ip_masking_enabled: bool = False
     fail_open_enabled: bool = True
