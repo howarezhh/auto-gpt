@@ -32,7 +32,7 @@ CONTENT_GUARD_SETTING_DEFAULTS: dict[str, Any] = {
     "content_guard_high_risk_strategy": "switch_provider",
     "content_guard_max_detection_delay_ms": 300,
     "content_guard_stream_mode": "buffer_300ms",
-    "content_guard_url_check_enabled": True,
+    "content_guard_url_check_enabled": False,
     "content_guard_url_allowlist_json": "",
     "content_guard_async_review_enabled": True,
     "content_guard_high_risk_confidence_threshold": 85,

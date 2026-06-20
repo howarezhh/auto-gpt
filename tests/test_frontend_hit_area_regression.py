@@ -39,6 +39,21 @@ def test_settings_switch_labels_have_explicit_targets() -> None:
     assert all(" for=" in label for label in switch_labels)
 
 
+def test_settings_page_action_buttons_are_left_aligned() -> None:
+    app_css = read_text("app/static/css/app.css")
+
+    assert re.search(
+        r'body\[data-page="settings"\]\s+\.form-actions\s*\{[^}]*justify-content:\s*flex-start;',
+        app_css,
+        re.S,
+    )
+    assert not re.search(
+        r'body\[data-page="settings"\]\s+\.form-actions\s*\{[^}]*justify-content:\s*flex-end;',
+        app_css,
+        re.S,
+    )
+
+
 def test_frontend_protocol_detection_skips_native_protocol_models() -> None:
     app_js = read_text("app/static/js/app.js")
 
@@ -47,6 +62,26 @@ def test_frontend_protocol_detection_skips_native_protocol_models() -> None:
     assert "item.protocolLabel = formatProviderModelProtocolLabel(modelConfig)" not in app_js
     assert "protocolLabel: formatProviderModelProtocolLabel(modelConfig)" in app_js
     assert "protocolLabel: formatProviderModelProtocolLabel(model)" in app_js
+
+
+def test_model_config_routes_allow_slash_model_names_and_mapping_preview_is_named_clearly() -> None:
+    models_router = read_text("app/routers/models.py")
+    app_js = read_text("app/static/js/app.js")
+    base_html = read_text("app/templates/base.html")
+
+    assert '"/api/models/{model_name:path}/test"' in models_router
+    assert '"/api/models/{model_name:path}"' in models_router
+    assert '"/api/model-mappings/{source_model_name:path}"' in models_router
+    assert "`/api/models/${encodeURIComponent(modelName)}`" in app_js
+    assert "`/api/model-mappings/${encodeURIComponent(state.editingMappingSource)}`" in app_js
+    assert "`/api/model-mappings/${encodeURIComponent(sourceModel)}`" in app_js
+    assert 'data-mapping-action="preview"' in app_js
+    assert 'data-mapping-action="test"' not in app_js
+    assert "模型映射预览" in app_js
+    assert "本次只预览模型映射选择和候选诊断，不会向上游模型发起真实调用。" in app_js
+    assert 'api.post("/api/model-mappings/select"' in app_js
+    assert "model_mapping_not_applied" in models_router
+    assert "js/app.js') }}?v=20260618-05" in base_html
 
 
 def test_frontend_probe_buttons_use_per_model_live_results() -> None:
@@ -71,7 +106,13 @@ def test_probe_result_lists_expose_json_detail_and_copy() -> None:
     assert "function renderProbeDetailButton" in app_js
     assert 'data-probe-detail="' in app_js
     assert 'data-probe-detail-copy="' in app_js
-    assert "raw_provider_response: raw || null" in app_js
+    assert 'value.raw_provider_response != null' in app_js
+    assert "collectProbeRawProviderResponses(item)" in app_js
+    assert "raw_provider_response: raw || rawResponses[0]?.raw_provider_response || null" in app_js
+    assert "raw_provider_responses: rawResponses" in app_js
+    assert 'probe_kind: "model_batch_summary"' in app_js
+    assert "channel_results: channelResults" in app_js
+    assert "selected_providers: providers" in app_js
     assert "await copyText(formatRawProviderResponse(entry), button);" in app_js
     assert "renderEndpointProbeHtml(endpointResults)" in app_js
     assert "renderProbeDetailButton(item.detail || item, item.displayName || \"可用性检测\")" in app_js
@@ -79,6 +120,17 @@ def test_probe_result_lists_expose_json_detail_and_copy() -> None:
     assert "renderProbeDetailButton(item.detail || item, item.displayName || \"协议检测\")" in app_js
     assert "renderProbeDetailButton(item, item.provider_name || \"渠道检测\")" in app_js
     assert "renderProbeDetailButton(model, model.model_name || \"模型检测\")" in app_js
+
+
+def test_probe_result_modal_can_be_restored_after_close() -> None:
+    app_js = read_text("app/static/js/app.js")
+    app_css = read_text("app/static/css/app.css")
+
+    assert "lastHealthCheckResultModalSnapshot" in app_js
+    assert "function reopenLastHealthCheckResultModal" in app_js
+    assert "health-check-result-restore" in app_js
+    assert "查看最近检测结果" in app_js
+    assert ".probe-result-restore-btn" in app_css
 
 
 def test_playground_uses_mode_workbench_layout_and_provider_terms() -> None:
@@ -148,7 +200,7 @@ def test_billing_frontend_exposes_multicurrency_pricing_fields() -> None:
     assert "exchange_rate_to_billing_currency: parseOptionalRawDecimalField(exchangeRateInput, \"汇率\")" in app_js
     assert "exchange_rate_to_billing_currency: exchangeRateInput.value.trim() ? Number(exchangeRateInput.value) : null" not in app_js
     assert "return toPricePer1K(value);" not in app_js
-    assert "js/app.js') }}?v=20260616-" in base_html
+    assert re.search(r"js/app\.js'\) \}\}\?v=20\d{6}-\d{2}", base_html)
 
     assert "<th>原币种</th>" in api_key_detail_html
     assert "<th>原币种</th>" in user_billing_html
@@ -206,7 +258,7 @@ def test_external_native_protocol_entries_are_visible_in_docs_and_user_pages() -
     assert "Claude 原生入口" in user_home_html
     assert "外部代理生效" in ip_management_html
     assert 'external_v1: "外部代理"' in app_js
-    assert "app.js') }}?v=20260616-" in base_html
+    assert re.search(r"app\.js'\) \}\}\?v=20\d{6}-\d{2}", base_html)
 
 
 def test_provider_directory_uses_server_pagination_and_same_row_filters() -> None:
@@ -226,22 +278,51 @@ def test_provider_directory_uses_server_pagination_and_same_row_filters() -> Non
     ):
         assert f'id="{field_id}"' in providers_html
     assert 'id="provider-page-meta"' in providers_html
+    assert 'id="provider-directory-status"' in providers_html
     assert 'id="provider-prev-page-btn"' in providers_html
     assert 'id="provider-next-page-btn"' in providers_html
+    assert 'id="provider-page-bootstrap"' in providers_html
+    assert 'id="providers-enable-selected-btn"' in providers_html
+    assert 'id="providers-disable-selected-btn"' in providers_html
+    assert 'id="providers-mark-available-selected-btn"' in providers_html
+    assert 'id="providers-mark-trusted-selected-btn"' in providers_html
     assert "/api/providers/directory" in app_js
+    assert "/api/providers/batch/governance" in app_js
     assert "page_size: String(pageSize || 20)" in app_js
     assert "if (Array.isArray(overview.items)) return overview.items;" in app_js
     assert "function normalizeProviderDirectoryResponse" in app_js
-    assert "providers = directory.items;" in app_js
+    assert "function readProviderPageBootstrap" in app_js
+    assert "function hasActiveProviderDirectoryFilters" in app_js
+    assert "function setProviderDirectoryStatus" in app_js
+    assert "directoryUnexpectedlyEmpty" in app_js
+    assert "已使用首屏数据恢复显示" in app_js
+    assert "function scheduleProviderPriorityAutoSave" in app_js
+    assert "tableBody.addEventListener(\"input\"" in app_js
+    assert "tableBody.addEventListener(\"focusout\"" in app_js
+    assert "setProviderPriorityInputState(input, \"saving\")" in app_js
+    assert "renderProviderBootstrapDirectory();" in app_js
     assert 'api.get("/api/providers")' in app_js
     assert "loadAllProviderDirectoryItemsForCurrentFilters" in app_js
     assert ".provider-directory-filters" in app_css
+    assert ".table-toolbar.filter-toolbar.provider-directory-filters" in app_css
+    assert ".provider-directory-status" in app_css
+    assert ".provider-priority-input.is-saving" in app_css
+    assert ".provider-priority-input.is-saved" in app_css
+    assert "border-color: transparent;" in app_css
     assert "repeat(7, minmax(118px, 1fr))" in app_css
+    assert ".provider-model-custom-row" in app_css
+    assert ".provider-model-custom-add-row" in app_css
+    assert "minmax(180px, 1fr)" in app_css
+    assert "minmax(128px, 0.55fr)" in app_css
+    base_html = read_text("app/templates/base.html")
+    assert "app.css') }}?v=20260618-02" in base_html
+    assert "app.js') }}?v=20260618-05" in base_html
 
 
 def test_provider_and_model_import_export_controls_exist() -> None:
     providers_html = read_text("app/templates/providers.html")
     provider_models_html = read_text("app/templates/provider_models.html")
+    models_html = read_text("app/templates/models.html")
     app_js = read_text("app/static/js/app.js")
 
     assert 'id="provider-export-btn"' in providers_html
@@ -252,10 +333,61 @@ def test_provider_and_model_import_export_controls_exist() -> None:
     assert 'id="provider-model-batch-import-copy-template-btn"' in provider_models_html
     assert 'id="provider-model-batch-import-preview-btn"' in provider_models_html
     assert 'id="provider-model-batch-import-submit-btn"' in provider_models_html
+    assert 'id="models-export-btn"' in models_html
+    assert 'id="models-batch-import-open-btn"' in models_html
+    assert 'id="models-batch-import-modal"' in models_html
+    assert 'id="models-batch-import-template-btn"' in models_html
+    assert 'id="models-batch-import-copy-template-btn"' in models_html
+    assert 'id="models-batch-import-preview-btn"' in models_html
+    assert 'id="models-batch-import-submit-btn"' in models_html
     assert "window.location.href = \"/api/providers/export\";" in app_js
     assert "window.location.href = \"/api/providers/models/export\";" in app_js
+    assert "window.location.href = \"/api/models/export\";" in app_js
     assert "ensureProviderModelBatchImportTemplate" in app_js
     assert "previewProviderModelBatchImport" in app_js
+    assert "ensureModelsBatchImportTemplate" in app_js
+    assert "previewModelsBatchImport" in app_js
+
+
+def test_provider_model_matrix_import_export_controls_are_bound_in_page_init() -> None:
+    app_js = read_text("app/static/js/app.js")
+    start = app_js.index("async function initProviderModelsPage()")
+    end = app_js.index("async function initModels()", start)
+    init_body = app_js[start:end]
+
+    assert 'providerModelBatchImportOpenBtn?.addEventListener("click"' in init_body
+    assert 'providerModelExportBtn?.addEventListener("click"' in init_body
+    assert 'window.location.href = "/api/providers/models/export";' in init_body
+    assert 'providerModelBatchImportTemplateBtn?.addEventListener("click"' in init_body
+    assert 'providerModelBatchImportCopyTemplateBtn?.addEventListener("click"' in init_body
+    assert 'providerModelBatchImportPreviewBtn?.addEventListener("click"' in init_body
+    assert 'providerModelBatchImportContentInput?.addEventListener("input"' in init_body
+    assert 'providerModelBatchImportForm?.addEventListener("submit"' in init_body
+    assert "let importCompleted = false;" in init_body
+    assert "if (importCompleted && providerModelBatchImportSubmitBtn) providerModelBatchImportSubmitBtn.disabled = true;" in init_body
+    assert 'document.getElementById("provider-model-batch-import-close")?.addEventListener("click"' in init_body
+
+
+def test_model_catalog_import_export_controls_are_bound_in_page_init() -> None:
+    app_js = read_text("app/static/js/app.js")
+    start = app_js.index("async function initModels()")
+    end = app_js.index("async function initContentGuardPage()", start)
+    init_body = app_js[start:end]
+
+    assert 'const modelsExportBtn = document.getElementById("models-export-btn")' in init_body
+    assert 'modelsBatchImportOpenBtn.addEventListener("click"' in init_body
+    assert 'modelsExportBtn.addEventListener("click"' in init_body
+    assert 'window.location.href = "/api/models/export";' in init_body
+    assert 'const result = await api.get("/api/models/batch-import-template");' in init_body
+    assert 'const result = await api.post("/api/models/batch-import"' in init_body
+    assert 'modelsBatchImportTemplateBtn.addEventListener("click"' in init_body
+    assert 'modelsBatchImportCopyTemplateBtn.addEventListener("click"' in init_body
+    assert 'modelsBatchImportPreviewBtn.addEventListener("click"' in init_body
+    assert 'modelsBatchImportContentInput.addEventListener("input"' in init_body
+    assert 'modelsBatchImportForm.addEventListener("submit"' in init_body
+    assert "let importCompleted = false;" in init_body
+    assert "if (importCompleted && modelsBatchImportSubmitBtn) modelsBatchImportSubmitBtn.disabled = true;" in init_body
+    assert 'document.getElementById("models-batch-import-close")?.addEventListener("click"' in init_body
 
 
 def test_frontend_locks_native_protocol_by_model_group() -> None:
@@ -283,15 +415,34 @@ def test_provider_form_custom_model_uses_name_and_id_fields() -> None:
 
     assert 'id="provider-custom-model-name"' in providers_html
     assert 'id="provider-custom-model-id"' in providers_html
+    assert 'id="provider-custom-model-protocol"' in providers_html
+    assert 'id="provider-custom-model-group"' in providers_html
+    assert "provider-model-custom-add-row" in providers_html
     assert 'id="provider-model-edit-model-name"' in provider_models_html
     assert 'id="provider-model-edit-upstream-model-name"' in provider_models_html
-    assert "模型名称" in providers_html
     assert "模型ID" in providers_html
-    assert "模型名称、模型ID" in provider_models_html
-    assert "用于本平台展示和用户请求。" in provider_models_html
-    assert "用于实际请求上游提供商。" in provider_models_html
+    assert "上游模型ID" in providers_html
+    assert "端点协议" in providers_html
+    assert "模型分组" in providers_html
+    assert "模型ID、上游模型ID" in provider_models_html
+    assert "本平台唯一模型ID" in provider_models_html
+    assert "上游模型ID，例如" in provider_models_html
     assert 'const customModelIdInput = document.getElementById("provider-custom-model-id")' in app_js
+    assert 'const customModelProtocolInput = document.getElementById("provider-custom-model-protocol")' in app_js
+    assert 'const customModelGroupInput = document.getElementById("provider-custom-model-group")' in app_js
+    assert "function syncCustomModelInference" in app_js
+    assert "function getPendingCustomModelConfig" in app_js
+    assert "async function ensureCatalogModelReference" in app_js
+    assert "async function validateCustomModelIdAgainstCatalog" in app_js
+    assert "async function addPendingCustomModelConfig" in app_js
+    assert 'const pendingCustomModelResult = await addPendingCustomModelConfig({ clearInputs: true, showSuccess: false });' in app_js
+    assert 'if (pendingCustomModelResult.status === "invalid") return;' in app_js
+    assert 'customModelIdInput?.addEventListener("input"' in app_js
+    assert "model_group: modelGroup" in app_js
+    assert "protocol_type: protocolType" in app_js
     assert "upstream_model_name: upstreamModelName" in app_js
+    assert "模型ID ${modelName} 已存在于模型库" in app_js
+    assert "getModelOptions({ force: true })" in app_js
     assert "upstream_model_name: discoveredModel.upstream_model_name || discoveredModel.model_id || modelName" in app_js
     assert "upstream_model_name: catalogModel.upstream_model_name || catalogModel.model_id || catalogModel.model_name || modelName" in app_js
     assert "请先输入模型ID" in app_js
@@ -409,3 +560,20 @@ def test_log_center_delete_filtered_controls_are_wired() -> None:
     assert "clear_all: bool" in logging_router
     assert "discarded_pending_typed_logs" in logging_router
     assert "request_path=request_path or path" in logging_router
+
+
+def test_native_protocol_request_logs_are_visible_in_filters_and_labels() -> None:
+    logs_html = read_text("app/templates/logs.html")
+    user_logs_html = read_text("app/templates/user_logs.html")
+    user_detail_html = read_text("app/templates/user_detail.html")
+    app_js = read_text("app/static/js/app.js")
+
+    for html in (logs_html, user_logs_html):
+        assert '<option value="gemini">Gemini 原生请求</option>' in html
+        assert '<option value="claude_messages">Claude 原生请求</option>' in html
+    assert "{% elif item.log_type == 'gemini' %}Gemini 原生请求" in user_detail_html
+    assert "{% elif item.log_type == 'claude_messages' %}Claude 原生请求" in user_detail_html
+    assert 'gemini: "Gemini 原生请求"' in app_js
+    assert 'claude_messages: "Claude 原生请求"' in app_js
+    assert "function isRequestLogInProgress" in app_js
+    assert 'Number(log.status_code) === 102' in app_js

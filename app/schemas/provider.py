@@ -793,6 +793,8 @@ class ProviderBatchGovernanceRequest(BaseModel):
     @classmethod
     def normalize_provider_ids(cls, value: list[int]) -> list[int]:
         normalized = [int(item) for item in value if int(item) > 0]
+        if not normalized:
+            raise ValueError("请先选择要操作的提供商")
         return list(dict.fromkeys(normalized))
 
     @field_validator("action")

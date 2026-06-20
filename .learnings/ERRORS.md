@@ -814,6 +814,97 @@ SyntaxError: Unexpected token ')'
 
 ---
 
+## [ERR-20260618-002] pwsh_outer_double_quote_variable_expansion
+
+**Logged**: 2026-06-18T00:00:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tooling
+
+### Summary
+Nested `pwsh -Command "..."` stripped an inner `$lines` variable before PowerShell executed the intended command.
+
+### Error
+```text
+ParserError: Missing type name after '['.
+```
+
+### Context
+- Attempted to inspect a file slice with `"$lines = Get-Content ...; $lines[20580..20780]"` inside an outer double-quoted `pwsh -Command`.
+- The outer shell expanded `$lines` to an empty value, leaving `= Get-Content ...; [20580..20780]`.
+- Project rules already require careful quoting for `$`, `|`, JSON and nested commands.
+
+### Suggested Fix
+Use single-quoted outer command strings where possible, escape `$`, or avoid shell variables by using `Get-Content ... | Select-Object -Skip <n> -First <n>` for file slices.
+
+### Metadata
+- Reproducible: yes
+- Related Files: app/static/js/app.js
+- See Also: ERR-20260617-001, ERR-20260618-001
+
+### Resolution
+- **Resolved**: 2026-06-18T00:00:00+08:00
+- **Notes**: Switched file slice reads to `Select-Object -Skip/-First`.
+
+---
+
+## [ERR-20260617-001] pwsh_python_forward_slash_invocation_failed_silently
+
+**Logged**: 2026-06-17T00:00:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tooling
+
+### Summary
+Running the project virtualenv Python through nested PowerShell with a forward-slash relative path exited with code 1 and no stderr/stdout, while the same command with Windows backslashes succeeded.
+
+### Error
+```text
+Exit code: 1
+```
+
+### Context
+- Failed form: `& './.venv/Scripts/python.exe' 'stage28_routing_policy_regression_check.py'`.
+- Working form: `& '.\.venv\Scripts\python.exe' 'stage28_routing_policy_regression_check.py'`.
+- The virtualenv itself was healthy: `.\.venv\Scripts\python.exe --version` returned Python 3.12.3.
+
+### Suggested Fix
+When invoking executables from nested `pwsh -Command`, prefer Windows-style relative paths such as `.\.venv\Scripts\python.exe` and quote them as a single invocation target.
+
+### Metadata
+- Reproducible: yes
+- Related Files: stage28_routing_policy_regression_check.py, tests/test_recent_session_route.py, tests/test_provider_model_mounts.py
+
+---
+
+## [ERR-20260617-002] pwsh_new_item_literalpath_unavailable
+
+**Logged**: 2026-06-17T00:00:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tooling
+
+### Summary
+`New-Item -ItemType Directory -Force -LiteralPath ...` failed in the project PowerShell 7 command wrapper because this environment's `New-Item` did not expose a `-LiteralPath` parameter.
+
+### Error
+```text
+New-Item: A parameter cannot be found that matches parameter name 'LiteralPath'.
+```
+
+### Context
+- Attempted to create `docs\架构决策`.
+- Re-running with `New-Item -ItemType Directory -Force -Path 'docs\架构决策'` succeeded.
+
+### Suggested Fix
+For directory creation in this workspace, use `New-Item -ItemType Directory -Force -Path ...`; reserve `-LiteralPath` for cmdlets verified to support it.
+
+### Metadata
+- Reproducible: yes
+- Related Files: docs/架构决策/提供商选择策略可插拔路由改造方案.md
+
+---
+
 ## [ERR-20260613-002] sqlalchemy_compiled_table_name_assertion
 
 **Logged**: 2026-06-13T00:00:00+08:00
@@ -1251,5 +1342,72 @@ Use an absolute Git executable path if available, repair the PowerShell 7 PATH, 
 ### Metadata
 - Reproducible: unknown
 - Related Files: 项目全局规范.md
+
+---
+
+## [ERR-20260617-001] powershell_variable_interpolation
+
+**Logged**: 2026-06-17T00:00:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: infra
+
+### Summary
+Outer PowerShell interpolation removed $lines in nested pwsh -Command snippets.
+
+### Error
+`
+Missing type name after '['.
+`
+
+### Context
+- Nested command attempted to run $lines = Get-Content ...; [80..340] inside a double-quoted outer command.
+- The outer shell expanded $lines before the inner pwsh received it.
+
+### Suggested Fix
+Use single-quoted inner -Command strings or escape $ as ` $ ` when nesting PowerShell commands.
+
+### Metadata
+- Reproducible: yes
+- Related Files: app/services/router_service.py
+
+### Resolution
+- **Resolved**: 2026-06-17T00:00:00+08:00
+- **Notes**: Continue with escaped $ or single-quoted command strings.
+
+---
+
+## [ERR-20260618-001] nested_pwsh_heredoc_quote_collision
+
+**Logged**: 2026-06-18T00:00:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tooling
+
+### Summary
+Nested `pwsh -Command '...'` failed when the inner Python here-string or generated code contained single quotes and JavaScript template expressions.
+
+### Error
+```text
+ParserError: The 'from' keyword is not supported in this version of the language.
+ParserError: An expression was expected after '('.
+```
+
+### Context
+- Attempted to run a Python rewrite script through a nested PowerShell command.
+- The outer single-quoted `-Command` argument closed early on an inner `@'` here-string and later on single-quoted Python/JavaScript strings.
+- A JavaScript template expression `${escapeHtml(message)}` was also consumed by PowerShell during script execution.
+
+### Suggested Fix
+For nested PowerShell script execution, avoid single quotes inside the outer single-quoted `-Command` payload or switch to a script file / apply_patch for edits. Avoid JavaScript template strings in generated scripts unless `$` is escaped for the outer PowerShell layer.
+
+### Metadata
+- Reproducible: yes
+- Related Files: app/static/js/app.js
+- See Also: ERR-20260617-001
+
+### Resolution
+- **Resolved**: 2026-06-18T00:00:00+08:00
+- **Notes**: Replaced the malformed generated JavaScript with explicit string concatenation and continued with syntax checks.
 
 ---

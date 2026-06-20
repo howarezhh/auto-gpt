@@ -1364,7 +1364,6 @@ def user_log_timeline_api(
         return JSONResponse({"detail": "unauthorized"}, status_code=401)
     log = db.scalar(
         select(RequestLog)
-        .options(*LogService._lightweight_log_load_options())
         .where(
             RequestLog.id == log_id,
             RequestLog.api_client_key_id.in_(

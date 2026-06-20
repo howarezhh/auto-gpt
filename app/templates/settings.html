@@ -4,7 +4,7 @@
     <div>
         <div class="eyebrow">路由设置</div>
         <h2>路由设置</h2>
-        <p>统一配置可用性优先主策略、重试策略、熔断阈值，以及自动可用性检测与恢复探测参数。</p>
+        <p>统一配置全局主路由策略、重试策略、熔断阈值，以及自动可用性检测与恢复探测参数。</p>
     </div>
 </section>
 
@@ -16,6 +16,25 @@
         </div>
     </div>
     <form class="form-grid" id="settings-form">
+        <label>
+            <span class="settings-field-label">
+                <span>主路由策略</span>
+                <span class="settings-help">
+                    <button class="settings-help-btn" type="button" aria-label="查看主路由策略说明" data-settings-tooltip-trigger="true">
+                        <i class="bi bi-question-circle" aria-hidden="true"></i>
+                    </button>
+                    <div class="settings-tooltip-content hidden">
+                        <div class="settings-tooltip-title">主路由策略说明</div>
+                        <div class="settings-tooltip-copy">管理员全局选择正式 /v1 路由排序策略。默认使用可用性优先；低延迟优先会加大延迟惩罚；容量避让会加大容量饱和惩罚。API Key、用户和策略模板不能覆盖该全局策略。</div>
+                    </div>
+                </span>
+            </span>
+            <select class="field-input" id="setting-route-strategy">
+                <option value="availability_first">可用性优先（默认）</option>
+                <option value="latency_first">低延迟优先</option>
+                <option value="capacity_avoidance">容量避让</option>
+            </select>
+        </label>
         <label>
             <span class="settings-field-label">
                 <span>候选耗尽等待重试（s）</span>

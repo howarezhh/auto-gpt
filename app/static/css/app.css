@@ -3800,6 +3800,16 @@ html[data-theme="dark"] .settings-switch-control input:checked + .settings-switc
     margin-bottom: 10px;
 }
 
+.provider-model-custom-add-row {
+    display: grid;
+    grid-template-columns:
+        minmax(180px, 1fr)
+        minmax(180px, 1fr)
+        minmax(128px, 0.55fr)
+        minmax(128px, 0.55fr)
+        auto;
+}
+
 .provider-model-custom-row label {
     display: grid;
     gap: 6px;
@@ -4135,6 +4145,45 @@ html[data-theme="dark"] .settings-switch-control input:checked + .settings-switc
     align-items: center;
 }
 
+.table-toolbar.filter-toolbar.provider-directory-filters {
+    grid-template-columns: minmax(220px, 1.45fr) repeat(7, minmax(118px, 1fr));
+    gap: 10px;
+    align-items: center;
+}
+
+.provider-directory-filters .field-input,
+.provider-directory-filters .search-input {
+    border-color: transparent;
+    border-radius: 0;
+    box-shadow: none;
+    background: color-mix(in srgb, var(--surface-soft) 72%, transparent);
+}
+
+.provider-directory-filters .field-input:hover,
+.provider-directory-filters .search-input:hover,
+.provider-directory-filters .field-input:focus,
+.provider-directory-filters .search-input:focus {
+    border-color: color-mix(in srgb, var(--accent) 34%, var(--line-strong));
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 8%, transparent);
+    background: var(--surface);
+}
+
+.provider-directory-status {
+    padding: 8px 10px;
+    border-left: 2px solid color-mix(in srgb, var(--accent) 44%, transparent);
+    background: color-mix(in srgb, var(--surface-soft) 84%, transparent);
+}
+
+.provider-directory-status.is-warning {
+    border-left-color: color-mix(in srgb, var(--warning) 64%, var(--line-strong));
+}
+
+@media (max-width: 1280px) {
+    .table-toolbar.filter-toolbar.provider-directory-filters {
+        grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+    }
+}
+
 .provider-search-input {
     min-width: 0;
 }
@@ -4289,6 +4338,23 @@ html[data-theme="dark"] .settings-switch-control input:checked + .settings-switc
 .provider-priority-input:focus-visible {
     outline: 2px solid color-mix(in srgb, var(--accent) 38%, transparent);
     outline-offset: 2px;
+}
+
+.provider-priority-input.is-dirty {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.provider-priority-input.is-saving {
+    cursor: progress;
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--warning) 16%, transparent);
+}
+
+.provider-priority-input.is-saved {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 18%, transparent);
+}
+
+.provider-priority-input.is-error {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--red) 18%, transparent);
 }
 
 .provider-priority-tier-label {
@@ -7438,6 +7504,26 @@ html[data-theme="dark"] .benchmark-log-window {
     overflow-wrap: anywhere;
 }
 
+.log-detail-raw-response {
+    max-width: 100%;
+    overflow: auto;
+}
+
+.log-detail-raw-response pre {
+    min-width: 0;
+    max-height: min(58dvh, 620px);
+    margin: 0;
+    padding: 12px;
+    overflow: auto;
+    border: 1px solid var(--border);
+    border-radius: 0;
+    background: color-mix(in srgb, var(--surface-strong) 78%, transparent);
+    color: var(--text);
+    font-size: 12px;
+    line-height: 1.55;
+    white-space: pre;
+}
+
 .log-detail-timeline {
     grid-column: 1 / -1;
 }
@@ -8625,6 +8711,29 @@ body[data-page="user-detail"] .user-detail-quota-form .btn {
     border-radius: 0;
     border: 1px solid rgba(128, 149, 182, 0.18);
     background: rgba(248, 250, 252, 0.82);
+}
+
+.probe-result-restore-btn {
+    position: fixed;
+    right: 24px;
+    bottom: 24px;
+    z-index: 1050;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 42px;
+    padding: 0 16px;
+    border: 1px solid var(--border-strong);
+    background: var(--surface);
+    color: var(--text);
+    box-shadow: none;
+    cursor: pointer;
+}
+
+.probe-result-restore-btn:hover,
+.probe-result-restore-btn:focus-visible {
+    border-color: var(--primary);
+    background: var(--surface-muted);
 }
 
 .provider-test-summary-grid {
@@ -12059,7 +12168,7 @@ html[data-theme="dark"] .nav-link.active {
 }
 
 .log-billing-row-primary {
-    grid-template-columns: minmax(0, auto) auto minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, auto) auto auto minmax(0, 1fr) auto;
     align-items: center;
     gap: 8px;
 }
@@ -12122,6 +12231,21 @@ html[data-theme="dark"] .nav-link.active {
     overflow-wrap: anywhere;
 }
 
+.log-billing-status {
+    display: inline-flex;
+    align-items: center;
+    min-height: 24px;
+    padding: 0 8px;
+    border: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--surface-soft) 82%, transparent);
+    color: var(--text-soft);
+    font-size: 12px;
+    line-height: 1;
+    font-weight: 800;
+    white-space: nowrap;
+}
+
 .log-billing-token-strip,
 .log-result-pill-row,
 .log-timing-cell {
@@ -12164,6 +12288,8 @@ html[data-theme="dark"] .nav-link.active {
 .log-pill.log-tooltip-trigger:focus-visible,
 .log-billing-multiplier.log-tooltip-trigger:hover,
 .log-billing-multiplier.log-tooltip-trigger:focus-visible,
+.log-billing-status.log-tooltip-trigger:hover,
+.log-billing-status.log-tooltip-trigger:focus-visible,
 .log-timing-cell .log-tooltip-trigger:hover,
 .log-timing-cell .log-tooltip-trigger:focus-visible {
     border-color: color-mix(in srgb, var(--accent) 34%, var(--line));
@@ -12344,6 +12470,12 @@ html[data-theme="dark"] .log-billing-multiplier {
     border-color: rgba(251, 191, 36, 0.24);
     background: rgba(146, 64, 14, 0.28);
     color: #facc15;
+}
+
+html[data-theme="dark"] .log-billing-status {
+    border-color: rgba(148, 163, 184, 0.28);
+    background: rgba(15, 23, 42, 0.36);
+    color: #cbd5e1;
 }
 
 html[data-theme="dark"] .help-tooltip[data-tooltip-name="log-compact"] {
@@ -14013,7 +14145,7 @@ body[data-page="settings"] .settings-switch-control {
 }
 
 body[data-page="settings"] .form-actions {
-    justify-content: flex-end;
+    justify-content: flex-start;
 }
 
 body[data-page="playground"] #playground-single {

@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,6 +11,7 @@ from app.models.request_log import RequestLog
 from app.services.billing_reservation_service import BillingReservationService
 from app.services.billing_service import BillingService
 from app.services.currency_service import CurrencyService
+from app.services.log_service import LogService
 from app.services.model_pricing_service import ModelPricingService
 from app.services.proxy_service import ProxyService
 
@@ -113,6 +115,182 @@ def test_fee_component_cost_tracks_billing_and_source_currency_separately() -> N
     assert source_cost == Decimal("0.200000000")
 
 
+def test_finalized_no_charge_log_can_recompute_when_current_price_is_billable(monkeypatch) -> None:
+    finalized_at = datetime(2026, 6, 18, 13, 57, 33)
+    log = RequestLog(
+        id=374521,
+        api_client_key_id=1,
+        billable=True,
+        billing_status="no_charge",
+        billing_finalized_at=finalized_at,
+        prompt_tokens=426,
+        completion_tokens=5,
+        total_tokens=431,
+        total_cost=Decimal("0"),
+    )
+    fake_db = SimpleNamespace(scalar=lambda *_args, **_kwargs: None)
+
+    def fake_sync(_db, item):
+        item.prompt_cost = Decimal("0.001065000")
+        item.completion_cost = Decimal("0.000075000")
+        item.total_cost = Decimal("0.001140000")
+        item.source_total_cost = Decimal("0.001140000")
+        item.billing_status = "billed"
+        return Decimal("0.001140000")
+
+    monkeypatch.setattr(BillingService, "_should_recompute_finalized_no_charge", staticmethod(lambda *_args: True))
+    monkeypatch.setattr(BillingService, "sync_request_billing", staticmethod(fake_sync))
+    monkeypatch.setattr(
+        "app.services.billing_service.BillingLogRecorder.record_billing_process",
+        lambda *_args, **_kwargs: None,
+    )
+
+    delta = BillingService.finalize_request_log_billing(fake_db, log)
+
+    assert delta == Decimal("0.001140000")
+    assert log.billing_status == "billed"
+    assert log.total_cost == Decimal("0.001140000")
+    assert log.billing_finalized_at is not None
+    assert log.billing_finalized_at != finalized_at
+
+
+def test_cost_preview_preserves_exact_token_source(monkeypatch) -> None:
+    log = RequestLog(
+        id=11,
+        api_client_key_id=1,
+        billable=True,
+        request_path="/v1/chat/completions",
+        token_source="upstream_usage",
+        upstream_usage_missing=False,
+        prompt_tokens=1,
+        completion_tokens=1,
+        total_tokens=2,
+        resolved_provider_model_id=3,
+    )
+    seen = {}
+
+    def fake_compute(_db, item, *, billing_currency=None):
+        seen["token_source"] = item.token_source
+        seen["upstream_usage_missing"] = item.upstream_usage_missing
+        return {"total_cost": Decimal("0"), "billing_status": "no_charge"}
+
+    monkeypatch.setattr(BillingService, "compute_log_cost", staticmethod(fake_compute))
+
+    BillingService._preview_log_cost(SimpleNamespace(), log)
+
+    assert seen == {"token_source": "upstream_usage", "upstream_usage_missing": False}
+
+
+def test_finalized_no_charge_log_stays_skipped_when_current_price_is_free(monkeypatch) -> None:
+    log = RequestLog(
+        id=9,
+        api_client_key_id=1,
+        billable=True,
+        billing_status="no_charge",
+        billing_finalized_at=datetime(2026, 6, 18, 14, 0, 0),
+        prompt_tokens=1,
+        completion_tokens=1,
+        total_tokens=2,
+        total_cost=Decimal("0"),
+    )
+
+    def fail_sync(*_args, **_kwargs):
+        raise AssertionError("finalized free logs should not be reopened")
+
+    monkeypatch.setattr(BillingService, "_should_recompute_finalized_no_charge", staticmethod(lambda *_args: False))
+    monkeypatch.setattr(BillingService, "sync_request_billing", staticmethod(fail_sync))
+
+    assert BillingService.finalize_request_log_billing(SimpleNamespace(), log) is None
+    assert log.billing_status == "no_charge"
+
+
+def test_estimated_token_source_cannot_finalize_billing(monkeypatch) -> None:
+    log = RequestLog(
+        id=23,
+        log_type="chat",
+        api_client_key_id=1,
+        billable=True,
+        request_path="/v1/chat/completions",
+        token_source="estimated",
+        upstream_usage_missing=True,
+        prompt_tokens=12,
+        completion_tokens=3,
+        total_tokens=15,
+        resolved_provider_model_id=8,
+    )
+
+    def fail_sync(*_args, **_kwargs):
+        raise AssertionError("estimated tokens must not reach billing sync")
+
+    monkeypatch.setattr(BillingService, "sync_request_billing", staticmethod(fail_sync))
+
+    assert BillingService.finalize_request_log_billing(SimpleNamespace(), log) is None
+    assert log.billing_status == "pending_tokens"
+    assert log.billing_finalized_at is None
+    assert log.billing_error == "token_source_not_exact:estimated"
+
+
+def test_exact_upstream_usage_can_trigger_immediate_billing(monkeypatch) -> None:
+    log = RequestLog(
+        id=24,
+        log_type="chat",
+        api_client_key_id=1,
+        billable=True,
+        request_path="/v1/chat/completions",
+        token_source="upstream_usage",
+        upstream_usage_missing=False,
+        prompt_tokens=12,
+        completion_tokens=3,
+        total_tokens=15,
+    )
+
+    called = {}
+
+    def fake_finalize(db, item):
+        called["db"] = db
+        called["log"] = item
+        item.billing_status = "billed"
+        return Decimal("0.000001000")
+
+    monkeypatch.setattr(BillingService, "finalize_request_log_billing", staticmethod(fake_finalize))
+
+    delta = LogService.finalize_billing_if_exact_usage(SimpleNamespace(name="db"), log)
+
+    assert delta == Decimal("0.000001000")
+    assert called["log"] is log
+    assert log.billing_status == "billed"
+
+
+def test_finalized_exact_usage_log_is_not_enqueued_for_token_finalize(monkeypatch) -> None:
+    log = RequestLog(
+        id=25,
+        log_type="chat",
+        api_client_key_id=1,
+        billable=True,
+        request_path="/v1/chat/completions",
+        token_source="upstream_usage",
+        upstream_usage_missing=False,
+        billing_status="billed",
+        billing_finalized_at=datetime(2026, 6, 18, 15, 0, 0),
+    )
+
+    def fail_enqueue(*_args, **_kwargs):
+        raise AssertionError("finalized exact usage logs should not enter compensation queue")
+
+    monkeypatch.setattr(
+        "app.services.token_usage_service.TokenUsageService.enqueue_log_finalize",
+        fail_enqueue,
+    )
+
+    LogService.enqueue_finalize_for_log(
+        log=log,
+        model_name="gpt-5.4",
+        request_path="/v1/chat/completions",
+        token_request_payload={"messages": []},
+        token_response_payload={"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+    )
+
+
 def test_unpriced_preflight_rejects_candidate_when_tokens_are_estimable(monkeypatch) -> None:
     monkeypatch.setattr(
         ProxyService,
@@ -178,7 +356,7 @@ def test_billing_precision_static_guards() -> None:
 
     assert "amount=float" not in user_accounts_source
     assert "BillingService.to_float(" not in read_text("app/services/billing_service.py")
-    assert "func.sum(case((RequestLog.success.is_(True), RequestLog.total_tokens)" in user_quota_source
+    assert "func.sum(case((RequestLog.billable.is_(True), RequestLog.total_tokens)" in user_quota_source
     assert "channel_price_cache_write_per_1k if item.channel_price_cache_write_per_1k is not None else input_price" not in log_service_source
     assert "prompt_cost: float" not in log_schema_source
     assert "channel_price_input_per_1k: float" not in log_schema_source

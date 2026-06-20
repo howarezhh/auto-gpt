@@ -1,10 +1,13 @@
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from fastapi.responses import PlainTextResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.provider_model import ProviderModel
 from app.schemas.model_catalog import (
+    ModelCatalogBatchImportRequest,
+    ModelCatalogBatchImportResponse,
     ModelCatalogBatchContextWindowUpdate,
     ModelCatalogCreate,
     ModelCatalogDetailOut,
@@ -134,7 +137,50 @@ async def test_all_model_health(payload: dict | None = None, db: Session = Depen
     )
 
 
-@router.post("/api/models/{model_name}/test", dependencies=[Depends(require_admin_api_user)])
+@router.get("/api/models/batch-import-template", dependencies=[Depends(require_admin_api_user)])
+def get_model_batch_import_template() -> dict:
+    return {"template": ModelCatalogService.MODEL_CATALOG_BATCH_IMPORT_TEMPLATE}
+
+
+@router.get("/api/models/export", dependencies=[Depends(require_admin_api_user)])
+def export_models(db: Session = Depends(get_db)) -> PlainTextResponse:
+    text = ModelCatalogService.export_models_import_text(db)
+    return PlainTextResponse(
+        text,
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="models-import-template.txt"'},
+    )
+
+
+@router.post(
+    "/api/models/batch-import",
+    response_model=ModelCatalogBatchImportResponse,
+    dependencies=[Depends(require_admin_api_user)],
+)
+def batch_import_models(
+    payload: ModelCatalogBatchImportRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_admin_api_user),
+) -> ModelCatalogBatchImportResponse:
+    try:
+        result = ModelCatalogService.batch_import_models(db, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not payload.dry_run:
+        AdminAuditService.create_log(
+            db,
+            actor_user_id=current_user.id,
+            actor_username=current_user.username,
+            action="batch_import",
+            entity_type="model",
+            entity_name="批量导入模型",
+            summary=f"批量导入模型，创建 {result.created_count} 条，失败 {result.failed_count} 条",
+            detail=result.model_dump(),
+        )
+    return result
+
+
+@router.post("/api/models/{model_name:path}/test", dependencies=[Depends(require_admin_api_user)])
 async def test_model_health(model_name: str, payload: dict | None = None, db: Session = Depends(get_db)) -> dict:
     try:
         return await ModelCatalogService.test_model_health(
@@ -146,7 +192,7 @@ async def test_model_health(model_name: str, payload: dict | None = None, db: Se
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.get("/api/models/{model_name}", response_model=ModelCatalogDetailOut, dependencies=[Depends(require_admin_api_user)])
+@router.get("/api/models/{model_name:path}", response_model=ModelCatalogDetailOut, dependencies=[Depends(require_admin_api_user)])
 def get_model_detail(model_name: str, db: Session = Depends(get_db)) -> ModelCatalogDetailOut:
     detail = ModelCatalogService.get_model_detail(db, model_name)
     if detail is None:
@@ -154,7 +200,7 @@ def get_model_detail(model_name: str, db: Session = Depends(get_db)) -> ModelCat
     return ModelCatalogDetailOut(**detail)
 
 
-@router.put("/api/models/{model_name}", response_model=ModelCatalogDetailOut, dependencies=[Depends(require_admin_api_user)])
+@router.put("/api/models/{model_name:path}", response_model=ModelCatalogDetailOut, dependencies=[Depends(require_admin_api_user)])
 async def update_model(
     model_name: str,
     payload: ModelCatalogUpdate,
@@ -205,7 +251,7 @@ async def update_model(
     return ModelCatalogDetailOut(**detail)
 
 
-@router.delete("/api/models/{model_name}", dependencies=[Depends(require_admin_api_user)])
+@router.delete("/api/models/{model_name:path}", dependencies=[Depends(require_admin_api_user)])
 def delete_model(
     model_name: str,
     db: Session = Depends(get_db),
@@ -259,7 +305,7 @@ def create_model_mapping(
     return ModelMappingOut(**ModelMappingService.serialize_mapping(mapping))
 
 
-@router.put("/api/model-mappings/{source_model_name}", response_model=ModelMappingOut, dependencies=[Depends(require_admin_api_user)])
+@router.put("/api/model-mappings/{source_model_name:path}", response_model=ModelMappingOut, dependencies=[Depends(require_admin_api_user)])
 def update_model_mapping(
     source_model_name: str,
     payload: ModelMappingUpdate,
@@ -287,7 +333,7 @@ def update_model_mapping(
     return ModelMappingOut(**ModelMappingService.serialize_mapping(mapping))
 
 
-@router.delete("/api/model-mappings/{source_model_name}", dependencies=[Depends(require_admin_api_user)])
+@router.delete("/api/model-mappings/{source_model_name:path}", dependencies=[Depends(require_admin_api_user)])
 def delete_model_mapping(
     source_model_name: str,
     db: Session = Depends(get_db),
@@ -313,17 +359,26 @@ def delete_model_mapping(
 
 
 @router.post("/api/model-mappings/select", response_model=ModelMappingSelectionOut, dependencies=[Depends(require_admin_api_user)])
-async def select_model_mapping_target(payload: ModelMappingSelectionProbe) -> ModelMappingSelectionOut:
+async def select_model_mapping_target(payload: ModelMappingSelectionProbe, db: Session = Depends(get_db)) -> ModelMappingSelectionOut:
     resolution = await ModelMappingService.resolve_for_request(
         source_model_name=payload.source_model_name,
         api_client_auth=None,
         sticky_key=payload.source_model_name,
     )
     if resolution is None:
+        mapping = ModelMappingService.get_mapping(db, payload.source_model_name)
+        reason = "model_mapping_not_found" if mapping is None else "model_mapping_disabled_or_no_available_target"
         return ModelMappingSelectionOut(
             mapped=False,
             source_model_name=payload.source_model_name,
             selected_model_name=payload.source_model_name,
+            trace={
+                "result": "model_mapping_not_applied",
+                "reason": reason,
+                "source_model_name": payload.source_model_name,
+                "mapping_id": getattr(mapping, "id", None),
+                "mapping_enabled": getattr(mapping, "enabled", None),
+            },
         )
     return ModelMappingSelectionOut(
         mapped=resolution.selected_model_name != resolution.source_model_name,

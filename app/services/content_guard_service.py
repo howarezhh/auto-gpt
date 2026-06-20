@@ -141,6 +141,24 @@ class ContentGuardService:
     _ALLOWED_RULE_MATCH_TYPES = {"keyword_any", "regex", "unexpected_url"}
     _ALLOWED_RULE_RISK_LEVELS = {"low", "medium", "high"}
     _ALLOWED_RULE_ACTIONS = {"allow", "record", "block"}
+    _STRUCTURED_RESPONSE_ENDPOINTS = {"/chat/completions", "/responses"}
+    _PROTOCOL_METADATA_SCAN_SKIP_KEYS = {
+        "id",
+        "object",
+        "model",
+        "created",
+        "created_at",
+        "finish_reason",
+        "finishReason",
+        "index",
+        "usage",
+        "system_fingerprint",
+        "service_tier",
+    }
+    _PROTOCOL_METADATA_DOMAINS = {
+        "chat.completion",
+        "chat.completion.chunk",
+    }
     _ZERO_WIDTH_RE = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]")
     _DOMAIN_RE = re.compile(
         r"(?<![\w.-])(?:[a-z0-9\u4e00-\u9fff](?:[a-z0-9\u4e00-\u9fff-]{0,61}[a-z0-9\u4e00-\u9fff])?\.)+"
@@ -149,6 +167,7 @@ class ContentGuardService:
     )
     _IPV4_RE = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])")
     _IPV6_RE = re.compile(r"(?<![\w:])(?:\[[0-9a-f:.%]+\]|[0-9a-f]{0,4}:[0-9a-f:.%]{2,})(?![\w:])", re.IGNORECASE)
+    _FENCED_CODE_BLOCK_RE = re.compile(r"```[\s\S]*?```")
     SHORT_LINK_DOMAINS = {
         "amzn.to",
         "bit.ly",
@@ -758,6 +777,12 @@ class ContentGuardService:
         return cls._normalize_obfuscated_url_text(previous)
 
     @classmethod
+    def strip_markdown_code_blocks(cls, text: str | None) -> str:
+        if not isinstance(text, str) or not text:
+            return ""
+        return cls._FENCED_CODE_BLOCK_RE.sub(" ", text)
+
+    @classmethod
     def parse_url_allowlist(cls, value: list[str] | str | None) -> set[str]:
         domains: set[str] = set()
         if isinstance(value, str):
@@ -800,21 +825,26 @@ class ContentGuardService:
         for url in cls._URL_RE.findall(normalized):
             parsed = urlparse(url)
             domain = cls._normalize_domain(parsed.hostname or "")
-            if domain:
+            if domain and not cls._is_protocol_metadata_domain(domain):
                 domains.add(domain)
         for match in cls._DOMAIN_RE.findall(normalized):
             domain = cls._normalize_domain(match)
-            if domain:
+            if domain and not cls._is_protocol_metadata_domain(domain):
                 domains.add(domain)
         for match in cls._IPV4_RE.findall(normalized):
             domain = cls._normalize_domain(match)
-            if domain:
+            if domain and not cls._is_protocol_metadata_domain(domain):
                 domains.add(domain)
         for match in cls._IPV6_RE.findall(normalized):
             domain = cls._normalize_domain(match)
-            if domain:
+            if domain and not cls._is_protocol_metadata_domain(domain):
                 domains.add(domain)
         return domains
+
+    @classmethod
+    def _is_protocol_metadata_domain(cls, domain: str) -> bool:
+        normalized = cls._normalize_domain(domain)
+        return normalized in cls._PROTOCOL_METADATA_DOMAINS or normalized.endswith(".completion.chunk")
 
     @staticmethod
     def _normalize_domain(value: str) -> str:
@@ -1489,8 +1519,14 @@ class ContentGuardService:
         arguments: list[Any] = []
         if isinstance(value, dict):
             item_type = str(value.get("type") or value.get("item_type") or "")
-            looks_like_tool_call = item_type in {"function_call", "tool_call", "response.function_call", "response.tool_call"}
-            if looks_like_tool_call and "arguments" in value:
+            looks_like_tool_call = item_type in {
+                "function_call",
+                "tool_call",
+                "custom_tool_call",
+                "response.function_call",
+                "response.tool_call",
+            }
+            if (looks_like_tool_call or depth > 0) and "arguments" in value:
                 arguments.append(value.get("arguments"))
             function = value.get("function")
             if isinstance(function, dict) and "arguments" in function:
@@ -1501,7 +1537,7 @@ class ContentGuardService:
             tool_call = value.get("tool_call")
             if isinstance(tool_call, dict):
                 arguments.extend(cls._collect_tool_call_arguments(tool_call, depth=depth + 1))
-            for nested_key in ("content", "output", "items", "delta"):
+            for nested_key in ("content", "output", "items", "delta", "payload"):
                 nested = value.get(nested_key)
                 if isinstance(nested, (dict, list)):
                     arguments.extend(cls._collect_tool_call_arguments(nested, depth=depth + 1))
@@ -1658,7 +1694,7 @@ class ContentGuardService:
                 return
             if isinstance(item, dict):
                 for key, nested in item.items():
-                    if str(key).lower() in {"api_key", "authorization", "base64", "b64_json"}:
+                    if str(key) in cls._PROTOCOL_METADATA_SCAN_SKIP_KEYS or str(key).lower() in {"api_key", "authorization", "base64", "b64_json"}:
                         continue
                     walk(nested, depth=depth + 1)
                     if current_bytes >= max_scan_bytes or visited_nodes >= cls.MAX_SCAN_NODES:
@@ -1693,6 +1729,24 @@ class ContentGuardService:
             extracted = cls._extract_scan_text(value, max_scan_bytes=max_scan_bytes)
             if extracted:
                 parts.append(extracted)
+
+        def add_native_visible_text(payload: dict[str, Any]) -> None:
+            for candidate in payload.get("candidates") or []:
+                if not isinstance(candidate, dict):
+                    continue
+                content = candidate.get("content") if isinstance(candidate.get("content"), dict) else {}
+                for part in content.get("parts") or []:
+                    if isinstance(part, dict):
+                        add(part.get("text"))
+                    elif isinstance(part, str):
+                        add(part)
+                add(candidate.get("text"))
+            delta = payload.get("delta") if isinstance(payload.get("delta"), dict) else {}
+            add(delta.get("text"))
+            content_block = payload.get("content_block") if isinstance(payload.get("content_block"), dict) else {}
+            add(content_block.get("text"))
+
+        add_native_visible_text(value)
 
         if endpoint_path == "/chat/completions":
             for choice in value.get("choices") or []:
@@ -1748,6 +1802,8 @@ class ContentGuardService:
             add_scan(value.get("refusal"))
             add_scan(value.get("reasoning"))
             add_scan(value.get("metadata"))
+        if not parts and endpoint_path in cls._STRUCTURED_RESPONSE_ENDPOINTS:
+            return ""
         if not parts:
             return cls._extract_scan_text(value, max_scan_bytes=max_scan_bytes)
         return cls._clip_text("\n".join(parts), max_scan_bytes=max_scan_bytes)

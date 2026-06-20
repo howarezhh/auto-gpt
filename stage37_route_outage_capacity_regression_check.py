@@ -6,7 +6,14 @@ from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
 from app.services.provider_capacity_service import ProviderCapacityUnavailableError
 from app.services.proxy_service import ProxyService
-from app.services.router_service import RouteCandidate, RoutePolicyContext, RouterService
+from app.services.routing import (
+    AvailabilityFirstOrderer,
+    CandidateWindowOrderer,
+    FailedCandidateExclusionOrderer,
+    RouteCandidate,
+    RoutePolicyContext,
+    RoutingService,
+)
 
 
 def _assert(condition: bool, message: str) -> None:
@@ -55,14 +62,16 @@ def main() -> None:
         (candidates[0].provider.id, candidates[0].provider_model.id),
         (candidates[1].provider.id, candidates[1].provider_model.id),
     }
-    with patch.object(RouterService, "_effective_candidate_attempt_count", return_value=2):
-        ordered = RouterService._order_filtered_candidates(
-            None,
-            candidates,
-            sticky_key=None,
-            route_context=RoutePolicyContext(),
-            excluded_candidate_keys=failed,
-        )
+    ordered = AvailabilityFirstOrderer.order(
+        candidates,
+        recent_route=None,
+        route_context=RoutePolicyContext(),
+    ).candidates
+    ordered = FailedCandidateExclusionOrderer.order(ordered, excluded_candidate_keys=failed).candidates
+    for candidate in ordered[:2]:
+        candidate.score_breakdown["failed_candidate_exclusion_count"] = len(failed)
+        candidate.score_breakdown["candidate_window_after_exclusion"] = True
+    ordered = CandidateWindowOrderer.order(ordered, max_count=2).candidates
     _assert([item.provider.id for item in ordered] == [3, 4], "failed candidates must be excluded before truncation")
     _assert(
         ordered[0].score_breakdown.get("failed_candidate_exclusion_count") == 2,
@@ -84,11 +93,11 @@ def main() -> None:
     _assert(wait_plan["retry_after_jitter_seconds"] is not None, "Retry-After wait should include short jitter")
 
     with patch(
-        "app.services.router_service.ProviderCapacityService.snapshots",
+        "app.services.routing.service.ProviderCapacityService.snapshots",
         side_effect=ProviderCapacityUnavailableError("Redis ping failed"),
     ):
         try:
-            RouterService._filter_capacity_candidates(candidates, is_stream=False)
+            RoutingService._apply_capacity_filter(candidates, is_stream=False)
         except ProviderCapacityUnavailableError as exc:
             _assert("Redis ping failed" in str(exc), "capacity error should preserve concrete reason")
         else:

@@ -17,6 +17,7 @@ from app.services.health_service import HealthService
 from app.logging.adapters.health_adapter import HealthLogRecorder
 from app.services.probe_rate_limit_service import ProbeRateLimitResult, ProbeRateLimitService
 from app.services.provider_service import ProviderService
+from app.utils.content_guard_config import content_guard_default
 
 
 def test_stage33_content_guard_regression() -> None:
@@ -78,6 +79,26 @@ def test_content_probe_failure_reason_prefers_raw_upstream_error() -> None:
     )
 
     assert reason == "上游余额不足，请充值后重试"
+
+
+def test_probe_raw_provider_response_includes_sanitized_request_payload() -> None:
+    result = ContentGuardProbeService.attach_raw_provider_response(
+        {
+            "endpoint_path": "/v1/chat/completions",
+            "endpoint_label": "Chat Completions",
+            "status_code": 200,
+        },
+        request_payload={"model": "测试模型", "messages": [{"role": "user", "content": "ping"}]},
+        response={"choices": [{"message": {"content": "pong"}}]},
+    )
+
+    raw = result["raw_provider_response"]
+    assert raw["request"]["method"] == "POST"
+    assert raw["request"]["endpoint_path"] == "/v1/chat/completions"
+    assert raw["request"]["payload"]["model"] == "测试模型"
+    assert raw["request"]["headers"] == "已脱敏：未记录请求头"
+    assert "Authorization" not in raw["request"]
+    assert raw["body"]["choices"][0]["message"]["content"] == "pong"
 
 
 def test_combined_content_probe_request_failure_uses_upstream_reason() -> None:
@@ -256,6 +277,83 @@ def test_runtime_stream_guard_scans_native_gemini_and_claude_sse_events() -> Non
     assert "unexpected_link" in gemini_result.categories
     assert claude_result.result == ContentGuardService.RESULT_BLOCK
     assert any(rule.get("id") == "api_key_community_promotion" for rule in claude_result.matched_rules)
+
+
+def test_content_guard_url_check_defaults_to_disabled_without_runtime_fallback() -> None:
+    assert content_guard_default("content_guard_url_check_enabled") is False
+
+    setting = SimpleNamespace(
+        content_guard_enabled=True,
+        content_guard_stream_mode="pass_through_scan",
+        content_guard_rules_json="",
+        content_guard_url_allowlist_json="[]",
+    )
+    result = ContentRuntimeGuardService.inspect_stream_chunk(
+        event_buffer=bytearray(),
+        chunk='data: {"choices":[{"delta":{"content":"正常回答 https://ad.example.com"},"finish_reason":"stop"}]}\n\n'.encode("utf-8"),
+        setting=setting,
+        endpoint_path="/chat/completions",
+        request_payload={"messages": [{"role": "user", "content": "写一段普通说明"}]},
+    )
+
+    assert result.result == ContentGuardService.RESULT_PASS
+    assert "unexpected_link" not in result.categories
+
+
+def test_content_guard_ignores_openai_stream_protocol_metadata_for_unexpected_link() -> None:
+    setting = SimpleNamespace(
+        content_guard_enabled=True,
+        content_guard_stream_mode="pass_through_scan",
+        content_guard_rules_json="",
+        content_guard_url_allowlist_json="[]",
+        content_guard_url_check_enabled=True,
+    )
+
+    assert ContentGuardService.extract_domains("chat.completion.chunk") == set()
+    text_result = ContentGuardService.inspect_response_text(
+        "chat.completion.chunk",
+        request_payload={"messages": [{"role": "user", "content": "1"}]},
+        url_allowlist="[]",
+        url_check_enabled=True,
+    )
+    stream_result = ContentRuntimeGuardService.inspect_stream_chunk(
+        event_buffer=bytearray(),
+        chunk='data: {"id":"resp_1","object":"chat.completion.chunk","model":"gpt-5.4","choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'.encode("utf-8"),
+        setting=setting,
+        endpoint_path="/chat/completions",
+        request_payload={"messages": [{"role": "user", "content": "1"}]},
+    )
+
+    assert text_result.result == ContentGuardService.RESULT_PASS
+    assert stream_result.result == ContentGuardService.RESULT_PASS
+
+
+def test_content_guard_ignores_urls_inside_markdown_code_blocks() -> None:
+    text = """下面是一个 HTML 示例：
+
+```html
+<script src="https://cdn.example.com/three.min.js"></script>
+<a href="http://localhost:3000">本地预览</a>
+```
+"""
+
+    result = ContentGuardService.inspect_response_text(
+        text,
+        request_payload={"messages": [{"role": "user", "content": "写一个 3D 太阳 HTML 页面"}]},
+        url_allowlist="[]",
+        url_check_enabled=True,
+    )
+    plain_result = ContentGuardService.inspect_response_text(
+        "请访问 https://ad.example.com 领取优惠码",
+        request_payload={"messages": [{"role": "user", "content": "写一段普通说明"}]},
+        url_allowlist="[]",
+        url_check_enabled=True,
+    )
+
+    assert result.result == ContentGuardService.RESULT_PASS
+    assert "unexpected_link" not in result.categories
+    assert plain_result.result == ContentGuardService.RESULT_BLOCK
+    assert "unexpected_link" in plain_result.categories
 
 
 def test_native_stream_probe_terminal_events_follow_official_stream_shapes() -> None:

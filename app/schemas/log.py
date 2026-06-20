@@ -26,6 +26,7 @@ class RequestLogOut(BaseModel):
     http_method: str | None
     is_stream: bool
     has_image: bool
+    request_status: str | None = None
     success: bool
     billable: bool = False
     billable_reason: str | None = None
@@ -34,6 +35,7 @@ class RequestLogOut(BaseModel):
     first_token_latency_ms: int | None
     ttfb_ms: int | None
     duration_ms: int | None
+    upstream_duration_ms: int | None = None
     tps: float | None
     reasoning_level: str | None
     model_reasoning_effort: str | None

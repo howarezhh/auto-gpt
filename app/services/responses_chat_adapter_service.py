@@ -22,7 +22,7 @@ from app.models.responses_chat_adapter_session import ResponsesChatAdapterSessio
 from app.services.api_key_service import ApiClientAuthContext
 from app.services.proxy_service import ProxyService
 from app.services.redis_service import RedisService
-from app.services.router_service import RoutePolicyContext
+from app.services.routing import RoutePolicyContext
 from app.services.setting_service import SettingService
 from app.utils.json_utils import dumps_json, loads_json, safeJsonParse
 
@@ -194,6 +194,7 @@ class ResponsesChatAdapterService:
         api_client_auth: ApiClientAuthContext | None = None,
         trace_id: str | None = None,
         source_ip: str | None = None,
+        request_started_at: float | None = None,
     ) -> tuple[dict[str, Any], Any, list[dict], int]:
         prepared = await ResponsesChatAdapterService.prepare_request(payload)
         upstream_chat_payload = dict(prepared.chat_payload)
@@ -213,6 +214,7 @@ class ResponsesChatAdapterService:
             conversation_key_override=prepared.response_id,
             session_id_override=prepared.response_id,
             route_retry_trace=[ResponsesChatAdapterService._trace_item(prepared, stream=False)],
+            request_started_at=request_started_at,
         )
         response_payload = ProxyService._convert_chat_completion_to_responses_payload(
             chat_response,
@@ -235,6 +237,7 @@ class ResponsesChatAdapterService:
         api_client_auth: ApiClientAuthContext | None = None,
         trace_id: str | None = None,
         source_ip: str | None = None,
+        request_started_at: float | None = None,
     ) -> tuple[AsyncIterator[bytes], Any, list[dict], int]:
         prepared = await ResponsesChatAdapterService.prepare_request(payload)
         stream, provider, trace, latency_ms = await ProxyService.forward_stream_request(
@@ -250,6 +253,7 @@ class ResponsesChatAdapterService:
             conversation_key_override=prepared.response_id,
             session_id_override=prepared.response_id,
             route_retry_trace=[ResponsesChatAdapterService._trace_item(prepared, stream=True)],
+            request_started_at=request_started_at,
         )
 
         async def wrapped_stream() -> AsyncIterator[bytes]:

@@ -5,7 +5,8 @@ from types import SimpleNamespace
 from app.services.log_service import LogService
 from app.services.model_catalog_service import ModelCatalogService
 from app.services.provider_service import ProviderService
-from app.services.router_service import RecentSessionRoute, RouterService
+from app.services.router_service import RouterService
+from app.services.routing import RecentSessionRoute
 
 
 class FakeDb:

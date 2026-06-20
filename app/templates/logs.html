@@ -57,6 +57,8 @@
                     <option value="responses">响应请求</option>
                     <option value="moderations">内容审核请求</option>
                     <option value="files">文件请求</option>
+                    <option value="gemini">Gemini 原生请求</option>
+                    <option value="claude_messages">Claude 原生请求</option>
                     <option value="proxy_generic">通用代理日志</option>
                     <option value="api_client_auth">密钥鉴权失败日志</option>
                     <option value="unsupported_endpoint">不支持端点日志</option>
@@ -70,7 +72,7 @@
                 </select>
             </label>
             <label>
-                <span>模型名</span>
+                <span>模型ID</span>
                 <select class="field-input" id="logs-model-name">
                     <option value="">全部</option>
                 </select>
@@ -129,8 +131,8 @@
                     <input class="field-input" id="logs-user-account-query" type="text" placeholder="输入用户名或用户 ID">
                 </label>
                 <label>
-                    <span>手动模型</span>
-                    <input class="field-input" id="logs-model-query" type="text" placeholder="输入模型名关键字">
+                    <span>手动模型ID</span>
+                    <input class="field-input" id="logs-model-query" type="text" placeholder="输入模型ID关键字">
                 </label>
                 <label>
                     <span>手动密钥</span>

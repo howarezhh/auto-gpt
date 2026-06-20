@@ -201,6 +201,8 @@
                                 {% elif item.log_type == 'responses' %}响应请求
                                 {% elif item.log_type == 'moderations' %}内容审核请求
                                 {% elif item.log_type == 'files' %}文件请求
+                                {% elif item.log_type == 'gemini' %}Gemini 原生请求
+                                {% elif item.log_type == 'claude_messages' %}Claude 原生请求
                                 {% elif item.log_type == 'embeddings' %}历史向量请求（已下线）
                                 {% elif item.log_type == 'api_client_auth' %}密钥鉴权
                                 {% else %}{{ item.log_type }}

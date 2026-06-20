@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% set health_labels = {"healthy": "可用", "degraded": "降级", "unhealthy": "不可用", "unknown": "未知"} %}
 {% set circuit_labels = {"closed": "闭合", "open": "已熔断", "half_open": "半开探测", "unknown": "未知"} %}
+{% set route_strategy_labels = {"availability_first": "可用性优先", "latency_first": "低延迟优先", "capacity_avoidance": "容量避让"} %}
 {% block content %}
 <section class="hero-panel hero-panel-compact cockpit-hero">
     <div class="cockpit-hero-copy">
@@ -20,7 +21,7 @@
             <span style="width: {{ ((stats.healthy_count / stats.provider_count) * 100) if stats.provider_count else 0 }}%"></span>
         </div>
         <div class="cockpit-aside-meta">
-            <span>路由 可用性优先</span>
+            <span>路由 {{ route_strategy_labels.get(stats.route_strategy, "全局策略") }}</span>
             <span>{{ stats.healthy_count or 0 }}/{{ stats.provider_count or 0 }} 可用</span>
         </div>
     </div>

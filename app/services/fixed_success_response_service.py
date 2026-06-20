@@ -16,7 +16,7 @@ class FixedSuccessResponseService:
     CACHE_PREFIX = "fixed-success-response"
     CACHE_TTL_SECONDS = 60 * 60
     SIMILARITY_THRESHOLD = 0.95
-    MIN_NORMALIZED_CHARS = 12
+    MIN_NORMALIZED_CHARS = 6
     MAX_NORMALIZED_CHARS = 1200
     EXCERPT_CHARS = 160
 
@@ -105,6 +105,10 @@ class FixedSuccessResponseService:
     @classmethod
     def cache_key(cls, provider_id: int, provider_model_id: int) -> str:
         return f"{cls.CACHE_PREFIX}:{int(provider_id)}:{int(provider_model_id)}"
+
+    @classmethod
+    def clear_samples(cls, provider_id: int, provider_model_id: int) -> None:
+        CacheService.invalidate(cls.cache_key(provider_id, provider_model_id))
 
     @classmethod
     def _eligible_text(cls, value: str) -> bool:

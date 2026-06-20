@@ -12,6 +12,7 @@ from app.services.cache_service import CacheService
 
 _settings = get_settings()
 LOG_RETENTION_MAX_DAYS = 7
+ROUTE_STRATEGY_VALUES = {"availability_first", "latency_first", "capacity_avoidance"}
 LOG_RETENTION_FIELDS = (
     "request_log_retention_days",
     "admin_audit_log_retention_days",
@@ -30,6 +31,7 @@ DEFAULT_SETTING = {
     "route_exhausted_retry_max_wait_seconds": 600,
     "route_exhausted_retry_infinite_enabled": False,
     "trusted_providers_only": False,
+    "route_strategy": "availability_first",
     "route_health_gate_mode": "permissive",
     "max_candidate_count": 10,
     "route_candidate_expand_count": 5,
@@ -54,7 +56,7 @@ DEFAULT_SETTING = {
     "content_guard_high_risk_strategy": "switch_provider",
     "content_guard_max_detection_delay_ms": 300,
     "content_guard_stream_mode": "buffer_300ms",
-    "content_guard_url_check_enabled": True,
+    "content_guard_url_check_enabled": False,
     "content_guard_url_allowlist_json": "",
     "content_guard_async_review_enabled": True,
     "content_guard_high_risk_confidence_threshold": 85,
@@ -139,6 +141,9 @@ class SettingService:
             changed = False
             if setting.health_check_interval_sec < 300:
                 setting.health_check_interval_sec = 300
+                changed = True
+            if str(setting.route_strategy or "").strip() not in ROUTE_STRATEGY_VALUES:
+                setting.route_strategy = "availability_first"
                 changed = True
             normalized_guard_delay_ms = min(500, max(0, int(setting.content_guard_max_detection_delay_ms or 300)))
             if setting.content_guard_max_detection_delay_ms != normalized_guard_delay_ms:

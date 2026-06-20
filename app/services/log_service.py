@@ -27,6 +27,7 @@ class LogService:
     """负责请求日志落库、派生指标计算和日志序列化。"""
 
     TOKEN_FINALIZE_MAX_ATTEMPTS = 3
+    EXACT_TOKEN_SOURCES = frozenset({"upstream_usage"})
 
     @staticmethod
     def format_money_display(value) -> str:
@@ -77,10 +78,19 @@ class LogService:
         return LogService.CSV_VALUE_LABELS.get(text, text)
 
     HEALTH_CHECK_LOG_TYPES = ("health_check", "health_check_provider", "health_check_model")
-    ROUTE_TRAFFIC_LOG_TYPES = ("chat", "responses", "moderations", "files")
+    ROUTE_TRAFFIC_LOG_TYPES = ("chat", "responses", "moderations", "files", "gemini", "claude_messages")
     TOKEN_BILLING_LOG_TYPES = ("chat", "responses", "embeddings")
-    USER_VISIBLE_LOG_TYPES = ("chat", "responses", "moderations", "files")
+    USER_VISIBLE_LOG_TYPES = ("chat", "responses", "moderations", "files", "gemini", "claude_messages")
+    STREAM_IN_PROGRESS_STATUS_CODE = 102
     MODEL_LIST_PATH = "/v1/models"
+    REQUEST_STATUS_REQUESTING = "请求中"
+    REQUEST_STATUS_RESPONDING = "响应中"
+    REQUEST_STATUS_COMPLETED = "已完成"
+    REQUEST_STATUS_VALUES = {
+        REQUEST_STATUS_REQUESTING,
+        REQUEST_STATUS_RESPONDING,
+        REQUEST_STATUS_COMPLETED,
+    }
     REASONING_LEVEL_NONE = "无"
     REASONING_LEVEL_VALUES = {REASONING_LEVEL_NONE, "low", "medium", "high", "xhigh"}
     METRIC_ROW_SAMPLE_LIMIT = 10000
@@ -117,6 +127,8 @@ class LogService:
         "responses": "响应",
         "moderations": "审核",
         "files": "文件",
+        "gemini": "Gemini 原生请求",
+        "claude_messages": "Claude 原生请求",
         "health_check": "可用性检测",
         "health_check_provider": "提供商可用性检测",
         "health_check_model": "模型可用性检测",
@@ -209,6 +221,7 @@ class LogService:
         is_stream: bool = False,
         has_image: bool = False,
         success: bool,
+        request_status: str | None = None,
         billable: bool | None = None,
         billable_reason: str | None = None,
         status_code: int | None = None,
@@ -216,6 +229,7 @@ class LogService:
         first_token_latency_ms: int | None = None,
         ttfb_ms: int | None = None,
         duration_ms: int | None = None,
+        upstream_duration_ms: int | None = None,
         tps: float | None = None,
         reasoning_level: str | None = None,
         model_reasoning_effort: str | None = None,
@@ -277,6 +291,7 @@ class LogService:
         refresh_after_create: bool = True,
         flush_after_add: bool = True,
         enqueue_finalize: bool = True,
+        record_runtime_signals: bool = True,
     ) -> RequestLog:
         """创建请求日志，并在必要时补充异步 token 统计任务。"""
         if not success:
@@ -347,11 +362,21 @@ class LogService:
             success=success,
         )
         effective_duration_ms = LogService.resolve_duration_ms(latency_ms=latency_ms, duration_ms=duration_ms)
+        effective_upstream_duration_ms = LogService.resolve_upstream_duration_ms(
+            latency_ms=latency_ms,
+            upstream_duration_ms=upstream_duration_ms,
+        )
         effective_attempt_count = LogService.resolve_attempt_count(attempt_count=attempt_count, trace=trace)
         effective_tps = tps if tps is not None else LogService.compute_tps(
             completion_tokens=effective_completion_tokens,
             duration_ms=effective_duration_ms,
             ttfb_ms=effective_ttfb_ms,
+        )
+        effective_request_status = LogService.resolve_request_status(
+            request_status=request_status,
+            success=success,
+            status_code=status_code,
+            is_stream=is_stream,
         )
         if not success and error_code:
             error_context = ErrorCatalogService.build_log_context(
@@ -411,6 +436,7 @@ class LogService:
             http_method=http_method.upper() if isinstance(http_method, str) and http_method.strip() else None,
             is_stream=is_stream,
             has_image=has_image,
+            request_status=effective_request_status,
             success=success,
             billable=effective_billable,
             billable_reason=effective_billable_reason,
@@ -419,6 +445,7 @@ class LogService:
             first_token_latency_ms=first_token_latency_ms,
             ttfb_ms=effective_ttfb_ms,
             duration_ms=effective_duration_ms,
+            upstream_duration_ms=effective_upstream_duration_ms,
             tps=effective_tps,
             reasoning_level=normalized_reasoning_level,
             model_reasoning_effort=normalized_model_reasoning_effort,
@@ -520,6 +547,7 @@ class LogService:
         if flush_after_add or auto_commit:
             db.flush()
         if log.id is not None:
+            LogService.finalize_billing_if_exact_usage(db, log)
             from app.logging.adapters.request_adapter import RequestLogRecorder
             from app.services.ip_management_event_service import IpManagementEventService
 
@@ -550,9 +578,232 @@ class LogService:
                 token_response_text=token_response_text,
                 schedule_token_fill=schedule_token_fill,
         )
-        LogService._cache_recent_runtime_log(log)
-        LogService.record_retry_failure_signal_for_log(log)
+        if record_runtime_signals:
+            LogService._cache_recent_runtime_log(log)
+            LogService.record_retry_failure_signal_for_log(log)
         return log
+
+    @staticmethod
+    def upsert_log(db: Session, **kwargs: Any) -> RequestLog:
+        """按请求身份更新已有日志，或在首次写入时创建新日志。"""
+        trace_id = kwargs.get("trace_id")
+        log_type = kwargs.get("log_type")
+        request_id = kwargs.get("request_id")
+        request_path = kwargs.get("request_path")
+        http_method = kwargs.get("http_method")
+        existing = LogService._find_log_by_identity(
+            db,
+            trace_id=trace_id,
+            log_type=log_type,
+            request_id=request_id,
+            request_path=request_path,
+            http_method=http_method,
+        )
+        if existing is None:
+            return LogService.create_log(db, **kwargs)
+
+        payload = dict(kwargs)
+        auto_commit = bool(payload.get("auto_commit", True))
+        refresh_after_create = bool(payload.get("refresh_after_create", True))
+        flush_after_add = bool(payload.get("flush_after_add", True))
+        enqueue_finalize = bool(payload.get("enqueue_finalize", True))
+        schedule_token_fill = bool(payload.get("schedule_token_fill", True))
+        record_runtime_signals = bool(payload.get("record_runtime_signals", True))
+        LogService._apply_log_update_payload(existing, payload)
+        if flush_after_add or auto_commit:
+            db.flush()
+        if existing.id is not None:
+            LogService.finalize_billing_if_exact_usage(db, existing)
+            from app.logging.adapters.request_adapter import RequestLogRecorder
+            from app.services.ip_management_event_service import IpManagementEventService
+
+            RequestLogRecorder.record_missing_events_from_summary(db, existing, auto_commit=False)
+            IpManagementEventService.attach_request_context(
+                db,
+                event_id=payload.get("ip_management_event_id") or get_current_ip_management_event_id(),
+                request_log_id=existing.id,
+                api_client_key_id=payload.get("api_client_key_id"),
+                api_client_key_prefix=payload.get("api_client_key_prefix"),
+                user_account_id=payload.get("user_account_id"),
+            )
+            if auto_commit:
+                db.commit()
+        elif auto_commit:
+            db.commit()
+        if refresh_after_create:
+            db.refresh(existing)
+        if enqueue_finalize:
+            LogService.enqueue_finalize_for_log(
+                log=existing,
+                model_name=payload.get("model_name") or payload.get("requested_model"),
+                request_path=payload.get("request_path"),
+                token_request_payload=payload.get("token_request_payload"),
+                token_response_payload=payload.get("token_response_payload"),
+                token_response_text=payload.get("token_response_text"),
+                schedule_token_fill=schedule_token_fill,
+            )
+        if record_runtime_signals:
+            LogService._cache_recent_runtime_log(existing)
+            LogService.record_retry_failure_signal_for_log(existing)
+        return existing
+
+    @staticmethod
+    def _apply_log_update_payload(log: RequestLog, payload: dict[str, Any]) -> None:
+        token_response_payload = payload.get("token_response_payload")
+        trace = payload.get("trace")
+        usage_payload = LogService.extract_usage_payload(token_response_payload)
+        usage_token_counts = LogService.extract_usage_token_counts(usage_payload)
+        usage_detail_tokens = LogService.extract_usage_detail_tokens(usage_payload)
+        read_tokens, write_tokens = LogService.extract_cache_tokens(token_response_payload)
+        if isinstance(usage_payload, dict) and payload.get("usage_details_json") is None:
+            payload["usage_details_json"] = dumps_json(usage_payload)
+        if payload.get("prompt_tokens") is None:
+            payload["prompt_tokens"] = usage_token_counts["prompt_tokens"]
+        if payload.get("completion_tokens") is None:
+            payload["completion_tokens"] = usage_token_counts["completion_tokens"]
+        if payload.get("total_tokens") is None:
+            payload["total_tokens"] = usage_token_counts["total_tokens"]
+        if payload.get("cache_read_tokens") is None:
+            payload["cache_read_tokens"] = read_tokens
+        if payload.get("cache_write_tokens") is None:
+            payload["cache_write_tokens"] = write_tokens
+        if payload.get("reasoning_tokens") is None:
+            payload["reasoning_tokens"] = usage_detail_tokens.get("reasoning_tokens")
+        if payload.get("prompt_audio_tokens") is None:
+            payload["prompt_audio_tokens"] = usage_detail_tokens.get("prompt_audio_tokens")
+        if payload.get("completion_audio_tokens") is None:
+            payload["completion_audio_tokens"] = usage_detail_tokens.get("completion_audio_tokens")
+        if payload.get("accepted_prediction_tokens") is None:
+            payload["accepted_prediction_tokens"] = usage_detail_tokens.get("accepted_prediction_tokens")
+        if payload.get("rejected_prediction_tokens") is None:
+            payload["rejected_prediction_tokens"] = usage_detail_tokens.get("rejected_prediction_tokens")
+        if "http_method" in payload and isinstance(payload.get("http_method"), str):
+            payload["http_method"] = payload["http_method"].upper()
+        if "trace" in payload:
+            payload["trace_json"] = dumps_json(trace) if trace is not None else None
+        payload["request_status"] = LogService.resolve_request_status(
+            request_status=payload.get("request_status"),
+            success=bool(payload.get("success")),
+            status_code=payload.get("status_code"),
+            is_stream=bool(payload.get("is_stream", log.is_stream)),
+        )
+        if "ttfb_ms" not in payload or payload.get("ttfb_ms") is None:
+            payload["ttfb_ms"] = LogService.resolve_ttfb_ms(
+                first_token_latency_ms=payload.get("first_token_latency_ms"),
+                ttfb_ms=payload.get("ttfb_ms"),
+                latency_ms=payload.get("latency_ms"),
+                is_stream=bool(payload.get("is_stream")),
+                success=bool(payload.get("success")),
+            )
+        if "duration_ms" not in payload or payload.get("duration_ms") is None:
+            payload["duration_ms"] = LogService.resolve_duration_ms(
+                latency_ms=payload.get("latency_ms"),
+                duration_ms=payload.get("duration_ms"),
+            )
+        if "upstream_duration_ms" not in payload or payload.get("upstream_duration_ms") is None:
+            payload["upstream_duration_ms"] = LogService.resolve_upstream_duration_ms(
+                latency_ms=payload.get("latency_ms"),
+                upstream_duration_ms=payload.get("upstream_duration_ms"),
+            )
+        if "attempt_count" not in payload or payload.get("attempt_count") is None:
+            payload["attempt_count"] = LogService.resolve_attempt_count(
+                attempt_count=payload.get("attempt_count"),
+                trace=trace,
+            )
+        if "tps" not in payload or payload.get("tps") is None:
+            payload["tps"] = LogService.compute_tps(
+                completion_tokens=payload.get("completion_tokens"),
+                duration_ms=payload.get("duration_ms"),
+                ttfb_ms=payload.get("ttfb_ms"),
+            )
+        if "token_source" not in payload or payload.get("token_source") is None:
+            payload["token_source"] = LogService.resolve_token_source(
+                has_upstream_usage=isinstance(usage_payload, dict),
+                has_token_values=any(
+                    value is not None
+                    for value in (
+                        payload.get("prompt_tokens"),
+                        payload.get("completion_tokens"),
+                        payload.get("total_tokens"),
+                        payload.get("cache_read_tokens"),
+                        payload.get("cache_write_tokens"),
+                    )
+                ),
+                schedule_token_fill=bool(payload.get("schedule_token_fill", True)),
+                success=bool(payload.get("success")),
+            )
+        if "upstream_usage_missing" not in payload or payload.get("upstream_usage_missing") is None:
+            payload["upstream_usage_missing"] = (
+                bool(payload.get("success") and payload.get("schedule_token_fill", True))
+                and not isinstance(usage_payload, dict)
+            )
+        success = bool(payload.get("success"))
+        billable = LogService.resolve_billable(
+            success=success,
+            billable=payload.get("billable"),
+            api_client_key_id=payload.get("api_client_key_id"),
+            request_path=payload.get("request_path"),
+            log_type=str(payload.get("log_type") or log.log_type),
+            prompt_tokens=payload.get("prompt_tokens"),
+            completion_tokens=payload.get("completion_tokens"),
+            total_tokens=payload.get("total_tokens"),
+            response_text=payload.get("response_text"),
+            response_body_json=payload.get("response_body_json"),
+            error_code=payload.get("error_code"),
+        )
+        payload["billable"] = billable
+        payload["billable_reason"] = LogService.resolve_billable_reason(
+            billable=billable,
+            success=success,
+            explicit_reason=payload.get("billable_reason"),
+            error_code=payload.get("error_code"),
+        )
+        column_names = {column.name for column in RequestLog.__table__.columns}
+        for key, value in payload.items():
+            if key in column_names and key not in {"id", "created_at"}:
+                setattr(log, key, value)
+        if log.log_type in LogService.HEALTH_CHECK_LOG_TYPES:
+            log.billing_status = "skipped"
+            log.billing_finalized_at = now_beijing()
+            log.token_finalize_error = None
+            log.billing_error = None
+        elif LogService._should_mark_no_charge_without_finalize(log):
+            log.billing_status = "no_charge"
+            log.billing_finalized_at = now_beijing()
+            log.token_finalize_error = None
+            log.billing_error = None
+        LogService.refresh_derived_fields(log, response_payload=token_response_payload, trace=trace)
+
+    @staticmethod
+    def _find_log_by_identity(
+        db: Session,
+        *,
+        trace_id: str | None,
+        log_type: str | None,
+        request_id: str | None,
+        request_path: str | None,
+        http_method: str | None,
+    ) -> RequestLog | None:
+        if not trace_id or not log_type:
+            return None
+        normalized_http_method = http_method.upper() if isinstance(http_method, str) and http_method.strip() else None
+        stmt = select(RequestLog).where(
+            RequestLog.trace_id == str(trace_id),
+            RequestLog.log_type == str(log_type),
+            RequestLog.request_id.is_(None) if request_id is None else RequestLog.request_id == request_id,
+            RequestLog.request_path.is_(None) if request_path is None else RequestLog.request_path == request_path,
+            RequestLog.http_method.is_(None)
+            if normalized_http_method is None
+            else RequestLog.http_method == normalized_http_method,
+        )
+        return db.scalars(stmt.order_by(RequestLog.id.desc()).limit(1)).first()
+
+    @staticmethod
+    def _copy_request_log_fields(target: RequestLog, source: RequestLog) -> None:
+        for column in RequestLog.__table__.columns:
+            if column.name in {"id", "created_at"}:
+                continue
+            setattr(target, column.name, getattr(source, column.name))
 
     @staticmethod
     def backfill_typed_events_from_request_logs(
@@ -752,6 +1003,8 @@ class LogService:
             or not request_path
             or not LogService.is_token_billing_finalize_candidate(log)
         ):
+            return
+        if log.billing_finalized_at is not None and log.billing_status != "pending_tokens":
             return
         from app.services.token_usage_service import TokenUsageService
 
@@ -1077,8 +1330,30 @@ class LogService:
         count_stmt = select(func.count()).select_from(RequestLog)
         summary_stmt = select(
             func.count(RequestLog.id).label("total_requests"),
-            func.sum(case((RequestLog.success.is_(True), 1), else_=0)).label("success_requests"),
-            func.sum(case((RequestLog.success.is_(False), 1), else_=0)).label("failed_requests"),
+            func.sum(
+                case(
+                    (
+                        and_(
+                            RequestLog.success.is_(True),
+                            LogService._non_in_progress_request_expr(),
+                        ),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label("success_requests"),
+            func.sum(
+                case(
+                    (
+                        and_(
+                            RequestLog.success.is_(False),
+                            LogService._non_in_progress_request_expr(),
+                        ),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label("failed_requests"),
             func.sum(case((RequestLog.billable.is_(True), 1), else_=0)).label("billable_requests"),
             func.sum(RequestLog.prompt_tokens).label("prompt_tokens"),
             func.sum(RequestLog.completion_tokens).label("completion_tokens"),
@@ -1253,6 +1528,8 @@ class LogService:
             stmt = stmt.where(RequestLog.log_type == log_type)
         elif log_types:
             stmt = stmt.where(RequestLog.log_type.in_(log_types))
+        if success is not None:
+            stmt = stmt.where(LogService._non_in_progress_request_expr())
         if provider_id:
             stmt = stmt.where(RequestLog.provider_id == provider_id)
         if provider_trust_level:
@@ -1404,6 +1681,19 @@ class LogService:
         return RequestLog.log_type.in_(LogService.ROUTE_TRAFFIC_LOG_TYPES)
 
     @staticmethod
+    def _non_in_progress_request_expr():
+        return or_(
+            and_(
+                RequestLog.request_status.is_(None),
+                or_(
+                    RequestLog.status_code.is_(None),
+                    RequestLog.status_code != LogService.STREAM_IN_PROGRESS_STATUS_CODE,
+                ),
+            ),
+            RequestLog.request_status == LogService.REQUEST_STATUS_COMPLETED,
+        )
+
+    @staticmethod
     def _token_billing_finalize_candidate_expr():
         return and_(
             RequestLog.request_path.is_not(None),
@@ -1444,8 +1734,33 @@ class LogService:
         )
 
     @staticmethod
+    def is_exact_token_source(token_source: str | None) -> bool:
+        return str(token_source or "").strip() in LogService.EXACT_TOKEN_SOURCES
+
+    @staticmethod
+    def has_exact_usage_for_billing(log: RequestLog) -> bool:
+        return LogService.is_exact_token_source(log.token_source) and log.upstream_usage_missing is not True
+
+    @staticmethod
+    def inexact_token_billing_error(log: RequestLog) -> str:
+        token_source = str(log.token_source or "missing").strip() or "missing"
+        return f"token_source_not_exact:{token_source}"
+
+    @staticmethod
+    def finalize_billing_if_exact_usage(db: Session, log: RequestLog) -> Decimal | None:
+        if not LogService.is_token_billing_finalize_candidate(log):
+            return None
+        if not LogService.has_exact_usage_for_billing(log):
+            return None
+        from app.services.billing_service import BillingService
+
+        return BillingService.finalize_request_log_billing(db, log)
+
+    @staticmethod
     def _should_mark_no_charge_without_finalize(log: RequestLog) -> bool:
         if log.api_client_key_id is None or log.billing_finalized_at is not None:
+            return False
+        if LogService.is_request_log_in_progress(log):
             return False
         if LogService.is_token_billing_finalize_candidate(log):
             return False
@@ -1845,6 +2160,49 @@ class LogService:
         return int(attempt_count or 0)
 
     @staticmethod
+    def normalize_request_status(value: str | None) -> str | None:
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip()
+        return normalized if normalized in LogService.REQUEST_STATUS_VALUES else None
+
+    @staticmethod
+    def resolve_request_status(
+        *,
+        request_status: str | None,
+        success: bool,
+        status_code: int | None,
+        is_stream: bool,
+    ) -> str:
+        normalized = LogService.normalize_request_status(request_status)
+        if normalized is not None:
+            return normalized
+        if status_code == LogService.STREAM_IN_PROGRESS_STATUS_CODE:
+            return LogService.REQUEST_STATUS_RESPONDING if is_stream else LogService.REQUEST_STATUS_REQUESTING
+        if success and is_stream and status_code is None:
+            return LogService.REQUEST_STATUS_RESPONDING
+        return LogService.REQUEST_STATUS_COMPLETED
+
+    @staticmethod
+    def is_request_log_in_progress(log: RequestLog | dict[str, Any] | None) -> bool:
+        if log is None:
+            return False
+        status_value = None
+        if isinstance(log, dict):
+            status_value = log.get("request_status")
+            status_code = log.get("status_code")
+        else:
+            status_value = getattr(log, "request_status", None)
+            status_code = getattr(log, "status_code", None)
+        normalized = LogService.normalize_request_status(status_value)
+        if normalized is not None:
+            return normalized in {
+                LogService.REQUEST_STATUS_REQUESTING,
+                LogService.REQUEST_STATUS_RESPONDING,
+            }
+        return status_code == LogService.STREAM_IN_PROGRESS_STATUS_CODE
+
+    @staticmethod
     def derive_attempt_count(trace: list[dict] | dict | None) -> int:
         if not isinstance(trace, list) or not trace:
             return 0
@@ -1856,7 +2214,6 @@ class LogService:
             "rate_limited",
             "request_rejected",
             "upstream_auth_error",
-            "stream_opened",
             "capacity_limited",
             "capacity_unavailable",
             "auth_rejected",
@@ -1891,6 +2248,18 @@ class LogService:
     def resolve_duration_ms(*, latency_ms: int | None, duration_ms: int | None) -> int | None:
         if duration_ms is not None:
             return int(duration_ms)
+        if latency_ms is not None:
+            return int(latency_ms)
+        return None
+
+    @staticmethod
+    def resolve_upstream_duration_ms(
+        *,
+        latency_ms: int | None,
+        upstream_duration_ms: int | None,
+    ) -> int | None:
+        if upstream_duration_ms is not None:
+            return int(upstream_duration_ms)
         if latency_ms is not None:
             return int(latency_ms)
         return None
@@ -2121,6 +2490,15 @@ class LogService:
         if not log.reasoning_level:
             log.reasoning_level = LogService.REASONING_LEVEL_NONE
             changed = True
+        resolved_request_status = LogService.resolve_request_status(
+            request_status=log.request_status,
+            success=bool(log.success),
+            status_code=log.status_code,
+            is_stream=bool(log.is_stream),
+        )
+        if log.request_status != resolved_request_status:
+            log.request_status = resolved_request_status
+            changed = True
         derived_attempt_count = LogService.derive_attempt_count(parsed_trace)
         if derived_attempt_count and ((log.attempt_count or 0) <= 0 or derived_attempt_count > int(log.attempt_count or 0)):
             log.attempt_count = derived_attempt_count
@@ -2138,6 +2516,13 @@ class LogService:
         derived_duration = LogService.resolve_duration_ms(latency_ms=log.latency_ms, duration_ms=log.duration_ms)
         if log.duration_ms != derived_duration:
             log.duration_ms = derived_duration
+            changed = True
+        derived_upstream_duration = LogService.resolve_upstream_duration_ms(
+            latency_ms=log.latency_ms,
+            upstream_duration_ms=log.upstream_duration_ms,
+        )
+        if log.upstream_duration_ms != derived_upstream_duration:
+            log.upstream_duration_ms = derived_upstream_duration
             changed = True
         derived_tps = LogService.compute_tps(
             completion_tokens=log.completion_tokens,
@@ -2523,8 +2908,9 @@ class LogService:
             if log.latency_ms is not None:
                 pipe.hincrbyfloat(key, "latency_sum", float(max(0, int(log.latency_ms))))
                 pipe.hincrby(key, "latency_count", 1)
-            if log.ttfb_ms is not None:
-                pipe.hincrbyfloat(key, "ttfb_sum", float(max(0, int(log.ttfb_ms))))
+            runtime_ttfb_ms = log.first_token_latency_ms if log.first_token_latency_ms is not None else log.ttfb_ms
+            if runtime_ttfb_ms is not None:
+                pipe.hincrbyfloat(key, "ttfb_sum", float(max(0, int(runtime_ttfb_ms))))
                 pipe.hincrby(key, "ttfb_count", 1)
             pipe.expire(key, LogService.RECENT_RUNTIME_CACHE_TTL_SECONDS)
             pipe.execute()
@@ -2679,7 +3065,7 @@ class LogService:
     ) -> dict[str, Any]:
         """返回指定模型挂载 ID 最近短窗口的正式路由运行指标。
 
-        注意：provider_model_id 是唯一模型挂载 ID；model_name 只是自定义展示/请求名，不用于唯一定位。
+        注意：provider_model_id 是唯一模型挂载 ID；model_name 在项目内语义为平台模型ID，不作为挂载唯一定位主键。
         """
         metrics = LogService.provider_model_recent_runtime_metrics_batch(
             db,
@@ -2743,6 +3129,7 @@ class LogService:
                 RequestLog.success,
                 RequestLog.status_code,
                 RequestLog.latency_ms,
+                RequestLog.first_token_latency_ms,
                 RequestLog.ttfb_ms,
                 RequestLog.duration_ms,
                 RequestLog.error_code,
@@ -2836,8 +3223,9 @@ class LogService:
         item["latest_log_at"] = row.created_at.isoformat() if row.created_at else item.get("latest_log_at")
         if row.latency_ms is not None:
             item["_latency_values"].append(max(0, int(row.latency_ms)))
-        if row.ttfb_ms is not None:
-            item["_ttfb_values"].append(max(0, int(row.ttfb_ms)))
+        runtime_ttfb_ms = row.first_token_latency_ms if row.first_token_latency_ms is not None else row.ttfb_ms
+        if runtime_ttfb_ms is not None:
+            item["_ttfb_values"].append(max(0, int(runtime_ttfb_ms)))
         if bool(row.success):
             item["success_requests"] += 1
             return

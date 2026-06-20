@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-from unittest.mock import patch
-
 from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
 from app.services.model_mapping_service import ModelMappingResolution
 from app.services.model_mapping_service import ModelMappingService
 from app.services.provider_capacity_service import ProviderCapacitySnapshot
 from app.services.proxy_service import ProxyService
-from app.services.router_service import RecentSessionRoute, RouteCandidate, RouterService
+from app.services.routing import AvailabilityFirstOrderer, BalancedScoreOrderer, RecentSessionRoute, RouteCandidate
+from app.services.routing.filters import CapacityFilter
 
 
 def _assert(condition: bool, message: str) -> None:
@@ -77,11 +76,11 @@ def _candidate(
 def _check_recent_session_actual_target_wins_when_available() -> None:
     healthy = _candidate(1, 101, health_tier=0, route_score=10)
     unhealthy_recent = _candidate(2, 202, health_tier=2, route_score=999)
-    ordered = RouterService._primary_route_order(
+    ordered = AvailabilityFirstOrderer.order(
         [unhealthy_recent, healthy],
         recent_route=RecentSessionRoute(provider_id=2, provider_model_id=202, model_name="stage28-model"),
         route_context=None,
-    )
+    ).candidates
     _assert(
         ordered[0] is unhealthy_recent,
         "recent successful session target should be tried first when it remains in the available candidates",
@@ -91,11 +90,11 @@ def _check_recent_session_actual_target_wins_when_available() -> None:
 def _check_health_order_when_recent_session_target_unavailable() -> None:
     healthy = _candidate(1, 101, health_tier=0, route_score=1)
     unhealthy = _candidate(2, 202, health_tier=2, route_score=999)
-    ordered = RouterService._primary_route_order(
+    ordered = AvailabilityFirstOrderer.order(
         [unhealthy, healthy],
         recent_route=RecentSessionRoute(provider_id=9, provider_model_id=909, model_name="stage28-model"),
         route_context=None,
-    )
+    ).candidates
     _assert(
         ordered[0] is healthy,
         "when the recent session target is unavailable, routing should fall back to normal health-priority ordering",
@@ -105,7 +104,7 @@ def _check_health_order_when_recent_session_target_unavailable() -> None:
 def _check_load_affects_balanced_order() -> None:
     low_load = _candidate(1, 101, route_score=100, load_factor=0.1)
     high_load = _candidate(2, 202, route_score=100, load_factor=0.9)
-    ordered = RouterService._balanced_order([high_load, low_load])
+    ordered = BalancedScoreOrderer.order([high_load, low_load]).candidates
     _assert(
         ordered[0] is low_load,
         "lower loaded provider should be ordered first when candidates are in the same score bucket",
@@ -121,8 +120,11 @@ def _check_capacity_is_hard_filter() -> None:
         1: ProviderCapacitySnapshot(active_requests=1, active_streams=0, current_qps=0, current_rpm=0),
         2: ProviderCapacitySnapshot(active_requests=0, active_streams=0, current_qps=0, current_rpm=0),
     }
-    with patch("app.services.router_service.ProviderCapacityService.snapshots", return_value=snapshots):
-        filtered = RouterService._filter_capacity_candidates([full, available], is_stream=False)
+    filtered = CapacityFilter().apply_with_snapshots(
+        [full, available],
+        snapshots=snapshots,
+        is_stream=False,
+    ).kept_candidates
     _assert(filtered == [available], "provider at max active concurrency must be excluded")
 
 
@@ -135,8 +137,11 @@ def _check_provider_rpm_is_hard_filter() -> None:
         1: ProviderCapacitySnapshot(active_requests=0, active_streams=0, current_qps=0, current_rpm=20),
         2: ProviderCapacitySnapshot(active_requests=0, active_streams=0, current_qps=0, current_rpm=19),
     }
-    with patch("app.services.router_service.ProviderCapacityService.snapshots", return_value=snapshots):
-        filtered = RouterService._filter_capacity_candidates([full, available], is_stream=False)
+    filtered = CapacityFilter().apply_with_snapshots(
+        [full, available],
+        snapshots=snapshots,
+        is_stream=False,
+    ).kept_candidates
     _assert(filtered == [available], "provider at max RPM must be excluded until the minute window refreshes")
 
 

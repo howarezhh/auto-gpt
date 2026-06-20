@@ -13,7 +13,7 @@ from app.schemas.model_mapping import ModelMappingCreate, ModelMappingTarget, Mo
 from app.services.api_key_service import ApiClientAuthContext, ApiKeyService
 from app.services.cache_service import CacheService
 from app.services.provider_service import ProviderService
-from app.services.router_service import RouterService
+from app.services.routing import RouteCapabilitySet, RouteRequest, RouteRequestKind, RoutingService
 from app.utils.json_utils import dumps_json, loads_json
 
 
@@ -213,7 +213,7 @@ class ModelMappingService:
                 for item in (excluded_target_model_names or ())
                 if isinstance(item, str) and item.strip()
             }
-            recent_route = RouterService.load_recent_session_route(db, sticky_key)
+            recent_route = RoutingService.load_recent_session_route(db, sticky_key)
             target_model_names = [
                 str(item.get("model_name") or "").strip()
                 for item in targets
@@ -264,19 +264,26 @@ class ModelMappingService:
                 if capability_reason is not None:
                     evaluated.append(ModelMappingService._target_trace(target, index, available=False, reason=capability_reason))
                     continue
-                route_diagnostics = RouterService.diagnose_candidate_unavailability(
-                    db,
-                    model_name=target_model_name,
-                    route_context=route_context,
-                    require_vision=require_vision,
-                    require_stream=require_stream,
-                    require_tools=require_tools,
-                    require_image_generation=require_image_generation,
-                    require_chat_completions=require_chat_completions,
-                    require_responses=require_responses,
-                    required_upstream_protocol_type=required_upstream_protocol_type,
-                    is_stream=require_stream,
-                )
+                route_diagnostics = RoutingService.diagnose_sync(
+                    RouteRequest(
+                        requested_model=target_model_name,
+                        selected_model=target_model_name,
+                        endpoint_path=endpoint_path or "",
+                        public_endpoint_path=endpoint_path or "",
+                        request_kind=RouteRequestKind.GENERIC,
+                        capabilities=RouteCapabilitySet(
+                            require_vision=require_vision,
+                            require_stream=require_stream,
+                            require_tools=require_tools,
+                            require_image_generation=require_image_generation,
+                            require_chat_completions=require_chat_completions,
+                            require_responses=require_responses,
+                            required_upstream_protocol_type=required_upstream_protocol_type,
+                        ),
+                        policy_context=route_context,
+                        db=db,
+                    )
+                ).to_dict()
                 if int(route_diagnostics.get("final_candidate_count") or 0) <= 0:
                     evaluated.append(
                         ModelMappingService._target_trace(
@@ -372,7 +379,7 @@ class ModelMappingService:
 
     @staticmethod
     def _normalize_required_upstream_protocol_type(protocol_type: str | None) -> str | None:
-        return RouterService._normalize_required_upstream_protocol_type(protocol_type)
+        return RoutingService.normalize_required_upstream_protocol_type(protocol_type)
 
     @staticmethod
     def _catalog_protocol_type(catalog: ModelCatalog) -> str:

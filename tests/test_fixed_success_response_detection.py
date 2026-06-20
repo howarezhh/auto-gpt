@@ -1,11 +1,14 @@
+import asyncio
 from types import SimpleNamespace
 
 from app.services.health_service import HealthService
 from app.services.cache_service import CacheService
+from app.services.content_guard_probe_service import ContentGuardProbeService
 from app.services.fixed_success_response_service import FixedSuccessResponseService
 from app.services.provider_health_state_service import ProviderHealthStateService
 from app.services.provider_service import ProviderService
 from app.services.log_service import LogService
+from app.services.proxy_service import ProxyService
 
 
 def test_fixed_success_response_detection_compares_latest_two_success_texts() -> None:
@@ -30,6 +33,46 @@ def test_fixed_success_response_detection_compares_latest_two_success_texts() ->
     assert second["request_fingerprint"] != second["previous_request_fingerprint"]
 
 
+def test_fixed_success_response_detection_uses_six_normalized_chars_minimum() -> None:
+    CacheService.invalidate_prefix(FixedSuccessResponseService.CACHE_PREFIX)
+
+    FixedSuccessResponseService.inspect_and_record(
+        provider_id=911,
+        provider_model_id=912,
+        request_payload={"messages": [{"role": "user", "content": "请求 A"}]},
+        response_text="模型暂不可用",
+    )
+    detected = FixedSuccessResponseService.inspect_and_record(
+        provider_id=911,
+        provider_model_id=912,
+        request_payload={"messages": [{"role": "user", "content": "请求 B"}]},
+        response_text="模型暂不可用",
+    )
+
+    assert detected["normalized_length"] == 6
+    assert detected["detected"] is True
+
+
+def test_fixed_success_response_detection_skips_under_six_normalized_chars() -> None:
+    CacheService.invalidate_prefix(FixedSuccessResponseService.CACHE_PREFIX)
+
+    FixedSuccessResponseService.inspect_and_record(
+        provider_id=913,
+        provider_model_id=914,
+        request_payload={"messages": [{"role": "user", "content": "请求 A"}]},
+        response_text="模型不可用",
+    )
+    detected = FixedSuccessResponseService.inspect_and_record(
+        provider_id=913,
+        provider_model_id=914,
+        request_payload={"messages": [{"role": "user", "content": "请求 B"}]},
+        response_text="模型不可用",
+    )
+
+    assert detected["normalized_length"] == 5
+    assert detected["detected"] is False
+
+
 def test_fixed_success_response_detection_ignores_same_request_replay() -> None:
     CacheService.invalidate_prefix(FixedSuccessResponseService.CACHE_PREFIX)
     payload = {"messages": [{"role": "user", "content": "固定问题"}]}
@@ -48,6 +91,150 @@ def test_fixed_success_response_detection_ignores_same_request_replay() -> None:
     )
 
     assert repeated["detected"] is False
+
+
+def test_fixed_success_confirmation_passed_probe_clears_samples(monkeypatch) -> None:
+    provider = SimpleNamespace(id=921, name="固定文本确认提供商")
+    provider_model = SimpleNamespace(id=922, model_name="确认模型")
+    detection = {"detected": True}
+    trace: list[dict] = []
+    CacheService.set(
+        FixedSuccessResponseService.cache_key(provider.id, provider_model.id),
+        [{"normalized_text": "模型暂不可用", "request_fingerprint": "a"}],
+        ttl_seconds=60,
+    )
+
+    async def fake_probe(*_args, **_kwargs):
+        return {
+            "success": True,
+            "endpoint_path": "/chat/completions",
+            "status_code": 200,
+            "message": "固定答案一致",
+            "support_label": "固定答案探针通过",
+        }
+
+    monkeypatch.setattr(ContentGuardProbeService, "content_probe_endpoint_path", staticmethod(lambda *_args: "/chat/completions"))
+    monkeypatch.setattr(ContentGuardProbeService, "probe_fixed_answer", staticmethod(fake_probe))
+
+    decision = asyncio.run(
+        ProxyService._confirm_fixed_success_response_detection(
+            provider,
+            provider_model,
+            detection,
+            trace=trace,
+        )
+    )
+
+    assert decision["confirmed_normal"] is True
+    assert decision["should_mark_unhealthy"] is False
+    assert decision["reason"] == "fixed_answer_probe_passed"
+    assert CacheService.get(FixedSuccessResponseService.cache_key(provider.id, provider_model.id)) is None
+    assert trace[-1]["result"] == "fixed_answer_probe_confirmed"
+
+
+def test_fixed_success_confirmation_retries_rate_limit_then_passes(monkeypatch) -> None:
+    provider = SimpleNamespace(id=923, name="限频后恢复提供商")
+    provider_model = SimpleNamespace(id=924, model_name="限频后恢复模型")
+    detection = {"detected": True}
+    calls: list[int] = []
+    sleeps: list[int] = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    async def fake_probe(*_args, **_kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            return {
+                "success": False,
+                "probe_rate_limited": True,
+                "error_code": "probe_rate_limited",
+                "status_code": 429,
+                "message": "探针频率限制",
+            }
+        return {
+            "success": True,
+            "endpoint_path": "/chat/completions",
+            "status_code": 200,
+            "message": "固定答案一致",
+        }
+
+    monkeypatch.setattr(ContentGuardProbeService, "content_probe_endpoint_path", staticmethod(lambda *_args: "/chat/completions"))
+    monkeypatch.setattr(ContentGuardProbeService, "probe_fixed_answer", staticmethod(fake_probe))
+    monkeypatch.setattr("app.services.proxy_service.asyncio.sleep", fake_sleep)
+
+    decision = asyncio.run(ProxyService._confirm_fixed_success_response_detection(provider, provider_model, detection))
+
+    assert decision["confirmed_normal"] is True
+    assert decision["should_mark_unhealthy"] is False
+    assert sleeps == [2]
+    assert len(calls) == 2
+    assert [item["rate_limited"] for item in decision["attempts"]] == [True, False]
+
+
+def test_fixed_success_confirmation_marks_unhealthy_when_all_probe_attempts_rate_limited(monkeypatch) -> None:
+    provider = SimpleNamespace(id=925, name="全部限频提供商")
+    provider_model = SimpleNamespace(id=926, model_name="全部限频模型")
+    detection = {"detected": True}
+    calls: list[int] = []
+    sleeps: list[int] = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    async def fake_probe(*_args, **_kwargs):
+        calls.append(1)
+        return {
+            "success": False,
+            "probe_rate_limited": True,
+            "error_code": "probe_rate_limited",
+            "status_code": 429,
+            "message": "探针频率限制",
+        }
+
+    monkeypatch.setattr(ContentGuardProbeService, "content_probe_endpoint_path", staticmethod(lambda *_args: "/chat/completions"))
+    monkeypatch.setattr(ContentGuardProbeService, "probe_fixed_answer", staticmethod(fake_probe))
+    monkeypatch.setattr("app.services.proxy_service.asyncio.sleep", fake_sleep)
+
+    decision = asyncio.run(ProxyService._confirm_fixed_success_response_detection(provider, provider_model, detection))
+
+    assert decision["confirmed_normal"] is False
+    assert decision["should_mark_unhealthy"] is True
+    assert decision["reason"] == "fixed_answer_probe_rate_limited"
+    assert sleeps == [2, 5, 10]
+    assert len(calls) == 4
+
+
+def test_fixed_success_confirmation_marks_unhealthy_on_non_rate_limited_probe_failure(monkeypatch) -> None:
+    provider = SimpleNamespace(id=927, name="固定答案失败提供商")
+    provider_model = SimpleNamespace(id=928, model_name="固定答案失败模型")
+    detection = {"detected": True}
+    calls: list[int] = []
+    sleeps: list[int] = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    async def fake_probe(*_args, **_kwargs):
+        calls.append(1)
+        return {
+            "success": False,
+            "support_mode": "probe_failed",
+            "status_code": 200,
+            "message": "固定答案探针返回内容与指定字符串不一致",
+        }
+
+    monkeypatch.setattr(ContentGuardProbeService, "content_probe_endpoint_path", staticmethod(lambda *_args: "/chat/completions"))
+    monkeypatch.setattr(ContentGuardProbeService, "probe_fixed_answer", staticmethod(fake_probe))
+    monkeypatch.setattr("app.services.proxy_service.asyncio.sleep", fake_sleep)
+
+    decision = asyncio.run(ProxyService._confirm_fixed_success_response_detection(provider, provider_model, detection))
+
+    assert decision["confirmed_normal"] is False
+    assert decision["should_mark_unhealthy"] is True
+    assert decision["reason"] == "fixed_answer_probe_failed"
+    assert sleeps == []
+    assert len(calls) == 1
 
 
 def test_health_payload_exposes_availability_aliases() -> None:

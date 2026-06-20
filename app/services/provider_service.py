@@ -189,9 +189,9 @@ class ProviderService:
 
 模型块填写规则：
 - 模型块整体可不填；不填时只新增提供商，不新增模型挂载。
-- 一旦填写模型，模型名称和模型ID必填；启用、端点协议、模型分组、倍率可不填，系统会按默认规则补齐。
-- 模型名称：本平台展示和对外请求使用的自定义模型名。
-- 模型ID：上游官方模型名或唯一 ID，实际请求上游时使用。
+- 一旦填写模型，模型ID和上游模型ID必填；启用、端点协议、模型分组、倍率可不填，系统会按默认规则补齐。
+- 模型ID：本平台唯一模型标识，供外部请求、权限、映射和路由使用。
+- 上游模型ID：上游官方模型名或唯一 ID，实际请求上游时使用。
 - 启用：可选，填 是/否，默认 是。
 - 端点协议：可选，Claude 类模型只能填 Claude；Gemini 类模型只能填 Gemini；中国国内模型或 GPT 系列默认按 Chat / Responses 规则自动推断。
 - 模型分组：可选，按现有分组填写，如 OpenAI、DeepSeek、通义千问、智谱 GLM、豆包、Kimi、Gemini、Claude；不填时按模型ID自动推断。
@@ -214,14 +214,14 @@ API Key: sk-xxxx
 启用: 是
 备注: 可选备注
 模型:
-- 模型名称: GPT 5.4
-  模型ID: gpt-5.4
+- 模型ID: gpt-5.4
+  上游模型ID: gpt-5.4
   启用: 是
   端点协议: 双协议
   模型分组: OpenAI
   倍率: 1
-- 模型名称: Claude Sonnet
-  模型ID: claude-3-5-sonnet-latest
+- 模型ID: claude-sonnet
+  上游模型ID: claude-3-5-sonnet-latest
   启用: 是
   端点协议: Claude
   模型分组: Claude
@@ -244,8 +244,8 @@ API Key: sk-yyyy
 
 字段填写规则：
 - 提供商名称：必填，必须与提供商管理中的名称一致；也可使用提供商ID。
-- 模型名称：必填，本平台展示和对外请求使用的模型名。
-- 模型ID：必填，上游官方模型名或唯一 ID，实际请求上游时使用。
+- 模型ID：必填，本平台唯一模型标识，供外部请求、权限、映射和路由使用。
+- 上游模型ID：必填，上游官方模型名或唯一 ID，实际请求上游时使用。
 - 启用：可选，填 是/否，默认 是。
 - 端点协议：可选，支持 双协议、Chat Completions API、Responses API、Gemini 原生协议、Claude Messages API。
 - 模型分组：可选，支持 OpenAI、DeepSeek、通义千问、Gemini、Claude、未知分组等。
@@ -255,8 +255,8 @@ API Key: sk-yyyy
 
 提供商名称: 中文提供商
 提供商ID:
-模型名称: GPT 5.4
 模型ID: gpt-5.4
+上游模型ID: gpt-5.4
 启用: 是
 端点协议: 双协议
 模型分组: OpenAI
@@ -503,7 +503,7 @@ API Key: sk-yyyy
 
     @staticmethod
     def _infer_model_capabilities(model_name: str) -> dict[str, bool]:
-        """根据模型名启发式推断非协议能力。"""
+        """根据模型ID启发式推断非协议能力。"""
         normalized = (model_name or "").strip().lower()
         supports_vision = ProviderService._model_name_supports_vision(normalized)
         supports_tools = ProviderService._model_name_supports_tools(normalized)
@@ -516,12 +516,12 @@ API Key: sk-yyyy
 
     @staticmethod
     def model_name_supports_image_generation(model_name: str) -> bool:
-        """判断模型名是否具备图像生成倾向。"""
+        """判断模型ID是否具备图像生成倾向。"""
         return ProviderService._infer_model_capabilities(model_name).get("supports_image_generation", False)
 
     @staticmethod
     def model_name_supports_tools(model_name: str) -> bool:
-        """判断模型名是否具备工具调用倾向。"""
+        """判断模型ID是否具备工具调用倾向。"""
         return ProviderService._infer_model_capabilities(model_name).get("supports_tools", False)
 
     @staticmethod
@@ -540,7 +540,7 @@ API Key: sk-yyyy
 
     @staticmethod
     def _build_model_config_input_from_name(model_name: str) -> ProviderModelConfigInput:
-        """根据模型名生成默认模型配置；端点协议只给管理员可编辑默认值。"""
+        """根据模型ID生成默认模型配置；端点协议只给管理员可编辑默认值。"""
         capabilities = ProviderService._infer_model_capabilities(model_name)
         protocol_type, supports_chat, supports_responses = ProviderService.default_supports_for_model_name(model_name)
         return ProviderModelConfigInput(
@@ -837,7 +837,7 @@ API Key: sk-yyyy
 
     @staticmethod
     def _list_providers_for_model_name_lists(db: Session) -> list[Provider]:
-        """轻量 provider 列表只需要 provider 摘要字段和模型名。"""
+        """轻量 provider 列表只需要 provider 摘要字段和模型ID。"""
         return list(
             db.scalars(
                 select(Provider)
@@ -1009,8 +1009,8 @@ API Key: sk-yyyy
             for provider_model in provider.provider_models:
                 model_lines.extend(
                     [
-                        f"- 模型名称: {ProviderService._export_text(provider_model.model_name)}",
-                        f"  模型ID: {ProviderService._export_text(ProviderService.provider_model_upstream_model_name(provider_model))}",
+                        f"- 模型ID: {ProviderService._export_text(provider_model.model_name)}",
+                        f"  上游模型ID: {ProviderService._export_text(ProviderService.provider_model_upstream_model_name(provider_model))}",
                         f"  启用: {ProviderService._export_bool(provider_model.enabled)}",
                         f"  端点协议: {ProviderService.provider_model_protocol_label(provider_model)}",
                         f"  模型分组: {MODEL_GROUP_LABELS.get(provider_model.model_group, provider_model.model_group or 'unknown')}",
@@ -1062,8 +1062,8 @@ API Key: sk-yyyy
             block = [
                 f"提供商名称: {ProviderService._export_text(provider.name if provider else None)}",
                 f"提供商ID: {ProviderService._export_text(provider.id if provider else None)}",
-                f"模型名称: {ProviderService._export_text(provider_model.model_name)}",
-                f"模型ID: {ProviderService._export_text(ProviderService.provider_model_upstream_model_name(provider_model))}",
+                f"模型ID: {ProviderService._export_text(provider_model.model_name)}",
+                f"上游模型ID: {ProviderService._export_text(ProviderService.provider_model_upstream_model_name(provider_model))}",
                 f"启用: {ProviderService._export_bool(provider_model.enabled)}",
                 f"端点协议: {ProviderService.provider_model_protocol_label(provider_model)}",
                 f"模型分组: {MODEL_GROUP_LABELS.get(provider_model.model_group, provider_model.model_group or 'unknown')}",
@@ -1133,7 +1133,7 @@ API Key: sk-yyyy
                     else:
                         errors.append("提供商不存在")
                 elif (provider.id, normalized["model_name"]) in seen_targets:
-                    errors.append("同一导入内容中提供商和模型名称重复")
+                    errors.append("同一导入内容中提供商和模型ID重复")
                 else:
                     seen_targets.add((provider.id, normalized["model_name"]))
 
@@ -1582,17 +1582,20 @@ API Key: sk-yyyy
             "模型列表": "models",
             "models": "models",
             "model": "models",
-            "模型名称": "model_name",
-            "模型名": "model_name",
+            "平台模型id": "model_name",
+            "平台模型ID": "model_name",
+            "模型id": "model_name",
+            "模型ID": "model_name",
             "modelname": "model_name",
             "model_name": "model_name",
-            "模型id": "upstream_model_name",
-            "模型ID": "upstream_model_name",
-            "官方模型名": "upstream_model_name",
-            "上游模型名": "upstream_model_name",
+            "modelid": "model_name",
+            "model_id": "model_name",
+            "上游模型ID": "upstream_model_name",
             "上游模型id": "upstream_model_name",
-            "modelid": "upstream_model_name",
-            "model_id": "upstream_model_name",
+            "官方模型ID": "upstream_model_name",
+            "官方模型id": "upstream_model_name",
+            "upstreammodelid": "upstream_model_name",
+            "upstream_model_id": "upstream_model_name",
             "upstreammodel": "upstream_model_name",
             "upstream_model": "upstream_model_name",
             "upstreammodelname": "upstream_model_name",
@@ -1632,14 +1635,20 @@ API Key: sk-yyyy
             "提供商ID": "provider_id",
             "providerid": "provider_id",
             "provider_id": "provider_id",
-            "名称": "model_name",
-            "模型名称": "model_name",
+            "平台模型id": "model_name",
+            "平台模型ID": "model_name",
+            "模型id": "model_name",
+            "模型ID": "model_name",
             "modelname": "model_name",
             "model_name": "model_name",
-            "模型id": "upstream_model_name",
-            "模型ID": "upstream_model_name",
-            "modelid": "upstream_model_name",
-            "model_id": "upstream_model_name",
+            "modelid": "model_name",
+            "model_id": "model_name",
+            "上游模型ID": "upstream_model_name",
+            "上游模型id": "upstream_model_name",
+            "官方模型ID": "upstream_model_name",
+            "官方模型id": "upstream_model_name",
+            "upstreammodelid": "upstream_model_name",
+            "upstream_model_id": "upstream_model_name",
             "upstreammodelname": "upstream_model_name",
             "upstream_model_name": "upstream_model_name",
             "启用": "enabled",
@@ -1782,9 +1791,9 @@ API Key: sk-yyyy
         model_name = ProviderService._clean_optional_text(normalized.get("model_name"))
         upstream_model_name = ProviderService._clean_optional_text(normalized.get("upstream_model_name"))
         if not model_name:
-            errors.append("缺少模型名称")
-        if not upstream_model_name:
             errors.append("缺少模型ID")
+        if not upstream_model_name:
+            errors.append("缺少上游模型ID")
         if not provider_name and not provider_id_raw:
             errors.append("缺少提供商名称或提供商ID")
         if errors:
@@ -1953,14 +1962,14 @@ API Key: sk-yyyy
 
             missing: list[str] = []
             if not model_name:
-                missing.append("模型名称")
-            if not upstream_model_name:
                 missing.append("模型ID")
+            if not upstream_model_name:
+                missing.append("上游模型ID")
             if missing:
                 errors.append(f"模型第 {index} 组缺少字段：{'、'.join(missing)}")
                 continue
             if model_name in seen_names:
-                errors.append(f"模型第 {index} 组的模型名称重复：{model_name}")
+                errors.append(f"模型第 {index} 组的模型ID重复：{model_name}")
                 continue
             seen_names.add(model_name)
             try:
@@ -2191,6 +2200,7 @@ API Key: sk-yyyy
         found_ids = {provider.id for provider in providers}
         missing_ids = [provider_id for provider_id in normalized_ids if provider_id not in found_ids]
         updated_items: list[dict[str, Any]] = []
+        updated_count = 0
         skipped_count = 0
         now = now_beijing()
         for provider in providers:
@@ -2213,6 +2223,9 @@ API Key: sk-yyyy
                 if provider.circuit_state != "closed":
                     provider.circuit_state = "closed"
                     changed = True
+                if getattr(provider, "circuit_opened_at", None) is not None:
+                    provider.circuit_opened_at = None
+                    changed = True
                 if provider.last_check_at != now:
                     provider.last_check_at = now
                     changed = True
@@ -2224,6 +2237,12 @@ API Key: sk-yyyy
                         provider_model.circuit_state = "closed"
                         changed = True
                     if provider_model.enabled:
+                        if getattr(provider_model, "circuit_opened_at", None) is not None:
+                            provider_model.circuit_opened_at = None
+                            changed = True
+                        if provider_model.last_error is not None:
+                            provider_model.last_error = None
+                            changed = True
                         provider_model.last_check_at = now
             elif action == "mark_trusted":
                 if provider.trust_level != "trusted":
@@ -2243,6 +2262,8 @@ API Key: sk-yyyy
                 raise ValueError("批量治理动作不受支持")
             if not changed:
                 skipped_count += 1
+            else:
+                updated_count += 1
             ProviderService.refresh_provider_state(provider)
             ProviderHealthStateService.clear_provider_runtime_state(provider)
             updated_items.append(ProviderService.provider_to_dict(provider, metrics=ProviderService._build_quality_metrics(db, [provider])))
@@ -2251,7 +2272,7 @@ API Key: sk-yyyy
         return {
             "action": action,
             "requested_count": len(normalized_ids),
-            "updated_count": len(updated_items),
+            "updated_count": updated_count,
             "skipped_count": skipped_count,
             "missing_ids": missing_ids,
             "items": updated_items,
@@ -2303,7 +2324,7 @@ API Key: sk-yyyy
             if field == "model_name":
                 model_name = ProviderService._clean_optional_text(value)
                 if not model_name:
-                    raise ValueError("模型名称不能为空")
+                    raise ValueError("模型ID不能为空")
                 duplicate = next(
                     (
                         item
@@ -2313,7 +2334,7 @@ API Key: sk-yyyy
                     None,
                 )
                 if duplicate is not None:
-                    raise ValueError(f"模型名称已存在：{model_name}")
+                    raise ValueError(f"模型ID已存在：{model_name}")
                 provider_model.model_name = model_name
                 continue
             if field == "model_group":
@@ -3336,10 +3357,9 @@ API Key: sk-yyyy
         model_configs: list[ProviderModelConfigInput],
     ) -> dict[str, ModelCatalog]:
         model_names = list({
-            name
+            config.model_name
             for config in model_configs
-            for name in (config.model_name, config.upstream_model_name)
-            if name
+            if config.model_name
         })
         if not model_names:
             return {}
@@ -3348,9 +3368,9 @@ API Key: sk-yyyy
             for item in db.scalars(select(ModelCatalog).where(ModelCatalog.model_name.in_(model_names)))
         }
         catalogs_by_name = {
-            config.model_name: raw_catalogs_by_name.get(config.upstream_model_name or "") or raw_catalogs_by_name.get(config.model_name)
+            config.model_name: raw_catalogs_by_name.get(config.model_name)
             for config in model_configs
-            if raw_catalogs_by_name.get(config.upstream_model_name or "") or raw_catalogs_by_name.get(config.model_name)
+            if raw_catalogs_by_name.get(config.model_name)
         }
         for config in model_configs:
             if config.model_name in catalogs_by_name:
@@ -3401,15 +3421,10 @@ API Key: sk-yyyy
 
     @staticmethod
     def _sync_provider_model_price_from_catalog(db: Session, provider_model: ProviderModel) -> None:
-        catalog_names = [
-            name
-            for name in (
-                getattr(provider_model, "upstream_model_name", None),
-                provider_model.model_name,
-            )
-            if name
-        ]
-        catalog = db.scalar(select(ModelCatalog).where(ModelCatalog.model_name.in_(catalog_names)).limit(1))
+        model_name = getattr(provider_model, "model_name", None)
+        if not model_name:
+            return
+        catalog = db.scalar(select(ModelCatalog).where(ModelCatalog.model_name == model_name).limit(1))
         if catalog is None:
             return
         ProviderService._sync_provider_model_from_catalog(provider_model, catalog)

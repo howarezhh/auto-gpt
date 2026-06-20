@@ -15,7 +15,7 @@
 <section class="panel-card section-shell provider-model-panel" id="provider-model-section">
     <div class="table-toolbar filter-toolbar provider-model-filter-toolbar">
         <label>
-            <span>模型名称</span>
+            <span>模型ID</span>
             <input class="field-input search-input" id="provider-model-search" type="search" placeholder="搜索模型或提供商">
         </label>
         <label>
@@ -170,7 +170,7 @@
             <div>
                 <div class="panel-kicker">挂载编辑</div>
                 <h2 id="provider-model-edit-title">编辑模型挂载</h2>
-                <div class="table-muted" id="provider-model-edit-subtitle">调整模型名称、模型ID、可信度、端点协议、倍率、价格和容量。</div>
+                <div class="table-muted" id="provider-model-edit-subtitle">调整模型ID、上游模型ID、可信度、端点协议、倍率、价格和容量。</div>
             </div>
             <button class="icon-btn interactive-btn" id="provider-model-edit-close" type="button" aria-label="关闭模型挂载编辑">×</button>
         </div>
@@ -187,13 +187,13 @@
                     </select>
                 </label>
                 <label>
-                    <span>模型名称</span>
-                    <input class="field-input" id="provider-model-edit-model-name" placeholder="本平台对外别名，例如 自定义 GPT">
-                    <small>用于本平台展示和用户请求。</small>
+                    <span>模型ID</span>
+                    <input class="field-input" id="provider-model-edit-model-name" placeholder="本平台唯一模型ID，例如 gpt-5.4">
+                    <small>用于外部请求、权限、映射和路由。</small>
                 </label>
                 <label>
-                    <span>模型ID</span>
-                    <input class="field-input" id="provider-model-edit-upstream-model-name" placeholder="上游官方模型名，例如 gpt-4.1">
+                    <span>上游模型ID</span>
+                    <input class="field-input" id="provider-model-edit-upstream-model-name" placeholder="上游模型ID，例如 gpt-4.1">
                     <small>用于实际请求上游提供商。</small>
                 </label>
                 <label>

@@ -45,6 +45,10 @@ class ContentRuntimeGuardService:
         }
 
     @staticmethod
+    def url_check_enabled(setting: Any) -> bool:
+        return bool(getattr(setting, "content_guard_url_check_enabled", False))
+
+    @staticmethod
     async def inspect_non_stream_response(
         *,
         db: Session | None,
@@ -76,7 +80,7 @@ class ContentRuntimeGuardService:
             max_scan_bytes=ContentRuntimeGuardService.bounded_max_scan_bytes(setting),
             rules_json=getattr(setting, "content_guard_rules_json", ""),
             url_allowlist=getattr(setting, "content_guard_url_allowlist_json", ""),
-            url_check_enabled=bool(getattr(setting, "content_guard_url_check_enabled", True)),
+            url_check_enabled=ContentRuntimeGuardService.url_check_enabled(setting),
             **ContentRuntimeGuardService.enhanced_detection_kwargs(setting),
         )
         if ContentRuntimeGuardService.should_record_violation(guard_result, setting=setting):
@@ -117,9 +121,9 @@ class ContentRuntimeGuardService:
                 reason="内容完整性防护未启用",
                 action="allow",
             )
-        text = buffered_bytes.decode("utf-8", errors="ignore")
         max_scan_bytes = ContentRuntimeGuardService.bounded_max_scan_bytes(setting)
         event_buffer = bytearray(buffered_bytes)
+        visible_text_parts: list[str] = []
         combined_result = ContentGuardResult(
             result=ContentGuardRuleService.RESULT_PASS,
             risk_level="low",
@@ -134,24 +138,31 @@ class ContentRuntimeGuardService:
                 max_scan_bytes=max_scan_bytes,
                 rules_json=getattr(setting, "content_guard_rules_json", ""),
                 url_allowlist=getattr(setting, "content_guard_url_allowlist_json", ""),
-                url_check_enabled=bool(getattr(setting, "content_guard_url_check_enabled", True)),
+                url_check_enabled=ContentRuntimeGuardService.url_check_enabled(setting),
                 **ContentRuntimeGuardService.enhanced_detection_kwargs(setting),
             )
+            visible_text = ContentRuntimeGuardService.extract_sse_scan_text(
+                data,
+                endpoint_path=endpoint_path,
+                max_scan_bytes=max_scan_bytes,
+            )
+            if visible_text:
+                visible_text_parts.append(visible_text)
             if current.result == ContentGuardRuleService.RESULT_BLOCK:
                 combined_result = current
                 break
             if current.result == ContentGuardRuleService.RESULT_REVIEW:
                 combined_result = current
-        if combined_result.result == ContentGuardRuleService.RESULT_PASS:
+        if combined_result.result == ContentGuardRuleService.RESULT_PASS and visible_text_parts:
             text_result = ContentGuardRuleService.inspect_response_text(
-                text,
+                "\n".join(visible_text_parts),
                 provider=provider,
                 endpoint_path=endpoint_path,
                 request_payload=request_payload,
                 max_scan_bytes=max_scan_bytes,
                 rules_json=getattr(setting, "content_guard_rules_json", ""),
                 url_allowlist=getattr(setting, "content_guard_url_allowlist_json", ""),
-                url_check_enabled=bool(getattr(setting, "content_guard_url_check_enabled", True)),
+                url_check_enabled=ContentRuntimeGuardService.url_check_enabled(setting),
                 **ContentRuntimeGuardService.enhanced_detection_kwargs(setting),
             )
             if text_result.result != ContentGuardRuleService.RESULT_PASS:
@@ -204,7 +215,7 @@ class ContentRuntimeGuardService:
                 max_scan_bytes=max_scan_bytes,
                 rules_json=getattr(setting, "content_guard_rules_json", ""),
                 url_allowlist=getattr(setting, "content_guard_url_allowlist_json", ""),
-                url_check_enabled=bool(getattr(setting, "content_guard_url_check_enabled", True)),
+                url_check_enabled=ContentRuntimeGuardService.url_check_enabled(setting),
                 **ContentRuntimeGuardService.enhanced_detection_kwargs(setting),
             )
             if current.result == ContentGuardRuleService.RESULT_BLOCK:
@@ -231,7 +242,7 @@ class ContentRuntimeGuardService:
                         max_scan_bytes=max_scan_bytes,
                         rules_json=getattr(setting, "content_guard_rules_json", ""),
                         url_allowlist=getattr(setting, "content_guard_url_allowlist_json", ""),
-                        url_check_enabled=bool(getattr(setting, "content_guard_url_check_enabled", True)),
+                        url_check_enabled=ContentRuntimeGuardService.url_check_enabled(setting),
                         **ContentRuntimeGuardService.enhanced_detection_kwargs(setting),
                     )
                     if window_result.result == ContentGuardRuleService.RESULT_BLOCK:
@@ -239,24 +250,6 @@ class ContentRuntimeGuardService:
                         return window_result
                     if window_result.result == ContentGuardRuleService.RESULT_REVIEW:
                         combined_result = window_result
-        residual_text = ContentRuntimeGuardService.extract_pending_sse_data_text(event_buffer)
-        if combined_result.result == ContentGuardRuleService.RESULT_PASS and residual_text:
-            text_result = ContentGuardRuleService.inspect_response_text(
-                residual_text,
-                endpoint_path=endpoint_path,
-                request_payload=request_payload,
-                max_scan_bytes=max_scan_bytes,
-                rules_json=getattr(setting, "content_guard_rules_json", ""),
-                url_allowlist=getattr(setting, "content_guard_url_allowlist_json", ""),
-                url_check_enabled=bool(getattr(setting, "content_guard_url_check_enabled", True)),
-                **ContentRuntimeGuardService.enhanced_detection_kwargs(setting),
-            )
-            if len(event_buffer) >= max_scan_bytes:
-                keep_bytes = max(512, min(4096, max_scan_bytes // 4))
-                del event_buffer[:-keep_bytes]
-            if text_result.result != ContentGuardRuleService.RESULT_PASS:
-                ContentRuntimeGuardService.apply_runtime_action(text_result, setting=setting)
-                return text_result
         ContentRuntimeGuardService.trim_stream_window(event_buffer, max_scan_bytes=max_scan_bytes)
         if combined_result.result != ContentGuardRuleService.RESULT_PASS:
             ContentRuntimeGuardService.apply_runtime_action(combined_result, setting=setting)
@@ -623,18 +616,6 @@ class ContentRuntimeGuardService:
             raise
         finally:
             db.close()
-
-    @staticmethod
-    def extract_pending_sse_data_text(event_buffer: bytearray) -> str:
-        payload_lines: list[str] = []
-        for raw_line in bytes(event_buffer).splitlines():
-            line = raw_line.strip()
-            if not line.startswith(b"data:"):
-                continue
-            payload = line[5:].strip()
-            if payload:
-                payload_lines.append(payload.decode("utf-8", errors="ignore"))
-        return "\n".join(payload_lines)
 
     @staticmethod
     def trim_stream_window(event_buffer: bytearray, *, max_scan_bytes: int) -> None:

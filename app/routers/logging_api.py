@@ -371,7 +371,7 @@ def build_request_log_timeline_payload(
         "request_log": RequestLogOut.model_validate(
             LogService.serialize_log(
                 log,
-                include_payload_fields=False,
+                include_payload_fields=True,
                 derive_image_observability=False,
                 raw_api_key_by_id=LogService.load_raw_api_keys_for_logs(db, [log]),
             )

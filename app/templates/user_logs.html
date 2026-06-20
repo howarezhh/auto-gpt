@@ -35,6 +35,8 @@
                     <option value="responses">响应请求</option>
                     <option value="moderations">内容审核请求</option>
                     <option value="files">文件请求</option>
+                    <option value="gemini">Gemini 原生请求</option>
+                    <option value="claude_messages">Claude 原生请求</option>
                 </select>
             </label>
             <label>
@@ -44,7 +46,7 @@
                 </select>
             </label>
             <label>
-                <span>模型名</span>
+                <span>模型ID</span>
                 <select class="field-input" id="logs-model-name">
                     <option value="">全部</option>
                 </select>
@@ -74,8 +76,8 @@
             <summary>高级筛选</summary>
             <div class="filter-grid compact-filter-grid">
                 <label>
-                    <span>手动模型</span>
-                    <input class="field-input" id="logs-model-query" type="text" placeholder="输入模型名关键字">
+                    <span>手动模型ID</span>
+                    <input class="field-input" id="logs-model-query" type="text" placeholder="输入模型ID关键字">
                 </label>
                 <label>
                     <span>手动密钥</span>

@@ -16,6 +16,7 @@ class SettingUpdate(BaseModel):
     route_exhausted_retry_max_wait_seconds: int = Field(default=600, ge=0, le=600)
     route_exhausted_retry_infinite_enabled: bool = False
     trusted_providers_only: bool = False
+    route_strategy: Literal["availability_first", "latency_first", "capacity_avoidance"] = "availability_first"
     route_health_gate_mode: Literal["permissive", "healthy_only", "trusted_healthy"] = "permissive"
     max_candidate_count: int = Field(default=10, ge=1, le=500)
     route_candidate_expand_count: int = Field(default=5, ge=0, le=100)

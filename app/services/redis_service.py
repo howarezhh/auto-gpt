@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 
 from redis import Redis as SyncRedis
 from redis.asyncio import Redis
@@ -13,6 +14,7 @@ class RedisService:
     _client: Redis | None = None
     _sync_client: SyncRedis | None = None
     _last_error: str | None = None
+    _last_error_at: float | None = None
     _loop: asyncio.AbstractEventLoop | None = None
     _loop_thread_id: int | None = None
 
@@ -54,9 +56,9 @@ class RedisService:
             cls._client = cls.create_async_client()
         try:
             await cls._client.ping()
-            cls._last_error = None
+            cls.clear_last_error()
         except Exception as exc:
-            cls._last_error = str(exc)
+            cls.mark_error(exc)
 
     @classmethod
     def get_client(cls) -> Redis:
@@ -74,15 +76,31 @@ class RedisService:
     async def ping(cls) -> bool:
         try:
             await cls.get_client().ping()
-            cls._last_error = None
+            cls.clear_last_error()
             return True
         except Exception as exc:
-            cls._last_error = str(exc)
+            cls.mark_error(exc)
             return False
 
     @classmethod
     def last_error(cls) -> str | None:
         return cls._last_error
+
+    @classmethod
+    def mark_error(cls, exc: Exception | str) -> None:
+        cls._last_error = str(exc)
+        cls._last_error_at = time.monotonic()
+
+    @classmethod
+    def clear_last_error(cls) -> None:
+        cls._last_error = None
+        cls._last_error_at = None
+
+    @classmethod
+    def should_skip_after_recent_error(cls, *, cooldown_seconds: float = 5.0) -> bool:
+        if cls._last_error is None or cls._last_error_at is None:
+            return False
+        return time.monotonic() - cls._last_error_at < max(0.1, cooldown_seconds)
 
     @classmethod
     def event_loop(cls) -> asyncio.AbstractEventLoop | None:

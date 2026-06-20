@@ -1,6 +1,5 @@
 from app.utils.timezone import now_beijing
 import hashlib
-from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from threading import Lock
 from typing import Any
@@ -22,61 +21,7 @@ from app.services.provider_health_state_service import ProviderHealthStateServic
 from app.services.provider_service import ProviderService
 from app.services.setting_service import SettingService
 from app.services.content_trust_probe_service import ContentTrustProbeService
-
-
-@dataclass(slots=True)
-class RouteCandidate:
-    """描述单个可参与路由的 provider/model 候选项。"""
-
-    provider: Provider
-    provider_model: ProviderModel
-    recent_failure_rate: float = 0.0
-    recent_success_rate: float = 1.0
-    recent_avg_latency_ms: float | None = None
-    route_score: float = 0.0
-    health_tier: int = 1
-    sticky_affinity: float = 0.0
-    load_factor: float = 0.0
-    score_breakdown: dict[str, Any] = field(default_factory=dict)
-    selection_reason: str | None = None
-
-
-@dataclass(slots=True)
-class RecentSessionRoute:
-    """记录同一会话最近一次成功使用的模型与提供商。"""
-
-    provider_id: int | None
-    provider_model_id: int | None
-    model_name: str | None
-
-
-@dataclass(slots=True)
-class RoutePolicyContext:
-    """描述一次路由决策的策略上下文。"""
-
-    allowed_provider_ids: list[int] | None = None
-    forced_provider_id: int | None = None
-    preferred_provider_ids: list[int] | None = None
-    preferred_region_tags: list[str] | None = None
-    latency_bias: int = 1
-    success_rate_bias: int = 1
-    require_trusted_provider: bool = False
-    content_guard_required: bool = True
-    health_gate_mode: str | None = None
-
-    def with_forced_provider_id(self, forced_provider_id: int | None) -> "RoutePolicyContext":
-        """返回一个仅修改强制 provider 配置的新上下文对象。"""
-        return RoutePolicyContext(
-            allowed_provider_ids=list(self.allowed_provider_ids) if self.allowed_provider_ids is not None else None,
-            forced_provider_id=forced_provider_id,
-            preferred_provider_ids=list(self.preferred_provider_ids) if self.preferred_provider_ids is not None else None,
-            preferred_region_tags=list(self.preferred_region_tags) if self.preferred_region_tags is not None else None,
-            latency_bias=self.latency_bias,
-            success_rate_bias=self.success_rate_bias,
-            require_trusted_provider=self.require_trusted_provider,
-            content_guard_required=self.content_guard_required,
-            health_gate_mode=self.health_gate_mode,
-        )
+from app.services.routing.context import RecentSessionRoute, RouteCandidate, RoutePolicyContext
 
 
 class RouterService:
@@ -547,73 +492,29 @@ class RouterService:
         require_responses: bool,
         required_upstream_protocol_type: str | None,
     ) -> bool:
-        if not provider.enabled or provider.circuit_state == "open" or provider.maintenance_mode_enabled:
-            return False
-        if RouterService._provider_blocked_by_content_policy(provider, route_context=route_context):
-            return False
-        if allowed_provider_ids is not None and provider.id not in allowed_provider_ids:
-            return False
-        if not RouterService._provider_endpoint_protocol_allowed(
-            provider,
-            require_chat_completions=require_chat_completions,
-            require_responses=require_responses,
-            required_upstream_protocol_type=required_upstream_protocol_type,
-        ):
-            return False
-        if not provider_model.enabled:
-            return False
-        if RouterService._provider_model_blocked_by_content_policy(provider_model, provider=provider, route_context=route_context):
-            return False
-        if provider_model.model_name not in enabled_model_names:
-            return False
-        if model_name and provider_model.model_name != model_name:
-            return False
-        if not RouterService._provider_model_endpoint_protocol_allowed(
-            provider,
-            provider_model,
-            require_chat_completions=require_chat_completions,
-            require_responses=require_responses,
-            required_upstream_protocol_type=required_upstream_protocol_type,
-        ):
-            return False
-        if not RouterService._health_gate_allows(provider, provider_model, route_context=route_context):
-            return False
-        if require_stream and not provider_model.supports_stream:
-            return False
-        if require_vision and not provider_model.supports_vision:
-            return False
-        if require_tools and not provider_model.supports_tools:
-            return False
-        if require_image_generation and not ProviderService.provider_model_supports_image_generation(provider_model):
-            return False
-        if require_vision and RouterService._capability_probe_failed(
-            provider,
-            provider_model,
-            "vision",
-            endpoint_path=required_endpoint_path,
-        ):
-            return False
-        if require_tools and RouterService._capability_probe_failed(
-            provider,
-            provider_model,
-            "tools",
-            endpoint_path=required_endpoint_path,
-        ):
-            return False
-        if require_image_generation and RouterService._capability_probe_failed(provider, provider_model, "image_generation"):
-            return False
-        if provider_model.circuit_state == "open":
-            if not RouterService._should_probe_open_model(
-                provider=provider,
-                provider_model=provider_model,
-                recovery_interval_sec=ProviderService.get_effective_recovery_probe_interval_sec(db, provider),
+        from app.services.routing.filters import RouteFilterEvaluationContext, evaluate_runtime_candidate
+
+        decision = evaluate_runtime_candidate(
+            provider=provider,
+            provider_model=provider_model,
+            context=RouteFilterEvaluationContext(
+                db=db,
+                model_name=model_name,
+                route_context=route_context,
+                allowed_provider_ids=allowed_provider_ids,
+                enabled_model_names=enabled_model_names,
+                required_endpoint_path=required_endpoint_path,
                 now=now,
-            ):
-                return False
-            # 打开熔断后仅允许极少量探测流量进入 half-open 探针流程。
-            if not RouterService._claim_half_open_probe(db, provider_model, now):
-                return False
-        return True
+                require_vision=require_vision,
+                require_stream=require_stream,
+                require_tools=require_tools,
+                require_image_generation=require_image_generation,
+                require_chat_completions=require_chat_completions,
+                require_responses=require_responses,
+                required_upstream_protocol_type=required_upstream_protocol_type,
+            ),
+        )
+        return decision.allowed
 
     @staticmethod
     def _build_route_candidate(
@@ -921,10 +822,75 @@ class RouterService:
                 "forced_provider_not_found",
                 extra={"provider_id": effective_forced_provider_id},
             )
+        from app.services.routing.filters import (
+            CapabilityFilter,
+            CapabilityProbeFilter,
+            HealthGateFilter,
+            ModelCircuitFilter,
+            ProviderAuthorizationFilter,
+            ProviderAvailabilityFilter,
+            ProviderContentTrustFilter,
+            ProviderEndpointProtocolFilter,
+            ProviderModelBasicFilter,
+            ProviderModelEndpointProtocolFilter,
+            RouteFilterChain,
+            RouteFilterDecision,
+            RouteFilterEvaluationContext,
+        )
+
+        def record_filter_decision(
+            decision: RouteFilterDecision,
+            *,
+            provider: Provider | None = None,
+            provider_model: ProviderModel | None = None,
+        ) -> None:
+            RouterService._record_diagnostic_reason(
+                diagnostics,
+                decision.reason_code,
+                provider=provider,
+                provider_model=provider_model,
+                extra=decision.details or None,
+            )
+
+        provider_filter_chain = RouteFilterChain(
+            (
+                ProviderAvailabilityFilter(),
+                ProviderContentTrustFilter(),
+                ProviderAuthorizationFilter(),
+                ProviderEndpointProtocolFilter(),
+            )
+        )
+        model_filter_chain = RouteFilterChain(
+            (
+                ProviderModelBasicFilter(),
+                ProviderModelEndpointProtocolFilter(),
+                HealthGateFilter(),
+                CapabilityFilter(),
+                CapabilityProbeFilter(),
+                ModelCircuitFilter(),
+            )
+        )
         pre_capacity_candidates: list[RouteCandidate] = []
         required_endpoint_path = RouterService._required_endpoint_path(
             require_chat_completions=require_chat_completions,
             require_responses=require_responses,
+        )
+        filter_context = RouteFilterEvaluationContext(
+            db=db,
+            model_name=model_name,
+            route_context=route_context,
+            allowed_provider_ids=allowed_provider_ids,
+            enabled_model_names=enabled_model_names,
+            required_endpoint_path=required_endpoint_path,
+            now=now,
+            require_vision=require_vision,
+            require_stream=require_stream,
+            require_tools=require_tools,
+            require_image_generation=require_image_generation,
+            require_chat_completions=require_chat_completions,
+            require_responses=require_responses,
+            required_upstream_protocol_type=required_upstream_protocol_type,
+            claim_half_open_probe=False,
         )
         for provider in providers:
             if effective_forced_provider_id is not None and provider.id != effective_forced_provider_id:
@@ -933,125 +899,17 @@ class RouterService:
             if not provider.provider_models:
                 RouterService._record_diagnostic_reason(diagnostics, "provider_without_models", provider=provider)
                 continue
-            if not provider.enabled:
-                RouterService._record_diagnostic_reason(diagnostics, "provider_disabled", provider=provider)
-                continue
-            if provider.circuit_state == "open":
-                RouterService._record_diagnostic_reason(diagnostics, "provider_circuit_open", provider=provider)
-                continue
-            if provider.maintenance_mode_enabled:
-                RouterService._record_diagnostic_reason(diagnostics, "provider_maintenance_mode", provider=provider)
-                continue
-            content_policy_reason = RouterService._content_policy_diagnostic_reason(provider, route_context=route_context)
-            if content_policy_reason:
-                RouterService._record_diagnostic_reason(diagnostics, content_policy_reason, provider=provider)
-                continue
-            if allowed_provider_ids is not None and provider.id not in allowed_provider_ids:
-                RouterService._record_diagnostic_reason(diagnostics, "provider_not_authorized", provider=provider)
-                continue
-            if not RouterService._provider_endpoint_protocol_allowed(
-                provider,
-                require_chat_completions=require_chat_completions,
-                require_responses=require_responses,
-                required_upstream_protocol_type=required_upstream_protocol_type,
-            ):
-                required_native = RouterService._normalize_required_upstream_protocol_type(required_upstream_protocol_type)
-                if required_native:
-                    RouterService._record_protocol_mismatch_reason(
-                        diagnostics,
-                        provider=provider,
-                        provider_model=None,
-                        required_protocol=required_native,
-                        actual_protocol=ProviderService.provider_protocol_type(provider),
-                    )
-                elif require_chat_completions:
-                    RouterService._record_diagnostic_reason(diagnostics, "provider_chat_protocol_not_supported", provider=provider)
-                else:
-                    RouterService._record_diagnostic_reason(diagnostics, "provider_responses_protocol_not_supported", provider=provider)
+            provider_decision = provider_filter_chain.evaluate_candidate(provider, provider.provider_models[0], filter_context)
+            if not provider_decision.allowed:
+                record_filter_decision(provider_decision, provider=provider)
                 continue
             for provider_model in provider.provider_models:
                 diagnostics["mounted_model_total"] += 1
                 if model_name and provider_model.model_name == model_name:
                     diagnostics["matching_model_mount_count"] += 1
-                if not provider_model.enabled:
-                    RouterService._record_diagnostic_reason(diagnostics, "model_disabled", provider=provider, provider_model=provider_model)
-                    continue
-                if RouterService._provider_model_blocked_by_content_policy(provider_model, provider=provider, route_context=route_context):
-                    RouterService._record_diagnostic_reason(diagnostics, "model_content_integrity_blocked", provider=provider, provider_model=provider_model)
-                    continue
-                if provider_model.model_name not in enabled_model_names:
-                    RouterService._record_diagnostic_reason(diagnostics, "model_globally_disabled", provider=provider, provider_model=provider_model)
-                    continue
-                if model_name and provider_model.model_name != model_name:
-                    RouterService._record_diagnostic_reason(diagnostics, "model_name_mismatch", provider=provider, provider_model=provider_model)
-                    continue
-                if not RouterService._provider_model_endpoint_protocol_allowed(
-                    provider,
-                    provider_model,
-                    require_chat_completions=require_chat_completions,
-                    require_responses=require_responses,
-                    required_upstream_protocol_type=required_upstream_protocol_type,
-                ):
-                    required_native = RouterService._normalize_required_upstream_protocol_type(required_upstream_protocol_type)
-                    if required_native:
-                        RouterService._record_protocol_mismatch_reason(
-                            diagnostics,
-                            provider=provider,
-                            provider_model=provider_model,
-                            required_protocol=required_native,
-                            actual_protocol=ProviderService.provider_or_model_native_protocol(provider, provider_model)
-                            or ProviderService.provider_model_protocol_type(provider_model),
-                        )
-                    elif require_chat_completions:
-                        RouterService._record_diagnostic_reason(diagnostics, "chat_not_supported", provider=provider, provider_model=provider_model)
-                    else:
-                        RouterService._record_diagnostic_reason(diagnostics, "responses_not_supported", provider=provider, provider_model=provider_model)
-                    continue
-                health_gate_reason = RouterService._health_gate_diagnostic_reason(provider, provider_model, route_context=route_context)
-                if health_gate_reason:
-                    RouterService._record_diagnostic_reason(diagnostics, health_gate_reason, provider=provider, provider_model=provider_model)
-                    continue
-                if require_stream and not provider_model.supports_stream:
-                    RouterService._record_diagnostic_reason(diagnostics, "stream_not_supported", provider=provider, provider_model=provider_model)
-                    continue
-                if require_chat_completions and not provider_model.supports_chat_completions and not ProviderService.provider_or_model_native_protocol(provider, provider_model):
-                    RouterService._record_diagnostic_reason(diagnostics, "chat_not_supported", provider=provider, provider_model=provider_model)
-                    continue
-                if require_responses and not provider_model.supports_responses and not ProviderService.provider_or_model_native_protocol(provider, provider_model):
-                    RouterService._record_diagnostic_reason(diagnostics, "responses_not_supported", provider=provider, provider_model=provider_model)
-                    continue
-                if require_vision and not provider_model.supports_vision:
-                    RouterService._record_diagnostic_reason(diagnostics, "vision_not_supported", provider=provider, provider_model=provider_model)
-                    continue
-                if require_image_generation and not ProviderService.provider_model_supports_image_generation(provider_model):
-                    RouterService._record_diagnostic_reason(diagnostics, "image_generation_not_supported", provider=provider, provider_model=provider_model)
-                    continue
-                if require_vision and RouterService._capability_probe_failed(
-                    provider,
-                    provider_model,
-                    "vision",
-                    endpoint_path=required_endpoint_path,
-                ):
-                    RouterService._record_diagnostic_reason(diagnostics, "vision_probe_unhealthy", provider=provider, provider_model=provider_model)
-                    continue
-                if require_tools and RouterService._capability_probe_failed(
-                    provider,
-                    provider_model,
-                    "tools",
-                    endpoint_path=required_endpoint_path,
-                ):
-                    RouterService._record_diagnostic_reason(diagnostics, "tools_probe_unhealthy", provider=provider, provider_model=provider_model)
-                    continue
-                if require_image_generation and RouterService._capability_probe_failed(provider, provider_model, "image_generation"):
-                    RouterService._record_diagnostic_reason(diagnostics, "image_generation_probe_unhealthy", provider=provider, provider_model=provider_model)
-                    continue
-                if provider_model.circuit_state == "open" and not RouterService._should_probe_open_model(
-                    provider=provider,
-                    provider_model=provider_model,
-                    recovery_interval_sec=ProviderService.get_effective_recovery_probe_interval_sec(db, provider),
-                    now=now,
-                ):
-                    RouterService._record_diagnostic_reason(diagnostics, "model_circuit_open", provider=provider, provider_model=provider_model)
+                model_decision = model_filter_chain.evaluate_candidate(provider, provider_model, filter_context)
+                if not model_decision.allowed:
+                    record_filter_decision(model_decision, provider=provider, provider_model=provider_model)
                     continue
                 pre_capacity_candidates.append(
                     RouteCandidate(
@@ -1353,33 +1211,19 @@ class RouterService:
     def _filter_capacity_candidates(candidates: list[RouteCandidate], *, is_stream: bool) -> list[RouteCandidate]:
         if not candidates:
             return []
+        from app.services.routing.filters import CapacityFilter
+
         snapshots = ProviderCapacityService.snapshots({item.provider.id for item in candidates})
-        filtered: list[RouteCandidate] = []
-        for candidate in candidates:
-            snapshot = snapshots.get(candidate.provider.id)
-            if snapshot is None:
-                continue
-            if not ProviderCapacityService._has_capacity(candidate.provider, snapshot=snapshot, is_stream=is_stream):
-                continue
-            candidate.load_factor = RouterService._capacity_load_factor(candidate.provider, snapshot, is_stream=is_stream)
-            filtered.append(candidate)
-        return filtered
+        return CapacityFilter().apply_with_snapshots(candidates, snapshots=snapshots, is_stream=is_stream).kept_candidates
 
     @staticmethod
     async def _async_filter_capacity_candidates(candidates: list[RouteCandidate], *, is_stream: bool) -> list[RouteCandidate]:
         if not candidates:
             return []
+        from app.services.routing.filters import CapacityFilter
+
         snapshots = await ProviderCapacityService.async_snapshots({item.provider.id for item in candidates})
-        filtered: list[RouteCandidate] = []
-        for candidate in candidates:
-            snapshot = snapshots.get(candidate.provider.id)
-            if snapshot is None:
-                continue
-            if not ProviderCapacityService._has_capacity(candidate.provider, snapshot=snapshot, is_stream=is_stream):
-                continue
-            candidate.load_factor = RouterService._capacity_load_factor(candidate.provider, snapshot, is_stream=is_stream)
-            filtered.append(candidate)
-        return filtered
+        return CapacityFilter().apply_with_snapshots(candidates, snapshots=snapshots, is_stream=is_stream).kept_candidates
 
     @staticmethod
     def _health_tier(
@@ -1467,7 +1311,7 @@ class RouterService:
             "provider_responses_protocol_not_supported": "提供商不支持 Responses API",
             "model_disabled": "提供商模型已禁用",
             "model_globally_disabled": "模型管理中已禁用",
-            "model_name_mismatch": "模型名不匹配",
+            "model_name_mismatch": "模型ID不匹配",
             "stream_not_supported": "模型不支持流式",
             "vision_not_supported": "模型不支持图像",
             "tools_not_supported": "模型不支持工具调用",
@@ -1602,6 +1446,19 @@ class RouterService:
         capacity_snapshot: ProviderCapacitySnapshot | None = None,
         route_context: RoutePolicyContext | None = None,
     ) -> dict[str, Any]:
+        from app.services.routing.scorers import AvailabilityFirstScorer
+
+        return AvailabilityFirstScorer.score_breakdown(
+            provider=provider,
+            provider_model=provider_model,
+            recent_success_rate=recent_success_rate,
+            recent_avg_latency_ms=recent_avg_latency_ms,
+            is_stream=is_stream,
+            model_health_state=model_health_state,
+            provider_health_state=provider_health_state,
+            capacity_snapshot=capacity_snapshot,
+            route_context=route_context,
+        )
         model_health_state = model_health_state or {}
         provider_health_state = provider_health_state or {}
         effective_health_status = str(model_health_state.get("health_status") or provider_model.health_status or "unknown")
@@ -1774,22 +1631,14 @@ class RouterService:
 
     @staticmethod
     def _balanced_order(candidates: list[RouteCandidate]) -> list[RouteCandidate]:
-        return sorted(
-            candidates,
-            key=lambda item: (
-                -RouterService._route_score_tie_bucket(item.route_score),
-                item.load_factor,
-                -float(item.score_breakdown.get("preferred_provider_bonus") or 0.0),
-                -item.route_score,
-                item.provider_model.priority,
-                item.provider.priority,
-                item.provider.id,
-                item.provider_model.id,
-            ),
-        )
+        from app.services.routing.orderers import BalancedScoreOrderer
+
+        BalancedScoreOrderer.route_score_tie_bucket_size = RouterService.ROUTE_SCORE_TIE_BUCKET
+        return BalancedScoreOrderer.order(candidates).candidates
 
     @staticmethod
     def _route_score_tie_bucket(route_score: float | None) -> int:
-        score = max(0.0, float(route_score or 0.0))
-        bucket = max(1.0, RouterService.ROUTE_SCORE_TIE_BUCKET)
-        return int((score + bucket / 2.0) // bucket)
+        from app.services.routing.orderers import BalancedScoreOrderer
+
+        BalancedScoreOrderer.route_score_tie_bucket_size = RouterService.ROUTE_SCORE_TIE_BUCKET
+        return BalancedScoreOrderer.route_score_tie_bucket(route_score)

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.logging.dispatcher import LoggingDispatcher
@@ -38,7 +40,6 @@ class RequestLogRecorder:
     }
     PROVIDER_ATTEMPT_RESULTS = {
         "success",
-        "stream_opened",
         "http_error",
         "exception",
         "model_not_found",
@@ -112,15 +113,23 @@ class RequestLogRecorder:
     @staticmethod
     def record_missing_events_from_summary(db: Session, log: RequestLog, *, auto_commit: bool = False) -> int:
         events = []
+        existing_signatures_by_model: dict[type, set[tuple[tuple[str, Any], ...]]] = {}
         for event in RequestLogRecorder.build_events_from_summary(log):
             model = RequestLogRecorder.EVENT_MODELS.get(event.envelope.event_name)
             if model is None or log.id is None:
                 continue
-            exists = db.scalar(
-                select(func.count()).select_from(model).where(model.request_log_id == log.id)
-            )
-            if not exists:
+            if model not in existing_signatures_by_model:
+                rows = db.scalars(
+                    select(model).where(model.request_log_id == log.id)
+                ).all()
+                existing_signatures_by_model[model] = {
+                    RequestLogRecorder._row_signature(model, row)
+                    for row in rows
+                }
+            signature = RequestLogRecorder._event_signature(model, event.payload)
+            if signature not in existing_signatures_by_model[model]:
                 events.append(event)
+                existing_signatures_by_model[model].add(signature)
         if not events:
             return 0
         LoggingDispatcher.record_many(events, db=db, enqueue=False, auto_commit=auto_commit)
@@ -318,6 +327,7 @@ class RequestLogRecorder:
                     "first_token_latency_ms": log.first_token_latency_ms,
                     "ttfb_ms": log.ttfb_ms,
                     "duration_ms": log.duration_ms,
+                    "upstream_duration_ms": log.upstream_duration_ms,
                     "chunk_count": stream_payload.get("chunk_count"),
                     "captured_text_bytes": (
                         stream_payload.get("captured_text_bytes")
@@ -413,7 +423,7 @@ class RequestLogRecorder:
                     "trace_id": trace_id,
                     "billing_event_id": log.billing_event_id,
                     "billing_stage": log.billing_status or "queued",
-                    "token_source": "upstream_usage" if log.total_tokens is not None else "missing",
+                    "token_source": log.token_source or ("upstream_usage" if log.total_tokens is not None else "missing"),
                     "prompt_tokens": log.prompt_tokens,
                     "completion_tokens": log.completion_tokens,
                     "cache_read_tokens": log.cache_read_tokens,
@@ -609,8 +619,25 @@ class RequestLogRecorder:
                 native_payload.setdefault("request_path", log.request_path)
                 native_payload.setdefault("is_stream", log.is_stream)
             if event_name == "request_provider_attempt":
+                if native_payload.get("result") not in RequestLogRecorder.PROVIDER_ATTEMPT_RESULTS:
+                    continue
                 provider_attempt_index += 1
                 native_payload.setdefault("attempt_index", provider_attempt_index)
+                native_payload.setdefault("endpoint_path", log.request_path)
+            if event_name == "request_billing" and log.billing_status:
+                native_payload["billing_event_id"] = log.billing_event_id
+                native_payload["billing_stage"] = log.billing_status
+                native_payload["token_source"] = log.token_source or native_payload.get("token_source")
+                native_payload["prompt_tokens"] = log.prompt_tokens
+                native_payload["completion_tokens"] = log.completion_tokens
+                native_payload["cache_read_tokens"] = log.cache_read_tokens
+                native_payload["cache_write_tokens"] = log.cache_write_tokens
+                native_payload["prompt_cost"] = float(log.prompt_cost) if log.prompt_cost is not None else None
+                native_payload["completion_cost"] = float(log.completion_cost) if log.completion_cost is not None else None
+                native_payload["total_cost"] = float(log.total_cost) if log.total_cost is not None else None
+                native_payload["balance_after"] = float(log.api_client_balance_after) if log.api_client_balance_after is not None else None
+                native_payload["attempt_count"] = log.billing_attempt_count
+                native_payload["error"] = log.billing_error
             events.append(LoggingDispatcher.build_event(
                 event_type="external_request",
                 event_name=event_name,
@@ -636,6 +663,52 @@ class RequestLogRecorder:
             payload=payload,
         )
         return LoggingDispatcher.record(event, db=db, auto_commit=auto_commit)
+
+    @staticmethod
+    def _signature_skip_fields(model: type) -> set[str]:
+        skipped = {"id", "request_log_id", "trace_id", "created_at"}
+        if model is RequestUpstreamResponseEvent:
+            skipped.add("provider_attempt_event_id")
+        return skipped
+
+    @staticmethod
+    def _normalize_signature_value(value: Any) -> Any:
+        if isinstance(value, Decimal):
+            return str(value)
+        if isinstance(value, datetime):
+            return value.isoformat()
+        if isinstance(value, (list, dict)):
+            return dumps_sanitized(value)
+        return value
+
+    @staticmethod
+    def _signature_items(model: type, payload: dict[str, Any]) -> tuple[tuple[str, Any], ...]:
+        skipped = RequestLogRecorder._signature_skip_fields(model)
+        items: list[tuple[str, Any]] = []
+        for column in model.__table__.columns:
+            if column.name in skipped:
+                continue
+            items.append(
+                (
+                    column.name,
+                    RequestLogRecorder._normalize_signature_value(payload.get(column.name)),
+                )
+            )
+        return tuple(items)
+
+    @staticmethod
+    def _event_signature(model: type, payload: dict[str, Any]) -> tuple[tuple[str, Any], ...]:
+        return RequestLogRecorder._signature_items(model, payload)
+
+    @staticmethod
+    def _row_signature(model: type, row: Any) -> tuple[tuple[str, Any], ...]:
+        return RequestLogRecorder._signature_items(
+            model,
+            {
+                column.name: getattr(row, column.name)
+                for column in model.__table__.columns
+            },
+        )
 
     @staticmethod
     def _error_category_from_body(response_body_json: str | None) -> str | None:

@@ -24,7 +24,7 @@ from app.services.api_key_auth_cache import ApiKeyAuthCache
 from app.services.billing_service import BillingService
 from app.services.log_service import LogService
 from app.services.rate_limit_service import RateLimitExceededError, RateLimitService
-from app.services.router_service import RoutePolicyContext
+from app.services.routing import RoutePolicyContext, normalize_route_strategy
 from app.services.setting_service import SettingService
 from app.services.user_quota_service import UserQuotaService
 from app.utils.json_utils import dumps_json, loads_json
@@ -487,6 +487,7 @@ class ApiKeyService:
             allowed_provider_ids=allowed_provider_ids,
             require_trusted_provider=bool(getattr(route_setting, "trusted_providers_only", False)),
             health_gate_mode=str(getattr(route_setting, "route_health_gate_mode", "permissive") or "permissive"),
+            route_strategy=normalize_route_strategy(getattr(route_setting, "route_strategy", None)),
             preferred_provider_ids=loads_json(api_client_key.preferred_provider_ids_json, []),
             preferred_region_tags=loads_json(api_client_key.preferred_region_tags_json, []),
             latency_bias=api_client_key.latency_bias,

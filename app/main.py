@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 import asyncio
 import logging
+import time
 from uuid import uuid4
 
 import anyio.to_thread
@@ -271,7 +272,7 @@ def CONTENT_GUARD_COMPAT_COLUMNS(
             "content_guard_high_risk_strategy": "ALTER TABLE app_settings ADD COLUMN content_guard_high_risk_strategy TEXT NOT NULL DEFAULT 'switch_provider'",
             "content_guard_max_detection_delay_ms": "ALTER TABLE app_settings ADD COLUMN content_guard_max_detection_delay_ms INTEGER NOT NULL DEFAULT 300",
             "content_guard_stream_mode": "ALTER TABLE app_settings ADD COLUMN content_guard_stream_mode TEXT NOT NULL DEFAULT 'buffer_300ms'",
-            "content_guard_url_check_enabled": f"ALTER TABLE app_settings ADD COLUMN content_guard_url_check_enabled BOOLEAN NOT NULL DEFAULT {true_default}",
+            "content_guard_url_check_enabled": f"ALTER TABLE app_settings ADD COLUMN content_guard_url_check_enabled BOOLEAN NOT NULL DEFAULT {false_default}",
             "content_guard_url_allowlist_json": "ALTER TABLE app_settings ADD COLUMN content_guard_url_allowlist_json TEXT NOT NULL DEFAULT ''",
             "content_guard_async_review_enabled": f"ALTER TABLE app_settings ADD COLUMN content_guard_async_review_enabled BOOLEAN NOT NULL DEFAULT {true_default}",
             "content_guard_high_risk_confidence_threshold": "ALTER TABLE app_settings ADD COLUMN content_guard_high_risk_confidence_threshold INTEGER NOT NULL DEFAULT 85",
@@ -456,6 +457,7 @@ def _migrate_app_setting_concurrency_columns(db) -> None:
         "global_max_request_tokens": "ALTER TABLE app_settings ADD COLUMN global_max_request_tokens INTEGER DEFAULT 0",
         "route_exhausted_retry_max_wait_seconds": "ALTER TABLE app_settings ADD COLUMN route_exhausted_retry_max_wait_seconds INTEGER DEFAULT 600",
         "route_exhausted_retry_infinite_enabled": f"ALTER TABLE app_settings ADD COLUMN route_exhausted_retry_infinite_enabled BOOLEAN DEFAULT {false_default}",
+        "route_strategy": "ALTER TABLE app_settings ADD COLUMN route_strategy TEXT NOT NULL DEFAULT 'availability_first'",
         "trusted_providers_only": f"ALTER TABLE app_settings ADD COLUMN trusted_providers_only BOOLEAN DEFAULT {false_default}",
         "max_candidate_count": "ALTER TABLE app_settings ADD COLUMN max_candidate_count INTEGER DEFAULT 10",
         "route_candidate_expand_count": "ALTER TABLE app_settings ADD COLUMN route_candidate_expand_count INTEGER DEFAULT 5",
@@ -563,6 +565,29 @@ def _migrate_typed_logging_event_columns(db) -> None:
     dialect_name = db.get_bind().dialect.name
     float_type = "DOUBLE PRECISION" if dialect_name == "postgresql" else "FLOAT"
     additions_by_table = {
+        "request_route_decision_events": {
+            "hard_filter_final_candidate_count": "ALTER TABLE request_route_decision_events ADD COLUMN hard_filter_final_candidate_count INTEGER",
+            "candidate_count_after_failed_exclusion": "ALTER TABLE request_route_decision_events ADD COLUMN candidate_count_after_failed_exclusion INTEGER",
+            "base_candidate_count": "ALTER TABLE request_route_decision_events ADD COLUMN base_candidate_count INTEGER",
+            "candidate_expand_count": "ALTER TABLE request_route_decision_events ADD COLUMN candidate_expand_count INTEGER",
+            "candidate_window_count": "ALTER TABLE request_route_decision_events ADD COLUMN candidate_window_count INTEGER",
+            "selected_reason": "ALTER TABLE request_route_decision_events ADD COLUMN selected_reason TEXT",
+            "failed_candidate_keys_json": "ALTER TABLE request_route_decision_events ADD COLUMN failed_candidate_keys_json TEXT",
+            "failed_candidate_count": "ALTER TABLE request_route_decision_events ADD COLUMN failed_candidate_count INTEGER",
+            "hard_filter_reason_counts_json": "ALTER TABLE request_route_decision_events ADD COLUMN hard_filter_reason_counts_json TEXT",
+            "top_candidates_json": "ALTER TABLE request_route_decision_events ADD COLUMN top_candidates_json TEXT",
+            "stage_traces_json": "ALTER TABLE request_route_decision_events ADD COLUMN stage_traces_json TEXT",
+            "retry_wait_plan_json": "ALTER TABLE request_route_decision_events ADD COLUMN retry_wait_plan_json TEXT",
+            "selection_guard": "ALTER TABLE request_route_decision_events ADD COLUMN selection_guard TEXT",
+        },
+        "request_provider_attempt_events": {
+            "route_round": "ALTER TABLE request_provider_attempt_events ADD COLUMN route_round INTEGER",
+            "retry_index": "ALTER TABLE request_provider_attempt_events ADD COLUMN retry_index INTEGER",
+            "error_message": "ALTER TABLE request_provider_attempt_events ADD COLUMN error_message TEXT",
+            "retry_wait_seconds": f"ALTER TABLE request_provider_attempt_events ADD COLUMN retry_wait_seconds {float_type}",
+            "retry_wait_plan_json": "ALTER TABLE request_provider_attempt_events ADD COLUMN retry_wait_plan_json TEXT",
+            "detail_json": "ALTER TABLE request_provider_attempt_events ADD COLUMN detail_json TEXT",
+        },
         "request_content_guard_events": {
             "provider_id": "ALTER TABLE request_content_guard_events ADD COLUMN provider_id INTEGER",
             "provider_name": "ALTER TABLE request_content_guard_events ADD COLUMN provider_name TEXT",
@@ -659,6 +684,7 @@ def _migrate_cache_price_columns(db) -> None:
             "rounding_strategy": "ALTER TABLE model_catalogs ADD COLUMN rounding_strategy TEXT NOT NULL DEFAULT 'ROUND_HALF_UP'",
         },
         "request_logs": {
+            "request_status": "ALTER TABLE request_logs ADD COLUMN request_status TEXT",
             "channel_price_cache_per_1k": f"ALTER TABLE request_logs ADD COLUMN channel_price_cache_per_1k {price_type}",
             "channel_price_cache_write_per_1k": f"ALTER TABLE request_logs ADD COLUMN channel_price_cache_write_per_1k {price_type}",
             "source_currency": "ALTER TABLE request_logs ADD COLUMN source_currency TEXT",
@@ -676,6 +702,7 @@ def _migrate_cache_price_columns(db) -> None:
             "exchange_rate_version": "ALTER TABLE request_logs ADD COLUMN exchange_rate_version TEXT",
             "rounding_strategy": "ALTER TABLE request_logs ADD COLUMN rounding_strategy TEXT",
             "model_reasoning_effort": "ALTER TABLE request_logs ADD COLUMN model_reasoning_effort TEXT",
+            "upstream_duration_ms": "ALTER TABLE request_logs ADD COLUMN upstream_duration_ms INTEGER",
             "pricing_tier_key": "ALTER TABLE request_logs ADD COLUMN pricing_tier_key TEXT",
             "pricing_tier_name": "ALTER TABLE request_logs ADD COLUMN pricing_tier_name TEXT",
             "reasoning_tokens": "ALTER TABLE request_logs ADD COLUMN reasoning_tokens INTEGER",
@@ -1094,6 +1121,7 @@ app.mount("/uploaded-assets", StaticFiles(directory=settings.uploads_dir), name=
 
 @app.middleware("http")
 async def trace_and_runtime_middleware(request: Request, call_next):
+    request.state.request_started_at_perf = time.perf_counter()
     trace_id = getattr(request.state, "trace_id", None) or request.headers.get("x-trace-id") or request.headers.get("x-request-id") or uuid4().hex
     request.state.trace_id = trace_id
     if not getattr(request.state, "ip_management", None):

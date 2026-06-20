@@ -1,5 +1,8 @@
 {% extends "base.html" %}
 {% block content %}
+<script id="provider-page-bootstrap" type="application/json">
+{{ provider_bootstrap_json | safe }}
+</script>
 <section class="panel-card section-shell">
     <div class="section-subhead">
         <div>
@@ -87,6 +90,7 @@
                 <option value="100">100 条/页</option>
             </select>
         </div>
+        <div class="table-muted provider-directory-status hidden" id="provider-directory-status" role="status" aria-live="polite"></div>
     </div>
     <div class="table-shell provider-table-shell">
         <table class="data-table provider-data-table provider-registry-table">
@@ -375,30 +379,38 @@
                     <div class="provider-preset-manager hidden" id="provider-preset-manager" aria-hidden="true">
                         <div class="provider-preset-manager-head">
                             <strong>编辑预设模型</strong>
-                            <span>用于快速添加常用或自定义模型名。</span>
+                            <span>用于快速添加常用或自定义模型ID。</span>
                         </div>
                         <div class="provider-preset-editor-list" id="provider-preset-editor-list"></div>
                         <div class="provider-model-custom-row">
-                            <label class="visually-hidden" for="provider-new-preset-model">新增预设模型名</label>
-                            <input class="field-input" id="provider-new-preset-model" placeholder="新增预设模型名" type="text">
+                            <label class="visually-hidden" for="provider-new-preset-model">新增预设模型ID</label>
+                            <input class="field-input" id="provider-new-preset-model" placeholder="新增预设模型ID" type="text">
                             <button class="btn btn-ghost interactive-btn" id="provider-add-preset-model" type="button">新增预设</button>
                         </div>
                     </div>
                 </div>
-                <div class="provider-model-custom-row">
+                <div class="provider-model-custom-row provider-model-custom-add-row">
                     <label for="provider-custom-model-name">
-                        <span>模型名称</span>
-                        <input class="field-input" id="provider-custom-model-name" placeholder="平台对外别名，例如 gemini-pro" type="text">
+                        <span>模型ID</span>
+                        <input class="field-input" id="provider-custom-model-name" placeholder="平台唯一模型ID，例如 gemini-pro" type="text">
                     </label>
                     <label for="provider-custom-model-id">
-                        <span>模型ID</span>
-                        <input class="field-input" id="provider-custom-model-id" placeholder="上游官方模型名，例如 gemini-2.5-pro" type="text">
+                        <span>上游模型ID</span>
+                        <input class="field-input" id="provider-custom-model-id" placeholder="上游模型ID，例如 gemini-2.5-pro" type="text">
+                    </label>
+                    <label for="provider-custom-model-protocol">
+                        <span>端点协议</span>
+                        <select class="field-input" id="provider-custom-model-protocol"></select>
+                    </label>
+                    <label for="provider-custom-model-group">
+                        <span>模型分组</span>
+                        <select class="field-input" id="provider-custom-model-group"></select>
                     </label>
                     <button class="btn btn-ghost interactive-btn" id="provider-add-custom-model" type="button">添加自定义模型</button>
                 </div>
                 <div class="provider-model-config-head" aria-hidden="true">
-                    <span>模型名称 * <small>对外别名</small></span>
-                    <span>模型ID * <small>上游官方名</small></span>
+                    <span>模型ID * <small>平台唯一标识</small></span>
+                    <span>上游模型ID * <small>上游官方名</small></span>
                     <span>启用 <small>默认是</small></span>
                     <span>端点协议 <small>自动推断</small></span>
                     <span>模型分组 <small>自动推断</small></span>

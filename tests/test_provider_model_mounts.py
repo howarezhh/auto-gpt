@@ -8,9 +8,12 @@ from app.database import SessionLocal
 from app.models.model_catalog import ModelCatalog
 from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
-from app.schemas.model_catalog import ModelCatalogOptionOut, ModelCatalogOut
+from app.schemas.model_catalog import ModelCatalogBatchImportRequest, ModelCatalogOptionOut, ModelCatalogOut
+from app.schemas.provider import ProviderModelConfigInput
 from app.services.model_catalog_service import ModelCatalogService
+from app.services.provider_health_state_service import ProviderHealthStateService
 from app.services.provider_service import ProviderService
+from app.services.routing import AvailabilityFirstScorer, BalancedScoreOrderer, RouteCandidate
 from app.utils.timezone import now_beijing
 
 
@@ -48,6 +51,37 @@ def test_provider_model_quality_metrics_respect_requested_window(monkeypatch) ->
     assert captured["quality_window_minutes"] == 24 * 60
     assert metrics["provider_models"][11]["quality_window_minutes"] == 24 * 60
     assert metrics["provider_models"][11]["recent_request_count"] == 2
+
+
+def test_provider_priority_contributes_to_route_score_and_ordering() -> None:
+    high_priority_provider = SimpleNamespace(id=1, priority=5, max_active_requests=None, max_active_streams=None, max_qps=None, max_rpm=None, region_tag=None)
+    low_priority_provider = SimpleNamespace(id=2, priority=80, max_active_requests=None, max_active_streams=None, max_qps=None, max_rpm=None, region_tag=None)
+    high_priority_model = SimpleNamespace(id=11, priority=40, health_status="healthy", circuit_state="closed", last_latency_ms=None)
+    low_priority_model = SimpleNamespace(id=22, priority=40, health_status="healthy", circuit_state="closed", last_latency_ms=None)
+
+    high_breakdown = AvailabilityFirstScorer.score_breakdown(
+        provider=high_priority_provider,
+        provider_model=high_priority_model,
+        recent_success_rate=1.0,
+        recent_avg_latency_ms=0,
+    )
+    low_breakdown = AvailabilityFirstScorer.score_breakdown(
+        provider=low_priority_provider,
+        provider_model=low_priority_model,
+        recent_success_rate=1.0,
+        recent_avg_latency_ms=0,
+    )
+
+    assert high_breakdown["provider_priority_score"] > low_breakdown["provider_priority_score"]
+    assert high_breakdown["final_score"] > low_breakdown["final_score"]
+
+    ordered = BalancedScoreOrderer.order(
+        [
+            RouteCandidate(provider=low_priority_provider, provider_model=low_priority_model, route_score=100),
+            RouteCandidate(provider=high_priority_provider, provider_model=high_priority_model, route_score=100),
+        ]
+    ).candidates
+    assert ordered[0].provider.id == high_priority_provider.id
 
 
 def test_model_group_inference_covers_mainstream_model_families() -> None:
@@ -106,6 +140,72 @@ def test_provider_model_mount_list_filters_by_model_group() -> None:
     compiled = captured[0].compile()
     assert "provider_models.model_group" in str(compiled)
     assert compiled.params["model_group_1"] == "qwen"
+
+
+def test_batch_provider_governance_marks_available_and_trusted() -> None:
+    provider_name = f"批量治理{uuid4().hex[:8]}"
+    with SessionLocal() as db:
+        provider = Provider(
+            name=provider_name,
+            base_url="https://provider.example.com/v1",
+            api_key="sk-test",
+            provider_type="openai_compatible",
+            enabled=False,
+            health_status="unhealthy",
+            circuit_state="open",
+            circuit_opened_at=now_beijing(),
+            trust_level="low",
+            content_integrity_status="blocked",
+            content_integrity_score=10,
+        )
+        provider_model = ProviderModel(
+            model_name=f"批量治理模型{uuid4().hex[:6]}",
+            upstream_model_name="batch-governance-model",
+            enabled=True,
+            health_status="unhealthy",
+            circuit_state="open",
+            circuit_opened_at=now_beijing(),
+            last_error=ProviderHealthStateService.FIXED_SUCCESS_RESPONSE_ERROR_CODE,
+            protocol_type="both",
+            model_group="openai",
+            content_integrity_status="blocked",
+        )
+        provider.provider_models = [provider_model]
+        db.add(provider)
+        db.commit()
+        try:
+            result = ProviderService.batch_update_provider_governance(
+                db,
+                provider_ids=[provider.id],
+                action="mark_available",
+            )
+            assert result["updated_count"] == 1
+            db.refresh(provider)
+            db.refresh(provider_model)
+            assert provider.enabled is True
+            assert provider.health_status == "healthy"
+            assert provider.circuit_state == "closed"
+            assert provider.circuit_opened_at is None
+            assert provider_model.health_status == "healthy"
+            assert provider_model.circuit_state == "closed"
+            assert provider_model.circuit_opened_at is None
+            assert provider_model.last_error is None
+
+            result = ProviderService.batch_update_provider_governance(
+                db,
+                provider_ids=[provider.id],
+                action="mark_trusted",
+            )
+            assert result["updated_count"] == 1
+            db.refresh(provider)
+            db.refresh(provider_model)
+            assert provider.trust_level == "trusted"
+            assert provider.content_integrity_status == "passed"
+            assert provider_model.content_integrity_status == "passed"
+            assert ProviderService.provider_trust_summary(provider)["status"] == "trusted"
+        finally:
+            db.delete(provider)
+            db.commit()
 
 
 def test_model_catalog_list_filters_by_model_group() -> None:
@@ -406,13 +506,13 @@ def test_provider_batch_import_allows_provider_without_models() -> None:
     assert payload["model_configs"] == []
 
 
-def test_provider_batch_import_requires_model_name_and_id_when_model_block_exists() -> None:
+def test_provider_batch_import_requires_model_id_and_upstream_id_when_model_block_exists() -> None:
     raw_item = {
-        "名称": "缺模型ID提供商",
+        "名称": "缺上游模型ID提供商",
         "Base URL": "https://provider.example.com/v1",
         "API Key": "sk-test",
         "模型": """
-- 模型名称: 自定义 GPT
+- 模型ID: custom-gpt
   启用: 是
   端点协议: 双协议
   模型分组: OpenAI
@@ -424,17 +524,35 @@ def test_provider_batch_import_requires_model_name_and_id_when_model_block_exist
     payload = ProviderService._normalize_batch_provider_item(raw_item, errors)
 
     assert payload is None
+    assert any("模型第 1 组缺少字段：上游模型ID" in error for error in errors)
+
+
+def test_provider_batch_import_does_not_treat_model_name_as_model_id() -> None:
+    raw_item = {
+        "名称": "旧字段提供商",
+        "Base URL": "https://provider.example.com/v1",
+        "API Key": "sk-test",
+        "模型": """
+- 模型名称: custom-gpt
+  上游模型ID: gpt-4.1
+""",
+    }
+    errors: list[str] = []
+
+    payload = ProviderService._normalize_batch_provider_item(raw_item, errors)
+
+    assert payload is None
     assert any("模型第 1 组缺少字段：模型ID" in error for error in errors)
 
 
-def test_provider_batch_import_preserves_model_alias_and_upstream_id() -> None:
+def test_provider_batch_import_preserves_model_id_and_upstream_id() -> None:
     raw_item = {
         "名称": "自定义别名提供商",
         "Base URL": "https://provider.example.com/v1",
         "API Key": "sk-test",
         "模型": """
-- 模型名称: 中文展示名
-  模型ID: claude-3-5-sonnet-latest
+- 模型ID: claude-sonnet
+  上游模型ID: claude-3-5-sonnet-latest
   启用: 是
   端点协议: Claude
   模型分组: Claude
@@ -447,8 +565,8 @@ def test_provider_batch_import_preserves_model_alias_and_upstream_id() -> None:
 
     assert errors == []
     assert payload is not None
-    assert payload["models"] == ["中文展示名"]
-    assert payload["model_configs"][0]["model_name"] == "中文展示名"
+    assert payload["models"] == ["claude-sonnet"]
+    assert payload["model_configs"][0]["model_name"] == "claude-sonnet"
     assert payload["model_configs"][0]["upstream_model_name"] == "claude-3-5-sonnet-latest"
     assert payload["model_configs"][0]["model_group"] == "claude"
     assert payload["model_configs"][0]["protocol_type"] == "claude_messages"
@@ -461,8 +579,8 @@ def test_provider_batch_import_defaults_optional_model_fields() -> None:
         "Base URL": "https://provider.example.com/v1",
         "API Key": "sk-test",
         "模型": """
-- 模型名称: 自定义通义
-  模型ID: qwen-plus
+- 模型ID: custom-qwen
+  上游模型ID: qwen-plus
 """,
     }
     errors: list[str] = []
@@ -472,7 +590,7 @@ def test_provider_batch_import_defaults_optional_model_fields() -> None:
     assert errors == []
     assert payload is not None
     model_config = payload["model_configs"][0]
-    assert model_config["model_name"] == "自定义通义"
+    assert model_config["model_name"] == "custom-qwen"
     assert model_config["upstream_model_name"] == "qwen-plus"
     assert model_config["enabled"] is True
     assert model_config["model_group"] == "qwen"
@@ -498,9 +616,115 @@ def test_provider_model_export_template_mentions_batch_import_fields() -> None:
     assert "账户输入价/1M" in ProviderService.MODEL_BATCH_IMPORT_TEMPLATE
 
 
-def test_protocol_lock_uses_upstream_model_id_for_custom_alias() -> None:
+def test_model_catalog_import_export_template_uses_same_fields() -> None:
+    template = ModelCatalogService.MODEL_CATALOG_BATCH_IMPORT_TEMPLATE
+
+    assert "模型配置批量导入模板" in template
+    assert "模型ID" in template
+    assert "账户输入价/1M" in template
+    assert "价格 JSON" in template
+
+    def field_names(text: str) -> list[str]:
+        names: list[str] = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or stripped in {"---", "----"}:
+                continue
+            if ":" in stripped:
+                names.append(stripped.split(":", 1)[0])
+        return names
+
+    db = SessionLocal()
+    try:
+        text = ModelCatalogService.export_models_import_text(db)
+        exported_or_template = text if "模型ID:" in text else template
+        for field in ("模型ID", "模型名称", "模型分组", "启用", "支持 Stream", "价格模式", "价格 JSON", "账户输入价/1M", "备注"):
+            assert f"{field}:" in template
+            assert f"{field}:" in exported_or_template
+        assert field_names(exported_or_template.split("---", 1)[0]) == field_names(template)
+    finally:
+        db.close()
+
+
+def test_model_catalog_batch_import_rejects_existing_model_id() -> None:
+    db = SessionLocal()
+    model_name = f"批量导入重复-{uuid4().hex[:8]}"
+    try:
+        db.add(ModelCatalog(model_name=model_name, model_group="openai", enabled=True))
+        db.commit()
+
+        result = ModelCatalogService.batch_import_models(
+            db,
+            ModelCatalogBatchImportRequest(
+                content=f"""
+模型ID: {model_name}
+模型名称: 重复模型
+模型分组: openai
+启用: 是
+""",
+                dry_run=True,
+            ),
+        )
+
+        assert result.total == 1
+        assert result.valid_count == 0
+        assert result.failed_count == 1
+        assert "模型ID已存在" in "；".join(result.items[0].errors)
+    finally:
+        db.query(ModelCatalog).filter(ModelCatalog.model_name == model_name).delete()
+        db.commit()
+        db.close()
+
+
+def test_model_catalog_batch_import_creates_new_model() -> None:
+    db = SessionLocal()
+    model_name = f"批量导入新模型-{uuid4().hex[:8]}"
+    try:
+        result = ModelCatalogService.batch_import_models(
+            db,
+            ModelCatalogBatchImportRequest(
+                content=f"""
+模型ID: {model_name}
+模型名称: 批量导入新模型
+模型分组: openai
+启用: 是
+支持 Stream: 是
+支持图像理解: 否
+支持工具调用: 是
+支持 Chat: 是
+支持 Responses: 是
+上下文 token: 128000
+价格模式: fixed
+价格 JSON: {{"source_label":"导入测试"}}
+账户输入价/1M: 1.5
+账户输出价/1M: 6
+原始币种: USD
+账户币种: USD
+备注: 批量导入测试
+""",
+                dry_run=False,
+            ),
+        )
+
+        assert result.total == 1
+        assert result.valid_count == 1
+        assert result.created_count == 1
+        catalog = ModelCatalogService.get_catalog(db, model_name)
+        assert catalog is not None
+        assert catalog.display_name == "批量导入新模型"
+        assert catalog.context_window_tokens == 128000
+        assert catalog.supports_vision is False
+        assert catalog.input_price_per_1k == Decimal("0.0015")
+        assert "导入测试" in str(catalog.pricing_json)
+    finally:
+        db.query(ModelCatalog).filter(ModelCatalog.model_name == model_name).delete()
+        db.commit()
+        db.close()
+
+
+def test_protocol_lock_uses_upstream_model_id_for_custom_model_id() -> None:
     provider_model = SimpleNamespace(
-        model_name="中文展示名",
+        model_name="custom-gemini-model-id",
         upstream_model_name="gemini-2.5-pro",
         model_group=None,
         protocol_type="both",
@@ -513,8 +737,90 @@ def test_protocol_lock_uses_upstream_model_id_for_custom_alias() -> None:
 
 def test_upstream_model_name_does_not_use_provider_model_id_as_fallback() -> None:
     provider_model = SimpleNamespace(
-        model_name="平台模型别名",
+        model_name="platform-model-id",
         provider_model_id="gemini-2.5-pro",
     )
 
-    assert ProviderService.provider_model_upstream_model_name(provider_model) == "平台模型别名"
+    assert ProviderService.provider_model_upstream_model_name(provider_model) == "platform-model-id"
+
+
+def test_ensure_model_catalogs_for_configs_does_not_match_upstream_model_id() -> None:
+    upstream_model_id = f"上游模型{uuid4().hex[:8]}"
+    platform_model_id = f"平台模型{uuid4().hex[:8]}"
+    db = SessionLocal()
+    try:
+        db.add(
+            ModelCatalog(
+                model_name=upstream_model_id,
+                display_name="已有上游模型目录",
+                enabled=True,
+            )
+        )
+        db.commit()
+
+        catalogs = ProviderService._ensure_model_catalogs_for_configs(
+            db,
+            [
+                ProviderModelConfigInput(
+                    model_name=platform_model_id,
+                    upstream_model_name=upstream_model_id,
+                    supports_chat_completions=True,
+                    supports_responses=True,
+                )
+            ],
+        )
+        db.commit()
+
+        assert catalogs[platform_model_id].model_name == platform_model_id
+        assert catalogs[platform_model_id].display_name is None
+        assert catalogs[platform_model_id].model_name != upstream_model_id
+        assert ModelCatalogService.get_catalog(db, platform_model_id) is not None
+    finally:
+        db.query(ModelCatalog).filter(ModelCatalog.model_name.in_([platform_model_id, upstream_model_id])).delete(
+            synchronize_session=False
+        )
+        db.commit()
+        db.close()
+
+
+def test_sync_provider_model_price_from_catalog_uses_platform_model_id_only() -> None:
+    platform_model_id = f"平台定价模型{uuid4().hex[:8]}"
+    upstream_model_id = f"上游定价模型{uuid4().hex[:8]}"
+    db = SessionLocal()
+    try:
+        db.add_all(
+            [
+                ModelCatalog(
+                    model_name=platform_model_id,
+                    display_name="平台目录",
+                    enabled=True,
+                    input_price_per_1k=Decimal("0.0015"),
+                    output_price_per_1k=Decimal("0.0030"),
+                ),
+                ModelCatalog(
+                    model_name=upstream_model_id,
+                    display_name="上游目录",
+                    enabled=True,
+                    input_price_per_1k=Decimal("9.9999"),
+                    output_price_per_1k=Decimal("8.8888"),
+                ),
+            ]
+        )
+        db.commit()
+
+        provider_model = SimpleNamespace(
+            model_name=platform_model_id,
+            upstream_model_name=upstream_model_id,
+            price_multiplier=1.0,
+        )
+
+        ProviderService._sync_provider_model_price_from_catalog(db, provider_model)
+
+        assert provider_model.input_price_per_1k == Decimal("0.0015")
+        assert provider_model.output_price_per_1k == Decimal("0.0030")
+    finally:
+        db.query(ModelCatalog).filter(ModelCatalog.model_name.in_([platform_model_id, upstream_model_id])).delete(
+            synchronize_session=False
+        )
+        db.commit()
+        db.close()

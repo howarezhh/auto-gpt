@@ -66,6 +66,9 @@ class BillingService:
             return {"prompt_cost": BillingService.to_decimal(0), "completion_cost": BillingService.to_decimal(0), "total_cost": BillingService.to_decimal(0), "billing_status": "internal_request"}
         if LogService.is_model_list_request_path(log.request_path):
             return {"prompt_cost": BillingService.to_decimal(0), "completion_cost": BillingService.to_decimal(0), "total_cost": BillingService.to_decimal(0), "billing_status": "no_charge"}
+        if LogService.is_token_billing_finalize_candidate(log) and not LogService.has_exact_usage_for_billing(log):
+            log.billing_error = LogService.inexact_token_billing_error(log)
+            return {"prompt_cost": None, "completion_cost": None, "total_cost": None, "billing_status": "pending_tokens"}
         if log.prompt_tokens is None and log.completion_tokens is None and log.total_tokens is None:
             return {"prompt_cost": None, "completion_cost": None, "total_cost": None, "billing_status": "pending_tokens"}
         if log.resolved_provider_model_id is None:
@@ -221,6 +224,69 @@ class BillingService:
             "source_component_cost": BillingService.to_decimal(source_component_cost),
             "billing_status": "billed" if total_cost > 0 else "no_charge",
         }
+
+    @staticmethod
+    def _copy_log_for_cost_preview(log: RequestLog) -> RequestLog:
+        preview = RequestLog()
+        for field_name in (
+            "id",
+            "api_client_key_id",
+            "billable",
+            "request_path",
+            "request_body_json",
+            "response_body_json",
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+            "token_source",
+            "upstream_usage_missing",
+            "resolved_provider_model_id",
+        ):
+            setattr(preview, field_name, getattr(log, field_name, None))
+        return preview
+
+    @staticmethod
+    def _preview_log_cost(
+        db: Session,
+        log: RequestLog,
+        *,
+        billing_currency: str | None = None,
+    ) -> dict[str, Decimal | str | None]:
+        return BillingService.compute_log_cost(
+            db,
+            BillingService._copy_log_for_cost_preview(log),
+            billing_currency=billing_currency,
+        )
+
+    @staticmethod
+    def can_finalize_no_charge_from_current_pricing(db: Session, log: RequestLog) -> bool:
+        if log.api_client_key_id is None:
+            return False
+        if not getattr(log, "billable", False):
+            return False
+        if log.billing_finalized_at is not None and log.billing_status != "pending_tokens":
+            return False
+        if log.prompt_tokens is None and log.completion_tokens is None and log.total_tokens is None:
+            return False
+        billing_data = BillingService._preview_log_cost(db, log)
+        total_cost = billing_data.get("total_cost")
+        return billing_data.get("billing_status") == "no_charge" and isinstance(total_cost, Decimal) and total_cost == 0
+
+    @staticmethod
+    def _should_recompute_finalized_no_charge(db: Session, log: RequestLog) -> bool:
+        if log.billing_status != "no_charge":
+            return False
+        if not getattr(log, "billable", False):
+            return False
+        if log.prompt_tokens is None and log.completion_tokens is None and log.total_tokens is None:
+            return False
+        if BillingService.to_decimal(log.total_cost) > 0:
+            return False
+        billing_data = BillingService._preview_log_cost(db, log)
+        total_cost = billing_data.get("total_cost")
+        return billing_data.get("billing_status") == "billed" and isinstance(total_cost, Decimal) and total_cost > 0
 
     @staticmethod
     def _compute_fee_component_costs(
@@ -518,12 +584,23 @@ class BillingService:
     def finalize_request_log_billing(db: Session, log: RequestLog) -> Decimal | None:
         if log.api_client_key_id is None:
             return None
-        if log.billing_finalized_at is not None and log.billing_status != "pending_tokens":
+        if LogService.is_token_billing_finalize_candidate(log) and not LogService.has_exact_usage_for_billing(log):
+            log.billing_status = "pending_tokens"
+            log.billing_error = LogService.inexact_token_billing_error(log)
+            log.billing_finalized_at = None
+            return None
+        if (
+            log.billing_finalized_at is not None
+            and log.billing_status != "pending_tokens"
+            and not BillingService._should_recompute_finalized_no_charge(db, log)
+        ):
             return None
         log.billing_attempt_count = int(log.billing_attempt_count or 0) + 1
         log.billing_event_id = log.billing_event_id or f"billing-{log.id}-{uuid4().hex}"
         try:
             billing_delta = BillingService.sync_request_billing(db, log)
+            if hasattr(db, "flush"):
+                db.flush()
             existing_record = db.scalar(
                 select(ApiClientBillingRecord).where(ApiClientBillingRecord.request_log_id == log.id)
             )

@@ -501,6 +501,8 @@ class ContentGuardProbeService:
         result: dict[str, Any],
         *,
         response: Any = None,
+        request_payload: dict[str, Any] | None = None,
+        request_method: str = "POST",
         output_text: str | None = None,
         stream_events: list[str] | None = None,
         stream_chunks: list[str] | None = None,
@@ -511,6 +513,13 @@ class ContentGuardProbeService:
             "endpoint_label": result.get("endpoint_label"),
             "status_code": result.get("status_code"),
         }
+        if request_payload is not None:
+            raw["request"] = {
+                "method": request_method,
+                "endpoint_path": result.get("endpoint_path"),
+                "payload": ContentGuardProbeService.compact_raw_provider_value(request_payload),
+                "headers": "已脱敏：未记录请求头",
+            }
         if response is not None:
             raw["body"] = ContentGuardProbeService.compact_raw_provider_value(response)
         if output_text is not None:
@@ -1051,6 +1060,7 @@ class ContentGuardProbeService:
                     guard_result=structure_guard,
                 ),
                 response=response,
+                request_payload=payload,
             )
         ProxyService = _proxy_service()
         output_text = (ProxyService._extract_response_text(response or {}, limit_bytes=512) or "").strip()
@@ -1069,6 +1079,7 @@ class ContentGuardProbeService:
                     ),
                 ),
                 response=response,
+                request_payload=payload,
                 output_text=output_text,
             )
         return ContentGuardProbeService.attach_raw_provider_response(
@@ -1082,6 +1093,7 @@ class ContentGuardProbeService:
                 trace=trace,
             ),
             response=response,
+            request_payload=payload,
             output_text=output_text,
         )
 
@@ -1116,6 +1128,7 @@ class ContentGuardProbeService:
                     guard_result=structure_guard,
                 ),
                 response=response,
+                request_payload=payload,
             )
         ProxyService = _proxy_service()
         output_text = (ProxyService._extract_response_text(response or {}, limit_bytes=1024) or "").strip()
@@ -1138,6 +1151,7 @@ class ContentGuardProbeService:
                     ),
                 ),
                 response=response,
+                request_payload=payload,
                 output_text=output_text,
             )
         return ContentGuardProbeService.attach_raw_provider_response(
@@ -1151,6 +1165,7 @@ class ContentGuardProbeService:
                 trace=trace,
             ),
             response=response,
+            request_payload=payload,
             output_text=output_text,
         )
 
@@ -1185,6 +1200,7 @@ class ContentGuardProbeService:
                     guard_result=structure_guard,
                 ),
                 response=response,
+                request_payload=payload,
             )
         ProxyService = _proxy_service()
         output_text = (ProxyService._extract_response_text(response or {}, limit_bytes=512) or "").strip()
@@ -1203,6 +1219,7 @@ class ContentGuardProbeService:
                     ),
                 ),
                 response=response,
+                request_payload=payload,
                 output_text=output_text,
             )
         return ContentGuardProbeService.attach_raw_provider_response(
@@ -1216,6 +1233,7 @@ class ContentGuardProbeService:
                 trace=trace,
             ),
             response=response,
+            request_payload=payload,
             output_text=output_text,
         )
 
@@ -1835,7 +1853,7 @@ class ContentGuardProbeService:
             failure["detections"] = detections
             failure["failed_scenarios"] = detections
             failure["trace"] = trace or []
-            return ContentGuardProbeService.attach_raw_provider_response(failure, response=response)
+            return ContentGuardProbeService.attach_raw_provider_response(failure, response=response, request_payload=payload)
         ProxyService = _proxy_service()
         output_text = (ProxyService._extract_response_text(response or {}, limit_bytes=8192) or "").strip()
         if not output_text:
@@ -1858,7 +1876,7 @@ class ContentGuardProbeService:
             failure["detections"] = detections
             failure["failed_scenarios"] = detections
             failure["trace"] = trace or []
-            return ContentGuardProbeService.attach_raw_provider_response(failure, response=response)
+            return ContentGuardProbeService.attach_raw_provider_response(failure, response=response, request_payload=payload)
         sections = ContentGuardProbeService.split_combined_pollution_output(output_text, selected_scenarios)
         return ContentGuardProbeService.pollution_result_from_sections(
             provider,
@@ -1990,7 +2008,7 @@ class ContentGuardProbeService:
         if structure_guard.result != ContentGuardService.RESULT_PASS:
             results = paired_failure(structure_guard, status_code=status_code, trace=trace or [])
             for item in results.values():
-                ContentGuardProbeService.attach_raw_provider_response(item, response=response)
+                ContentGuardProbeService.attach_raw_provider_response(item, response=response, request_payload=payload)
             return results
         ProxyService = _proxy_service()
         output_text = (ProxyService._extract_response_text(response or {}, limit_bytes=8192) or "").strip()
@@ -2001,7 +2019,7 @@ class ContentGuardProbeService:
             )
             results = paired_failure(empty_guard, status_code=status_code, trace=trace or [])
             for item in results.values():
-                ContentGuardProbeService.attach_raw_provider_response(item, response=response)
+                ContentGuardProbeService.attach_raw_provider_response(item, response=response, request_payload=payload)
             return results
         sections = ContentGuardProbeService.split_combined_pollution_output(output_text, combined_scenarios)
         fixed_text = sections.get("fixed_answer", "").strip()
@@ -2137,9 +2155,9 @@ class ContentGuardProbeService:
     @staticmethod
     def url_check_enabled() -> bool:
         try:
-            return bool(getattr(SettingService.get_cached(), "content_guard_url_check_enabled", True))
+            return bool(getattr(SettingService.get_cached(), "content_guard_url_check_enabled", False))
         except Exception:
-            return True
+            return False
 
     @staticmethod
     def url_allowlist() -> str:

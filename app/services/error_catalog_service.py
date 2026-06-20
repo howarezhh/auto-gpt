@@ -32,7 +32,7 @@ class ErrorCatalogService:
         "quota": "核对账户可用余额、冻结金额和计费后台任务状态；余额恢复后允许调用方重试。",
         "rate_limit": "核对 API Key、账户、全局和提供商短窗口限流计数；等待窗口恢复或调整限流配置。",
         "capacity_limited": "核对全局、账户、API Key 和提供商活跃请求/流式请求/QPS/RPM 容量；检查 Redis 租约是否及时释放。",
-        "model_unavailable": "核对模型名称、模型启用状态、API Key 授权、模型映射、挂载提供商和可用性检测结果。",
+        "model_unavailable": "核对模型ID、模型启用状态、API Key 授权、模型映射、挂载提供商和可用性检测结果。",
         "capability_not_supported": "核对请求端点、协议类型、模型能力、工具/视觉/图片生成能力和适配开关；避免把不可无损转换的请求投递到上游。",
         "route_unavailable": "核对候选筛选 trace、模型挂载、授权、可用状态、容量、熔断和协议能力，确认为什么没有可用候选。",
         "upstream_transient": "核对上游状态码、请求 ID、候选重试 trace、网络与提供商可用性；保留截断摘要，避免暴露原始敏感响应。",
@@ -179,7 +179,7 @@ class ErrorCatalogService:
             "invalid_request",
             False,
             False,
-            "在请求体中填写要调用的模型名称。",
+            "在请求体中填写要调用的模型ID。",
         ),
         "model_not_found": ErrorSpec(
             "model_not_found",
@@ -189,7 +189,7 @@ class ErrorCatalogService:
             "model_unavailable",
             False,
             False,
-            "确认模型名称是否正确，并检查模型授权、启用状态和路由策略。",
+            "确认模型ID是否正确，并检查模型授权、启用状态和路由策略。",
         ),
         "model_not_allowed": ErrorSpec(
             "model_not_allowed",
@@ -1830,7 +1830,7 @@ ErrorCatalogService.SPECS.update(
             public=False,
             public_code="route_unavailable",
             log_message="提供商可用性检测或端点探针失败。",
-            handling_strategy="检查探针端点、模型名、API Key、协议类型和上游响应摘要。",
+            handling_strategy="检查探针端点、模型ID、API Key、协议类型和上游响应摘要。",
             alert_level="warning",
         ),
         "provider_capacity_snapshot_failed": _spec(

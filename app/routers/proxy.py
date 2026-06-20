@@ -100,6 +100,18 @@ def _get_setting_with_scoped_session():
     return SettingService.get_cached()
 
 
+def _request_started_at_perf(request: Request) -> float | None:
+    value = getattr(request.state, "request_started_at_perf", None)
+    return value if isinstance(value, (int, float)) else None
+
+
+def _request_elapsed_ms(request: Request, *, fallback_ms: int | None = None) -> int | None:
+    started_at = _request_started_at_perf(request)
+    if started_at is None:
+        return fallback_ms
+    return max(0, int((time.perf_counter() - started_at) * 1000))
+
+
 def _effective_request_body_limit(setting, endpoint_path: str) -> int:
     """计算某个 v1 端点实际生效的请求体大小限制。"""
     global_limit = int(getattr(setting, "max_v1_request_body_bytes", 0) or 0)
@@ -569,6 +581,7 @@ async def _forward_legacy_image_batch(
                 response_format=response_format,
             ),
             suppress_success_log=requested_count > 1,
+            request_started_at=_request_started_at_perf(request),
         )
         merged_results.append(result)
         provider = current_provider
@@ -607,7 +620,7 @@ def _write_legacy_batch_success_log(
         preserve_request_content_when_disabled=True,
         structure_only=True,
     )
-    response_body_json = ProxyService._serialize_payload_for_logging(response_payload_for_log, setting=setting)
+    response_body_json = ProxyService._serialize_response_payload_for_logging(response_payload_for_log, setting=setting)
     response_text = ProxyService._extract_response_display_text(
         response_payload_for_log,
         limit_bytes=setting.max_logged_body_bytes,
@@ -641,7 +654,8 @@ def _write_legacy_batch_success_log(
             success=True,
             status_code=200,
             latency_ms=latency_ms,
-            duration_ms=latency_ms,
+            duration_ms=_request_elapsed_ms(request, fallback_ms=latency_ms),
+            upstream_duration_ms=latency_ms,
             reasoning_level=reasoning_level,
             model_reasoning_effort=model_reasoning_effort,
             request_body_json=request_body_json,
@@ -672,6 +686,19 @@ async def _release_after_stream(
         async for chunk in stream:
             yield chunk
     except Exception as exc:
+        yield _format_sse_error_event(exc, trace_id=trace_id)
+        yield b"data: [DONE]\n\n"
+    finally:
+        await _release_request_concurrency(lease)
+
+
+async def _stream_pre_start_error(
+    exc: Exception,
+    lease: ConcurrencyLease,
+    *,
+    trace_id: str | None,
+) -> AsyncIterator[bytes]:
+    try:
         yield _format_sse_error_event(exc, trace_id=trace_id)
         yield b"data: [DONE]\n\n"
     finally:
@@ -726,6 +753,7 @@ async def chat_completions(
                 api_client_auth=api_client_auth,
                 trace_id=getattr(request.state, "trace_id", None),
                 source_ip=source_ip,
+                request_started_at=_request_started_at_perf(request),
             )
             headers = build_proxy_response_headers(
                 provider_id=provider.id,
@@ -739,9 +767,11 @@ async def chat_completions(
                 media_type="text/event-stream",
                 headers=headers,
             )
-        except Exception:
-            await _release_request_concurrency(lease)
-            raise
+        except Exception as exc:
+            return StreamingResponse(
+                _stream_pre_start_error(exc, lease, trace_id=getattr(request.state, "trace_id", None)),
+                media_type="text/event-stream",
+            )
 
     lease = await _acquire_request_concurrency(request=request, api_client_auth=api_client_auth, is_stream=False)
     try:
@@ -753,6 +783,7 @@ async def chat_completions(
             api_client_auth=api_client_auth,
             trace_id=getattr(request.state, "trace_id", None),
             source_ip=source_ip,
+            request_started_at=_request_started_at_perf(request),
         )
     finally:
         await _release_request_concurrency(lease)
@@ -791,6 +822,7 @@ async def gemini_generate_content(
             request_path_for_log=request_path_for_log,
             public_endpoint_path="/native/gemini",
             required_upstream_protocol_type="gemini",
+            request_started_at=_request_started_at_perf(request),
         )
     finally:
         await _release_request_concurrency(lease)
@@ -828,6 +860,7 @@ async def gemini_stream_generate_content(
             request_path_for_log=request_path_for_log,
             public_endpoint_path="/native/gemini",
             required_upstream_protocol_type="gemini",
+            request_started_at=_request_started_at_perf(request),
         )
         headers = build_proxy_response_headers(
             provider_id=provider.id,
@@ -841,9 +874,11 @@ async def gemini_stream_generate_content(
             media_type="text/event-stream",
             headers=headers,
         )
-    except Exception:
-        await _release_request_concurrency(lease)
-        raise
+    except Exception as exc:
+        return StreamingResponse(
+            _stream_pre_start_error(exc, lease, trace_id=getattr(request.state, "trace_id", None)),
+            media_type="text/event-stream",
+        )
 
 
 @router.post("/v1/messages", response_model=None)
@@ -869,6 +904,7 @@ async def claude_messages(
                 request_path_for_log="/v1/messages",
                 public_endpoint_path="/native/claude_messages",
                 required_upstream_protocol_type="claude_messages",
+                request_started_at=_request_started_at_perf(request),
             )
             headers = build_proxy_response_headers(
                 provider_id=provider.id,
@@ -882,9 +918,11 @@ async def claude_messages(
                 media_type="text/event-stream",
                 headers=headers,
             )
-        except Exception:
-            await _release_request_concurrency(lease)
-            raise
+        except Exception as exc:
+            return StreamingResponse(
+                _stream_pre_start_error(exc, lease, trace_id=getattr(request.state, "trace_id", None)),
+                media_type="text/event-stream",
+            )
 
     lease = await _acquire_request_concurrency(request=request, api_client_auth=api_client_auth, is_stream=False)
     try:
@@ -899,6 +937,7 @@ async def claude_messages(
             request_path_for_log="/v1/messages",
             public_endpoint_path="/native/claude_messages",
             required_upstream_protocol_type="claude_messages",
+            request_started_at=_request_started_at_perf(request),
         )
     finally:
         await _release_request_concurrency(lease)
@@ -932,6 +971,7 @@ async def completions(
                 api_client_auth=api_client_auth,
                 trace_id=getattr(request.state, "trace_id", None),
                 source_ip=source_ip,
+                request_started_at=_request_started_at_perf(request),
             )
             headers = build_proxy_response_headers(
                 provider_id=provider.id,
@@ -945,9 +985,11 @@ async def completions(
                 media_type="text/event-stream",
                 headers=headers,
             )
-        except Exception:
-            await _release_request_concurrency(lease)
-            raise
+        except Exception as exc:
+            return StreamingResponse(
+                _stream_pre_start_error(exc, lease, trace_id=getattr(request.state, "trace_id", None)),
+                media_type="text/event-stream",
+            )
 
     lease = await _acquire_request_concurrency(request=request, api_client_auth=api_client_auth, is_stream=False)
     try:
@@ -959,6 +1001,7 @@ async def completions(
             api_client_auth=api_client_auth,
             trace_id=getattr(request.state, "trace_id", None),
             source_ip=source_ip,
+            request_started_at=_request_started_at_perf(request),
         )
     finally:
         await _release_request_concurrency(lease)
@@ -1138,6 +1181,7 @@ async def responses(
                     api_client_auth=api_client_auth,
                     trace_id=getattr(request.state, "trace_id", None),
                     source_ip=source_ip,
+                    request_started_at=_request_started_at_perf(request),
                 )
             else:
                 stream, provider, trace, latency_ms = await ProxyService.forward_stream_request(
@@ -1148,6 +1192,7 @@ async def responses(
                     api_client_auth=api_client_auth,
                     trace_id=getattr(request.state, "trace_id", None),
                     source_ip=source_ip,
+                    request_started_at=_request_started_at_perf(request),
                 )
             headers = build_proxy_response_headers(
                 provider_id=provider.id,
@@ -1161,9 +1206,11 @@ async def responses(
                 media_type="text/event-stream",
                 headers=headers,
             )
-        except Exception:
-            await _release_request_concurrency(lease)
-            raise
+        except Exception as exc:
+            return StreamingResponse(
+                _stream_pre_start_error(exc, lease, trace_id=getattr(request.state, "trace_id", None)),
+                media_type="text/event-stream",
+            )
 
     lease = await _acquire_request_concurrency(request=request, api_client_auth=api_client_auth, is_stream=False)
     try:
@@ -1174,6 +1221,7 @@ async def responses(
                 api_client_auth=api_client_auth,
                 trace_id=getattr(request.state, "trace_id", None),
                 source_ip=source_ip,
+                request_started_at=_request_started_at_perf(request),
             )
         else:
             result, provider, trace, latency_ms = await ProxyService.forward_json_request(
@@ -1184,6 +1232,7 @@ async def responses(
                 api_client_auth=api_client_auth,
                 trace_id=getattr(request.state, "trace_id", None),
                 source_ip=source_ip,
+                request_started_at=_request_started_at_perf(request),
             )
     finally:
         await _release_request_concurrency(lease)
@@ -1215,6 +1264,7 @@ async def embeddings(
             api_client_auth=api_client_auth,
             trace_id=getattr(request.state, "trace_id", None),
             source_ip=ApiKeyService.extract_source_ip(request),
+            request_started_at=_request_started_at_perf(request),
         )
     finally:
         await _release_request_concurrency(lease)

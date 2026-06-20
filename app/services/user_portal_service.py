@@ -24,7 +24,8 @@ from app.services.billing_service import BillingService
 from app.services.cache_service import CacheService
 from app.services.conversation_service import ConversationService
 from app.services.log_service import LogService
-from app.services.router_service import RoutePolicyContext, RouterService
+from app.services.routing import RoutePolicyContext, normalize_route_strategy
+from app.services.routing import RouteRequest, RoutingService
 from app.services.setting_service import SettingService
 from app.services.user_quota_service import UserQuotaService
 
@@ -781,14 +782,22 @@ class UserPortalService:
             if not provider_ids:
                 return []
             names: list[str] = []
-            for model in RouterService.get_available_candidates(
-                db,
-                route_context=RoutePolicyContext(
-                    allowed_provider_ids=sorted(provider_ids),
-                    require_trusted_provider=bool(getattr(route_setting, "trusted_providers_only", False)),
-                    health_gate_mode=str(getattr(route_setting, "route_health_gate_mode", "permissive") or "permissive"),
-                ),
-            ):
+            decision = RoutingService.preview_candidates_sync(
+                RouteRequest(
+                    requested_model=None,
+                    selected_model=None,
+                    endpoint_path="",
+                    public_endpoint_path="",
+                    policy_context=RoutePolicyContext(
+                        allowed_provider_ids=sorted(provider_ids),
+                        require_trusted_provider=bool(getattr(route_setting, "trusted_providers_only", False)),
+                        health_gate_mode=str(getattr(route_setting, "route_health_gate_mode", "permissive") or "permissive"),
+                        route_strategy=normalize_route_strategy(getattr(route_setting, "route_strategy", None)),
+                    ),
+                    db=db,
+                )
+            )
+            for model in decision.candidates:
                 if model.provider.id not in provider_ids:
                     continue
                 if not ApiKeyService.is_model_allowed(api_key, model.provider_model.model_name):
@@ -827,12 +836,18 @@ class UserPortalService:
                     allowed_provider_ids=[binding.provider_id for binding in selected_key.provider_bindings],
                     require_trusted_provider=bool(getattr(route_setting, "trusted_providers_only", False)),
                     health_gate_mode=str(getattr(route_setting, "route_health_gate_mode", "permissive") or "permissive"),
+                    route_strategy=normalize_route_strategy(getattr(route_setting, "route_strategy", None)),
                 )
-                candidates = RouterService.order_candidates(
-                    db,
-                    model_name=selected_model,
-                    route_context=route_context,
-                )
+                candidates = RoutingService.preview_candidates_sync(
+                    RouteRequest(
+                        requested_model=selected_model,
+                        selected_model=selected_model,
+                        endpoint_path="",
+                        public_endpoint_path="",
+                        policy_context=route_context,
+                        db=db,
+                    )
+                ).candidates
                 candidates_payload = [
                     {
                         "provider_id": item.provider.id,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections import defaultdict
 from datetime import datetime
 from decimal import Decimal
@@ -16,7 +17,13 @@ from app.models.model_catalog import ModelCatalog
 from app.models.provider import Provider
 from app.models.provider_model import ProviderModel
 from app.models.user_account import UserAccount
-from app.schemas.model_catalog import ModelCatalogCreate, ModelCatalogUpdate, ModelProviderBindingIn
+from app.schemas.model_catalog import (
+    ModelCatalogBatchImportRequest,
+    ModelCatalogBatchImportResponse,
+    ModelCatalogCreate,
+    ModelCatalogUpdate,
+    ModelProviderBindingIn,
+)
 from app.services.cache_service import CacheService
 from app.services.content_guard_probe_service import ContentGuardProbeService
 from app.services.model_pricing_service import ModelPricingService
@@ -42,6 +49,40 @@ class ModelCatalogService:
     MODEL_OPTIONS_LIMIT = 500
     MODEL_HEALTH_FILTER_SCAN_LIMIT = 1000
     MODEL_MAPPING_NORMALIZE_BATCH_SIZE = 500
+    MODEL_CATALOG_BATCH_IMPORT_TEMPLATE = """# 模型配置批量导入模板
+# 每个模型一段，空行或 --- 分隔；导入只新增模型，不覆盖现有模型。
+模型ID: gpt-5.4
+模型名称: GPT-5.4
+模型分组: openai
+启用: 是
+支持 Stream: 是
+支持图像理解: 是
+支持工具调用: 是
+支持 Chat: 是
+支持 Responses: 是
+上下文 token: 400000
+最大输入 token: 300000
+最大输出 token: 100000
+价格模式: fixed
+价格 JSON:
+账户输入价/1M: 3
+账户输出价/1M: 12
+账户缓存价/1M: 0.3
+账户缓存写入价/1M:
+原始币种: USD
+账户币种: USD
+原币种输入价/1M: 3
+原币种输出价/1M: 12
+原币种缓存价/1M: 0.3
+原币种缓存写入价/1M:
+汇率:
+汇率来源:
+汇率时间:
+汇率版本:
+舍入策略: ROUND_HALF_UP
+速度标签: 快
+备注: 示例模型
+"""
 
     @staticmethod
     def _backfill_default_protocol_support(db: Session) -> bool:
@@ -93,7 +134,7 @@ class ModelCatalogService:
 
     @staticmethod
     def get_catalog(db: Session, model_name: str) -> ModelCatalog | None:
-        """按模型名读取目录项。"""
+        """按模型ID读取目录项。"""
         return db.scalar(select(ModelCatalog).where(ModelCatalog.model_name == model_name))
 
     @staticmethod
@@ -101,6 +142,108 @@ class ModelCatalogService:
         """返回模型目录的序列化结果列表。"""
         catalogs, providers = ModelCatalogService._load_catalogs_and_providers(db)
         return [ModelCatalogService._serialize_catalog(catalog, providers) for catalog in catalogs]
+
+    @staticmethod
+    def export_models_import_text(db: Session) -> str:
+        """按批量导入格式导出现有模型目录。"""
+        catalogs = ModelCatalogService.list_catalogs(db)
+        blocks: list[str] = []
+        for catalog in catalogs:
+            pricing_json = ModelPricingService.serialize_pricing_json(catalog.pricing_json)
+            blocks.append(
+                "\n".join(
+                    [
+                        f"模型ID: {ProviderService._export_text(catalog.model_name)}",
+                        f"模型名称: {ProviderService._export_text(catalog.display_name)}",
+                        f"模型分组: {ProviderService._export_text(catalog.model_group)}",
+                        f"启用: {ProviderService._export_bool(catalog.enabled)}",
+                        f"支持 Stream: {ProviderService._export_bool(catalog.supports_stream)}",
+                        f"支持图像理解: {ProviderService._export_bool(catalog.supports_vision)}",
+                        f"支持工具调用: {ProviderService._export_bool(catalog.supports_tools)}",
+                        f"支持 Chat: {ProviderService._export_bool(catalog.supports_chat_completions)}",
+                        f"支持 Responses: {ProviderService._export_bool(catalog.supports_responses)}",
+                        f"上下文 token: {ProviderService._export_text(catalog.context_window_tokens)}",
+                        f"最大输入 token: {ProviderService._export_text(catalog.max_input_tokens)}",
+                        f"最大输出 token: {ProviderService._export_text(catalog.max_output_tokens)}",
+                        f"价格模式: {ProviderService._export_text(catalog.pricing_mode)}",
+                        f"价格 JSON: {dumps_json(pricing_json) if pricing_json else ''}",
+                        f"账户输入价/1M: {ProviderService._export_price_per_1m(catalog.input_price_per_1k)}",
+                        f"账户输出价/1M: {ProviderService._export_price_per_1m(catalog.output_price_per_1k)}",
+                        f"账户缓存价/1M: {ProviderService._export_price_per_1m(catalog.cache_price_per_1k)}",
+                        f"账户缓存写入价/1M: {ProviderService._export_price_per_1m(catalog.cache_write_price_per_1k)}",
+                        f"原始币种: {ProviderService._export_text(catalog.source_currency)}",
+                        f"账户币种: {ProviderService._export_text(catalog.billing_currency)}",
+                        f"原币种输入价/1M: {ProviderService._export_price_per_1m(catalog.source_input_price_per_1k)}",
+                        f"原币种输出价/1M: {ProviderService._export_price_per_1m(catalog.source_output_price_per_1k)}",
+                        f"原币种缓存价/1M: {ProviderService._export_price_per_1m(catalog.source_cache_price_per_1k)}",
+                        f"原币种缓存写入价/1M: {ProviderService._export_price_per_1m(catalog.source_cache_write_price_per_1k)}",
+                        f"汇率: {ProviderService._export_decimal(catalog.exchange_rate_to_billing_currency)}",
+                        f"汇率来源: {ProviderService._export_text(catalog.exchange_rate_source)}",
+                        f"汇率时间: {ProviderService._export_text(catalog.exchange_rate_at.isoformat() if catalog.exchange_rate_at else None)}",
+                        f"汇率版本: {ProviderService._export_text(catalog.exchange_rate_version)}",
+                        f"舍入策略: {ProviderService._export_text(catalog.rounding_strategy)}",
+                        f"速度标签: {ProviderService._export_text(catalog.speed_label)}",
+                        f"备注: {ProviderService._export_text(catalog.remark)}",
+                    ]
+                )
+            )
+        return "\n\n---\n\n".join(blocks) if blocks else ModelCatalogService.MODEL_CATALOG_BATCH_IMPORT_TEMPLATE
+
+    @staticmethod
+    def batch_import_models(db: Session, payload: ModelCatalogBatchImportRequest) -> ModelCatalogBatchImportResponse:
+        """批量导入模型目录；模型 ID 只允许新增，禁止覆盖现有模型。"""
+        blocks = ModelCatalogService._split_model_catalog_import_blocks(payload.content)
+        existing_model_names = set(db.scalars(select(ModelCatalog.model_name)))
+        seen_model_names: set[str] = set()
+        providers = ProviderService.list_providers(db)
+        result_items: list[dict] = []
+        created_count = 0
+
+        for index, block in enumerate(blocks, start=1):
+            raw_item = ModelCatalogService._parse_model_catalog_import_block(block)
+            errors: list[str] = []
+            normalized = ModelCatalogService._normalize_model_catalog_import_item(raw_item, errors)
+            model_name = normalized.get("model_name") if normalized else ProviderService._clean_optional_text(raw_item.get("model_name"))
+            display_name = normalized.get("display_name") if normalized else ProviderService._clean_optional_text(raw_item.get("display_name"))
+            if model_name:
+                if model_name in seen_model_names:
+                    errors.append("导入文本中模型ID重复")
+                if model_name in existing_model_names:
+                    errors.append("模型ID已存在，批量导入只允许新增模型")
+                seen_model_names.add(model_name)
+            valid = normalized is not None and not errors
+            item = {
+                "index": index,
+                "model_name": model_name,
+                "display_name": display_name,
+                "valid": valid,
+                "created": False,
+                "errors": errors,
+                "model": normalized if valid else None,
+            }
+            if valid and not payload.dry_run:
+                try:
+                    catalog = ModelCatalogService.create_model(db, ModelCatalogCreate(**normalized))
+                    existing_model_names.add(catalog.model_name)
+                    item["created"] = True
+                    item["model"] = ModelCatalogService._serialize_catalog(catalog, providers)
+                    created_count += 1
+                except Exception as exc:
+                    item["valid"] = False
+                    item["errors"] = [str(exc)]
+            result_items.append(item)
+
+        valid_count = sum(1 for item in result_items if item["valid"])
+        failed_count = sum(1 for item in result_items if not item["valid"])
+        return ModelCatalogBatchImportResponse(
+            total=len(result_items),
+            valid_count=valid_count,
+            created_count=created_count,
+            failed_count=failed_count,
+            dry_run=payload.dry_run,
+            template=ModelCatalogService.MODEL_CATALOG_BATCH_IMPORT_TEMPLATE,
+            items=result_items,
+        )
 
     @staticmethod
     def list_model_option_dicts(db: Session) -> list[dict]:
@@ -779,6 +922,236 @@ class ModelCatalogService:
         if normalized not in {"healthy", "unhealthy"}:
             raise ValueError("模型可用状态筛选仅支持 healthy 或 unhealthy")
         return normalized
+
+    @staticmethod
+    def _split_model_catalog_import_blocks(content: str) -> list[str]:
+        return ProviderService._split_batch_import_blocks(content)
+
+    @staticmethod
+    def _parse_model_catalog_import_block(block: str) -> dict:
+        item: dict[str, str] = {}
+        current_key: str | None = None
+        for raw_line in block.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            match = re.match(r"^([^:=：]+)\s*[:=：]\s*(.*)$", line)
+            if match:
+                normalized_key = ModelCatalogService._normalize_model_catalog_import_key(match.group(1))
+                if not normalized_key:
+                    if current_key:
+                        item[current_key] = f"{item.get(current_key, '')}\n{line}".strip()
+                    continue
+                current_key = normalized_key
+                item[current_key] = match.group(2).strip()
+                continue
+            if current_key:
+                item[current_key] = f"{item.get(current_key, '')}\n{line}".strip()
+        return item
+
+    @staticmethod
+    def _normalize_model_catalog_import_key(raw_key: str) -> str | None:
+        normalized = re.sub(r"\s+", "", (raw_key or "").strip().lower())
+        aliases = {
+            "模型id": "model_name",
+            "modelid": "model_name",
+            "model_id": "model_name",
+            "modelname": "model_name",
+            "model_name": "model_name",
+            "模型名": "display_name",
+            "模型名称": "display_name",
+            "展示名称": "display_name",
+            "displayname": "display_name",
+            "display_name": "display_name",
+            "模型分组": "model_group",
+            "分组": "model_group",
+            "modelgroup": "model_group",
+            "model_group": "model_group",
+            "启用": "enabled",
+            "enabled": "enabled",
+            "支持stream": "supports_stream",
+            "supportsstream": "supports_stream",
+            "supports_stream": "supports_stream",
+            "支持图像理解": "supports_vision",
+            "支持图片理解": "supports_vision",
+            "supportsvision": "supports_vision",
+            "supports_vision": "supports_vision",
+            "支持工具调用": "supports_tools",
+            "supportstools": "supports_tools",
+            "supports_tools": "supports_tools",
+            "支持chat": "supports_chat_completions",
+            "支持chatcompletions": "supports_chat_completions",
+            "supportschatcompletions": "supports_chat_completions",
+            "supports_chat_completions": "supports_chat_completions",
+            "支持responses": "supports_responses",
+            "supportsresponses": "supports_responses",
+            "supports_responses": "supports_responses",
+            "上下文token": "context_window_tokens",
+            "上下文tok": "context_window_tokens",
+            "contextwindowtokens": "context_window_tokens",
+            "context_window_tokens": "context_window_tokens",
+            "最大输入token": "max_input_tokens",
+            "maxinputtokens": "max_input_tokens",
+            "max_input_tokens": "max_input_tokens",
+            "最大输出token": "max_output_tokens",
+            "maxoutputtokens": "max_output_tokens",
+            "max_output_tokens": "max_output_tokens",
+            "价格模式": "pricing_mode",
+            "pricingmode": "pricing_mode",
+            "pricing_mode": "pricing_mode",
+            "价格json": "pricing_json",
+            "pricingjson": "pricing_json",
+            "pricing_json": "pricing_json",
+            "账户输入价1m": "input_price_per_1m",
+            "账户输入价/1m": "input_price_per_1m",
+            "输入价1m": "input_price_per_1m",
+            "input_price_per_1m": "input_price_per_1m",
+            "账户输出价1m": "output_price_per_1m",
+            "账户输出价/1m": "output_price_per_1m",
+            "输出价1m": "output_price_per_1m",
+            "output_price_per_1m": "output_price_per_1m",
+            "账户缓存价1m": "cache_price_per_1m",
+            "账户缓存价/1m": "cache_price_per_1m",
+            "cache_price_per_1m": "cache_price_per_1m",
+            "账户缓存写入价1m": "cache_write_price_per_1m",
+            "账户缓存写入价/1m": "cache_write_price_per_1m",
+            "账户缓存写价1m": "cache_write_price_per_1m",
+            "账户缓存写价/1m": "cache_write_price_per_1m",
+            "cache_write_price_per_1m": "cache_write_price_per_1m",
+            "原始币种": "source_currency",
+            "原币种": "source_currency",
+            "sourcecurrency": "source_currency",
+            "source_currency": "source_currency",
+            "账户币种": "billing_currency",
+            "billingcurrency": "billing_currency",
+            "billing_currency": "billing_currency",
+            "原币种输入价1m": "source_input_price_per_1m",
+            "原币种输入价/1m": "source_input_price_per_1m",
+            "source_input_price_per_1m": "source_input_price_per_1m",
+            "原币种输出价1m": "source_output_price_per_1m",
+            "原币种输出价/1m": "source_output_price_per_1m",
+            "source_output_price_per_1m": "source_output_price_per_1m",
+            "原币种缓存价1m": "source_cache_price_per_1m",
+            "原币种缓存价/1m": "source_cache_price_per_1m",
+            "source_cache_price_per_1m": "source_cache_price_per_1m",
+            "原币种缓存写入价1m": "source_cache_write_price_per_1m",
+            "原币种缓存写入价/1m": "source_cache_write_price_per_1m",
+            "原币种缓存写价1m": "source_cache_write_price_per_1m",
+            "原币种缓存写价/1m": "source_cache_write_price_per_1m",
+            "source_cache_write_price_per_1m": "source_cache_write_price_per_1m",
+            "汇率": "exchange_rate_to_billing_currency",
+            "exchangerate": "exchange_rate_to_billing_currency",
+            "exchange_rate": "exchange_rate_to_billing_currency",
+            "exchange_rate_to_billing_currency": "exchange_rate_to_billing_currency",
+            "汇率来源": "exchange_rate_source",
+            "exchange_rate_source": "exchange_rate_source",
+            "汇率时间": "exchange_rate_at",
+            "exchange_rate_at": "exchange_rate_at",
+            "汇率版本": "exchange_rate_version",
+            "exchange_rate_version": "exchange_rate_version",
+            "舍入策略": "rounding_strategy",
+            "rounding_strategy": "rounding_strategy",
+            "速度标签": "speed_label",
+            "speedlabel": "speed_label",
+            "speed_label": "speed_label",
+            "备注": "remark",
+            "remark": "remark",
+        }
+        return aliases.get(normalized)
+
+    @staticmethod
+    def _normalize_model_catalog_import_item(raw_item: dict, errors: list[str]) -> dict | None:
+        normalized = {
+            ModelCatalogService._normalize_model_catalog_import_key(str(key)): value
+            for key, value in raw_item.items()
+            if ModelCatalogService._normalize_model_catalog_import_key(str(key))
+        }
+        model_name = ProviderService._clean_optional_text(normalized.get("model_name"))
+        if not model_name:
+            errors.append("缺少模型ID")
+            return None
+        try:
+            pricing_json = ModelCatalogService._parse_model_catalog_pricing_json(normalized.get("pricing_json"))
+            payload = {
+                "model_name": model_name,
+                "display_name": ProviderService._clean_optional_text(normalized.get("display_name")),
+                "model_group": ProviderService.normalize_model_group(
+                    ProviderService._clean_optional_text(normalized.get("model_group"))
+                    or ProviderService.infer_model_group(model_name)
+                ),
+                "enabled": ProviderService._parse_batch_bool(normalized.get("enabled"), default=True),
+                "supports_stream": ProviderService._parse_batch_bool(normalized.get("supports_stream"), default=True),
+                "supports_vision": ProviderService._parse_batch_bool(normalized.get("supports_vision"), default=True),
+                "supports_tools": ProviderService._parse_batch_bool(normalized.get("supports_tools"), default=True),
+                "supports_chat_completions": ProviderService._parse_batch_bool(normalized.get("supports_chat_completions"), default=True),
+                "supports_responses": ProviderService._parse_batch_bool(normalized.get("supports_responses"), default=True),
+                "context_window_tokens": ProviderService._parse_batch_nullable_int(normalized.get("context_window_tokens"), default=None),
+                "max_input_tokens": ProviderService._parse_batch_nullable_int(normalized.get("max_input_tokens"), default=None),
+                "max_output_tokens": ProviderService._parse_batch_nullable_int(normalized.get("max_output_tokens"), default=None),
+                "pricing_mode": ProviderService._clean_optional_text(normalized.get("pricing_mode")) or "fixed",
+                "pricing_json": pricing_json,
+                "input_price_per_1k": ProviderService._parse_price_per_1m(normalized.get("input_price_per_1m")),
+                "output_price_per_1k": ProviderService._parse_price_per_1m(normalized.get("output_price_per_1m")),
+                "cache_price_per_1k": ProviderService._parse_price_per_1m(normalized.get("cache_price_per_1m")),
+                "cache_write_price_per_1k": ProviderService._parse_price_per_1m(normalized.get("cache_write_price_per_1m")),
+                "source_currency": ModelCatalogService._normalize_import_currency(normalized.get("source_currency"), default="USD"),
+                "billing_currency": ModelCatalogService._normalize_import_currency(normalized.get("billing_currency"), default="USD"),
+                "source_input_price_per_1k": ProviderService._parse_price_per_1m(normalized.get("source_input_price_per_1m")),
+                "source_output_price_per_1k": ProviderService._parse_price_per_1m(normalized.get("source_output_price_per_1m")),
+                "source_cache_price_per_1k": ProviderService._parse_price_per_1m(normalized.get("source_cache_price_per_1m")),
+                "source_cache_write_price_per_1k": ProviderService._parse_price_per_1m(normalized.get("source_cache_write_price_per_1m")),
+                "exchange_rate_to_billing_currency": ModelCatalogService._parse_optional_decimal(normalized.get("exchange_rate_to_billing_currency")),
+                "exchange_rate_source": ProviderService._clean_optional_text(normalized.get("exchange_rate_source")),
+                "exchange_rate_at": ModelCatalogService._parse_optional_datetime(normalized.get("exchange_rate_at")),
+                "exchange_rate_version": ProviderService._clean_optional_text(normalized.get("exchange_rate_version")),
+                "rounding_strategy": ProviderService._clean_optional_text(normalized.get("rounding_strategy")) or "ROUND_HALF_UP",
+                "speed_label": ProviderService._clean_optional_text(normalized.get("speed_label")),
+                "remark": ProviderService._clean_optional_text(normalized.get("remark")),
+                "provider_bindings": [],
+            }
+            return ModelCatalogCreate(**payload).model_dump()
+        except Exception as exc:
+            errors.append(str(exc))
+            return None
+
+    @staticmethod
+    def _parse_model_catalog_pricing_json(value) -> dict | None:
+        text = ProviderService._clean_optional_text(value)
+        if not text:
+            return None
+        parsed = loads_json(text, default=None)
+        if not isinstance(parsed, dict):
+            raise ValueError("价格 JSON 必须是对象")
+        return parsed
+
+    @staticmethod
+    def _normalize_import_currency(value, *, default: str) -> str:
+        text = ProviderService._clean_optional_text(value)
+        return (text or default).upper()
+
+    @staticmethod
+    def _parse_optional_decimal(value) -> Decimal | None:
+        text = ProviderService._clean_optional_text(value)
+        if text is None:
+            return None
+        try:
+            decimal_value = Decimal(text)
+        except Exception as exc:
+            raise ValueError("汇率必须是大于或等于 0 的数字") from exc
+        if decimal_value < 0:
+            raise ValueError("汇率必须是大于或等于 0 的数字")
+        return decimal_value
+
+    @staticmethod
+    def _parse_optional_datetime(value) -> datetime | None:
+        text = ProviderService._clean_optional_text(value)
+        if text is None:
+            return None
+        normalized = text.replace("Z", "+00:00")
+        try:
+            return datetime.fromisoformat(normalized)
+        except Exception as exc:
+            raise ValueError("汇率时间必须是 ISO 日期时间格式") from exc
 
     @staticmethod
     def _serialize_catalog(catalog: ModelCatalog, providers: list[Provider], *, include_all_providers: bool = False) -> dict:

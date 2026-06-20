@@ -13,7 +13,7 @@ from app.services.provider_service import ProviderService
 from app.services.setting_service import SettingService
 from app.services.user_auth_service import USER_ROLE_ADMIN, UserAuthService
 from app.utils.display_format import register_display_filters
-from app.utils.json_utils import to_jsonable
+from app.utils.json_utils import dumps_json, to_jsonable
 
 
 router = APIRouter()
@@ -94,11 +94,18 @@ def providers_page(request: Request, db: Session = Depends(get_db)) -> HTMLRespo
     if isinstance(current_user, RedirectResponse):
         return current_user
     provider_page_content = ProviderService.build_provider_page_content(db)
+    provider_bootstrap_json = dumps_json(
+        {
+            "providers": provider_page_content["providers"],
+            "summary": provider_page_content["summary"],
+        }
+    ).replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
     return templates.TemplateResponse(
         "providers.html",
         {
             "request": request,
             "providers": provider_page_content["providers"],
+            "provider_bootstrap_json": provider_bootstrap_json,
             "page_name": "providers",
             "portal_type": "admin",
             "current_user": current_user,

@@ -100,6 +100,7 @@ def test_content_guard_runtime_events_use_event_provider_and_model_without_reque
                 risk_level="high",
                 reason="命中高风险内容",
                 action="block",
+                diagnostics_json='{"source":"runtime_guard","score":92}',
             )
         )
         db.commit()
@@ -112,6 +113,8 @@ def test_content_guard_runtime_events_use_event_provider_and_model_without_reque
     assert event["model_name"] == "测试模型"
     assert event["requested_model"] == "用户请求模型"
     assert event["request_path"] == "/v1/responses"
+    assert event["diagnostics_json"] == '{"source":"runtime_guard","score":92}'
+    assert event["request_log"] is None
 
 
 def test_typed_content_guard_events_fallback_to_request_log_context() -> None:

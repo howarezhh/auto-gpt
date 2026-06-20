@@ -1301,6 +1301,7 @@ class HealthService:
             model_results = await HealthService._gather_staggered_by_previous_completion(
                 models_to_check,
                 run_model_probe,
+                stagger_seconds=0.0,
             )
             for provider_model, model_result in zip(models_to_check, model_results, strict=False):
                 if not model_result.get("model_name"):
@@ -1972,6 +1973,8 @@ class HealthService:
         result: dict[str, Any],
         *,
         response: Any = None,
+        request_payload: dict[str, Any] | None = None,
+        request_method: str = "POST",
         output_text: str | None = None,
         stream_chunk: bytes | str | None = None,
         note: str | None = None,
@@ -1985,6 +1988,8 @@ class HealthService:
         return ContentGuardProbeService.attach_raw_provider_response(
             result,
             response=response,
+            request_payload=request_payload,
+            request_method=request_method,
             output_text=output_text,
             stream_chunks=stream_chunks,
             note=note,
@@ -3516,7 +3521,7 @@ class HealthService:
                     latency_ms=latency_ms,
                     status_code=200,
                     guard_result=guard_result,
-                ), response=response)
+                ), response=response, request_payload=prepared.request_payload)
             output_text = ProxyService._extract_response_display_text(response, limit_bytes=160)
             return HealthService._attach_probe_raw_provider_response({
                 "endpoint_path": prepared.request_path,
@@ -3532,7 +3537,7 @@ class HealthService:
                 "status_code": 200,
                 "message": output_text or "ok",
                 "trace": [{"result": "native_health_probe", "protocol_type": protocol_type, "endpoint": prepared.request_path}],
-            }, response=response, output_text=output_text)
+            }, response=response, request_payload=prepared.request_payload, output_text=output_text)
         except Exception as exc:
             latency_ms = int((time.perf_counter() - started) * 1000)
             status_code = HealthService._exception_status_code(exc)
@@ -3556,7 +3561,7 @@ class HealthService:
                     message=message,
                     interactive_mode=interactive_mode,
                 ),
-            }, response=message)
+            }, response=message, request_payload=prepared.request_payload)
 
     @staticmethod
     async def _probe_native_health_stream_endpoint(
@@ -3642,7 +3647,7 @@ class HealthService:
                     latency_ms=latency_ms,
                     status_code=200,
                     guard_result=guard_result,
-                ), stream_chunk=chunk, note="原生流式可用性探针首个数据块")
+                ), request_payload=prepared.request_payload, stream_chunk=chunk, note="原生流式可用性探针首个数据块")
             return HealthService._attach_probe_raw_provider_response({
                 "endpoint_path": prepared.request_path,
                 "endpoint_type": protocol_type,
@@ -3657,7 +3662,7 @@ class HealthService:
                 "status_code": 200,
                 "message": "已收到原生流式首个数据块" if chunk else "原生流式响应为空",
                 "trace": [{"result": "native_stream_health_probe", "protocol_type": protocol_type, "endpoint": prepared.request_path}],
-            }, stream_chunk=chunk, note="原生流式可用性探针首个数据块")
+            }, request_payload=prepared.request_payload, stream_chunk=chunk, note="原生流式可用性探针首个数据块")
         except Exception as exc:
             exc_type, exc_value, exc_traceback = type(exc), exc, exc.__traceback__
             latency_ms = int((time.perf_counter() - started) * 1000)
@@ -3682,7 +3687,7 @@ class HealthService:
                     message=message,
                     interactive_mode=interactive_mode,
                 ),
-            }, response=message)
+            }, response=message, request_payload=prepared.request_payload)
         finally:
             if stream_context is not None:
                 await stream_context.__aexit__(exc_type, exc_value, exc_traceback)
@@ -3731,7 +3736,7 @@ class HealthService:
                     latency_ms=latency_ms,
                     status_code=200,
                     guard_result=guard_result,
-                ), response=response)
+                ), response=response, request_payload=payload)
             output_text = ProxyService._extract_response_display_text(response, limit_bytes=160)
             return HealthService._attach_probe_raw_provider_response({
                 "endpoint_path": endpoint_path,
@@ -3745,7 +3750,7 @@ class HealthService:
                 "status_code": 200,
                 "message": output_text or "ok",
                 "trace": fallback_trace,
-            }, response=response, output_text=output_text)
+            }, response=response, request_payload=payload, output_text=output_text)
         except httpx.HTTPStatusError as exc:
             latency_ms = int((time.perf_counter() - started) * 1000)
             message = await HealthService._safe_error_text(exc.response)
@@ -3772,7 +3777,7 @@ class HealthService:
                     message=message,
                     interactive_mode=interactive_mode,
                 ),
-            }, response=message)
+            }, response=message, request_payload=payload)
         except requests.HTTPError as exc:
             latency_ms = int((time.perf_counter() - started) * 1000)
             response = exc.response
@@ -3801,7 +3806,7 @@ class HealthService:
                     message=message,
                     interactive_mode=interactive_mode,
                 ),
-            }, response=message)
+            }, response=message, request_payload=payload)
         except Exception as exc:
             latency_ms = int((time.perf_counter() - started) * 1000)
             status_code = HealthService._exception_status_code(exc)
@@ -3829,7 +3834,7 @@ class HealthService:
                     message=message,
                     interactive_mode=interactive_mode,
                 ),
-            }, response=message)
+            }, response=message, request_payload=payload)
 
     @staticmethod
     async def _probe_formal_stream_endpoint(
@@ -3903,7 +3908,7 @@ class HealthService:
                     latency_ms=latency_ms,
                     status_code=200,
                     guard_result=guard_result,
-                ), stream_chunk=chunk, note="流式可用性探针首个数据块")
+                ), request_payload=stream_payload, stream_chunk=chunk, note="流式可用性探针首个数据块")
             return HealthService._attach_probe_raw_provider_response({
                 "endpoint_path": endpoint_path,
                 "endpoint_label": endpoint_label,
@@ -3916,7 +3921,7 @@ class HealthService:
                 "status_code": 200,
                 "message": "已收到流式首个数据块" if chunk else "流式响应为空",
                 "trace": fallback_trace,
-            }, stream_chunk=chunk, note="流式可用性探针首个数据块")
+            }, request_payload=stream_payload, stream_chunk=chunk, note="流式可用性探针首个数据块")
         except StopAsyncIteration as exc:
             exc_type, exc_value, exc_traceback = type(exc), exc, exc.__traceback__
             latency_ms = int((time.perf_counter() - started) * 1000)
@@ -3937,7 +3942,7 @@ class HealthService:
                     message="上游流式响应未返回任何数据",
                     interactive_mode=interactive_mode,
                 ),
-            }, note="上游流式响应未返回任何数据")
+            }, request_payload=stream_payload if "stream_payload" in locals() else payload, note="上游流式响应未返回任何数据")
         except httpx.HTTPStatusError as exc:
             exc_type, exc_value, exc_traceback = type(exc), exc, exc.__traceback__
             latency_ms = int((time.perf_counter() - started) * 1000)
@@ -3965,7 +3970,7 @@ class HealthService:
                     message=message,
                     interactive_mode=interactive_mode,
                 ),
-            }, response=message)
+            }, response=message, request_payload=stream_payload if "stream_payload" in locals() else payload)
         except Exception as exc:
             exc_type, exc_value, exc_traceback = type(exc), exc, exc.__traceback__
             latency_ms = int((time.perf_counter() - started) * 1000)
@@ -3998,7 +4003,7 @@ class HealthService:
                     message=message,
                     interactive_mode=interactive_mode,
                 ),
-            }, response=message)
+            }, response=message, request_payload=stream_payload if "stream_payload" in locals() else payload)
         finally:
             if stream_context is not None:
                 await stream_context.__aexit__(exc_type, exc_value, exc_traceback)

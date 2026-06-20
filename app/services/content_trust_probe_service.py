@@ -488,7 +488,7 @@ class ContentTrustProbeService:
     def _resolve_probe_target(db: Session, payload: ContentGuardRunRequest) -> tuple[Provider, ProviderModel, dict[str, Any]]:
         if payload.target_type == "external":
             if payload.external is None:
-                raise ValueError("外部提供商检测必须提供接口地址、密钥和模型名")
+                raise ValueError("外部提供商检测必须提供接口地址、密钥和模型ID")
             return ContentTrustProbeService.resolve_external_probe_target(payload.external)
         if payload.provider_id is None:
             raise ValueError("本项目提供商检测必须选择提供商")

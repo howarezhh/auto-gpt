@@ -20,8 +20,8 @@ try:
 except Exception:  # optional dependency during bootstrap
     tiktoken = None
 
-from sqlalchemy import or_, select, update
-from sqlalchemy.orm import load_only
+from sqlalchemy import and_, or_, select, update
+from sqlalchemy.orm import Session, load_only
 
 from app.config import get_settings
 from app.database import SessionLocal
@@ -535,7 +535,7 @@ class TokenUsageService:
             now = now_beijing()
             for job in jobs:
                 log = log_by_id.get(int(job.log_id))
-                if log is None or not TokenUsageService._can_fast_finalize_no_charge_batch_item(log):
+                if log is None or not TokenUsageService._can_fast_finalize_no_charge_batch_item(db, log):
                     continue
                 api_key_id = int(log.api_client_key_id)
                 prompt_delta = int(log.prompt_tokens or 0)
@@ -613,8 +613,10 @@ class TokenUsageService:
             db.close()
 
     @staticmethod
-    def _can_fast_finalize_no_charge_batch_item(log: RequestLog) -> bool:
+    def _can_fast_finalize_no_charge_batch_item(db: Session, log: RequestLog) -> bool:
         if not TokenUsageService._can_fast_finalize_no_charge(log):
+            return False
+        if not BillingService.can_finalize_no_charge_from_current_pricing(db, log):
             return False
         if log.prompt_tokens is None and log.completion_tokens is None and log.total_tokens is None:
             return False
@@ -627,6 +629,20 @@ class TokenUsageService:
         processed_count = 0
         db = SessionLocal()
         try:
+            normalized_limit = max(1, limit)
+            legacy_pending_tokens_expr = and_(
+                RequestLog.request_path.is_not(None),
+                LogService._non_model_list_request_expr(),
+                LogService._non_health_check_expr(),
+                RequestLog.log_type.in_(LogService.TOKEN_BILLING_LOG_TYPES),
+                RequestLog.api_client_key_id.is_not(None),
+                RequestLog.billing_status == "pending_tokens",
+                RequestLog.billing_finalized_at.is_(None),
+                or_(
+                    RequestLog.token_finalize_attempt_count.is_(None),
+                    RequestLog.token_finalize_attempt_count < TokenUsageService.MAX_FINALIZE_ATTEMPTS,
+                ),
+            )
             logs = list(
                 db.scalars(
                     select(RequestLog)
@@ -639,10 +655,13 @@ class TokenUsageService:
                         )
                     )
                     .where(
-                        LogService._pending_token_billing_finalize_expr()
+                        or_(
+                            LogService._pending_token_billing_finalize_expr(),
+                            legacy_pending_tokens_expr,
+                        )
                     )
                     .order_by(RequestLog.created_at.desc(), RequestLog.id.desc())
-                    .limit(max(1, limit))
+                    .limit(normalized_limit)
                 )
             )
             for log in logs:
@@ -653,6 +672,47 @@ class TokenUsageService:
                     enable_usage_fill=tiktoken is not None,
                 )
                 processed_count += 1
+            remaining_limit = max(0, normalized_limit - processed_count)
+            if remaining_limit:
+                stale_no_charge_expr = and_(
+                    RequestLog.request_path.is_not(None),
+                    LogService._non_model_list_request_expr(),
+                    LogService._non_health_check_expr(),
+                    RequestLog.log_type.in_(LogService.TOKEN_BILLING_LOG_TYPES),
+                    RequestLog.api_client_key_id.is_not(None),
+                    RequestLog.billable.is_(True),
+                    RequestLog.billing_status == "no_charge",
+                    RequestLog.billing_finalized_at.is_not(None),
+                    RequestLog.token_source == "upstream_usage",
+                    or_(RequestLog.upstream_usage_missing.is_(False), RequestLog.upstream_usage_missing.is_(None)),
+                    or_(
+                        RequestLog.prompt_tokens.is_not(None),
+                        RequestLog.completion_tokens.is_not(None),
+                        RequestLog.total_tokens.is_not(None),
+                    ),
+                    or_(RequestLog.total_cost.is_(None), RequestLog.total_cost <= 0),
+                )
+                stale_logs = list(
+                    db.scalars(
+                        select(RequestLog)
+                        .where(stale_no_charge_expr)
+                        .order_by(RequestLog.created_at.desc(), RequestLog.id.desc())
+                        .limit(remaining_limit)
+                    )
+                )
+                for log in stale_logs:
+                    if not BillingService._should_recompute_finalized_no_charge(db, log):
+                        continue
+                    billing_delta = BillingService.finalize_request_log_billing(db, log)
+                    db.commit()
+                    if billing_delta is not None:
+                        TokenUsageService._record_redis_usage_counters(
+                            log,
+                            original_total_tokens=log.total_tokens,
+                            billing_delta=billing_delta,
+                            request_delta=0,
+                        )
+                    processed_count += 1
         finally:
             db.close()
         return processed_count
@@ -982,7 +1042,8 @@ class TokenUsageService:
         if LogService.refresh_derived_fields(log, response_payload=response_data):
             changed = True
 
-        should_finalize_billing = log.api_client_key_id is not None
+        has_exact_usage_for_billing = LogService.has_exact_usage_for_billing(log)
+        should_finalize_billing = log.api_client_key_id is not None and has_exact_usage_for_billing
         should_commit = changed
         billing_delta = None
         cache_usage_changed = (
@@ -990,23 +1051,32 @@ class TokenUsageService:
             or int(log.cache_write_tokens or 0) != int(original_cache_write_tokens or 0)
         )
         if changed or should_finalize_billing:
-            TokenUsageService._sync_api_client_key_usage_delta(
-                db,
-                log=log,
-                original_prompt_tokens=accounted_prompt_tokens,
-                original_completion_tokens=accounted_completion_tokens,
-                original_total_tokens=accounted_total_tokens,
-                force=should_finalize_billing,
-            )
-            if TokenUsageService._can_fast_finalize_no_charge(log):
-                billing_delta = Decimal("0")
-                log.billing_status = "no_charge"
-                log.billing_finalized_at = now_beijing()
-                log.billing_error = None
+            if should_finalize_billing:
+                TokenUsageService._sync_api_client_key_usage_delta(
+                    db,
+                    log=log,
+                    original_prompt_tokens=accounted_prompt_tokens,
+                    original_completion_tokens=accounted_completion_tokens,
+                    original_total_tokens=accounted_total_tokens,
+                    force=True,
+                )
+                if (
+                    TokenUsageService._can_fast_finalize_no_charge(log)
+                    and BillingService.can_finalize_no_charge_from_current_pricing(db, log)
+                ):
+                    billing_delta = Decimal("0")
+                    log.billing_status = "no_charge"
+                    log.billing_finalized_at = now_beijing()
+                    log.billing_error = None
+                else:
+                    billing_delta = BillingService.finalize_request_log_billing(db, log)
             else:
-                billing_delta = BillingService.finalize_request_log_billing(db, log)
+                if LogService.is_token_billing_finalize_candidate(log):
+                    log.billing_status = "pending_tokens"
+                    log.billing_error = LogService.inexact_token_billing_error(log)
+                    log.billing_finalized_at = None
             should_commit = True
-        elif cache_usage_changed:
+        elif cache_usage_changed and has_exact_usage_for_billing:
             billing_delta = BillingService.finalize_request_log_billing(db, log)
             should_commit = True
         if should_commit:

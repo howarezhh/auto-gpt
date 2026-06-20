@@ -56,9 +56,13 @@ class ProviderHealthStateService:
         for provider_model in getattr(provider, "provider_models", []) or []:
             keys.append(cls.model_key(provider.id, provider_model.id))
             keys.append(cls.capability_key(provider.id, provider_model.id))
+        if RedisService.should_skip_after_recent_error():
+            return
         try:
             RedisService.get_sync_client().delete(*keys)
+            RedisService.clear_last_error()
         except Exception:
+            RedisService.mark_error("provider health state redis delete failed")
             return
 
     @classmethod
@@ -180,7 +184,7 @@ class ProviderHealthStateService:
     ) -> dict[str, Any]:
         """写入统一状态模块计算出的短窗口运行指标。
 
-        provider_model.id 是唯一模型挂载 ID；model_name 仅作为自定义展示名保留在观测 payload 中。
+        provider_model.id 是唯一模型挂载 ID；model_name 在观测 payload 中表示平台模型ID。
         """
         now = cls._now()
         existing = cls.get_model_state(provider.id, provider_model.id) or {}
@@ -451,19 +455,27 @@ class ProviderHealthStateService:
 
     @classmethod
     def _get_json(cls, key: str) -> dict[str, Any] | None:
+        if RedisService.should_skip_after_recent_error():
+            return None
         try:
             raw_value = RedisService.get_sync_client().get(key)
+            RedisService.clear_last_error()
         except Exception:
+            RedisService.mark_error("provider health state redis read failed")
             return None
         parsed = loads_json(raw_value, None) if raw_value else None
         return parsed if isinstance(parsed, dict) else None
 
     @classmethod
     def _set_json(cls, key: str, payload: dict[str, Any], *, ttl_seconds: int) -> None:
+        if RedisService.should_skip_after_recent_error():
+            return
         try:
             cls._attach_availability_aliases(payload)
             RedisService.get_sync_client().setex(key, ttl_seconds, dumps_json(payload))
+            RedisService.clear_last_error()
         except Exception:
+            RedisService.mark_error("provider health state redis write failed")
             return
 
     @classmethod

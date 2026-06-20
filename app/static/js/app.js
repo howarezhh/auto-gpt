@@ -15,6 +15,8 @@
         responses: "响应请求",
         moderations: "内容审核请求",
         files: "文件请求",
+        gemini: "Gemini 原生请求",
+        claude_messages: "Claude 原生请求",
         embeddings: "历史向量请求（已下线）",
         health_check_provider: "提供商可用性检测",
         health_check_model: "模型可用性检测",
@@ -467,9 +469,10 @@
     }
 
     const api = {
-        get: async (url, options = {}) => parseResponse(await fetchWithTimeout(url, { cache: "no-store", headers: { "Cache-Control": "no-cache" }, ...options })),
+        get: async (url, options = {}) => parseResponse(await fetchWithTimeout(url, { cache: "no-store", credentials: "same-origin", headers: { "Cache-Control": "no-cache" }, ...options })),
         post: async (url, data, options = {}) => {
             const requestOptions = {
+                credentials: "same-origin",
                 ...withJson("POST", data),
                 ...options,
             };
@@ -478,12 +481,12 @@
             return result;
         },
         put: async (url, data) => {
-            const result = await parseResponse(await fetchWithTimeout(url, withJson("PUT", data)));
+            const result = await parseResponse(await fetchWithTimeout(url, { credentials: "same-origin", ...withJson("PUT", data) }));
             invalidateReferenceCacheByMutation("PUT", url);
             return result;
         },
         delete: async (url) => {
-            const result = await parseResponse(await fetchWithTimeout(url, { method: "DELETE" }));
+            const result = await parseResponse(await fetchWithTimeout(url, { method: "DELETE", credentials: "same-origin" }));
             invalidateReferenceCacheByMutation("DELETE", url);
             return result;
         },
@@ -981,6 +984,7 @@
     const modalManager = createModalManager();
     let healthCheckResultModalController = null;
     let healthCheckResultModalNode = null;
+    let lastHealthCheckResultModalSnapshot = null;
 
     function wait(ms) {
         return new Promise((resolve) => window.setTimeout(resolve, ms));
@@ -1021,9 +1025,7 @@
             modal,
             dialog: modal.querySelector('[role="dialog"]'),
             getInitialFocus: () => document.getElementById("provider-test-result-modal-close"),
-            afterClose: () => {
-                contentNode.innerHTML = "";
-            },
+            afterClose: () => updateHealthCheckResultRestoreButton(),
         });
         const closeBtn = document.getElementById("provider-test-result-modal-close");
         if (closeBtn && closeBtn.dataset.boundHealthCheckResultClose !== "true") {
@@ -1039,6 +1041,8 @@
         const modalState = ensureHealthCheckResultModalController();
         if (!modalState) return;
         const { controller, titleNode, contentNode } = modalState;
+        lastHealthCheckResultModalSnapshot = { title, html, trigger };
+        updateHealthCheckResultRestoreButton();
         titleNode.textContent = title;
         contentNode.innerHTML = html;
         if (controller.isOpen()) {
@@ -1053,6 +1057,12 @@
         const modalState = ensureHealthCheckResultModalController();
         if (!modalState) return;
         const { controller, titleNode, contentNode } = modalState;
+        lastHealthCheckResultModalSnapshot = {
+            title,
+            html,
+            trigger: lastHealthCheckResultModalSnapshot?.trigger || document.activeElement,
+        };
+        updateHealthCheckResultRestoreButton();
         if (!controller.isOpen()) return;
         titleNode.textContent = title;
         contentNode.innerHTML = html;
@@ -1061,6 +1071,37 @@
 
     function closeHealthCheckResultModal(options = {}) {
         healthCheckResultModalController?.close(options);
+    }
+
+    function reopenLastHealthCheckResultModal(trigger = document.activeElement) {
+        const snapshot = lastHealthCheckResultModalSnapshot;
+        if (!snapshot) {
+            showToast("暂无可回看的检测结果", "error");
+            return;
+        }
+        openHealthCheckResultModal(snapshot.title, snapshot.html, trigger || snapshot.trigger || document.activeElement);
+    }
+
+    function updateHealthCheckResultRestoreButton() {
+        const existing = document.getElementById("health-check-result-restore");
+        const shouldShow = Boolean(
+            lastHealthCheckResultModalSnapshot
+            && healthCheckResultModalController
+            && !healthCheckResultModalController.isOpen()
+        );
+        if (!shouldShow) {
+            existing?.remove();
+            return;
+        }
+        const button = existing || document.createElement("button");
+        button.id = "health-check-result-restore";
+        button.className = "probe-result-restore-btn interactive-btn";
+        button.type = "button";
+        button.textContent = "查看最近检测结果";
+        if (!existing) {
+            button.addEventListener("click", () => reopenLastHealthCheckResultModal(button));
+            document.body.appendChild(button);
+        }
     }
 
     function withJson(method, data, extraHeaders = {}) {
@@ -2175,12 +2216,50 @@
         }
     }
 
+    function collectProbeRawProviderResponses(value, path = "result", output = []) {
+        if (!value || typeof value !== "object") return output;
+        if (Object.prototype.hasOwnProperty.call(value, "raw_provider_response") && value.raw_provider_response != null) {
+            output.push({
+                path,
+                label: value.endpoint_label || value.model_name || value.provider_name || value.displayName || value.display_name || path,
+                endpoint_path: value.endpoint_path || value.raw_provider_response?.endpoint_path || null,
+                raw_provider_response: value.raw_provider_response,
+            });
+        }
+        Object.entries(value).forEach(([key, child]) => {
+            if (key === "raw_provider_response") return;
+            if (Array.isArray(child)) {
+                child.forEach((item, index) => collectProbeRawProviderResponses(item, `${path}.${key}[${index}]`, output));
+            } else if (child && typeof child === "object") {
+                collectProbeRawProviderResponses(child, `${path}.${key}`, output);
+            }
+        });
+        return output;
+    }
+
     function buildProbeDetailPayload(item, label = "检测详情") {
         if (item == null) return null;
         const raw = item?.raw_provider_response;
+        const rawResponses = collectProbeRawProviderResponses(item);
         return {
             label,
-            raw_provider_response: raw || null,
+            summary_text: "包含真实上游响应与本次检测结果对象",
+            raw_provider_response: raw || rawResponses[0]?.raw_provider_response || null,
+            raw_provider_responses: rawResponses,
+            probe_process: {
+                summary: {
+                    provider_name: item?.provider_name || item?.providerName || null,
+                    model_name: item?.model_name || item?.modelName || item?.display_name || item?.displayName || null,
+                    endpoint_path: item?.endpoint_path || null,
+                    endpoint_label: item?.endpoint_label || null,
+                    status_code: item?.status_code ?? null,
+                    latency_ms: item?.latency_ms ?? null,
+                    success: item?.success ?? item?.provider_success ?? null,
+                    message: item?.message || null,
+                },
+                endpoint_results: Array.isArray(item?.endpoint_results) ? item.endpoint_results : [],
+                nested_raw_response_count: rawResponses.length,
+            },
             result: item,
         };
     }
@@ -2197,20 +2276,32 @@
         return renderProbeDetailButton(item, label);
     }
 
+    function renderContentGuardRuntimeEventDetailButton(item) {
+        if (item == null) return "-";
+        const key = `content-guard-event-${Date.now()}-${probeDetailSeq += 1}`;
+        probeDetailStore.set(key, {
+            label: `内容防护事件 #${item.id ?? "-"}`,
+            summary_text: "包含该内容防护事件完整字段与关联请求日志摘要",
+            detail_payload: item,
+            result: item,
+        });
+        return `<button class="table-action-btn interactive-btn" type="button" data-probe-detail="${escapeHtml(key)}">详情</button>`;
+    }
+
     function openProbeDetail(key, trigger = document.activeElement) {
         const entry = probeDetailStore.get(key);
         if (!entry) {
             showToast("检测详情已失效，请重新执行探针", "error");
             return;
         }
-        const rawText = formatRawProviderResponse(entry);
+        const rawText = formatRawProviderResponse(entry.detail_payload || entry);
         openHealthCheckResultModal(
             `检测详情 · ${entry.label || "探针结果"}`,
             `
                 <div class="health-result-summary">
                     <span class="status-badge status-unknown">原始 JSON</span>
                     <strong>${escapeHtml(entry.label || "探针结果")}</strong>
-                    <span>包含真实上游响应与本次检测结果对象</span>
+                    <span>${escapeHtml(entry.summary_text || "包含真实上游响应与本次检测结果对象")}</span>
                 </div>
                 <div class="table-actions">
                     <button class="table-action-btn interactive-btn" type="button" data-probe-detail-copy="${escapeHtml(key)}">复制 JSON</button>
@@ -2237,7 +2328,7 @@
             showToast("检测详情已失效，请重新执行探针", "error");
             return;
         }
-        await copyText(formatRawProviderResponse(entry), button);
+        await copyText(formatRawProviderResponse(entry.detail_payload || entry), button);
     });
 
     function renderContentGuardProbeModalBody(result, title = "可信检测") {
@@ -2483,7 +2574,16 @@
         const outputCost = missingOutputPrice || outputPrice == null ? null : roundCurrency((completionTokens / 1000) * outputPrice, 9);
         const promptCost = roundCurrency(log?.prompt_cost) ?? (promptPriceMissing ? null : sumCosts(inputCost, cacheReadCost, cacheWriteCost));
         const completionCost = roundCurrency(log?.completion_cost) ?? (missingOutputPrice ? null : outputCost);
-        const totalCost = roundCurrency(log?.total_cost) ?? ((promptPriceMissing || missingOutputPrice) ? null : sumCosts(promptCost, completionCost));
+        const calculatedTotalCost = (promptPriceMissing || missingOutputPrice) ? null : sumCosts(promptCost, completionCost);
+        const storedTotalCost = roundCurrency(log?.total_cost);
+        const billingStatus = String(log?.billing_status || "").trim().toLowerCase();
+        const finalBillingStatuses = new Set(["billed", "no_charge", "internal_request", "skipped"]);
+        const shouldIgnoreStoredZero = storedTotalCost === 0
+            && Boolean(log?.billable)
+            && totalTokens > 0
+            && calculatedTotalCost != null
+            && !finalBillingStatuses.has(billingStatus);
+        const totalCost = shouldIgnoreStoredZero ? calculatedTotalCost : (storedTotalCost ?? calculatedTotalCost);
         const sourceTotalCost = roundCurrency(log?.source_total_cost);
         const baseInputPrice = inputPrice == null ? null : roundCurrency(inputPrice / multiplier, 12);
         const baseOutputPrice = outputPrice == null ? null : roundCurrency(outputPrice / multiplier, 12);
@@ -2519,6 +2619,7 @@
             completionCost,
             totalCost,
             sourceTotalCost,
+            billingStatus,
         };
     }
 
@@ -2575,6 +2676,8 @@
             `缓存读：${formatTokenDisplay(billing.cacheReadTokens)}`,
             `缓存写：${formatTokenDisplay(billing.cacheWriteTokens)}`,
             `倍率：${formatMultiplier(billing.multiplier)}`,
+            `计费状态：${formatLogStatusLabel(log.billing_status || "-")}`,
+            log.billing_error ? `计费说明：${log.billing_error}` : "",
         ].join("\n");
         const renderTokenChip = (icon, label, value) => `
             <span class="log-token-tooltip-chip log-tooltip-trigger" ${renderLogTooltipAttrs(label, value)}>
@@ -2586,6 +2689,7 @@
                 <div class="log-billing-row log-billing-row-primary">
                     <strong class="log-billing-total-cost log-tooltip-trigger" ${renderLogTooltipAttrs("费用明细", detail)}>${escapeHtml(formatCurrencyValue(billing.totalCost, billing.billingCurrency))}</strong>
                     <span class="log-billing-multiplier log-tooltip-trigger" ${renderLogTooltipAttrs("计费倍率", formatMultiplier(billing.multiplier))}>${escapeHtml(formatMultiplier(billing.multiplier))}</span>
+                    ${log.billing_status ? `<span class="log-billing-status log-tooltip-trigger" ${renderLogTooltipAttrs("计费状态", formatLogStatusLabel(log.billing_status))}>${escapeHtml(formatLogStatusLabel(log.billing_status))}</span>` : ""}
                     <div class="log-billing-pair">
                         <span class="log-billing-label">总 Token</span>
                         <strong class="log-billing-total-tokens">${escapeHtml(formatTokenDisplay(billing.totalTokens))}</strong>
@@ -2658,14 +2762,20 @@
 
     function renderLogTimingCell(log = {}) {
         const duration = log.duration_ms ?? log.latency_ms;
+        const upstreamDuration = log.upstream_duration_ms ?? log.latency_ms;
         const durationValue = formatLogCellMetricValue(duration, " ms");
+        const upstreamDurationValue = formatLogCellMetricValue(upstreamDuration, " ms");
         const ttfbValue = formatLogCellMetricValue(log.ttfb_ms, " ms");
         const tpsValue = log.tps == null ? "-" : Number(log.tps).toFixed(2);
+        const tpsTooltip = duration == null
+            ? "请求完成后按输出 Token / 有效输出时长计算"
+            : `输出速率：输出 Token / (总耗时 - 首包耗时)。总耗时 ${durationValue}，首包 ${ttfbValue}`;
         return `
             <div class="log-timing-cell">
                 <strong class="log-tooltip-trigger" ${renderLogTooltipAttrs("总耗时", durationValue)}>${escapeHtml(durationValue)}</strong>
                 <span class="log-tooltip-trigger" ${renderLogTooltipAttrs("首包耗时", ttfbValue)}><i class="bi bi-stopwatch" aria-hidden="true"></i>${escapeHtml(ttfbValue)}</span>
-                <span class="log-tooltip-trigger" ${renderLogTooltipAttrs("输出速率 TPS", tpsValue)}><i class="bi bi-speedometer2" aria-hidden="true"></i>${escapeHtml(tpsValue)}</span>
+                <span class="log-tooltip-trigger" ${renderLogTooltipAttrs("上游耗时", `提供商请求耗时：${upstreamDurationValue}`)}><i class="bi bi-hdd-network" aria-hidden="true"></i>${escapeHtml(upstreamDurationValue)}</span>
+                <span class="log-tooltip-trigger" ${renderLogTooltipAttrs("输出速率 TPS", `${tpsValue}\n${tpsTooltip}`)}><i class="bi bi-speedometer2" aria-hidden="true"></i>${escapeHtml(tpsValue)}</span>
             </div>
         `;
     }
@@ -2687,6 +2797,20 @@
         `;
     }
 
+    function hasContentGuardAttention(log = {}) {
+        const result = String(log.content_guard_result || "").trim().toLowerCase();
+        const risk = String(log.content_guard_risk_level || "").trim().toLowerCase();
+        const action = String(log.content_guard_action || "").trim().toLowerCase();
+        const strategy = String(log.content_guard_final_strategy || "").trim().toLowerCase();
+        const attentionResults = new Set(["block", "blocked", "review", "error", "failed", "upstream_unavailable", "rate_limited"]);
+        const attentionRisks = new Set(["medium", "high"]);
+        const attentionActions = new Set(["block", "review", "async_review", "safe_error", "switch_provider", "switch_provider_exhausted"]);
+        return attentionResults.has(result)
+            || attentionRisks.has(risk)
+            || attentionActions.has(action)
+            || attentionActions.has(strategy);
+    }
+
     function buildLogExceptionReason(log = {}) {
         const detailLines = [];
         const message = String(log.message || "").trim();
@@ -2706,8 +2830,12 @@
         if (message && (!log.success || /fail|error|timeout|exceed|invalid/i.test(message))) {
             detailLines.push(`主信息：${message}`);
         }
-        if (contentGuardReason) detailLines.push(`内容检测：${contentGuardReason}`);
-        if (contentGuardExcerpt) detailLines.push(`命中片段：${contentGuardExcerpt}`);
+        if (contentGuardReason && (!log.success || hasContentGuardAttention(log))) {
+            detailLines.push(`内容检测：${contentGuardReason}`);
+        }
+        if (contentGuardExcerpt && (!log.success || hasContentGuardAttention(log))) {
+            detailLines.push(`命中片段：${contentGuardExcerpt}`);
+        }
         if (!detailLines.length && !log.success && responseText) {
             detailLines.push(`响应内容：${responseText}`);
         }
@@ -2763,17 +2891,108 @@
         return parts.filter(Boolean).join(" · ");
     }
 
+    function isRequestLogInProgress(log = {}) {
+        const requestStatus = String(log.request_status || "").trim();
+        if (requestStatus === "请求中" || requestStatus === "响应中") return true;
+        return Number(log.status_code) === 102;
+    }
+
+    function formatRequestLogProgressLabel(log = {}) {
+        const requestStatus = String(log.request_status || "").trim();
+        if (requestStatus) return requestStatus;
+        return isRequestLogInProgress(log) ? "进行中" : "";
+    }
+
+    function buildTimelineDetailSummary(payload = {}) {
+        const keyLabels = {
+            auth_result: "鉴权",
+            validation_stage: "校验",
+            permission_result: "模型权限",
+            route_round: "路由轮次",
+            selected_provider_id: "选中提供商",
+            selected_provider_model_id: "选中挂载",
+            selected_reason: "选择原因",
+            selection_guard: "路由保护",
+            candidate_count: "候选数",
+            failed_candidate_count: "失败候选",
+            provider_name: "提供商",
+            provider_id: "提供商ID",
+            provider_model_id: "挂载ID",
+            actual_model: "实际模型",
+            endpoint_path: "端点",
+            retry_index: "重试序号",
+            result: "结果",
+            status_code: "状态码",
+            error_code: "错误码",
+            error_message: "错误",
+            public_message: "返回说明",
+            retryable: "可重试",
+            recoverable: "可恢复",
+            retry_wait_seconds: "等待秒数",
+            retry_wait_ms: "等待毫秒",
+            billing_stage: "计费阶段",
+            guard_result: "防护结果",
+            stream_result: "流式结果",
+            done_sent: "已发送结束",
+            sse_error_sent: "已发送错误事件",
+        };
+        const parts = Object.entries(keyLabels)
+            .filter(([key]) => payload[key] !== undefined && payload[key] !== null && payload[key] !== "")
+            .map(([key, label]) => `${label}：${formatTypedLogStatusLabel(payload[key])}`);
+        const waitPlan = safeJsonParse(payload.retry_wait_plan_json || "");
+        if (waitPlan && typeof waitPlan === "object") {
+            if (waitPlan.sleep_seconds !== undefined && waitPlan.sleep_seconds !== null) {
+                parts.push(`计划等待：${formatTypedLogStatusLabel(waitPlan.sleep_seconds)}s`);
+            }
+            if (waitPlan.wait_source) {
+                parts.push(`等待策略：${formatTypedLogStatusLabel(waitPlan.wait_source)}`);
+            }
+        }
+        const diagnostics = safeJsonParse(payload.diagnostics_json || payload.diagnostic_sample_json || "");
+        if (diagnostics && typeof diagnostics === "object") {
+            const summary = diagnostics.summary || diagnostics.message || diagnostics.code;
+            if (summary) parts.push(`诊断：${formatTypedLogStatusLabel(summary)}`);
+        }
+        return parts.join(" · ") || "已记录结构化详情";
+    }
+
+    function renderRequestTimelineHtml(timelineItems = []) {
+        if (!timelineItems.length) return "";
+        return `
+            <article class="log-detail-card log-detail-timeline">
+                <h4>链路时间线</h4>
+                <div class="log-detail-timeline-list">
+                    ${timelineItems.map((item) => `
+                        <div class="log-detail-timeline-item">
+                            <strong>${escapeHtml(item.label || item.event_type || "-")}</strong>
+                            <span class="table-muted">${escapeHtml(item.created_at || "-")}</span>
+                            <span>${escapeHtml(buildTimelineDetailSummary(item.payload || {}))}</span>
+                        </div>
+                    `).join("")}
+                </div>
+            </article>
+        `;
+    }
+
     function renderLogResultCell(log = {}) {
         const modeSummary = buildLogModeSummary(log);
         const contentGuardSummary = buildContentGuardSummary(log);
         const statusCode = log.status_code ?? "-";
+        const statusTone = isRequestLogInProgress(log) ? "running" : (log.success ? "healthy" : "unhealthy");
+        const badgeTone = isRequestLogInProgress(log) ? "status-running" : (log.success ? "status-ok" : "status-error");
+        const attemptCountValue = Number(log.attempt_count);
+        const attemptCountLabel = formatLogCellMetricValue(log.attempt_count);
+        const retryCountLabel = Number.isFinite(attemptCountValue)
+            ? formatLogCellMetricValue(Math.max(0, attemptCountValue - 1))
+            : "-";
+        const attemptTooltip = `上游尝试次数：${attemptCountLabel}；实际重试次数：${retryCountLabel}`;
         return `
             <div class="log-result-cell">
-                ${renderStatusWithErrorHint(log.success ? "healthy" : "unhealthy", buildLogExceptionReason(log))}
+                ${renderStatusWithErrorHint(statusTone, buildLogExceptionReason(log))}
                 <div class="log-result-pill-row">
-                    ${renderLogBadge(statusCode, log.success ? "status-ok" : "status-error", `HTTP 状态码：${statusCode}`)}
+                    ${renderLogBadge(statusCode, badgeTone, `HTTP 状态码：${statusCode}`)}
                     ${renderRequestPathBadge(log)}
-                    ${renderLogBadge(`×${formatLogCellMetricValue(log.attempt_count)}`, "attempt", `尝试次数：${formatLogCellMetricValue(log.attempt_count)}`)}
+                    ${renderLogBadge(`×${attemptCountLabel}`, "attempt", attemptTooltip)}
                 </div>
                 ${modeSummary ? `<div class="log-inline-note log-tooltip-trigger" ${renderLogTooltipAttrs("请求形态", modeSummary)}>${escapeHtml(modeSummary)}</div>` : ""}
                 ${contentGuardSummary ? `<div class="log-inline-note log-tooltip-trigger" ${renderLogTooltipAttrs("内容防护", contentGuardSummary)}>${escapeHtml(contentGuardSummary)}</div>` : ""}
@@ -4461,7 +4680,7 @@
                 <div class="filter-toolbar playground-batch-filter-toolbar">
                     <label>
                         <span>关键词</span>
-                        <input class="field-input search-input" id="playground-batch-search" type="text" value="${escapeHtml(options.keyword || "")}" placeholder="搜索提供商名、模型名、结果说明">
+                        <input class="field-input search-input" id="playground-batch-search" type="text" value="${escapeHtml(options.keyword || "")}" placeholder="搜索提供商名、模型ID、结果说明">
                     </label>
                     <label>
                         <span>整体可用性</span>
@@ -6238,6 +6457,11 @@
         renderDashboardUsageOverview(stats.usage_overview || {});
 
         const healthRatio = stats.provider_count ? Math.round((stats.healthy_count / stats.provider_count) * 100) : 0;
+        const routeStrategyLabel = {
+            availability_first: "可用性优先",
+            latency_first: "低延迟优先",
+            capacity_avoidance: "容量避让",
+        }[stats.route_strategy] || "全局策略";
         const signalCard = document.getElementById("dashboard-signal-card");
         if (signalCard) {
             signalCard.innerHTML = `
@@ -6246,7 +6470,7 @@
                 <div class="cockpit-aside-copy">过去 24 小时代理请求量</div>
                 <div class="cockpit-health-bar"><span style="width:${healthRatio}%"></span></div>
                 <div class="cockpit-aside-meta">
-                    <span>路由 可用性优先</span>
+                    <span>路由 ${routeStrategyLabel}</span>
                     <span>${stats.healthy_count}/${stats.provider_count} 全部可用</span>
                 </div>
             `;
@@ -6280,6 +6504,7 @@
         const providerGroupFilterSelect = document.getElementById("provider-group-filter");
         const providerPageSizeSelect = document.getElementById("provider-page-size");
         const providerPageMeta = document.getElementById("provider-page-meta");
+        const providerDirectoryStatus = document.getElementById("provider-directory-status");
         const providerPrevPageBtn = document.getElementById("provider-prev-page-btn");
         const providerNextPageBtn = document.getElementById("provider-next-page-btn");
         const providerModelSearchInput = document.getElementById("provider-model-search");
@@ -6313,6 +6538,8 @@
         const providerModelConfigList = document.getElementById("provider-model-config-list");
         const customModelInput = document.getElementById("provider-custom-model-name");
         const customModelIdInput = document.getElementById("provider-custom-model-id");
+        const customModelProtocolInput = document.getElementById("provider-custom-model-protocol");
+        const customModelGroupInput = document.getElementById("provider-custom-model-group");
         const addCustomModelBtn = document.getElementById("provider-add-custom-model");
         const addEmptyModelBtn = document.getElementById("provider-add-empty-model");
         const presetManageBtn = document.getElementById("provider-preset-manage-btn");
@@ -6414,6 +6641,7 @@
         const openProviderDetailIds = new Set();
         let discoveredModels = [];
         let catalogModels = [];
+        let catalogModelReferenceLoaded = false;
         let providerFormSnapshot = "";
         let providerPresetModels = loadProviderPresetModels();
         let providerBatchImportTemplate = "";
@@ -6423,6 +6651,7 @@
         let providerTypeManuallyTouched = false;
         let editingProviderApiKey = "";
         const selectedProviderIds = new Set();
+        const providerPageBootstrap = readProviderPageBootstrap();
         const PROVIDER_NAME_PATTERN = /^[\u4e00-\u9fffA-Za-z0-9]+$/;
         const PROVIDER_MODEL_PROTOCOL_OPTIONS = [
             ["responses", "Responses"],
@@ -6443,6 +6672,7 @@
         if (providerTypeInput) {
             providerTypeInput.innerHTML = renderProviderTypeOptions(providerTypeInput.value || "openai_compatible");
         }
+        renderProviderBootstrapDirectory();
 
         function serializeProviderFormState() {
             return JSON.stringify(
@@ -6771,14 +7001,14 @@
             row.dataset.supportsImageGeneration = item.supports_image_generation ? "true" : "false";
             row.innerHTML = `
                 <label class="provider-model-config-name" for="${rowId}-name">
-                    <span class="visually-hidden">模型名称</span>
-                    <input class="field-input" id="${rowId}-name" data-model-config-field="model_name" value="${escapeHtml(item.model_name)}" placeholder="展示别名，必填" required>
-                    <small>模型名称是本平台对外展示和用户请求时使用的自定义名称。</small>
+                    <span class="visually-hidden">模型ID</span>
+                    <input class="field-input" id="${rowId}-name" data-model-config-field="model_name" value="${escapeHtml(item.model_name)}" placeholder="平台模型ID，必填" required>
+                    <small>模型ID是本平台唯一标识，用于外部请求、权限、映射和路由。</small>
                 </label>
                 <label class="provider-model-config-name" for="${rowId}-upstream">
-                    <span class="visually-hidden">模型ID</span>
-                    <input class="field-input" id="${rowId}-upstream" data-model-config-field="upstream_model_name" value="${escapeHtml(item.upstream_model_name)}" placeholder="官方模型名，必填" required>
-                    <small>模型ID是上游官方模型名或唯一 ID，实际请求提供商时使用。</small>
+                    <span class="visually-hidden">上游模型ID</span>
+                    <input class="field-input" id="${rowId}-upstream" data-model-config-field="upstream_model_name" value="${escapeHtml(item.upstream_model_name)}" placeholder="上游模型ID，必填" required>
+                    <small>上游模型ID是上游官方模型名或唯一 ID，实际请求提供商时使用。</small>
                 </label>
                 <label class="provider-model-mini-switch settings-switch-control" title="控制该模型是否参与当前提供商路由">
                     <input type="checkbox" data-model-config-field="enabled" ${item.enabled ? "checked" : ""}>
@@ -6910,16 +7140,22 @@
         function addProviderModelConfig(config = {}, options = {}) {
             const item = normalizeProviderModelConfig(config);
             if (!item.model_name && !options.allowBlank) {
-                showToast("模型名称不能为空", "error");
+                showToast("模型ID不能为空", "error");
                 return false;
             }
             if (!item.upstream_model_name && !options.allowBlank) {
-                showToast("模型ID不能为空", "error");
+                showToast("上游模型ID不能为空", "error");
                 return false;
             }
             const existingNameSet = new Set(getCurrentConfiguredModelNames());
             if (item.model_name && existingNameSet.has(item.model_name)) {
                 showToast(`模型 ${item.model_name} 已存在`, "error");
+                return false;
+            }
+            const existingUpstreamModelSet = new Set(getCurrentConfiguredUpstreamModelNames().map(normalizeModelIdKey));
+            const upstreamModelKey = normalizeModelIdKey(item.upstream_model_name);
+            if (upstreamModelKey && existingUpstreamModelSet.has(upstreamModelKey)) {
+                showToast(`上游模型ID ${item.upstream_model_name} 已存在，请删除或修改重复项`, "error");
                 return false;
             }
             providerModelConfigList.querySelector(".provider-model-config-empty")?.remove();
@@ -6948,12 +7184,12 @@
                 const upstreamModelName = String(upstreamModelInput?.value || "").trim();
                 if (!modelName) {
                     modelNameInput?.focus();
-                    showToast("模型名称为必填项", "error");
+                    showToast("模型ID为必填项", "error");
                     return null;
                 }
                 if (!upstreamModelName) {
                     upstreamModelInput?.focus();
-                    showToast(`模型 ${modelName} 的模型ID为必填项`, "error");
+                    showToast(`模型 ${modelName} 的上游模型ID为必填项`, "error");
                     return null;
                 }
                 if (seen.has(modelName)) {
@@ -6964,7 +7200,7 @@
                 seen.add(modelName);
                 if (seenUpstreamIds.has(upstreamModelName)) {
                     upstreamModelInput?.focus();
-                    showToast(`模型ID ${upstreamModelName} 重复，请删除或修改重复项`, "error");
+                    showToast(`上游模型ID ${upstreamModelName} 重复，请删除或修改重复项`, "error");
                     return null;
                 }
                 seenUpstreamIds.add(upstreamModelName);
@@ -7098,7 +7334,7 @@
                 content_integrity_status: "内容完整性状态",
                 content_integrity_score: "内容完整性分数",
                 model_configs: "模型挂载",
-                model_name: "模型名称",
+                model_name: "模型ID",
                 model_group: "模型分组",
                 price_multiplier: "模型倍率",
                 context_window_tokens: "上下文窗口 token",
@@ -7179,7 +7415,7 @@
             if (presetEditorList) {
                 presetEditorList.innerHTML = providerPresetModels.map((modelName, index) => `
                     <div class="provider-preset-editor-row" data-preset-row="${index}">
-                        <label class="visually-hidden" for="provider-preset-${index}">预设模型名</label>
+                        <label class="visually-hidden" for="provider-preset-${index}">预设模型ID</label>
                         <input class="field-input" id="provider-preset-${index}" value="${escapeHtml(modelName)}" data-preset-input="${index}">
                         <button class="table-action-btn" type="button" data-action="save-preset" data-index="${index}">保存</button>
                         <button class="table-action-btn" type="button" data-action="delete-preset" data-index="${index}">删除</button>
@@ -7267,7 +7503,7 @@
         addPresetBtn?.addEventListener("click", () => {
             const modelName = String(newPresetInput?.value || "").trim();
             if (!modelName) {
-                showToast("请先输入预设模型名", "error");
+                showToast("请先输入预设模型ID", "error");
                 return;
             }
             if (providerPresetModels.includes(modelName)) {
@@ -7296,7 +7532,7 @@
                 const input = presetEditorList.querySelector(`[data-preset-input="${index}"]`);
                 const nextName = String(input?.value || "").trim();
                 if (!nextName) {
-                    showToast("预设模型名不能为空", "error");
+                    showToast("预设模型ID不能为空", "error");
                     input?.focus();
                     return;
                 }
@@ -7311,29 +7547,171 @@
                 showToast(`已保存预设模型 ${nextName}`);
             }
         });
-        addCustomModelBtn.addEventListener("click", () => {
-            const modelName = customModelInput.value.trim();
+        function getCustomModelInferenceName() {
+            return String(customModelIdInput?.value || customModelInput?.value || "").trim();
+        }
+
+        function getPendingCustomModelConfig({ requireComplete = false } = {}) {
+            const modelName = String(customModelInput?.value || "").trim();
             const upstreamModelName = String(customModelIdInput?.value || "").trim();
+            if (!modelName && !upstreamModelName) {
+                if (requireComplete) {
+                    showToast("请先输入模型ID", "error");
+                    customModelInput?.focus();
+                    return false;
+                }
+                return null;
+            }
             if (!modelName) {
-                showToast("请先输入模型名称", "error");
-                customModelInput.focus();
-                return;
+                showToast("请先输入模型ID", "error");
+                customModelInput?.focus();
+                return false;
             }
             if (!upstreamModelName) {
-                showToast("请先输入模型ID", "error");
+                showToast("请先输入上游模型ID", "error");
                 customModelIdInput?.focus();
-                return;
+                return false;
             }
-            if (addProviderModelConfig({ model_name: modelName, upstream_model_name: upstreamModelName })) {
-                customModelInput.value = "";
+            const modelIdentity = upstreamModelName || modelName;
+            const modelGroup = normalizeModelGroup(customModelGroupInput?.value, inferModelGroup(modelIdentity));
+            const protocolType = protocolTypeForModelGroup(
+                modelGroup,
+                modelIdentity,
+                normalizeProviderModelProtocolType(customModelProtocolInput?.value || inferProviderModelProtocolType(modelIdentity)),
+            );
+            return {
+                model_name: modelName,
+                upstream_model_name: upstreamModelName,
+                model_group: modelGroup,
+                protocol_type: protocolType,
+            };
+        }
+
+        async function ensureCatalogModelReference() {
+            const data = await getModelOptions({ force: true });
+            const items = Array.isArray(data) ? data : (Array.isArray(data?.items) ? data.items : []);
+            catalogModels = items
+                .map(normalizeCatalogModel)
+                .filter((item) => item.model_name);
+            catalogModelReferenceLoaded = true;
+            return catalogModels;
+        }
+
+        async function validateCustomModelIdAgainstCatalog(modelName) {
+            try {
+                const models = await ensureCatalogModelReference();
+                const catalogModelIdSet = new Set(models.map((item) => normalizeModelIdKey(item.model_name)).filter(Boolean));
+                if (catalogModelIdSet.has(normalizeModelIdKey(modelName))) {
+                    showToast(`模型ID ${modelName} 已存在于模型库，请改用“添加模型库中模型”或更换自定义模型ID`, "error");
+                    customModelInput?.focus();
+                    return false;
+                }
+                return true;
+            } catch (error) {
+                showToast(`读取模型库失败，暂不能校验自定义模型ID：${error.message}`, "error");
+                customModelInput?.focus();
+                return false;
+            }
+        }
+
+        async function addPendingCustomModelConfig({ requireComplete = false, clearInputs = true, showSuccess = true } = {}) {
+            const config = getPendingCustomModelConfig({ requireComplete });
+            if (config === null) return { status: "empty" };
+            if (config === false) return { status: "invalid" };
+            if (!await validateCustomModelIdAgainstCatalog(config.model_name)) {
+                return { status: "invalid" };
+            }
+            if (!addProviderModelConfig(config)) {
+                return { status: "invalid" };
+            }
+            if (clearInputs) {
+                if (customModelInput) customModelInput.value = "";
                 if (customModelIdInput) customModelIdInput.value = "";
-                showToast(`已添加自定义模型 ${modelName}`);
+                resetCustomModelInferenceControls();
+            }
+            if (showSuccess) {
+                showToast(`已添加自定义模型 ${config.model_name}`);
+            }
+            return { status: "added", config };
+        }
+
+        function syncCustomModelProtocolLock() {
+            if (!customModelProtocolInput || !customModelGroupInput) return;
+            const modelIdentity = getCustomModelInferenceName();
+            const modelGroup = normalizeModelGroup(customModelGroupInput.value, inferModelGroup(modelIdentity));
+            const locked = isProviderModelProtocolLocked(modelGroup, modelIdentity);
+            if (locked) {
+                customModelProtocolInput.value = protocolTypeForModelGroup(modelGroup, modelIdentity, customModelProtocolInput.value);
+                customModelProtocolInput.disabled = true;
+                customModelProtocolInput.title = "Gemini / Claude 分组必须使用对应原生协议；修改模型分组后可重新选择。";
+            } else {
+                customModelProtocolInput.disabled = false;
+                customModelProtocolInput.title = "模型ID变化时自动推断；也可以手动修改。";
+            }
+        }
+
+        function syncCustomModelInference({ force = false } = {}) {
+            if (!customModelProtocolInput || !customModelGroupInput) return;
+            const modelIdentity = getCustomModelInferenceName();
+            if (force || customModelGroupInput.dataset.userEdited !== "true") {
+                customModelGroupInput.value = inferModelGroup(modelIdentity);
+            }
+            const currentGroup = normalizeModelGroup(customModelGroupInput.value, inferModelGroup(modelIdentity));
+            if (
+                force
+                || customModelProtocolInput.dataset.userEdited !== "true"
+                || isProviderModelProtocolLocked(currentGroup, modelIdentity)
+            ) {
+                customModelProtocolInput.value = protocolTypeForModelGroup(
+                    currentGroup,
+                    modelIdentity,
+                    inferProviderModelProtocolType(modelIdentity),
+                );
+            }
+            syncCustomModelProtocolLock();
+        }
+
+        function resetCustomModelInferenceControls() {
+            if (customModelProtocolInput) {
+                customModelProtocolInput.innerHTML = renderProviderModelProtocolOptions("chat_completions");
+                customModelProtocolInput.dataset.userEdited = "false";
+            }
+            if (customModelGroupInput) {
+                customModelGroupInput.innerHTML = renderModelGroupOptions("unknown", "");
+                customModelGroupInput.dataset.userEdited = "false";
+            }
+            syncCustomModelInference({ force: true });
+        }
+
+        resetCustomModelInferenceControls();
+
+        customModelProtocolInput?.addEventListener("change", () => {
+            customModelProtocolInput.dataset.userEdited = "true";
+            syncCustomModelProtocolLock();
+            updateProviderFormDirtyState();
+        });
+        customModelGroupInput?.addEventListener("change", () => {
+            customModelGroupInput.dataset.userEdited = "true";
+            syncCustomModelInference();
+            syncProviderTypeFromForm();
+            updateProviderFormDirtyState();
+        });
+        addCustomModelBtn.addEventListener("click", async () => {
+            try {
+                setButtonLoading(addCustomModelBtn, true);
+                await addPendingCustomModelConfig({ requireComplete: true });
+            } finally {
+                setButtonLoading(addCustomModelBtn, false);
             }
         });
         customModelInput?.addEventListener("input", () => {
             if (customModelIdInput && !customModelIdInput.value.trim()) {
                 customModelIdInput.value = customModelInput.value.trim();
             }
+            syncCustomModelInference();
+        });
+        customModelIdInput?.addEventListener("input", () => {
+            syncCustomModelInference();
         });
         addEmptyModelBtn?.addEventListener("click", () => {
             if (addProviderModelConfig({}, { allowBlank: true })) {
@@ -7442,73 +7820,6 @@
                 if (importCompleted && batchImportSubmitBtn) batchImportSubmitBtn.disabled = true;
             }
         });
-        providerModelBatchImportOpenBtn?.addEventListener("click", () => {
-            openProviderModelBatchImportModal(providerModelBatchImportOpenBtn);
-        });
-        providerModelExportBtn?.addEventListener("click", () => {
-            setButtonTransientFeedback(providerModelExportBtn, "success", { successText: "准备导出" });
-            window.location.href = "/api/providers/models/export";
-        });
-        providerModelBatchImportTemplateBtn?.addEventListener("click", async () => {
-            try {
-                const template = await ensureProviderModelBatchImportTemplate();
-                if (providerModelBatchImportContentInput) {
-                    providerModelBatchImportContentInput.value = template;
-                    providerModelBatchImportContentInput.focus();
-                }
-                if (providerModelBatchImportSubmitBtn) providerModelBatchImportSubmitBtn.disabled = true;
-                providerModelBatchImportPreview = null;
-                renderProviderModelBatchImportResult(null);
-                showToast("已填入模型挂载批量导入模板");
-            } catch (error) {
-                showToast(error.message, "error");
-            }
-        });
-        providerModelBatchImportCopyTemplateBtn?.addEventListener("click", async (event) => {
-            try {
-                const template = await ensureProviderModelBatchImportTemplate();
-                await copyText(template, event.currentTarget);
-            } catch (error) {
-                showToast(error.message, "error");
-            }
-        });
-        providerModelBatchImportPreviewBtn?.addEventListener("click", async () => {
-            await previewProviderModelBatchImport();
-        });
-        providerModelBatchImportContentInput?.addEventListener("input", () => {
-            providerModelBatchImportPreview = null;
-            if (providerModelBatchImportSubmitBtn) providerModelBatchImportSubmitBtn.disabled = true;
-        });
-        providerModelBatchImportForm?.addEventListener("submit", async (event) => {
-            event.preventDefault();
-            const content = String(providerModelBatchImportContentInput?.value || "").trim();
-            if (!content) {
-                showToast("请先粘贴模型挂载导入文本", "error");
-                providerModelBatchImportContentInput?.focus();
-                return;
-            }
-            const preview = providerModelBatchImportPreview || await previewProviderModelBatchImport();
-            if (!preview || Number(preview.valid_count || 0) <= 0 || Number(preview.failed_count || 0) > 0) {
-                showToast("请先修正预览中的问题", "error");
-                return;
-            }
-            try {
-                setButtonLoading(providerModelBatchImportSubmitBtn, true);
-                const result = await api.post("/api/providers/models/batch-import", {
-                    content,
-                    dry_run: false,
-                    skip_missing_providers: true,
-                });
-                providerModelBatchImportPreview = result;
-                renderProviderModelBatchImportResult(result);
-                showToast(`批量导入完成：新增 ${formatNumber(result.created_count || 0)} 个，更新 ${formatNumber(result.updated_count || 0)} 个`);
-                await loadProviderModels({ silent: true });
-            } catch (error) {
-                showToast(error.message, "error");
-            } finally {
-                setButtonLoading(providerModelBatchImportSubmitBtn, false);
-            }
-        });
         catalogModelsCheckAll?.addEventListener("change", () => {
             catalogModelsBody?.querySelectorAll("[data-catalog-model-name]").forEach((node) => {
                 if (!node.disabled) {
@@ -7562,6 +7873,8 @@
                 return;
             }
             const maxRetries = Number(providerMaxRetriesInput.value || 0);
+            const pendingCustomModelResult = await addPendingCustomModelConfig({ clearInputs: true, showSuccess: false });
+            if (pendingCustomModelResult.status === "invalid") return;
             const modelConfigs = collectProviderModelConfigs();
             if (modelConfigs === null) return;
             const maintenanceWindowResult = validateProviderMaintenanceWindow({ focus: true });
@@ -7776,14 +8089,82 @@
         availabilityRefreshBtn?.addEventListener("click", async () => {
             await loadAvailability({ manual: true });
         });
+        function readProviderPageBootstrap() {
+            const node = document.getElementById("provider-page-bootstrap");
+            if (!node) return { providers: [], summary: {} };
+            const parsed = safeJsonParse(node.textContent || "{}") || {};
+            return {
+                providers: normalizeProviderOverviewItems(parsed),
+                summary: parsed && typeof parsed.summary === "object" && !Array.isArray(parsed.summary) ? parsed.summary : {},
+            };
+        }
+
         function normalizeProviderOverviewItems(overview = {}) {
             if (Array.isArray(overview)) return overview;
             if (Array.isArray(overview.providers)) return overview.providers;
             if (Array.isArray(overview.items)) return overview.items;
+            if (Array.isArray(overview.results)) return overview.results;
+            if (Array.isArray(overview.records)) return overview.records;
             if (Array.isArray(overview.directory?.items)) return overview.directory.items;
             if (Array.isArray(overview.data)) return overview.data;
             if (Array.isArray(overview.data?.items)) return overview.data.items;
+            if (Array.isArray(overview.data?.providers)) return overview.data.providers;
+            if (Array.isArray(overview.payload?.items)) return overview.payload.items;
+            if (Array.isArray(overview.payload?.providers)) return overview.payload.providers;
             return [];
+        }
+
+        function providerBootstrapDirectoryPayload() {
+            const bootstrapItems = getProviderBootstrapItems();
+            const summaryTotal = Number(providerPageBootstrap.summary?.provider_count);
+            const total = Number.isFinite(summaryTotal) ? summaryTotal : bootstrapItems.length;
+            return {
+                items: bootstrapItems,
+                total: Math.max(total, bootstrapItems.length),
+                page: 1,
+                page_size: providerDirectoryState.pageSize,
+                total_pages: Math.max(1, Math.ceil(Math.max(total, bootstrapItems.length) / (providerDirectoryState.pageSize || 20))),
+                filter_options: {},
+            };
+        }
+
+        function getProviderBootstrapItems() {
+            return normalizeProviderOverviewItems(providerPageBootstrap.providers);
+        }
+
+        function hasActiveProviderDirectoryFilters() {
+            return Boolean(
+                searchInput?.value.trim()
+                || providerHealthFilterSelect?.value
+                || providerEnabledFilterSelect?.value
+                || providerTrustFilterSelect?.value
+                || providerCircuitFilterSelect?.value
+                || providerTypeFilterSelect?.value
+                || providerGroupFilterSelect?.value
+            );
+        }
+
+        function setProviderDirectoryStatus(message = "", tone = "info") {
+            if (!providerDirectoryStatus) return;
+            providerDirectoryStatus.textContent = message;
+            providerDirectoryStatus.className = `table-muted provider-directory-status ${message ? "" : "hidden"} is-${tone}`;
+        }
+
+        function applyProviderDirectory(directory) {
+            providers = Array.isArray(directory.items) ? directory.items : [];
+            providerDirectoryState.total = Number(directory.total || providers.length || 0);
+            providerDirectoryState.page = Number(directory.page || providerDirectoryState.page || 1);
+            providerDirectoryState.pageSize = Number(directory.page_size || providerDirectoryState.pageSize || 20);
+            providerDirectoryState.totalPages = Number(directory.total_pages || Math.max(1, Math.ceil((providerDirectoryState.total || 0) / (providerDirectoryState.pageSize || 20))));
+        }
+
+        function renderProviderBootstrapDirectory() {
+            const bootstrapDirectory = normalizeProviderDirectoryResponse(providerBootstrapDirectoryPayload());
+            if (!bootstrapDirectory.items.length) return;
+            applyProviderDirectory(bootstrapDirectory);
+            renderProviderTelemetry(providerPageBootstrap.summary || { provider_count: providers.length });
+            renderProviders();
+            renderProviderDirectoryPagination();
         }
 
         function normalizeProviderDirectoryResponse(directory = {}) {
@@ -7863,31 +8244,61 @@
             if (directoryResult.status === "rejected") console.warn("提供商对象目录加载失败", directoryResult.reason);
             if (optionsResult.status === "rejected") console.warn("提供商选项加载失败", optionsResult.reason);
             directory = normalizeProviderDirectoryResponse(directory);
-            providers = directory.items;
-            if (!providers.length && (Number(overview.summary?.provider_count || 0) > 0 || Number(directory.total || 0) > 0 || directoryResult.status === "rejected")) {
+            const activeFilters = hasActiveProviderDirectoryFilters();
+            const bootstrapItems = getProviderBootstrapItems();
+            const bootstrapTotal = Math.max(Number(providerPageBootstrap.summary?.provider_count || 0), bootstrapItems.length);
+            const overviewTotal = Number(overview.summary?.provider_count || 0);
+            const knownTotal = Math.max(overviewTotal, Number(directory.total || 0), bootstrapTotal);
+            const directoryUnexpectedlyEmpty = !activeFilters && !directory.items.length && Number(directory.total || 0) === 0 && knownTotal > 0;
+            let directoryStatusMessage = "";
+            if (!directory.items.length && (knownTotal > 0 || directoryResult.status === "rejected" || directoryUnexpectedlyEmpty)) {
                 try {
-                    providers = normalizeProviderOverviewItems(await api.get("/api/providers"));
+                    const fallbackProviders = normalizeProviderOverviewItems(await api.get("/api/providers"));
+                    if (fallbackProviders.length) {
+                        directory = normalizeProviderDirectoryResponse({
+                            items: fallbackProviders,
+                            total: Math.max(fallbackProviders.length, knownTotal),
+                            page: 1,
+                            page_size: providerDirectoryState.pageSize,
+                            total_pages: Math.max(1, Math.ceil(Math.max(fallbackProviders.length, knownTotal) / (providerDirectoryState.pageSize || 20))),
+                            filter_options: directory.filter_options,
+                        });
+                        directoryStatusMessage = directoryResult.status === "rejected"
+                            ? "对象目录异步请求失败，已使用兼容列表恢复显示。"
+                            : "对象目录异步返回为空，已使用兼容列表恢复显示。";
+                    } else if (!activeFilters && bootstrapItems.length) {
+                        directory = normalizeProviderDirectoryResponse({
+                            items: bootstrapItems,
+                            total: Math.max(bootstrapItems.length, knownTotal),
+                            page: 1,
+                            page_size: providerDirectoryState.pageSize,
+                            total_pages: Math.max(1, Math.ceil(Math.max(bootstrapItems.length, knownTotal) / (providerDirectoryState.pageSize || 20))),
+                            filter_options: directory.filter_options,
+                        });
+                        directoryStatusMessage = "对象目录兼容列表暂未返回数据，已使用首屏数据恢复显示。";
+                    }
                 } catch (error) {
                     console.error("提供商对象目录兜底加载失败", error);
-                    showToast(error.message || "提供商对象目录加载失败", "error");
-                    providers = [];
+                    if (!activeFilters && bootstrapItems.length) {
+                        directory = normalizeProviderDirectoryResponse({
+                            items: bootstrapItems,
+                            total: Math.max(bootstrapItems.length, knownTotal),
+                            page: 1,
+                            page_size: providerDirectoryState.pageSize,
+                            total_pages: Math.max(1, Math.ceil(Math.max(bootstrapItems.length, knownTotal) / (providerDirectoryState.pageSize || 20))),
+                            filter_options: directory.filter_options,
+                        });
+                        directoryStatusMessage = `对象目录异步请求失败，已使用首屏数据恢复显示。原因：${error.message || "兼容接口异常"}`;
+                    } else {
+                        showToast(error.message || "提供商对象目录加载失败", "error");
+                    }
                 }
-                directory = normalizeProviderDirectoryResponse({
-                    items: providers,
-                    total: providers.length,
-                    page: 1,
-                    page_size: providerDirectoryState.pageSize,
-                    total_pages: Math.max(1, Math.ceil(providers.length / (providerDirectoryState.pageSize || 20))),
-                    filter_options: directory.filter_options,
-                });
             }
             providerSelectOptions = Array.isArray(options) ? options : [];
-            providerDirectoryState.total = Number(directory.total || 0);
-            providerDirectoryState.page = Number(directory.page || providerDirectoryState.page || 1);
-            providerDirectoryState.pageSize = Number(directory.page_size || providerDirectoryState.pageSize || 20);
-            providerDirectoryState.totalPages = Number(directory.total_pages || 1);
+            applyProviderDirectory(directory);
+            setProviderDirectoryStatus(directoryStatusMessage, directoryStatusMessage ? "warning" : "info");
             renderProviderDirectoryFilterOptions(directory.filter_options || {});
-            renderProviderTelemetry(overview.summary || {});
+            renderProviderTelemetry(Object.keys(overview.summary || {}).length ? overview.summary : (providerPageBootstrap.summary || { provider_count: providers.length }));
             renderProviders();
             renderProviderDirectoryPagination();
             if (modelTableBody) {
@@ -8296,6 +8707,16 @@
                 .filter(Boolean);
         }
 
+        function getCurrentConfiguredUpstreamModelNames() {
+            return getProviderModelConfigRows()
+                .map((row) => String(row.querySelector('[data-model-config-field="upstream_model_name"]')?.value || "").trim())
+                .filter(Boolean);
+        }
+
+        function normalizeModelIdKey(value) {
+            return String(value || "").trim().toLowerCase();
+        }
+
         function getSelectedDiscoveredModelNames() {
             if (!discoveredModelsBody) return [];
             return Array.from(discoveredModelsBody.querySelectorAll("[data-discovered-model-name]:checked"))
@@ -8491,6 +8912,7 @@
                 }
                 const data = await getModelOptions();
                 const items = Array.isArray(data) ? data : (Array.isArray(data.items) ? data.items : []);
+                catalogModelReferenceLoaded = true;
                 renderCatalogModels(items);
                 showToast(`已读取 ${formatNumber(items.length)} 个模型库模型`);
             } catch (error) {
@@ -9639,22 +10061,85 @@
             const nextPriority = Number(input.value);
             if (!Number.isFinite(nextPriority) || !Number.isInteger(nextPriority) || nextPriority < 0) {
                 input.value = String(previousPriority);
+                setProviderPriorityInputState(input, "error");
                 showToast("优先级必须填写大于或等于 0 的整数", "error");
                 return;
             }
             if (nextPriority === previousPriority) return;
             try {
                 input.disabled = true;
+                setProviderPriorityInputState(input, "saving");
                 await api.put(`/api/providers/${providerId}`, { priority: nextPriority });
                 provider.priority = nextPriority;
+                updateProviderPriorityInlineState(input, nextPriority);
+                setProviderPriorityInputState(input, "saved");
                 showToast(`已更新 ${provider.name} 的优先级`);
-                await loadProviders();
             } catch (error) {
                 input.value = String(previousPriority);
+                setProviderPriorityInputState(input, "error");
                 showToast(error.message, "error");
             } finally {
                 input.disabled = false;
             }
+        }
+
+        const providerPrioritySaveTimers = new Map();
+
+        function setProviderPriorityInputState(input, state = "") {
+            if (!input) return;
+            input.classList.remove("is-dirty", "is-saving", "is-saved", "is-error");
+            if (state) input.classList.add(`is-${state}`);
+            const titles = {
+                dirty: "优先级已修改，将自动保存",
+                saving: "正在保存优先级",
+                saved: "优先级已保存",
+                error: "优先级保存失败",
+            };
+            input.title = titles[state] || "修改后会自动保存";
+            if (state === "saved") {
+                window.setTimeout(() => input.classList.remove("is-saved"), 1200);
+            }
+        }
+
+        function updateProviderPriorityInlineState(input, priority) {
+            const cell = input.closest(".provider-priority-cell");
+            const label = cell?.querySelector(".provider-priority-tier-label");
+            const priorityTier = getProviderPriorityTier(priority);
+            if (cell) {
+                Array.from(cell.classList)
+                    .filter((name) => name.startsWith("provider-priority-") && name !== "provider-priority-cell")
+                    .forEach((name) => cell.classList.remove(name));
+                cell.classList.add(`provider-priority-${priorityTier.key}`);
+            }
+            if (label) label.textContent = priorityTier.label;
+        }
+
+        function clearProviderPrioritySaveTimer(input) {
+            const providerId = Number(input?.dataset.providerId);
+            const timer = providerPrioritySaveTimers.get(providerId);
+            if (timer) {
+                window.clearTimeout(timer);
+                providerPrioritySaveTimers.delete(providerId);
+            }
+        }
+
+        function scheduleProviderPriorityAutoSave(input) {
+            const providerId = Number(input?.dataset.providerId);
+            const provider = providers.find((item) => Number(item.id) === providerId);
+            if (!input || !provider) return;
+            clearProviderPrioritySaveTimer(input);
+            setProviderPriorityInputState(input, "dirty");
+            const nextPriority = Number(input.value);
+            if (!Number.isFinite(nextPriority) || !Number.isInteger(nextPriority) || nextPriority < 0) return;
+            if (nextPriority === Number(provider.priority ?? 100)) {
+                setProviderPriorityInputState(input, "");
+                return;
+            }
+            const timer = window.setTimeout(() => {
+                providerPrioritySaveTimers.delete(providerId);
+                void saveProviderPriorityInput(input);
+            }, 700);
+            providerPrioritySaveTimers.set(providerId, timer);
         }
 
         tableBody.addEventListener("keydown", (event) => {
@@ -9662,13 +10147,28 @@
             if (!input) return;
             if (event.key === "Enter") {
                 event.preventDefault();
+                clearProviderPrioritySaveTimer(input);
                 input.blur();
             }
+        });
+
+        tableBody.addEventListener("input", (event) => {
+            const priorityInput = event.target.closest("[data-provider-priority-input='true']");
+            if (!priorityInput) return;
+            scheduleProviderPriorityAutoSave(priorityInput);
+        });
+
+        tableBody.addEventListener("focusout", (event) => {
+            const priorityInput = event.target.closest("[data-provider-priority-input='true']");
+            if (!priorityInput) return;
+            clearProviderPrioritySaveTimer(priorityInput);
+            void saveProviderPriorityInput(priorityInput);
         });
 
         tableBody.addEventListener("change", (event) => {
             const priorityInput = event.target.closest("[data-provider-priority-input='true']");
             if (priorityInput) {
+                clearProviderPrioritySaveTimer(priorityInput);
                 void saveProviderPriorityInput(priorityInput);
                 return;
             }
@@ -9760,53 +10260,6 @@
             }
         });
 
-        let providerModelSearchTimer = 0;
-        providerModelSearchInput?.addEventListener("input", () => {
-            window.clearTimeout(providerModelSearchTimer);
-            providerModelSearchTimer = window.setTimeout(async () => {
-                try {
-                    await reloadProviderModelFirstPage();
-                } catch (error) {
-                    showToast(error.message, "error");
-                }
-            }, 250);
-        });
-        [providerModelProviderSelect, providerModelEnabledSelect, providerModelHealthSelect, providerModelTrustSelect, providerModelGroupSelect].forEach((field) => {
-            field?.addEventListener("change", async () => {
-                try {
-                    await reloadProviderModelFirstPage();
-                } catch (error) {
-                    showToast(error.message, "error");
-                }
-            });
-        });
-        providerModelPageSizeSelect?.addEventListener("change", async () => {
-            providerModelState.pageSize = Number.parseInt(providerModelPageSizeSelect.value || "20", 10) || 20;
-            try {
-                await reloadProviderModelFirstPage();
-            } catch (error) {
-                showToast(error.message, "error");
-            }
-        });
-        providerModelPrevPageBtn?.addEventListener("click", async () => {
-            if (providerModelState.page <= 1) return;
-            providerModelState.page -= 1;
-            try {
-                await loadProviderModels({ silent: true });
-            } catch (error) {
-                showToast(error.message, "error");
-            }
-        });
-        providerModelNextPageBtn?.addEventListener("click", async () => {
-            if (providerModelState.page >= providerModelState.totalPages) return;
-            providerModelState.page += 1;
-            try {
-                await loadProviderModels({ silent: true });
-            } catch (error) {
-                showToast(error.message, "error");
-            }
-        });
-
         function openProviderModal(provider, trigger = document.activeElement) {
             document.getElementById("provider-modal-title").textContent = provider ? "编辑提供商" : "新增提供商";
             providerIdInput.value = provider?.id ?? "";
@@ -9844,6 +10297,8 @@
             renderProviderModelConfigRows(provider?.model_configs ?? []);
             syncProviderTypeFromForm({ force: !providerTypeManuallyTouched });
             customModelInput.value = "";
+            if (customModelIdInput) customModelIdInput.value = "";
+            resetCustomModelInferenceControls();
             if (presetManager) {
                 presetManager.classList.add("hidden");
                 presetManager.setAttribute("aria-hidden", "true");
@@ -11097,13 +11552,13 @@
                 const modelName = String(providerModelEditModelNameInput?.value || "").trim();
                 if (!modelName) {
                     providerModelEditModelNameInput?.focus();
-                    showToast("模型名称为必填项", "error");
+                    showToast("模型ID为必填项", "error");
                     return;
                 }
                 const upstreamModelName = String(providerModelEditUpstreamModelNameInput?.value || "").trim();
                 if (!upstreamModelName) {
                     providerModelEditUpstreamModelNameInput?.focus();
-                    showToast("模型ID为必填项", "error");
+                    showToast("上游模型ID为必填项", "error");
                     return;
                 }
                 const modelGroup = normalizeModelGroup(providerModelEditGroupInput?.value, inferModelGroup(upstreamModelName || modelConfig.model_name));
@@ -11171,6 +11626,78 @@
 
         document.getElementById("provider-model-edit-close")?.addEventListener("click", () => editModalController.close({ reason: "close" }));
         document.getElementById("provider-model-edit-cancel")?.addEventListener("click", () => editModalController.close({ reason: "cancel" }));
+        document.getElementById("provider-model-batch-import-close")?.addEventListener("click", () => closeProviderModelBatchImportModal({ reason: "close" }));
+
+        providerModelBatchImportOpenBtn?.addEventListener("click", () => {
+            openProviderModelBatchImportModal(providerModelBatchImportOpenBtn);
+        });
+        providerModelExportBtn?.addEventListener("click", () => {
+            setButtonTransientFeedback(providerModelExportBtn, "success", { successText: "准备导出" });
+            window.location.href = "/api/providers/models/export";
+        });
+        providerModelBatchImportTemplateBtn?.addEventListener("click", async () => {
+            try {
+                const template = await ensureProviderModelBatchImportTemplate();
+                if (providerModelBatchImportContentInput) {
+                    providerModelBatchImportContentInput.value = template;
+                    providerModelBatchImportContentInput.focus();
+                }
+                if (providerModelBatchImportSubmitBtn) providerModelBatchImportSubmitBtn.disabled = true;
+                providerModelBatchImportPreview = null;
+                renderProviderModelBatchImportResult(null);
+                showToast("已填入模型挂载批量导入模板");
+            } catch (error) {
+                showToast(error.message, "error");
+            }
+        });
+        providerModelBatchImportCopyTemplateBtn?.addEventListener("click", async (event) => {
+            try {
+                const template = await ensureProviderModelBatchImportTemplate();
+                await copyText(template, event.currentTarget);
+            } catch (error) {
+                showToast(error.message, "error");
+            }
+        });
+        providerModelBatchImportPreviewBtn?.addEventListener("click", async () => {
+            await previewProviderModelBatchImport();
+        });
+        providerModelBatchImportContentInput?.addEventListener("input", () => {
+            providerModelBatchImportPreview = null;
+            if (providerModelBatchImportSubmitBtn) providerModelBatchImportSubmitBtn.disabled = true;
+        });
+        providerModelBatchImportForm?.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            const content = String(providerModelBatchImportContentInput?.value || "").trim();
+            if (!content) {
+                showToast("请先粘贴模型挂载导入文本", "error");
+                providerModelBatchImportContentInput?.focus();
+                return;
+            }
+            const preview = providerModelBatchImportPreview || await previewProviderModelBatchImport();
+            if (!preview || Number(preview.valid_count || 0) <= 0 || Number(preview.failed_count || 0) > 0) {
+                showToast("请先修正预览中的问题", "error");
+                return;
+            }
+            let importCompleted = false;
+            try {
+                setButtonLoading(providerModelBatchImportSubmitBtn, true);
+                const result = await api.post("/api/providers/models/batch-import", {
+                    content,
+                    dry_run: false,
+                    skip_missing_providers: true,
+                });
+                providerModelBatchImportPreview = result;
+                renderProviderModelBatchImportResult(result);
+                importCompleted = true;
+                showToast(`批量导入完成：新增 ${formatNumber(result.created_count || 0)} 个，更新 ${formatNumber(result.updated_count || 0)} 个`);
+                await loadProviderModels({ silent: true });
+            } catch (error) {
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(providerModelBatchImportSubmitBtn, false);
+                if (importCompleted && providerModelBatchImportSubmitBtn) providerModelBatchImportSubmitBtn.disabled = true;
+            }
+        });
 
         let searchTimer = 0;
         providerModelSearchInput?.addEventListener("input", () => {
@@ -11244,6 +11771,16 @@
         const batchContextWindowInput = document.getElementById("models-batch-context-window-tokens");
         const batchContextApplyBtn = document.getElementById("models-batch-context-apply-btn");
         const testAllBtn = document.getElementById("models-test-all-btn");
+        const modelsExportBtn = document.getElementById("models-export-btn");
+        const modelsBatchImportOpenBtn = document.getElementById("models-batch-import-open-btn");
+        const modelsBatchImportModal = document.getElementById("models-batch-import-modal");
+        const modelsBatchImportForm = document.getElementById("models-batch-import-form");
+        const modelsBatchImportContentInput = document.getElementById("models-batch-import-content");
+        const modelsBatchImportTemplateBtn = document.getElementById("models-batch-import-template-btn");
+        const modelsBatchImportCopyTemplateBtn = document.getElementById("models-batch-import-copy-template-btn");
+        const modelsBatchImportPreviewBtn = document.getElementById("models-batch-import-preview-btn");
+        const modelsBatchImportSubmitBtn = document.getElementById("models-batch-import-submit-btn");
+        const modelsBatchImportResult = document.getElementById("models-batch-import-result");
         const refreshBtn = document.getElementById("models-refresh-btn");
         const addBtn = document.getElementById("add-model-btn");
         const modal = document.getElementById("model-modal");
@@ -11306,7 +11843,10 @@
             || !supportsStreamInput || !supportsVisionInput || !supportsToolsInput
             || !contextWindowInput || !maxInputTokensInput || !maxOutputTokensInput
             || !selectPageInput || !batchMeta || !batchContextWindowInput || !batchContextApplyBtn
-            || !pageMeta || !prevPageBtn || !nextPageBtn || !testAllBtn || !refreshBtn || !addBtn || !modal || !form || !bindingBody || !modelGroupInput
+            || !pageMeta || !prevPageBtn || !nextPageBtn || !testAllBtn || !modelsExportBtn || !modelsBatchImportOpenBtn
+            || !modelsBatchImportModal || !modelsBatchImportForm || !modelsBatchImportContentInput || !modelsBatchImportTemplateBtn
+            || !modelsBatchImportCopyTemplateBtn || !modelsBatchImportPreviewBtn || !modelsBatchImportSubmitBtn || !modelsBatchImportResult
+            || !refreshBtn || !addBtn || !modal || !form || !bindingBody || !modelGroupInput
             || !mappingDrawer || !mappingDrawerCard || !mappingDrawerTitle || !mappingDrawerIntro || !mappingDrawerCloseBtn || !mappingSummary
             || !mappingForm || !mappingSourceInput || !mappingEnabledInput || !mappingRemarkInput
             || !mappingTargetList || !mappingTableBody || !mappingAddTargetBtn || !mappingSubmitBtn || !mappingCancelBtn
@@ -11328,6 +11868,8 @@
             expandedModelNames: new Set(),
         };
         let searchTimer = null;
+        let modelsBatchImportTemplate = "";
+        let modelsBatchImportPreview = null;
 
         function updateSummary(summary = {}) {
             const normalizedSummary = {
@@ -11926,7 +12468,7 @@
             const options = state.allModels.map((item) => `
                 <option value="${escapeHtml(item.model_name)}" ${item.model_name === selectedName ? "selected" : ""}>${escapeHtml(item.display_name || item.model_name)}</option>
             `).join("");
-            return `<option value="">选择目标模型</option>${options}`;
+            return `<option value="">选择目标模型ID</option>${options}`;
         }
 
         const mappingDrawerController = modalManager.register({
@@ -11937,15 +12479,119 @@
                 resetMappingForm();
             },
         });
+        const modelsBatchImportModalController = modalManager.register({
+            modal: modelsBatchImportModal,
+            dialog: modelsBatchImportModal.querySelector(".modal-card"),
+            getInitialFocus: () => modelsBatchImportContentInput,
+        });
+
+        async function ensureModelsBatchImportTemplate() {
+            if (modelsBatchImportTemplate) return modelsBatchImportTemplate;
+            const result = await api.get("/api/models/batch-import-template");
+            modelsBatchImportTemplate = String(result.template || "");
+            return modelsBatchImportTemplate;
+        }
+
+        function renderModelsBatchImportResult(result) {
+            if (!modelsBatchImportResult) return;
+            if (!result) {
+                modelsBatchImportResult.innerHTML = '<div class="empty-state">粘贴模型配置文本后先预览校验，通过后再确认导入。</div>';
+                return;
+            }
+            const items = Array.isArray(result.items) ? result.items : [];
+            const rows = items.map((item) => {
+                const statusText = item.created ? "已新增" : (item.valid ? "可导入" : "需修正");
+                const statusClass = item.created || item.valid ? "status-healthy" : "status-unhealthy";
+                return `
+                    <tr>
+                        <td>${formatNumber(item.index || 0)}</td>
+                        <td>
+                            <strong>${escapeHtml(item.model_name || "-")}</strong>
+                            <div class="table-muted">${escapeHtml(item.display_name || "未设置模型名称/别名")}</div>
+                        </td>
+                        <td><span class="status-badge ${statusClass}">${escapeHtml(statusText)}</span></td>
+                        <td>${escapeHtml((item.errors || []).join("；") || "校验通过")}</td>
+                    </tr>
+                `;
+            }).join("");
+            modelsBatchImportResult.innerHTML = `
+                <div class="provider-batch-import-summary">
+                    <div><span>总数</span><strong>${formatNumber(result.total || 0)}</strong></div>
+                    <div><span>可导入</span><strong>${formatNumber(result.valid_count || 0)}</strong></div>
+                    <div><span>新增</span><strong>${formatNumber(result.created_count || 0)}</strong></div>
+                    <div><span>失败</span><strong>${formatNumber(result.failed_count || 0)}</strong></div>
+                </div>
+                <div class="table-shell provider-batch-import-table-shell">
+                    <table class="data-table">
+                        <thead><tr><th>#</th><th>模型</th><th>状态</th><th>问题</th></tr></thead>
+                        <tbody>${rows || '<tr><td colspan="4"><div class="empty-state">没有解析到可导入内容。</div></td></tr>'}</tbody>
+                    </table>
+                </div>
+            `;
+            enhanceInteractiveButtons(modelsBatchImportResult);
+        }
+
+        async function previewModelsBatchImport() {
+            const content = String(modelsBatchImportContentInput?.value || "").trim();
+            if (!content) {
+                showToast("请先粘贴模型配置导入文本", "error");
+                modelsBatchImportContentInput?.focus();
+                return null;
+            }
+            try {
+                setButtonLoading(modelsBatchImportPreviewBtn, true);
+                const result = await api.post("/api/models/batch-import", {
+                    content,
+                    dry_run: true,
+                });
+                modelsBatchImportPreview = result;
+                renderModelsBatchImportResult(result);
+                if (modelsBatchImportSubmitBtn) {
+                    modelsBatchImportSubmitBtn.disabled = Number(result.valid_count || 0) <= 0 || Number(result.failed_count || 0) > 0;
+                }
+                showToast(`预览完成：${formatNumber(result.valid_count || 0)} 条可导入`);
+                return result;
+            } catch (error) {
+                modelsBatchImportPreview = null;
+                if (modelsBatchImportSubmitBtn) modelsBatchImportSubmitBtn.disabled = true;
+                renderModelsBatchImportResult({
+                    total: 0,
+                    valid_count: 0,
+                    created_count: 0,
+                    failed_count: 1,
+                    items: [{ index: 1, valid: false, errors: [error.message] }],
+                });
+                showToast(error.message, "error");
+                return null;
+            } finally {
+                setButtonLoading(modelsBatchImportPreviewBtn, false);
+            }
+        }
+
+        async function openModelsBatchImportModal(trigger = document.activeElement) {
+            try {
+                await ensureModelsBatchImportTemplate();
+            } catch (error) {
+                showToast(error.message, "error");
+            }
+            renderModelsBatchImportResult(null);
+            if (modelsBatchImportSubmitBtn) modelsBatchImportSubmitBtn.disabled = true;
+            modelsBatchImportPreview = null;
+            modelsBatchImportModalController.open(trigger);
+        }
+
+        function closeModelsBatchImportModal(options = {}) {
+            modelsBatchImportModalController.close(options);
+        }
 
         function updateMappingDrawerHeading() {
             if (state.editingMappingSource) {
                 mappingDrawerTitle.textContent = `编辑映射 · ${state.editingMappingSource}`;
-                mappingDrawerIntro.textContent = "源模型会保持锁定，其它配置可以继续调整。";
+                mappingDrawerIntro.textContent = "源模型ID会保持锁定，其它配置可以继续调整。";
                 return;
             }
             mappingDrawerTitle.textContent = "新建映射";
-            mappingDrawerIntro.textContent = "为一个源模型维护多个候选目标，映射阶段只决定目标模型。";
+            mappingDrawerIntro.textContent = "为一个源模型ID维护多个候选目标模型ID，映射阶段只决定目标模型ID。";
         }
 
         function addMappingTargetRow(target = {}) {
@@ -11954,7 +12600,7 @@
             row.innerHTML = `
                 <div class="model-mapping-target-top">
                     <label class="model-mapping-target-model">
-                        <span>目标模型</span>
+                        <span>目标模型ID</span>
                         <select class="field-input" data-mapping-target-field="model_name">${modelOptionHtml(target.model_name || "")}</select>
                     </label>
                     <label class="model-mapping-target-switch">
@@ -12046,25 +12692,79 @@
                                 </div>
                             </div>
                             <div class="model-mapping-card-actions">
-                                <button class="table-action-btn" data-mapping-action="test" data-source-model="${escapeHtml(mapping.source_model_name)}">测试</button>
+                                <button class="table-action-btn" data-mapping-action="preview" data-source-model="${escapeHtml(mapping.source_model_name)}">预览</button>
                                 <button class="table-action-btn" data-mapping-action="edit" data-source-model="${escapeHtml(mapping.source_model_name)}">编辑</button>
                                 <button class="table-action-btn danger" data-mapping-action="delete" data-source-model="${escapeHtml(mapping.source_model_name)}">删除</button>
                             </div>
                         </div>
                         <div class="model-mapping-card-foot">
                             ${mapping.enabled ? '<span class="status-badge status-healthy">已启用</span>' : '<span class="status-badge status-unknown">已停用</span>'}
-                            <span class="model-mapping-card-note">${mapping.enabled ? "源模型命中后将按当前候选集合参与择优。" : "当前映射已停用，源模型会按普通模型继续路由。"}</span>
+                            <span class="model-mapping-card-note">${mapping.enabled ? "源模型ID命中后将按当前候选集合参与择优。" : "当前映射已停用，源模型ID会按普通模型继续路由。"}</span>
                         </div>
                     </article>
                 `;
             }).join("") || `
                 <div class="model-mapping-empty-state empty-state">
                     <strong>还没有模型映射</strong>
-                    <span>把一个源模型重写为多个候选目标后，系统会在路由前按同会话近期目标和配置顺序选择。</span>
+                    <span>把一个源模型ID重写为多个候选目标模型ID后，系统会在路由前按同会话近期目标和配置顺序选择。</span>
                     <button class="btn btn-accent interactive-btn" type="button" data-mapping-empty-create>创建第一条</button>
                 </div>
             `;
             enhanceInteractiveButtons(mappingTableBody);
+        }
+
+        function renderModelMappingPreviewResult(result, sourceModel) {
+            const target = result?.selected_model_name || sourceModel;
+            const trace = result?.trace || {};
+            const targets = Array.isArray(trace.targets) ? trace.targets : [];
+            const availableTargets = targets.filter((item) => item?.available).length;
+            const reason = trace.selection_reason || trace.result || (result?.mapped ? "model_mapping_selected" : "model_mapping_not_applied");
+            const statusBadge = result?.mapped
+                ? '<span class="status-badge status-healthy">已命中映射</span>'
+                : '<span class="status-badge status-unknown">未改写</span>';
+            const traceText = JSON.stringify({
+                source_model_name: sourceModel,
+                selected_model_name: target,
+                mapped: Boolean(result?.mapped),
+                trace,
+            }, null, 2);
+            return `
+                <div class="provider-test-result-shell">
+                    <div class="provider-test-result-card">
+                        <div class="health-result-summary">
+                            ${statusBadge}
+                            <strong>${escapeHtml(sourceModel)} → ${escapeHtml(target)}</strong>
+                            <span>本次只预览模型映射选择和候选诊断，不会向上游模型发起真实调用。</span>
+                        </div>
+                        <div class="provider-test-summary-grid">
+                            <div class="provider-test-summary-item">
+                                <span>源模型ID</span>
+                                <strong>${escapeHtml(sourceModel)}</strong>
+                            </div>
+                            <div class="provider-test-summary-item">
+                                <span>选择目标模型ID</span>
+                                <strong>${escapeHtml(target)}</strong>
+                            </div>
+                            <div class="provider-test-summary-item">
+                                <span>候选目标模型ID</span>
+                                <strong>${escapeHtml(String(targets.length))} 个，${escapeHtml(String(availableTargets))} 个可用</strong>
+                            </div>
+                            <div class="provider-test-summary-item">
+                                <span>选择原因</span>
+                                <strong>${escapeHtml(reason)}</strong>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="provider-test-result-card">
+                        <div class="health-result-summary">
+                            <span class="status-badge status-unknown">Trace</span>
+                            <strong>映射预览诊断</strong>
+                            <span>展示后端模型映射选择过程返回的结构化诊断。</span>
+                        </div>
+                        <div class="doc-code-block compact"><pre><code>${escapeHtml(traceText)}</code></pre></div>
+                    </div>
+                </div>
+            `;
         }
 
         function renderPagination() {
@@ -12354,7 +13054,7 @@
         function normalizeModelSaveError(error) {
             const fallback = String(error?.message || "").trim() || "模型保存失败";
             if (fallback.includes("模型已存在")) {
-                return "模型名已存在，请更换后再保存";
+                return "模型ID已存在，请更换后再保存";
             }
             if (fallback.includes("提供商不存在")) {
                 return "所选提供商不存在，请刷新页面后重试";
@@ -12369,8 +13069,8 @@
                 const first = details[0] || {};
                 const location = Array.isArray(first.loc) ? first.loc.join(".") : "";
                 const message = String(first.msg || "").trim();
-                if (location.includes("model_name")) return "请填写模型名";
-                if (location.includes("display_name")) return "展示名格式不正确，请检查后重试";
+                if (location.includes("model_name")) return "请填写模型ID";
+                if (location.includes("display_name")) return "模型名称/别名格式不正确，请检查后重试";
                 if (location.includes("context_window_tokens")) return "最大上下文窗口 token 必须大于 0";
                 if (location.includes("max_input_tokens")) return "最大输入 token 必须大于 0";
                 if (location.includes("max_output_tokens")) return "最大输出 token 必须大于 0";
@@ -12545,20 +13245,50 @@
             const providers = Array.isArray(item.selectedProviders) ? item.selectedProviders : [];
             const completedProviders = providers.filter((provider) => ["healthy", "unhealthy", "failed", "rate_limited"].includes(provider.status));
             const healthyProviders = completedProviders.filter((provider) => provider.status === "healthy");
+            const channelResults = providers.map((provider) => ({
+                provider_id: provider.providerId ?? provider.provider_id ?? null,
+                provider_model_id: provider.providerModelId ?? provider.provider_model_id ?? null,
+                provider_name: provider.providerName || provider.provider_name || null,
+                model_name: item.modelName,
+                success: provider.status === "healthy",
+                provider_success: provider.status === "healthy",
+                available: provider.status === "healthy",
+                health_status: provider.status === "healthy" ? "healthy" : (provider.status === "rate_limited" ? "unknown" : "unhealthy"),
+                status: provider.status || "unknown",
+                status_label: provider.statusLabel || "",
+                status_code: provider.detail?.status_code ?? null,
+                latency_ms: provider.latencyMs ?? provider.detail?.latency_ms ?? null,
+                message: provider.message || provider.detail?.message || "",
+                endpoint_results: Array.isArray(provider.detail?.endpoint_results) ? provider.detail.endpoint_results : [],
+                raw_provider_response: provider.detail?.raw_provider_response || null,
+                detail: provider.detail || null,
+            }));
             item.healthyChannelCount = healthyProviders.length;
             item.totalChannelCount = providers.length;
             item.latencyMs = Date.now() - startedAt;
             item.status = healthyProviders.length > 0 ? "healthy" : "unhealthy";
             if (!providers.length) {
                 item.message = "该模型当前没有绑定可测试的提供商。";
-                return;
-            }
-            if (healthyProviders.length > 0) {
+            } else if (healthyProviders.length > 0) {
                 item.message = `至少 ${formatNumber(healthyProviders.length)} 个提供商可用，模型状态为可用。`;
-                return;
+            } else {
+                const firstReason = completedProviders.find((provider) => provider.message)?.message || "所有绑定提供商均不可用。";
+                item.message = compactModelBatchTestMessage(firstReason);
             }
-            const firstReason = completedProviders.find((provider) => provider.message)?.message || "所有绑定提供商均不可用。";
-            item.message = compactModelBatchTestMessage(firstReason);
+            item.detail = {
+                probe_kind: "model_batch_summary",
+                model_name: item.modelName,
+                display_name: item.displayName,
+                success: healthyProviders.length > 0,
+                health_status: item.status,
+                healthy_channel_count: item.healthyChannelCount,
+                total_channel_count: item.totalChannelCount,
+                latency_ms: item.latencyMs,
+                message: item.message,
+                selected_providers: providers,
+                channel_results: channelResults,
+                endpoint_results: channelResults.flatMap((provider) => Array.isArray(provider.endpoint_results) ? provider.endpoint_results : []),
+            };
         }
 
         async function runModelProviderTests(modelOption, batchState, features, refresh) {
@@ -12884,7 +13614,7 @@
             try {
                 const modelName = nameInput.value.trim();
                 if (!isEditing && !modelName) {
-                    showToast("请填写模型名", "error");
+                    showToast("请填写模型ID", "error");
                     return;
                 }
                 const inputPricePer1K = parseOptionalPriceField(inputPriceInput, "输入单价");
@@ -12973,11 +13703,11 @@
             const sourceModelName = mappingSourceInput.value.trim();
             const targets = collectMappingTargets();
             if (!sourceModelName) {
-                showToast("请填写源模型", "error");
+                showToast("请填写源模型ID", "error");
                 return;
             }
             if (!targets.length) {
-                showToast("请至少添加一个目标模型", "error");
+                showToast("请至少添加一个目标模型ID", "error");
                 return;
             }
             const payload = {
@@ -13044,7 +13774,7 @@
                 }
                 return;
             }
-            if (button.dataset.mappingAction === "test") {
+            if (button.dataset.mappingAction === "preview") {
                 try {
                     setButtonLoading(button, true);
                     const result = await api.post("/api/model-mappings/select", {
@@ -13052,12 +13782,17 @@
                     });
                     const target = result.selected_model_name || sourceModel;
                     setButtonTransientFeedback(button, result.mapped ? "success" : "error", {
-                        successText: "已选",
+                        successText: "已预览",
                         errorText: "未映射",
                     });
-                    showToast(`当前选择：${sourceModel} → ${target}`);
+                    openHealthCheckResultModal(
+                        `模型映射预览 · ${sourceModel}`,
+                        renderModelMappingPreviewResult(result, sourceModel),
+                        button,
+                    );
+                    showToast(`映射预览：${sourceModel} → ${target}`);
                 } catch (error) {
-                    setButtonTransientFeedback(button, "error", { errorText: "失败" });
+                    setButtonTransientFeedback(button, "error", { errorText: "预览失败" });
                     showToast(error.message, "error");
                 } finally {
                     setButtonLoading(button, false);
@@ -13066,6 +13801,74 @@
         });
 
         addBtn.addEventListener("click", () => openModal());
+        modelsExportBtn.addEventListener("click", () => {
+            setButtonTransientFeedback(modelsExportBtn, "success", { successText: "准备导出" });
+            window.location.href = "/api/models/export";
+        });
+        modelsBatchImportOpenBtn.addEventListener("click", () => {
+            openModelsBatchImportModal(modelsBatchImportOpenBtn);
+        });
+        document.getElementById("models-batch-import-close")?.addEventListener("click", () => closeModelsBatchImportModal({ reason: "close" }));
+        modelsBatchImportTemplateBtn.addEventListener("click", async () => {
+            try {
+                const template = await ensureModelsBatchImportTemplate();
+                modelsBatchImportContentInput.value = template;
+                modelsBatchImportContentInput.focus();
+                modelsBatchImportPreview = null;
+                if (modelsBatchImportSubmitBtn) modelsBatchImportSubmitBtn.disabled = true;
+                renderModelsBatchImportResult(null);
+                showToast("已填入模型批量导入模板");
+            } catch (error) {
+                showToast(error.message, "error");
+            }
+        });
+        modelsBatchImportCopyTemplateBtn.addEventListener("click", async (event) => {
+            try {
+                const template = await ensureModelsBatchImportTemplate();
+                await copyText(template, event.currentTarget);
+            } catch (error) {
+                showToast(error.message, "error");
+            }
+        });
+        modelsBatchImportPreviewBtn.addEventListener("click", async () => {
+            await previewModelsBatchImport();
+        });
+        modelsBatchImportContentInput.addEventListener("input", () => {
+            modelsBatchImportPreview = null;
+            if (modelsBatchImportSubmitBtn) modelsBatchImportSubmitBtn.disabled = true;
+        });
+        modelsBatchImportForm.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            const content = String(modelsBatchImportContentInput.value || "").trim();
+            if (!content) {
+                showToast("请先粘贴模型配置导入文本", "error");
+                modelsBatchImportContentInput.focus();
+                return;
+            }
+            const preview = modelsBatchImportPreview || await previewModelsBatchImport();
+            if (!preview || Number(preview.valid_count || 0) <= 0 || Number(preview.failed_count || 0) > 0) {
+                showToast("请先修正预览中的问题", "error");
+                return;
+            }
+            let importCompleted = false;
+            try {
+                setButtonLoading(modelsBatchImportSubmitBtn, true);
+                const result = await api.post("/api/models/batch-import", {
+                    content,
+                    dry_run: false,
+                });
+                modelsBatchImportPreview = result;
+                renderModelsBatchImportResult(result);
+                importCompleted = true;
+                showToast(`批量导入完成：新增 ${formatNumber(result.created_count || 0)} 个`);
+                await loadData({ silent: true, reloadProviders: true });
+            } catch (error) {
+                showToast(error.message, "error");
+            } finally {
+                setButtonLoading(modelsBatchImportSubmitBtn, false);
+                if (importCompleted && modelsBatchImportSubmitBtn) modelsBatchImportSubmitBtn.disabled = true;
+            }
+        });
         testAllBtn.addEventListener("click", testAllModelHealth);
         refreshBtn.addEventListener("click", async () => {
             try {
@@ -13908,7 +14711,7 @@
             document.getElementById("content-guard-json-probe-enabled").checked = settings.content_guard_json_probe_enabled ?? false;
             document.getElementById("content-guard-low-trust-requires-buffer").checked = settings.content_guard_low_trust_requires_buffer ?? true;
             document.getElementById("content-guard-async-review-enabled").checked = settings.content_guard_async_review_enabled ?? true;
-            document.getElementById("content-guard-url-check-enabled").checked = settings.content_guard_url_check_enabled ?? true;
+            document.getElementById("content-guard-url-check-enabled").checked = settings.content_guard_url_check_enabled ?? false;
             document.getElementById("content-guard-enhanced-detection-enabled").checked = settings.content_guard_enhanced_detection_enabled ?? true;
             document.getElementById("content-guard-enhanced-illegal-enabled").checked = settings.content_guard_enhanced_illegal_enabled ?? true;
             document.getElementById("content-guard-enhanced-ad-enabled").checked = settings.content_guard_enhanced_ad_enabled ?? true;
@@ -14351,10 +15154,12 @@
                         <td><span class="status-badge ${resultStatusClass(event.guard_result)}">${escapeHtml(resultText)}</span></td>
                         <td class="content-guard-reason-cell">${renderReasonHelp(event.reason || event.excerpt || "-", "事件原因")}</td>
                         <td>${escapeHtml(event.trace_id || "-")}</td>
+                        <td>${renderContentGuardRuntimeEventDetailButton(event)}</td>
                     </tr>
                 `;
-            }).join("") : '<tr><td colspan="6" class="table-muted">暂无运行时内容防护事件</td></tr>';
+            }).join("") : '<tr><td colspan="7" class="table-muted">暂无运行时内容防护事件</td></tr>';
             prepareSettingsTooltipTriggers(runtimeEventsBody);
+            enhanceInteractiveButtons(runtimeEventsBody);
             scheduleResponsiveTableSync(document.querySelector(".content-guard-runtime-events-table"));
         };
 
@@ -14362,7 +15167,7 @@
             if (!runtimeEventsBody) return;
             const params = buildRuntimeEventParams();
             if (manual) setButtonLoading(runtimeEventsRefreshBtn, true);
-            runtimeEventsBody.innerHTML = '<tr><td colspan="6" class="table-muted">加载中</td></tr>';
+            runtimeEventsBody.innerHTML = '<tr><td colspan="7" class="table-muted">加载中</td></tr>';
             try {
                 const data = await api.get(`/api/content-guard/runtime/events?${params.toString()}`);
                 renderRuntimeEvents(data.events || []);
@@ -14372,7 +15177,7 @@
                     showToast("内容防护事件已刷新");
                 }
             } catch (error) {
-                runtimeEventsBody.innerHTML = '<tr><td colspan="6" class="table-muted">运行时事件加载失败</td></tr>';
+                runtimeEventsBody.innerHTML = '<tr><td colspan="7" class="table-muted">运行时事件加载失败</td></tr>';
                 if (manual) setButtonTransientFeedback(runtimeEventsRefreshBtn, "error", { errorText: "失败" });
                 showToast(error.message, "error");
             } finally {
@@ -14911,7 +15716,7 @@
             "setting-responses-chat-adapter-upstream-api-key": ["单上游密钥说明", "适配器默认上游密钥。仅在启用单上游适配时填写，注意妥善保管。"],
             "setting-responses-chat-adapter-search-proxy-url": ["搜索代理地址说明", "web_search 代理服务地址。仅在启用搜索代理时填写。"],
             "setting-responses-chat-adapter-model-map-json": ["模型映射 JSON 说明", "Responses 模型到 Chat 上游模型的映射表。推荐使用对象 JSON，例如 {\"gpt-4o\":\"deepseek-chat\"}。"],
-            "setting-responses-chat-adapter-upstreams-json": ["多上游 JSON 说明", "为不同模型配置不同上游地址、密钥和模型名。生产多渠道适配时推荐使用对象 JSON。"],
+            "setting-responses-chat-adapter-upstreams-json": ["多上游 JSON 说明", "为不同模型配置不同上游地址、密钥和模型ID。生产多渠道适配时推荐使用对象 JSON。"],
             "setting-enable-token-logging": ["记录 token 使用量说明", "开启后记录上游 usage 中的 token 数据，用于统计和计费。推荐开启。"],
             "setting-enable-payload-logging": ["记录请求与响应正文说明", "开启后可保存截断正文用于排障。生产默认关闭，避免敏感内容和存储压力。"],
             "setting-enable-stream-response-persist": ["记录流式最终回复文本说明", "开启后保存流式输出文本。生产默认关闭；仅排障时短期开启。"],
@@ -14949,6 +15754,7 @@
         ensureSettingsHelp();
         initSettingsTooltipLayer();
         const settings = await api.get("/api/settings");
+        document.getElementById("setting-route-strategy").value = settings.route_strategy || "availability_first";
         document.getElementById("setting-route-exhausted-retry-max-wait-seconds").value = settings.route_exhausted_retry_max_wait_seconds ?? 600;
         document.getElementById("setting-route-exhausted-retry-infinite-enabled").checked = settings.route_exhausted_retry_infinite_enabled ?? false;
         document.getElementById("setting-trusted-providers-only").checked = settings.trusted_providers_only ?? false;
@@ -15033,6 +15839,7 @@
             event.preventDefault();
             try {
                 const payload = {
+                    route_strategy: document.getElementById("setting-route-strategy").value || "availability_first",
                     route_exhausted_retry_max_wait_seconds: Math.min(600, Math.max(0, Number(document.getElementById("setting-route-exhausted-retry-max-wait-seconds").value || 600))),
                     route_exhausted_retry_infinite_enabled: document.getElementById("setting-route-exhausted-retry-infinite-enabled").checked,
                     trusted_providers_only: document.getElementById("setting-trusted-providers-only").checked,
@@ -16027,6 +16834,9 @@
         let initialFilterValuesApplied = false;
         let requestLogItems = [];
         let requestLogLoadSeq = 0;
+        let requestLogListPollTimer = null;
+        let requestLogDetailPollTimer = null;
+        let activeRequestLogDetailId = null;
         if (currentParams.get("conversation_key")) {
             document.getElementById("logs-conversation-key").value = currentParams.get("conversation_key");
         }
@@ -16045,9 +16855,17 @@
             modal: traceModal,
             dialog: traceDialog,
             getInitialFocus: () => closeBtn,
+            afterClose: () => stopRequestLogDetailPolling(),
         });
-        const closeModal = () => traceModalController.close();
+        const closeModal = () => {
+            stopRequestLogDetailPolling();
+            traceModalController.close();
+        };
         closeBtn.addEventListener("click", closeModal);
+        registerPageCleanup(() => {
+            if (requestLogListPollTimer) window.clearInterval(requestLogListPollTimer);
+            stopRequestLogDetailPolling();
+        });
         for (const id of immediateFilterIds) {
             const node = document.getElementById(id);
             if (!node) continue;
@@ -16338,8 +17156,9 @@
                 if (group.summary) {
                     return `<article class="log-detail-summary-card">${group.html || ""}</article>`;
                 }
+                const extraClass = group.wide ? " log-detail-card-wide" : "";
                 return `
-                    <article class="log-detail-card">
+                    <article class="log-detail-card${extraClass}">
                         <h4>${escapeHtml(group.title)}</h4>
                         ${group.html || `
                             <dl>
@@ -16353,20 +17172,7 @@
                 `;
             }).join("");
             if (timelineItems.length) {
-                detailCards.insertAdjacentHTML("beforeend", `
-                    <article class="log-detail-card log-detail-timeline">
-                        <h4>链路时间线</h4>
-                        <div class="log-detail-timeline-list">
-                            ${timelineItems.map((item) => `
-                                <div class="log-detail-timeline-item">
-                                    <strong>${escapeHtml(item.label || item.event_type || "-")}</strong>
-                                    <span class="table-muted">${escapeHtml(item.created_at || "-")}</span>
-                                    <span>${escapeHtml(compactDetailSummary(item.payload || {}))}</span>
-                                </div>
-                            `).join("")}
-                        </div>
-                    </article>
-                `);
+                detailCards.insertAdjacentHTML("beforeend", renderRequestTimelineHtml(timelineItems));
             }
         }
 
@@ -16399,9 +17205,11 @@
         function renderLogTraceSummary(log, requestHeaders = {}) {
             const successKnown = log.success !== null && log.success !== undefined;
             const success = log.success === true;
-            const statusText = successKnown ? (success ? "成功" : "失败") : "未知";
-            const statusTone = success ? "success" : (successKnown ? "danger" : "neutral");
+            const inProgress = isRequestLogInProgress(log);
+            const statusText = formatRequestLogProgressLabel(log) || (successKnown ? (success ? "成功" : "失败") : "未知");
+            const statusTone = inProgress ? "running" : (success ? "success" : (successKnown ? "danger" : "neutral"));
             const duration = log.duration_ms == null && log.latency_ms == null ? "-" : `${log.duration_ms ?? log.latency_ms} ms`;
+            const upstreamDuration = log.upstream_duration_ms == null && log.latency_ms == null ? "-" : `${log.upstream_duration_ms ?? log.latency_ms} ms`;
             const ttfb = log.ttfb_ms == null ? "-" : `${log.ttfb_ms} ms`;
             const tps = log.tps == null ? "-" : Number(log.tps).toFixed(2);
             const title = log.display_model || log.model_name || log.requested_model || "-";
@@ -16420,7 +17228,8 @@
                     <div><span>状态码</span><strong>${escapeHtml(formatLogDetailValue(log.status_code ?? "-"))}</strong></div>
                     <div><span>总耗时</span><strong>${escapeHtml(duration)}</strong></div>
                     <div><span>首包</span><strong>${escapeHtml(ttfb)}</strong></div>
-                    <div><span>速率</span><strong>${escapeHtml(tps)}</strong></div>
+                    <div><span>上游耗时</span><strong>${escapeHtml(upstreamDuration)}</strong></div>
+                    <div><span>TPS</span><strong>${escapeHtml(tps)}</strong></div>
                 </div>
                 <div class="log-detail-summary-trace">
                     <span>Trace <code>${escapeHtml(traceId)}</code></span>
@@ -16428,6 +17237,174 @@
                     <span>客户端 <code>${escapeHtml(clientRequestId)}</code></span>
                 </div>
             `;
+        }
+
+        function renderOriginalResponseHtml(log) {
+            const rawJson = String(log.response_body_json || "").trim();
+            const rawText = String(log.response_text || "").trim();
+            let content = rawJson;
+            if (rawJson) {
+                const parsed = safeJsonParse(rawJson);
+                content = parsed === null ? rawJson : JSON.stringify(parsed, null, 2);
+            } else if (rawText) {
+                content = rawText;
+            } else {
+                content = "暂无原始响应内容";
+            }
+            return `<div class="log-detail-raw-response"><pre><code>${escapeHtml(content)}</code></pre></div>`;
+        }
+
+        function buildRequestLogDetailGroups(log, requestHeaders = {}) {
+            return [
+                {
+                    summary: true,
+                    html: renderLogTraceSummary(log, requestHeaders),
+                },
+                {
+                    title: "鉴权",
+                    items: [
+                        ["结果", log.api_client_auth_result || (log.api_client_key_id ? "authenticated" : "-")],
+                        ["API Key 名称", log.api_client_key_name || "-"],
+                        ["API Key 标识", log.api_client_key_prefix || "-"],
+                        ["用户", log.user_account_name || log.user_account_id || "-"],
+                    ],
+                },
+                {
+                    title: "校验",
+                    items: [
+                        ["请求状态", log.request_status || "-"],
+                        ["方法", log.http_method || "-"],
+                        ["路径", log.request_path || "-"],
+                        ["状态码", log.status_code ?? "-"],
+                        ["日志类型", formatLogTypeLabel(log.log_type)],
+                        ["请求形态", log.request_modality || (log.has_image ? "多模态" : "文本")],
+                    ],
+                },
+                {
+                    title: "模型能力",
+                    items: [
+                        ["请求模型", log.requested_model || "-"],
+                        ["实际模型", log.model_name || "-"],
+                        ["思维等级", log.reasoning_level || "无"],
+                        ["参数", log.model_reasoning_effort || "-"],
+                        ["图片输入", log.has_image_input ? "是" : "否"],
+                    ],
+                },
+                {
+                    title: "提供商尝试",
+                    items: [
+                        ["提供商", log.provider_name || log.provider_id || "-"],
+                        ["挂载 ID", log.resolved_provider_model_id || "-"],
+                        ["尝试次数", log.attempt_count ?? "-"],
+                        ["上游请求", log.upstream_request_id || "-"],
+                        ["完成原因", log.finish_reason || "-"],
+                    ],
+                },
+                {
+                    title: "客户端请求头",
+                    items: buildRequestHeaderDetailItems(requestHeaders),
+                },
+                {
+                    title: "流式",
+                    items: [
+                        ["是否流式", log.is_stream ? "是" : "否"],
+                        ["首包耗时", log.ttfb_ms == null ? "-" : `${log.ttfb_ms} ms`],
+                        ["总耗时", log.duration_ms == null ? "-" : `${log.duration_ms} ms`],
+                        ["上游耗时", log.upstream_duration_ms == null ? "-" : `${log.upstream_duration_ms} ms`],
+                        ["输出速率", log.tps == null ? "-" : Number(log.tps).toFixed(2)],
+                    ],
+                },
+                {
+                    title: "错误响应",
+                    items: [
+                        ["成功", log.success ? "是" : "否"],
+                        ["错误类型", log.error_type || "-"],
+                        ["错误码", log.error_code || "-"],
+                        ["可重试", log.retryable == null ? "-" : (log.retryable ? "是" : "否")],
+                        ["说明", log.message || "-"],
+                    ],
+                },
+                {
+                    title: "原始响应 JSON",
+                    wide: true,
+                    html: renderOriginalResponseHtml(log),
+                },
+                {
+                    title: "内容防护",
+                    items: [
+                        ["结果", formatContentGuardResultLabel(log.content_guard_result || "-")],
+                        ["风险", formatContentGuardRiskLabel(log.content_guard_risk_level || "-")],
+                        ["动作", formatContentGuardActionLabel(log.content_guard_action || "-")],
+                        ["耗时", formatLatencyMs(log.content_guard_latency_ms)],
+                        ["分类", formatContentGuardCategories(log.content_guard_categories_json)],
+                        ["原因", log.content_guard_reason || "-"],
+                        ["证据", log.content_guard_excerpt || "-"],
+                        ["缓冲等待", formatLatencyMs(log.content_guard_buffer_wait_ms)],
+                        ["重试提供商", log.content_guard_retry_provider_count ?? "-"],
+                        ["最终策略", formatContentGuardActionLabel(log.content_guard_final_strategy || "-")],
+                    ],
+                },
+                {
+                    title: "计费",
+                    items: [
+                        ["输入 Token", formatTokenDisplay(log.prompt_tokens)],
+                        ["输出 Token", formatTokenDisplay(log.completion_tokens)],
+                        ["总费用", log.total_cost == null ? "-" : formatMoney(log.total_cost)],
+                        ["状态", formatLogStatusLabel(log.billing_status || "-")],
+                    ],
+                },
+            ];
+        }
+
+        async function refreshRequestLogDetail(logId) {
+            const timeline = await api.get(`/api/user/logs/${encodeURIComponent(logId)}/timeline?_ts=${Date.now()}`);
+            const latestLog = timeline.request_log || requestLogItems.find((item) => String(item.id) === String(logId)) || {};
+            const latestHeaders = parseRequestHeadersForLog(latestLog);
+            renderDetailCards(buildRequestLogDetailGroups(latestLog, latestHeaders), timeline.events || []);
+            traceContent.textContent = formatLogRawJson({
+                ...latestLog,
+                trace: safeJsonParse(latestLog.trace_json || "") ?? latestLog.trace_json,
+                timeline_events: timeline.events || [],
+            });
+            if (!isRequestLogInProgress(latestLog)) {
+                stopRequestLogDetailPolling();
+            }
+            return latestLog;
+        }
+
+        function stopRequestLogDetailPolling() {
+            if (requestLogDetailPollTimer) {
+                window.clearInterval(requestLogDetailPollTimer);
+                requestLogDetailPollTimer = null;
+            }
+            activeRequestLogDetailId = null;
+        }
+
+        function startRequestLogDetailPolling(logId) {
+            stopRequestLogDetailPolling();
+            activeRequestLogDetailId = logId;
+            requestLogDetailPollTimer = window.setInterval(async () => {
+                if (!activeRequestLogDetailId) return;
+                try {
+                    await refreshRequestLogDetail(activeRequestLogDetailId);
+                } catch (error) {
+                    stopRequestLogDetailPolling();
+                }
+            }, 2500);
+        }
+
+        function syncRequestLogAutoRefresh() {
+            const hasInProgress = requestLogItems.some((log) => isRequestLogInProgress(log));
+            if (hasInProgress && !requestLogListPollTimer) {
+                requestLogListPollTimer = window.setInterval(() => {
+                    loadLogs({ feedbackSource: "in-progress" });
+                }, 3000);
+                return;
+            }
+            if (!hasInProgress && requestLogListPollTimer) {
+                window.clearInterval(requestLogListPollTimer);
+                requestLogListPollTimer = null;
+            }
         }
 
         async function loadLogs({ manual = false, feedbackSource = "auto" } = {}) {
@@ -16533,6 +17510,7 @@
                     const queueSuffix = queueParts.length ? `，${queueParts.join("，")}` : "";
                     showToast(`日志已刷新，第 ${state.page} 页 / ${Math.max(1, Math.ceil((state.total || 0) / state.pageSize))} 页${queueSuffix}`);
                 }
+                syncRequestLogAutoRefresh();
             } catch (error) {
                 if (loadSeq !== requestLogLoadSeq) return;
                 tableBody.innerHTML = '<tr><td colspan="7"><div class="empty-state">日志加载失败，请稍后重试</div></td></tr>';
@@ -16570,254 +17548,37 @@
             }
             if (button.dataset.action !== "show-trace") return;
             const log = requestLogItems[Number.parseInt(button.dataset.index || "-1", 10)] || {};
-            const detail = {
-                id: log.id,
-                log_type: log.log_type,
-                request_id: log.request_id,
-                conversation_key: log.conversation_key,
-                session_id: log.session_id,
-                requested_model: log.requested_model,
-                model_name: log.model_name,
-                display_model: log.display_model,
-                provider_name: log.provider_name,
-                user_account_id: log.user_account_id,
-                user_account_name: log.user_account_name,
-                api_client_key_id: log.api_client_key_id,
-                api_client_key_name: log.api_client_key_name,
-                api_client_key_prefix: log.api_client_key_prefix,
-                api_client_auth_result: log.api_client_auth_result,
-                http_method: log.http_method,
-                content_guard_result: log.content_guard_result,
-                content_guard_risk_level: log.content_guard_risk_level,
-                content_guard_action: log.content_guard_action,
-                content_guard_reason: log.content_guard_reason,
-                content_guard_excerpt: log.content_guard_excerpt,
-                content_guard_categories_json: safeJsonParse(log.content_guard_categories_json || "") ?? log.content_guard_categories_json,
-                has_image_input: log.has_image_input,
-                uses_image_generation: log.uses_image_generation,
-                request_modality: log.request_modality,
-                generated_images_count: log.generated_images_count,
-                generated_image_mime_types: log.generated_image_mime_types,
-                generated_image_approx_bytes: log.generated_image_approx_bytes,
-                has_partial_generated_image: log.has_partial_generated_image,
-                generated_image_result_truncated: log.generated_image_result_truncated,
-                image_response_mode: log.image_response_mode,
-                upstream_usage_missing: log.upstream_usage_missing,
-                reasoning_level: log.reasoning_level,
-                model_reasoning_effort: log.model_reasoning_effort,
-                attempt_count: log.attempt_count,
-                success: log.success,
-                status_code: log.status_code,
-                latency_ms: log.latency_ms,
-                ttfb_ms: log.ttfb_ms,
-                duration_ms: log.duration_ms,
-                tps: log.tps,
-                prompt_tokens: log.prompt_tokens,
-                completion_tokens: log.completion_tokens,
-                total_tokens: log.total_tokens,
-                cache_read_tokens: log.cache_read_tokens,
-                cache_write_tokens: log.cache_write_tokens,
-                billing_multiplier: log.billing_multiplier,
-                channel_price_input_per_1k: log.channel_price_input_per_1k,
-                channel_price_output_per_1k: log.channel_price_output_per_1k,
-                channel_price_cache_per_1k: log.channel_price_cache_per_1k,
-                prompt_cost: log.prompt_cost,
-                completion_cost: log.completion_cost,
-                total_cost: log.total_cost,
-                billing_calculation: formatBillingCalculation(log),
-                finish_reason: log.finish_reason,
-                upstream_request_id: log.upstream_request_id,
-                request_body_json: safeJsonParse(log.request_body_json || "") ?? log.request_body_json,
-                response_body_json: safeJsonParse(log.response_body_json || "") ?? log.response_body_json,
-                response_text: log.response_text,
-                request_headers_json: safeJsonParse(log.request_headers_json || "") ?? log.request_headers_json,
-                trace: safeJsonParse(log.trace_json || "") ?? log.trace_json,
-                created_at: log.created_at,
-            };
-            const requestHeaders = parseRequestHeadersForLog(log);
+            const logId = button.dataset.logId || log.id;
+            if (!logId) {
+                showToast("无法定位请求日志", "error");
+                return;
+            }
+            stopRequestLogDetailPolling();
             renderDetailCards([
                 {
-                    summary: true,
-                    html: renderLogTraceSummary(log, requestHeaders),
-                },
-                {
-                    title: "鉴权",
-                    items: [
-                        ["结果", log.api_client_auth_result || (log.api_client_key_id ? "authenticated" : "-")],
-                        ["API Key 名称", log.api_client_key_name || "-"],
-                        ["API Key 标识", log.api_client_key_prefix || "-"],
-                        ["用户", log.user_account_name || log.user_account_id || "-"],
-                    ],
-                },
-                {
-                    title: "校验",
-                    items: [
-                        ["方法", log.http_method || "-"],
-                        ["路径", log.request_path || "-"],
-                        ["状态码", log.status_code ?? "-"],
-                        ["日志类型", formatLogTypeLabel(log.log_type)],
-                        ["请求形态", log.request_modality || (log.has_image ? "多模态" : "文本")],
-                    ],
-                },
-                {
-                    title: "模型能力",
-                    items: [
-                        ["请求模型", log.requested_model || "-"],
-                        ["实际模型", log.model_name || "-"],
-                        ["思维等级", log.reasoning_level || "无"],
-                        ["参数", log.model_reasoning_effort || "-"],
-                        ["图片输入", log.has_image_input ? "是" : "否"],
-                    ],
-                },
-                {
-                    title: "路由",
-                    items: [
-                        ["提供商", log.provider_name || log.provider_id || "-"],
-                        ["挂载 ID", log.resolved_provider_model_id || "-"],
-                        ["尝试次数", log.attempt_count ?? "-"],
-                        ["上游请求", log.upstream_request_id || "-"],
-                    ],
-                },
-                {
-                    title: "客户端请求头",
-                    items: buildRequestHeaderDetailItems(requestHeaders),
-                },
-                {
-                    title: "流式",
-                    items: [
-                        ["是否流式", log.is_stream ? "是" : "否"],
-                            ["首包耗时", log.ttfb_ms == null ? "-" : `${log.ttfb_ms} ms`],
-                        ["持续时间", log.duration_ms == null ? "-" : `${log.duration_ms} ms`],
-                            ["输出速率", log.tps == null ? "-" : Number(log.tps).toFixed(2)],
-                    ],
-                },
-                {
-                    title: "错误响应",
-                    items: [
-                        ["成功", log.success ? "是" : "否"],
-                        ["错误类型", log.error_type || "-"],
-                        ["错误码", log.error_code || "-"],
-                        ["可重试", log.retryable == null ? "-" : (log.retryable ? "是" : "否")],
-                    ],
-                },
-                {
-                    title: "内容防护",
-                    items: [
-                        ["结果", formatContentGuardResultLabel(log.content_guard_result || "-")],
-                        ["风险", formatContentGuardRiskLabel(log.content_guard_risk_level || "-")],
-                        ["动作", formatContentGuardActionLabel(log.content_guard_action || "-")],
-                        ["耗时", formatLatencyMs(log.content_guard_latency_ms)],
-                        ["分类", formatContentGuardCategories(log.content_guard_categories_json)],
-                        ["原因", log.content_guard_reason || "-"],
-                        ["证据", log.content_guard_excerpt || "-"],
-                        ["缓冲等待", formatLatencyMs(log.content_guard_buffer_wait_ms)],
-                        ["重试提供商", log.content_guard_retry_provider_count ?? "-"],
-                        ["最终策略", formatContentGuardActionLabel(log.content_guard_final_strategy || "-")],
-                    ],
-                },
-                {
-                    title: "计费",
-                    items: [
-                        ["输入 Token", formatTokenDisplay(log.prompt_tokens)],
-                        ["输出 Token", formatTokenDisplay(log.completion_tokens)],
-                        ["总费用", log.total_cost == null ? "-" : formatMoney(log.total_cost)],
-                        ["状态", formatLogStatusLabel(log.billing_status || "-")],
-                    ],
+                    title: "请求详情",
+                    html: "<div class=\"empty-state compact-empty\">正在加载请求详情...</div>",
                 },
             ]);
+            traceContent.textContent = "正在加载请求详情...";
+            traceModalController.open(button);
             try {
-                const timeline = await api.get(`/api/user/logs/${encodeURIComponent(log.id)}/timeline?_ts=${Date.now()}`);
+                const latestLog = await refreshRequestLogDetail(logId);
+                if (isRequestLogInProgress(latestLog)) {
+                    startRequestLogDetailPolling(logId);
+                }
+            } catch (error) {
+                stopRequestLogDetailPolling();
+                const message = error?.message || "请求详情加载失败";
                 renderDetailCards([
                     {
-                        summary: true,
-                        html: renderLogTraceSummary(log, requestHeaders),
+                        title: "请求详情",
+                        html: "<div class=\"empty-state compact-empty\">" + escapeHtml(message) + "</div>",
                     },
-                    {
-                        title: "鉴权",
-                    items: [
-                        ["结果", log.api_client_auth_result || (log.api_client_key_id ? "authenticated" : "-")],
-                            ["API Key 名称", log.api_client_key_name || "-"],
-                            ["API Key 标识", log.api_client_key_prefix || "-"],
-                        ["用户", log.user_account_name || log.user_account_id || "-"],
-                    ],
-                },
-                    {
-                        title: "校验",
-                        items: [
-                            ["方法", log.http_method || "-"],
-                            ["路径", log.request_path || "-"],
-                            ["状态码", log.status_code ?? "-"],
-                            ["日志类型", formatLogTypeLabel(log.log_type)],
-                            ["请求形态", log.request_modality || (log.has_image ? "多模态" : "文本")],
-                        ],
-                    },
-                    {
-                        title: "模型能力",
-                        items: [
-                            ["请求模型", log.requested_model || "-"],
-                            ["实际模型", log.model_name || "-"],
-                            ["思维等级", log.reasoning_level || "无"],
-                            ["参数", log.model_reasoning_effort || "-"],
-                            ["图片输入", log.has_image_input ? "是" : "否"],
-                        ],
-                    },
-                    {
-                        title: "提供商尝试",
-                        items: [
-                            ["提供商", log.provider_name || log.provider_id || "-"],
-                            ["尝试次数", log.attempt_count ?? "-"],
-                            ["上游请求", log.upstream_request_id || "-"],
-                            ["完成原因", log.finish_reason || "-"],
-                        ],
-                    },
-                    {
-                        title: "流式",
-                        items: [
-                            ["是否流式", log.is_stream ? "是" : "否"],
-                            ["首包耗时", log.ttfb_ms == null ? "-" : `${log.ttfb_ms} ms`],
-                            ["持续时间", log.duration_ms == null ? "-" : `${log.duration_ms} ms`],
-                            ["输出速率", log.tps == null ? "-" : Number(log.tps).toFixed(2)],
-                        ],
-                    },
-                    {
-                        title: "错误响应",
-                        items: [
-                            ["成功", log.success ? "是" : "否"],
-                            ["错误类型", log.error_type || "-"],
-                            ["错误码", log.error_code || "-"],
-                            ["可重试", log.retryable == null ? "-" : (log.retryable ? "是" : "否")],
-                        ],
-                    },
-                    {
-                        title: "内容防护",
-                        items: [
-                            ["结果", formatContentGuardResultLabel(log.content_guard_result || "-")],
-                            ["风险", formatContentGuardRiskLabel(log.content_guard_risk_level || "-")],
-                            ["动作", formatContentGuardActionLabel(log.content_guard_action || "-")],
-                            ["耗时", formatLatencyMs(log.content_guard_latency_ms)],
-                            ["分类", formatContentGuardCategories(log.content_guard_categories_json)],
-                            ["原因", log.content_guard_reason || "-"],
-                            ["证据", log.content_guard_excerpt || "-"],
-                            ["缓冲等待", formatLatencyMs(log.content_guard_buffer_wait_ms)],
-                            ["重试提供商", log.content_guard_retry_provider_count ?? "-"],
-                            ["最终策略", formatContentGuardActionLabel(log.content_guard_final_strategy || "-")],
-                        ],
-                    },
-                    {
-                        title: "计费",
-                        items: [
-                            ["输入 Token", formatTokenDisplay(log.prompt_tokens)],
-                            ["输出 Token", formatTokenDisplay(log.completion_tokens)],
-                            ["总费用", log.total_cost == null ? "-" : formatMoney(log.total_cost)],
-                            ["状态", formatLogStatusLabel(log.billing_status || "-")],
-                        ],
-                    },
-                ], timeline.events || []);
-            } catch (error) {
-                showToast(error.message, "error");
+                ]);
+                traceContent.textContent = formatLogRawJson({ id: logId, error: message });
+                showToast(message, "error");
             }
-            traceContent.textContent = formatLogRawJson(detail);
-            traceModalController.open(button);
         });
 
         await loadFilterOptions();
@@ -17111,11 +17872,11 @@
                     { label: "摘要", value: "当前密钥命中的授权范围里没有这个模型，或者所选模型暂不可用。" },
                 ],
                 fixes: [
-                    { label: "修复建议", value: "去可用模型页确认模型名是否存在，再检查这把密钥的授权提供商是否覆盖该模型。" },
-                    { label: "补充检查", value: "若模型名是手工输入或从别处复制的，优先改成站内模型页展示的标准名称。" },
+                    { label: "修复建议", value: "去可用模型页确认模型ID是否存在，再检查这把密钥的授权提供商是否覆盖该模型。" },
+                    { label: "补充检查", value: "若模型ID是手工输入或从别处复制的，优先改成站内模型页展示的标准ID。" },
                 ],
                 next: [
-                    { label: "下一步", value: "回到可用模型页确认模型名，再重新选择模型执行自检。" },
+                    { label: "下一步", value: "回到可用模型页确认模型ID，再重新选择模型执行自检。" },
                 ],
             };
         }
@@ -17174,7 +17935,7 @@
                 { label: "摘要", value: message || "当前请求未通过，请结合调度链路和原始返回继续排查。" },
             ],
             fixes: [
-                { label: "修复建议", value: "优先检查密钥状态、模型名、授权提供商和余额，再查看调度链路里的具体报错。" },
+                { label: "修复建议", value: "优先检查密钥状态、模型ID、授权提供商和余额，再查看调度链路里的具体报错。" },
             ],
             next: [
                 { label: "下一步", value: "若无法直接判断原因，去“我的日志”或“会话回放”定位完整上下文。" },
@@ -19297,7 +20058,7 @@
                     <td>${formatTokenDisplay(log.total_tokens ?? 0)}<div class="table-muted">${escapeHtml(log.total_cost == null ? "-" : formatMoney(log.total_cost))}</div></td>
                     <td>${log.status_code ?? "-"}</td>
                     <td>${log.latency_ms ?? "-"}</td>
-                    <td>${log.success ? statusBadge("healthy") : statusBadge("unhealthy")}</td>
+                    <td>${isRequestLogInProgress(log) ? statusBadge("running") : (log.success ? statusBadge("healthy") : statusBadge("unhealthy"))}</td>
                     <td><button class="table-action-btn" data-action="show-api-key-log" data-index="${index}">详情</button></td>
                 </tr>
             `).join("") || '<tr><td colspan="10"><div class="empty-state">暂无请求日志</div></td></tr>';
@@ -19570,6 +20331,9 @@
         const typedPaginationState = {};
         let requestLogItems = [];
         let requestLogLoadSeq = 0;
+        let requestLogListPollTimer = null;
+        let requestLogDetailPollTimer = null;
+        let activeRequestLogDetailId = null;
         let typedLogItems = [];
         let typedLogLoadSeq = 0;
         let initialFilterValuesApplied = false;
@@ -19578,8 +20342,16 @@
             modal: traceModal,
             dialog: traceDialog,
             getInitialFocus: () => closeBtn,
+            afterClose: () => stopRequestLogDetailPolling(),
         });
-        closeBtn.addEventListener("click", () => traceModalController.close());
+        closeBtn.addEventListener("click", () => {
+            stopRequestLogDetailPolling();
+            traceModalController.close();
+        });
+        registerPageCleanup(() => {
+            if (requestLogListPollTimer) window.clearInterval(requestLogListPollTimer);
+            stopRequestLogDetailPolling();
+        });
 
         function confirmLogDangerAction({ title, message, confirmText }) {
             return new Promise((resolve) => {
@@ -19720,7 +20492,7 @@
                 log_type: "日志类型",
                 provider_id: "提供商",
                 provider_trust_level: "提供商信任等级",
-                model_name: "模型名",
+                model_name: "模型ID",
                 model_query: "模型关键字",
                 user_account_id: "所属用户",
                 user_account_query: "用户关键字",
@@ -20574,7 +21346,7 @@
             return String(value);
         }
 
-        function renderDetailCards(groups) {
+        function renderDetailCards(groups, timelineItems = []) {
             detailCards.innerHTML = groups.map((group) => {
                 if (group.summary) {
                     return `<article class="log-detail-summary-card">${group.html || ""}</article>`;
@@ -20594,14 +21366,19 @@
                     </article>
                 `;
             }).join("");
+            if (timelineItems.length) {
+                detailCards.insertAdjacentHTML("beforeend", renderRequestTimelineHtml(timelineItems));
+            }
         }
 
         function renderLogTraceSummary(log, requestHeaders = {}) {
             const successKnown = log.success !== null && log.success !== undefined;
             const success = log.success === true;
-            const statusText = successKnown ? (success ? "成功" : "失败") : "未知";
-            const statusTone = success ? "success" : (successKnown ? "danger" : "neutral");
+            const inProgress = isRequestLogInProgress(log);
+            const statusText = formatRequestLogProgressLabel(log) || (successKnown ? (success ? "成功" : "失败") : "未知");
+            const statusTone = inProgress ? "running" : (success ? "success" : (successKnown ? "danger" : "neutral"));
             const duration = log.duration_ms == null && log.latency_ms == null ? "-" : `${log.duration_ms ?? log.latency_ms} ms`;
+            const upstreamDuration = log.upstream_duration_ms == null && log.latency_ms == null ? "-" : `${log.upstream_duration_ms ?? log.latency_ms} ms`;
             const ttfb = log.ttfb_ms == null ? "-" : `${log.ttfb_ms} ms`;
             const tps = log.tps == null ? "-" : Number(log.tps).toFixed(2);
             const title = log.display_model || log.model_name || log.requested_model || "-";
@@ -20620,7 +21397,8 @@
                     <div><span>状态码</span><strong>${escapeHtml(formatLogDetailValue(log.status_code ?? "-"))}</strong></div>
                     <div><span>总耗时</span><strong>${escapeHtml(duration)}</strong></div>
                     <div><span>首包</span><strong>${escapeHtml(ttfb)}</strong></div>
-                    <div><span>速率</span><strong>${escapeHtml(tps)}</strong></div>
+                    <div><span>上游耗时</span><strong>${escapeHtml(upstreamDuration)}</strong></div>
+                    <div><span>TPS</span><strong>${escapeHtml(tps)}</strong></div>
                 </div>
                 <div class="log-detail-summary-trace">
                     <span>Trace <code>${escapeHtml(traceId)}</code></span>
@@ -20628,6 +21406,176 @@
                     <span>客户端 <code>${escapeHtml(clientRequestId)}</code></span>
                 </div>
             `;
+        }
+
+        function renderOriginalResponseHtml(log) {
+            const rawJson = String(log.response_body_json || "").trim();
+            const rawText = String(log.response_text || "").trim();
+            let content = rawJson;
+            if (rawJson) {
+                const parsed = safeJsonParse(rawJson);
+                content = parsed === null ? rawJson : JSON.stringify(parsed, null, 2);
+            } else if (rawText) {
+                content = rawText;
+            } else {
+                content = "暂无原始响应内容";
+            }
+            return `<div class="log-detail-raw-response"><pre><code>${escapeHtml(content)}</code></pre></div>`;
+        }
+
+        function buildRequestLogDetailGroups(log, requestHeaders = {}) {
+            return [
+                {
+                    summary: true,
+                    html: renderLogTraceSummary(log, requestHeaders),
+                },
+                {
+                    title: "鉴权",
+                    items: [
+                        ["结果", log.api_client_auth_result || (log.api_client_key_id ? "authenticated" : "-")],
+                        ["API Key 名称", log.api_client_key_name || "-"],
+                        ["API Key 标识", log.api_client_key_prefix || "-"],
+                        ["用户", log.user_account_name || log.user_account_id || "-"],
+                    ],
+                },
+                {
+                    title: "校验",
+                    items: [
+                        ["请求状态", log.request_status || "-"],
+                        ["方法", log.http_method || "-"],
+                        ["路径", log.request_path || "-"],
+                        ["状态码", log.status_code ?? "-"],
+                        ["日志类型", formatLogTypeLabel(log.log_type)],
+                        ["请求形态", log.request_modality || (log.has_image ? "多模态" : "文本")],
+                    ],
+                },
+                {
+                    title: "模型能力",
+                    items: [
+                        ["请求模型", log.requested_model || "-"],
+                        ["实际模型", log.model_name || "-"],
+                        ["思维等级", log.reasoning_level || "无"],
+                        ["参数", log.model_reasoning_effort || "-"],
+                        ["图片输入", log.has_image_input ? "是" : "否"],
+                    ],
+                },
+                {
+                    title: "提供商尝试",
+                    items: [
+                        ["提供商", log.provider_name || log.provider_id || "-"],
+                        ["挂载 ID", log.resolved_provider_model_id || "-"],
+                        ["尝试次数", log.attempt_count ?? "-"],
+                        ["上游请求", log.upstream_request_id || "-"],
+                        ["完成原因", log.finish_reason || "-"],
+                    ],
+                },
+                {
+                    title: "客户端请求头",
+                    items: buildRequestHeaderDetailItems(requestHeaders),
+                },
+                {
+                    title: "流式",
+                    items: [
+                        ["是否流式", log.is_stream ? "是" : "否"],
+                        ["首包耗时", log.ttfb_ms == null ? "-" : `${log.ttfb_ms} ms`],
+                        ["总耗时", log.duration_ms == null ? "-" : `${log.duration_ms} ms`],
+                        ["上游耗时", log.upstream_duration_ms == null ? "-" : `${log.upstream_duration_ms} ms`],
+                        ["输出速率", log.tps == null ? "-" : Number(log.tps).toFixed(2)],
+                    ],
+                },
+                {
+                    title: "错误响应",
+                    items: [
+                        ["成功", log.success ? "是" : "否"],
+                        ["错误类型", log.error_type || "-"],
+                        ["错误码", log.error_code || "-"],
+                        ["可重试", log.retryable == null ? "-" : (log.retryable ? "是" : "否")],
+                        ["说明", log.message || "-"],
+                    ],
+                },
+                {
+                    title: "原始响应 JSON",
+                    wide: true,
+                    html: renderOriginalResponseHtml(log),
+                },
+                {
+                    title: "内容防护",
+                    items: [
+                        ["结果", formatContentGuardResultLabel(log.content_guard_result || "-")],
+                        ["风险", formatContentGuardRiskLabel(log.content_guard_risk_level || "-")],
+                        ["动作", formatContentGuardActionLabel(log.content_guard_action || "-")],
+                        ["耗时", formatLatencyMs(log.content_guard_latency_ms)],
+                        ["分类", formatContentGuardCategories(log.content_guard_categories_json)],
+                        ["原因", log.content_guard_reason || "-"],
+                        ["证据", log.content_guard_excerpt || "-"],
+                        ["缓冲等待", formatLatencyMs(log.content_guard_buffer_wait_ms)],
+                        ["重试提供商", log.content_guard_retry_provider_count ?? "-"],
+                        ["最终策略", formatContentGuardActionLabel(log.content_guard_final_strategy || "-")],
+                    ],
+                },
+                {
+                    title: "计费",
+                    items: [
+                        ["输入 Token", formatTokenDisplay(log.prompt_tokens)],
+                        ["输出 Token", formatTokenDisplay(log.completion_tokens)],
+                        ["总费用", log.total_cost == null ? "-" : formatMoney(log.total_cost)],
+                        ["状态", formatLogStatusLabel(log.billing_status || "-")],
+                    ],
+                },
+            ];
+        }
+
+        async function refreshRequestLogDetail(logId) {
+            const timeline = await api.get(`/api/logging/request-logs/${encodeURIComponent(logId)}/timeline?_ts=${Date.now()}`);
+            const latestLog = timeline.request_log || requestLogItems.find((item) => String(item.id) === String(logId)) || {};
+            const latestHeaders = parseRequestHeadersForLog(latestLog);
+            renderDetailCards(buildRequestLogDetailGroups(latestLog, latestHeaders), timeline.events || []);
+            traceContent.textContent = formatLogRawJson({
+                ...latestLog,
+                trace: safeJsonParse(latestLog.trace_json || "") ?? latestLog.trace_json,
+                timeline_events: timeline.events || [],
+            });
+            if (!isRequestLogInProgress(latestLog)) {
+                stopRequestLogDetailPolling();
+            }
+            return latestLog;
+        }
+
+        function stopRequestLogDetailPolling() {
+            if (requestLogDetailPollTimer) {
+                window.clearInterval(requestLogDetailPollTimer);
+                requestLogDetailPollTimer = null;
+            }
+            activeRequestLogDetailId = null;
+        }
+
+        function startRequestLogDetailPolling(logId) {
+            stopRequestLogDetailPolling();
+            activeRequestLogDetailId = logId;
+            requestLogDetailPollTimer = window.setInterval(async () => {
+                if (!activeRequestLogDetailId) return;
+                try {
+                    await refreshRequestLogDetail(activeRequestLogDetailId);
+                } catch (error) {
+                    stopRequestLogDetailPolling();
+                }
+            }, 2500);
+        }
+
+        function syncRequestLogAutoRefresh() {
+            const hasInProgress = requestLogItems.some((log) => isRequestLogInProgress(log));
+            if (hasInProgress && !requestLogListPollTimer) {
+                requestLogListPollTimer = window.setInterval(() => {
+                    if (state.activeTab === "request") {
+                        loadLogs({ feedbackSource: "in-progress" });
+                    }
+                }, 3000);
+                return;
+            }
+            if (!hasInProgress && requestLogListPollTimer) {
+                window.clearInterval(requestLogListPollTimer);
+                requestLogListPollTimer = null;
+            }
         }
 
         function normalizeJsonObject(value) {
@@ -21170,6 +22118,7 @@
                     const queueSuffix = queueParts.length ? `，${queueParts.join("，")}` : "";
                     showToast(`日志已刷新，第 ${state.page} 页 / ${Math.max(1, Math.ceil((state.total || 0) / state.pageSize))} 页${queueSuffix}`);
                 }
+                syncRequestLogAutoRefresh();
             } catch (error) {
                 if (loadSeq !== requestLogLoadSeq) return;
                 tableBody.innerHTML = '<tr><td colspan="7"><div class="empty-state">请求日志加载失败，请稍后重试</div></td></tr>';
@@ -21195,7 +22144,7 @@
                 await loadLogs();
             });
 
-            tableBody.addEventListener("click", (event) => {
+            tableBody.addEventListener("click", async (event) => {
                 const button = event.target.closest('button[data-action]');
                 if (!button) return;
                 if (button.dataset.action === "open-conversation") {
@@ -21207,110 +22156,38 @@
                     return;
                 }
                 if (button.dataset.action !== "show-trace") return;
-                const log = requestLogItems[Number.parseInt(button.dataset.index || "-1", 10)] || {};
-                const detail = {
-                    id: log.id,
-                    log_type: log.log_type,
-                    request_id: log.request_id,
-                    conversation_key: log.conversation_key,
-                    session_id: log.session_id,
-                    requested_model: log.requested_model,
-                    model_name: log.model_name,
-                    display_model: log.display_model,
-                    provider_name: log.provider_name,
-                    user_account_id: log.user_account_id,
-                    user_account_name: log.user_account_name,
-                    api_client_key_id: log.api_client_key_id,
-                    api_client_key_name: log.api_client_key_name,
-                    api_client_key_prefix: log.api_client_key_prefix,
-                    api_client_auth_result: log.api_client_auth_result,
-                    http_method: log.http_method,
-                    has_image_input: log.has_image_input,
-                    uses_image_generation: log.uses_image_generation,
-                    request_modality: log.request_modality,
-                    generated_images_count: log.generated_images_count,
-                    generated_image_mime_types: log.generated_image_mime_types,
-                    generated_image_approx_bytes: log.generated_image_approx_bytes,
-                    has_partial_generated_image: log.has_partial_generated_image,
-                    generated_image_result_truncated: log.generated_image_result_truncated,
-                    image_response_mode: log.image_response_mode,
-                    upstream_usage_missing: log.upstream_usage_missing,
-                    reasoning_level: log.reasoning_level,
-                    model_reasoning_effort: log.model_reasoning_effort,
-                    attempt_count: log.attempt_count,
-                    success: log.success,
-                    status_code: log.status_code,
-                    latency_ms: log.latency_ms,
-                    ttfb_ms: log.ttfb_ms,
-                    duration_ms: log.duration_ms,
-                    tps: log.tps,
-                    prompt_tokens: log.prompt_tokens,
-                    completion_tokens: log.completion_tokens,
-                    total_tokens: log.total_tokens,
-                    cache_read_tokens: log.cache_read_tokens,
-                    cache_write_tokens: log.cache_write_tokens,
-                    billing_multiplier: log.billing_multiplier,
-                    channel_price_input_per_1k: log.channel_price_input_per_1k,
-                    channel_price_output_per_1k: log.channel_price_output_per_1k,
-                    channel_price_cache_per_1k: log.channel_price_cache_per_1k,
-                    prompt_cost: log.prompt_cost,
-                    completion_cost: log.completion_cost,
-                    total_cost: log.total_cost,
-                    billing_calculation: formatBillingCalculation(log),
-                    finish_reason: log.finish_reason,
-                    upstream_request_id: log.upstream_request_id,
-                    request_body_json: safeJsonParse(log.request_body_json || "") ?? log.request_body_json,
-                    response_body_json: safeJsonParse(log.response_body_json || "") ?? log.response_body_json,
-                    response_text: log.response_text,
-                    request_headers_json: safeJsonParse(log.request_headers_json || "") ?? log.request_headers_json,
-                    trace: safeJsonParse(log.trace_json || "") ?? log.trace_json,
-                    created_at: log.created_at,
-                };
-                const requestHeaders = parseRequestHeadersForLog(log);
+            const log = requestLogItems[Number.parseInt(button.dataset.index || "-1", 10)] || {};
+            const logId = button.dataset.logId || log.id;
+            if (!logId) {
+                showToast("无法定位请求日志", "error");
+                return;
+            }
+            stopRequestLogDetailPolling();
+            renderDetailCards([
+                {
+                    title: "请求详情",
+                    html: "<div class=\"empty-state compact-empty\">正在加载请求详情...</div>",
+                },
+            ]);
+            traceContent.textContent = "正在加载请求详情...";
+            traceModalController.open(button);
+            try {
+                const latestLog = await refreshRequestLogDetail(logId);
+                if (isRequestLogInProgress(latestLog)) {
+                    startRequestLogDetailPolling(logId);
+                }
+            } catch (error) {
+                stopRequestLogDetailPolling();
+                const message = error?.message || "请求详情加载失败";
                 renderDetailCards([
                     {
-                        summary: true,
-                        html: renderLogTraceSummary(log, requestHeaders),
-                    },
-                    {
-                        title: "请求上下文",
-                    items: [
-                        ["链路 ID", log.trace_id],
-                        ["客户端请求 ID", requestHeaders.client_request_id],
-                        ["请求 ID", log.request_id],
-                        ["会话", log.session_id || log.conversation_key],
-                        ["日志类型", formatLogTypeLabel(log.log_type)],
-                        ["API Key 名称", log.api_client_key_name || "-"],
-                        ["API Key 标识", log.api_client_key_prefix || "-"],
-                    ],
-                },
-                    {
-                        title: "客户端请求头",
-                        items: buildRequestHeaderDetailItems(requestHeaders),
-                    },
-                    {
-                        title: "路由结果",
-                        items: [
-                            ["请求模型", log.requested_model || "-"],
-                            ["实际模型", log.model_name || "-"],
-                            ["提供商", log.provider_name || log.provider_id || "-"],
-                            ["挂载 ID", log.resolved_provider_model_id || "-"],
-                            ["思维等级", log.reasoning_level || "无"],
-                            ["参数", log.model_reasoning_effort || "-"],
-                        ],
-                    },
-                    {
-                        title: "错误与耗时",
-                        items: [
-                            ["成功", log.success ? "是" : "否"],
-                            ["状态码", log.status_code ?? "-"],
-                            ["错误码", log.error_code || "-"],
-                            ["耗时", log.duration_ms == null && log.latency_ms == null ? "-" : `${log.duration_ms ?? log.latency_ms} ms`],
-                        ],
+                        title: "请求详情",
+                        html: "<div class=\"empty-state compact-empty\">" + escapeHtml(message) + "</div>",
                     },
                 ]);
-                traceContent.textContent = formatLogRawJson(detail);
-                traceModalController.open(button);
+                traceContent.textContent = formatLogRawJson({ id: logId, error: message });
+                showToast(message, "error");
+            }
             });
 
             await loadFilterOptions();
@@ -22163,6 +23040,7 @@
         `;
 
         const CONFIG_SETTING_LABELS = {
+            route_strategy: "主路由策略",
             global_qps_limit: "全局 QPS",
             global_rpm_limit: "全局 RPM",
             account_qps_limit: "账户 QPS",
@@ -22260,6 +23138,12 @@
         }
 
         function configurationDisplayValue(value) {
+            const routeStrategyLabels = {
+                availability_first: "可用性优先",
+                latency_first: "低延迟优先",
+                capacity_avoidance: "容量避让",
+            };
+            if (typeof value === "string" && routeStrategyLabels[value]) return routeStrategyLabels[value];
             if (typeof value === "boolean") return value ? "开启" : "关闭";
             if (typeof value === "number") return formatNumber(value);
             return value ?? "-";
@@ -23276,6 +24160,7 @@
             if (page === "logs") await initLogs();
             if (page === "conversations") await initConversations();
         } catch (error) {
+            console.error("页面初始化失败", error);
             showToast(error.message, "error");
         }
     }

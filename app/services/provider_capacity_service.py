@@ -252,6 +252,8 @@ return 1
     @classmethod
     def _redis(cls) -> Redis | None:
         """返回同步 Redis 客户端。"""
+        if RedisService.should_skip_after_recent_error():
+            raise ProviderCapacityUnavailableError(RedisService.last_error() or "Redis is temporarily unavailable")
         if not get_settings().redis_url.strip():
             raise ProviderCapacityUnavailableError("REDIS_URL is empty")
         if cls._redis_client is None:
@@ -272,14 +274,16 @@ return 1
                 f"rate:provider:rpm:{provider_id}:{current_minute}",
             ]
             values = client.mget(keys)
+            RedisService.clear_last_error()
             return ProviderCapacitySnapshot(
                 active_requests=int(values[0] or 0),
                 active_streams=int(values[1] or 0),
                 current_qps=int(values[2] or 0),
                 current_rpm=int(values[3] or 0),
             )
-        except Exception:
-            raise ProviderCapacityUnavailableError()
+        except Exception as exc:
+            RedisService.mark_error(exc)
+            raise ProviderCapacityUnavailableError(str(exc))
 
     @classmethod
     def _redis_snapshots(cls, provider_ids: set[int]) -> dict[int, ProviderCapacitySnapshot] | None:
@@ -300,6 +304,7 @@ return 1
                     ]
                 )
             values = client.mget(keys) if keys else []
+            RedisService.clear_last_error()
             snapshots: dict[int, ProviderCapacitySnapshot] = {}
             for index, provider_id in enumerate(ordered_ids):
                 offset = index * 4
@@ -310,8 +315,9 @@ return 1
                     current_rpm=int(values[offset + 3] or 0),
                 )
             return snapshots
-        except Exception:
-            raise ProviderCapacityUnavailableError()
+        except Exception as exc:
+            RedisService.mark_error(exc)
+            raise ProviderCapacityUnavailableError(str(exc))
 
     @classmethod
     async def _async_redis(cls) -> AsyncRedis:

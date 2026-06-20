@@ -242,7 +242,8 @@ class ContentGuardRuleService:
         normalized_rules = cls.normalize_rules(rules)
         normalized_text = ContentGuardService.normalize_scan_text(text)
         lower_sample = normalized_text.lower()
-        response_domains = ContentGuardService.extract_domains(normalized_text)
+        domain_scan_text = ContentGuardService.strip_markdown_code_blocks(normalized_text)
+        response_domains = ContentGuardService.extract_domains(domain_scan_text)
         try:
             validated_url_allowlist = validate_content_guard_url_allowlist(url_allowlist)
         except ValueError as exc:

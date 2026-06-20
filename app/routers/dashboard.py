@@ -236,6 +236,7 @@ def build_dashboard_payload(db: Session) -> dict:
         "api_key_total_prompt_tokens": api_key_summary.total_prompt_tokens,
         "api_key_total_completion_tokens": api_key_summary.total_completion_tokens,
         "api_key_total_tokens": api_key_summary.total_tokens,
+        "route_strategy": settings.route_strategy or "availability_first",
         "logging": {
             "enable_token_logging": settings.enable_token_logging,
             "enable_payload_logging": settings.enable_payload_logging,

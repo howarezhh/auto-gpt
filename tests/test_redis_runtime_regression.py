@@ -3,7 +3,11 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from app.logging.queue import LoggingQueue
+from app.services.provider_capacity_service import ProviderCapacityService, ProviderCapacityUnavailableError
+from app.services.provider_health_state_service import ProviderHealthStateService
 from app.services.api_key_auth_cache import ApiKeyAuthCache
 from app.services.cache_service import CacheService
 from app.services.redis_service import RedisService
@@ -35,6 +39,33 @@ def test_redis_service_client_kwargs_include_pool_and_timeout_settings(monkeypat
         "socket_timeout": 2.5,
         "health_check_interval": 17,
     }
+
+
+def test_provider_runtime_reads_skip_redis_after_recent_error(monkeypatch) -> None:
+    RedisService.clear_last_error()
+    RedisService.mark_error("redis connection timeout")
+    monkeypatch.setattr(ProviderCapacityService, "_redis_client", None)
+
+    def fail_if_redis_is_called(*_args, **_kwargs):
+        raise AssertionError("recent Redis error should skip runtime Redis reads")
+
+    monkeypatch.setattr(
+        "app.services.provider_health_state_service.RedisService.get_sync_client",
+        fail_if_redis_is_called,
+    )
+    monkeypatch.setattr(
+        "app.services.provider_capacity_service.RedisService.create_sync_client",
+        fail_if_redis_is_called,
+    )
+
+    provider = SimpleNamespace(id=42, health_status="healthy", updated_at=None, last_check_at=None)
+
+    assert ProviderHealthStateService.get_provider_state(provider.id) is None
+    assert ProviderHealthStateService.effective_provider_health(provider)["state_source"] == "db"
+    with pytest.raises(ProviderCapacityUnavailableError):
+        ProviderCapacityService.snapshot(provider.id)
+
+    RedisService.clear_last_error()
 
 
 def test_redis_snapshot_does_not_scan_token_finalize_dedupe_keys(monkeypatch) -> None:

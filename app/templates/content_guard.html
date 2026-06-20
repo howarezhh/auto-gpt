@@ -393,7 +393,7 @@
                 </label>
                 <label>
                     <span>模型ID</span>
-                    <input class="field-input" id="content-guard-external-model-name" type="text" placeholder="上游官方模型名，例如 gpt-4.1-mini" autocomplete="off">
+                    <input class="field-input" id="content-guard-external-model-name" type="text" placeholder="上游模型ID，例如 gpt-4.1-mini" autocomplete="off">
                 </label>
                 <label>
                     <span>密钥</span>
@@ -686,8 +686,8 @@
             </select>
         </label>
         <label>
-            <span>模型</span>
-            <input class="field-input" id="content-guard-runtime-model-name" type="search" placeholder="模型名">
+            <span>模型ID</span>
+            <input class="field-input" id="content-guard-runtime-model-name" type="search" placeholder="模型ID">
         </label>
     </div>
     <div class="table-shell content-guard-runtime-events-table">
@@ -700,11 +700,12 @@
                     <th>结果</th>
                     <th>原因</th>
                     <th>Trace</th>
+                    <th>详情</th>
                 </tr>
             </thead>
             <tbody id="content-guard-runtime-events-body">
                 <tr>
-                    <td colspan="6" class="table-muted">等待加载</td>
+                    <td colspan="7" class="table-muted">等待加载</td>
                 </tr>
             </tbody>
         </table>

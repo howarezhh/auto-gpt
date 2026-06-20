@@ -17,6 +17,7 @@ class AppSetting(Base):
     route_exhausted_retry_max_wait_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=600)
     route_exhausted_retry_infinite_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     trusted_providers_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    route_strategy: Mapped[str] = mapped_column(Text, nullable=False, default="availability_first")
     route_health_gate_mode: Mapped[str] = mapped_column(Text, nullable=False, default="permissive")
     max_candidate_count: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
     route_candidate_expand_count: Mapped[int] = mapped_column(Integer, nullable=False, default=5)

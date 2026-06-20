@@ -33,7 +33,7 @@
         </div>
         <div class="cockpit-aside-copy">外部系统接入标准模型代理路径：OpenAI 兼容走 <code>/v1/*</code>，Gemini 走 <code>/v1beta/models/*</code>，Claude 走 <code>/v1/messages</code>，不使用后台页面地址或内部调试接口。</div>
         <div class="docs-hero-meta">
-            <span>OpenAI 模型名以 <code>/v1/models</code> 返回为准</span>
+            <span>OpenAI 模型ID以 <code>/v1/models</code> 返回为准</span>
             <span>Gemini / Claude 按原生入口调用</span>
             <span>支持一键复制</span>
         </div>
@@ -53,7 +53,7 @@
             <div>
                 <div class="panel-kicker">接入信息</div>
                 <h3>复制这几项即可开始接入</h3>
-                <p class="section-subcopy">平台对外同时提供 OpenAI 兼容与 Gemini / Claude 原生入口。客户端通常只需要 Base URL、API Key 和模型名或模型 ID。</p>
+                <p class="section-subcopy">平台对外同时提供 OpenAI 兼容与 Gemini / Claude 原生入口。客户端通常只需要 Base URL、API Key 和模型ID；模型名称仅作为展示别名。</p>
             </div>
         </div>
         <div class="docs-copy-grid">
@@ -215,7 +215,7 @@
             <div class="doc-code-block compact"><pre><code>类型: OpenAI Compatible
 Base URL: {{ external_v1_base_url }}
 API Key: YOUR_PLATFORM_API_KEY
-模型: 使用 /v1/models 返回的模型名</code></pre></div>
+模型: 使用 /v1/models 返回的模型ID</code></pre></div>
             <div class="hero-actions">
                 <button class="btn btn-ghost btn-sm interactive-btn" type="button" data-copy-text="Base URL: {{ external_v1_base_url }}&#10;API Key: YOUR_PLATFORM_API_KEY">复制客户端配置</button>
             </div>
@@ -236,7 +236,7 @@ OPENAI_BASE_URL={{ external_v1_base_url }}</code></pre></div>
             <div class="docs-example-head">
                 <span>注意</span>
                 <h4>模型与能力</h4>
-                <p>模型名、视觉、工具调用、图片生成等能力以平台授权和实际路由结果为准。</p>
+                <p>模型ID、视觉、工具调用、图片生成等能力以平台授权和实际路由结果为准。</p>
             </div>
             <div class="docs-card-note docs-card-note-block">
                 <p>外部请求统一由平台按可用性优先策略选择可用提供商。业务侧不要传内部提供商名称、后台调试参数或非标准路由字段。</p>

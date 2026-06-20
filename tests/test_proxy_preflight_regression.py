@@ -212,14 +212,14 @@ def test_prepare_external_gemini_native_request_preserves_payload_and_response()
         base_url="https://generativelanguage.googleapis.com/v1beta",
     )
     provider_model = SimpleNamespace(
-        model_name="平台Gemini别名",
+        model_name="平台Gemini模型ID",
         upstream_model_name="gemini-2.5-pro",
         protocol_type="gemini",
         supports_chat_completions=False,
         supports_responses=False,
     )
     native_payload = {
-        "model": "平台Gemini别名",
+        "model": "平台Gemini模型ID",
         "contents": [{"role": "user", "parts": [{"text": "你好"}]}],
         "generationConfig": {"temperature": 0.2},
         "stream": True,
@@ -250,14 +250,14 @@ def test_prepare_external_claude_native_request_preserves_payload_and_response()
         base_url="https://api.anthropic.com",
     )
     provider_model = SimpleNamespace(
-        model_name="平台Claude别名",
+        model_name="平台Claude模型ID",
         upstream_model_name="claude-3-5-sonnet-latest",
         protocol_type="claude_messages",
         supports_chat_completions=False,
         supports_responses=False,
     )
     native_payload = {
-        "model": "平台Claude别名",
+        "model": "平台Claude模型ID",
         "messages": [{"role": "user", "content": "你好"}],
         "max_tokens": 32,
         "stream": False,
@@ -394,7 +394,7 @@ def test_native_health_and_content_guard_payloads_use_provider_model_id():
     from app.services.health_service import HealthService
 
     provider_model = SimpleNamespace(
-        model_name="公开别名",
+        model_name="公开模型ID",
         provider_model_id="gemini-2.5-pro",
     )
     provider = SimpleNamespace(native_endpoint_path=None)

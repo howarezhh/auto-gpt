@@ -1,5 +1,6 @@
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -165,6 +166,36 @@ class ModelCatalogBatchContextWindowUpdate(BaseModel):
         if not names:
             raise ValueError("model_names 不能为空")
         return list(dict.fromkeys(names))
+
+
+class ModelCatalogBatchImportRequest(BaseModel):
+    content: str = Field(..., min_length=1, max_length=200000)
+    dry_run: bool = True
+
+    @field_validator("content")
+    @classmethod
+    def normalize_content(cls, value: str) -> str:
+        return value.strip()
+
+
+class ModelCatalogBatchImportItemOut(BaseModel):
+    index: int
+    model_name: str | None = None
+    display_name: str | None = None
+    valid: bool = False
+    created: bool = False
+    errors: list[str] = Field(default_factory=list)
+    model: dict[str, Any] | None = None
+
+
+class ModelCatalogBatchImportResponse(BaseModel):
+    total: int
+    valid_count: int
+    created_count: int = 0
+    failed_count: int = 0
+    dry_run: bool
+    template: str | None = None
+    items: list[ModelCatalogBatchImportItemOut]
 
 
 class ModelCatalogOut(ModelCatalogBase):

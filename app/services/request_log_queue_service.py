@@ -360,6 +360,7 @@ class RequestLogQueueService:
         db = SessionLocal()
         finalize_jobs: list[tuple[Any, dict[str, Any]]] = []
         created_logs: list[Any] = []
+        updated_logs: list[Any] = []
         try:
             existing_by_signature = RequestLogQueueService._load_existing_logs_for_payloads(db, items)
             valid_provider_ids = RequestLogQueueService._load_valid_provider_ids(db, items, Provider)
@@ -372,7 +373,12 @@ class RequestLogQueueService:
                 existing = existing_by_signature.get(signature) if signature is not None else None
                 if existing is not None:
                     seen_signatures.add(signature)
-                    finalize_jobs.append((existing, kwargs))
+                    RequestLogQueueService._sanitize_log_provider_id(payload, valid_provider_ids)
+                    payload.pop("_dedupe_key", None)
+                    payload.pop("_queue_enqueued_at", None)
+                    LogService._apply_log_update_payload(existing, payload)
+                    updated_logs.append(existing)
+                    finalize_jobs.append((existing, payload))
                     continue
                 RequestLogQueueService._sanitize_log_provider_id(payload, valid_provider_ids)
                 payload.pop("_dedupe_key", None)
@@ -392,8 +398,12 @@ class RequestLogQueueService:
                 from app.logging.adapters.request_adapter import RequestLogRecorder
                 from app.services.ip_management_event_service import IpManagementEventService
 
+                for log in created_logs + updated_logs:
+                    LogService.finalize_billing_if_exact_usage(db, log)
                 for log in created_logs:
                     RequestLogRecorder.record_events_from_summary(db, log, auto_commit=False)
+                for log in updated_logs:
+                    RequestLogRecorder.record_missing_events_from_summary(db, log, auto_commit=False)
                 for log, kwargs in finalize_jobs:
                     IpManagementEventService.attach_request_context(
                         db,
